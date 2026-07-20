@@ -9,7 +9,21 @@ from halyard.config import ChannelKind, Settings
 
 
 def build(**env: str) -> Settings:
+    """Construct from keyword arguments.
+
+    Convenient, but note that this bypasses how settings are actually supplied.
+    Anything about *parsing* an environment variable has to go through
+    `from_env` below — keyword arguments skip the decoding step where
+    pydantic-settings does its own thing to complex types.
+    """
     return Settings(_env_file=None, **env)
+
+
+def from_env(monkeypatch: pytest.MonkeyPatch, **env: str) -> Settings:
+    """Construct the way the running service does: from the environment."""
+    for key, value in env.items():
+        monkeypatch.setenv(key, value)
+    return Settings(_env_file=None)
 
 
 def test_the_channel_must_be_named() -> None:
@@ -53,6 +67,91 @@ def test_telegram_starts_when_fully_configured() -> None:
     )
 
     assert settings.telegram_authorized_user_ids == {"4242", "1337"}
+
+
+# --- reading the authorized user list from the environment ------------------
+#
+# These go through the environment rather than through keyword arguments,
+# because that is where the bug was: pydantic-settings JSON-decodes set-typed
+# environment variables before any validator sees them, and every realistic
+# value of this one is either valid JSON meaning the wrong thing, or not JSON at
+# all. Tests that passed the value as a keyword argument never touched that step
+# and so agreed with a field that could not load.
+
+
+def test_a_single_user_id_is_read_from_the_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    settings = from_env(
+        monkeypatch,
+        HALYARD_CHANNEL="telegram",
+        TELEGRAM_BOT_TOKEN="t",
+        TELEGRAM_CHAT_ID="c",
+        # Valid JSON, and JSON says this is the number 4242.
+        TELEGRAM_AUTHORIZED_USER_IDS="4242",
+    )
+
+    assert settings.telegram_authorized_user_ids == {"4242"}
+
+
+def test_several_user_ids_are_read_from_the_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    settings = from_env(
+        monkeypatch,
+        HALYARD_CHANNEL="telegram",
+        TELEGRAM_BOT_TOKEN="t",
+        TELEGRAM_CHAT_ID="c",
+        # Not valid JSON at all.
+        TELEGRAM_AUTHORIZED_USER_IDS="4242,1337",
+    )
+
+    assert settings.telegram_authorized_user_ids == {"4242", "1337"}
+
+
+def test_a_sloppily_written_list_is_read_from_the_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = from_env(
+        monkeypatch,
+        HALYARD_CHANNEL="telegram",
+        TELEGRAM_BOT_TOKEN="t",
+        TELEGRAM_CHAT_ID="c",
+        TELEGRAM_AUTHORIZED_USER_IDS=" 4242 , 1337 , ",
+    )
+
+    assert settings.telegram_authorized_user_ids == {"4242", "1337"}
+
+
+def test_an_empty_user_list_in_the_environment_still_refuses_to_start(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with pytest.raises(ValidationError, match="TELEGRAM_AUTHORIZED_USER_IDS"):
+        from_env(
+            monkeypatch,
+            HALYARD_CHANNEL="telegram",
+            TELEGRAM_BOT_TOKEN="t",
+            TELEGRAM_CHAT_ID="c",
+            TELEGRAM_AUTHORIZED_USER_IDS="",
+        )
+
+
+def test_the_whole_configuration_loads_from_the_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = from_env(
+        monkeypatch,
+        HALYARD_CHANNEL="telegram",
+        HALYARD_BIND="127.0.0.1:8799",
+        HALYARD_APPROVAL_TIMEOUT_SECONDS="120",
+        HALYARD_BRIDGE_TIMEOUT_SECONDS="150",
+        HALYARD_HOOK_TIMEOUT_SECONDS="300",
+        CLAUDE_PROJECT_NAME="alpha-engine",
+        TELEGRAM_BOT_TOKEN="t",
+        TELEGRAM_CHAT_ID="-1001234567890",
+        TELEGRAM_AUTHORIZED_USER_IDS="4242",
+    )
+
+    assert settings.port == 8799
+    assert settings.project_name == "alpha-engine"
+    assert settings.telegram_chat_id == "-1001234567890"
+    assert settings.approval_timeout_seconds == 120
 
 
 def test_stub_channels_declare_that_nobody_is_asked() -> None:
