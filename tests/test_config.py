@@ -64,3 +64,49 @@ def test_stub_channels_declare_that_nobody_is_asked() -> None:
 def test_a_non_positive_timeout_is_rejected() -> None:
     with pytest.raises(ValidationError):
         build(HALYARD_CHANNEL="stub_deny", HALYARD_APPROVAL_TIMEOUT_SECONDS="0")
+
+
+# --- the timeout ordering ---------------------------------------------------
+
+
+def test_the_default_timeouts_are_ordered() -> None:
+    settings = build(HALYARD_CHANNEL="stub_deny")
+
+    assert (
+        settings.approval_timeout_seconds
+        < settings.bridge_timeout_seconds
+        < settings.hook_timeout_seconds
+    )
+
+
+@pytest.mark.parametrize(
+    ("approval", "bridge", "hook"),
+    [
+        ("400", "330", "600"),  # the bridge gives up before the approver does
+        ("300", "700", "600"),  # the hook gives up before the bridge does
+        ("300", "300", "600"),  # a tie is not an ordering
+        ("600", "600", "600"),  # everything at once
+    ],
+)
+def test_a_broken_ordering_refuses_to_start(approval: str, bridge: str, hook: str) -> None:
+    # Get this wrong and nothing looks broken: approvals work, denials work, the
+    # tests pass. The only symptom is that an unanswered request quietly runs
+    # instead of being denied — the one case the system exists for.
+    with pytest.raises(ValidationError, match="fails open"):
+        build(
+            HALYARD_CHANNEL="stub_deny",
+            HALYARD_APPROVAL_TIMEOUT_SECONDS=approval,
+            HALYARD_BRIDGE_TIMEOUT_SECONDS=bridge,
+            HALYARD_HOOK_TIMEOUT_SECONDS=hook,
+        )
+
+
+def test_a_valid_custom_ordering_is_accepted() -> None:
+    settings = build(
+        HALYARD_CHANNEL="stub_deny",
+        HALYARD_APPROVAL_TIMEOUT_SECONDS="60",
+        HALYARD_BRIDGE_TIMEOUT_SECONDS="90",
+        HALYARD_HOOK_TIMEOUT_SECONDS="120",
+    )
+
+    assert settings.approval_timeout_seconds == 60

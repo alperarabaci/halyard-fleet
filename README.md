@@ -109,6 +109,55 @@ halyard-fleet/
   stored — not in the database, not in the audit log.
 - The audit log is append-only. Nothing is ever updated or deleted.
 
+## Running it
+
+```bash
+cp .env.example .env       # then set HALYARD_CHANNEL
+uv sync --extra dev
+uv run halyard
+```
+
+Then point Claude Code at the bridge in `.claude/settings.json`:
+
+```json
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "$CLAUDE_PROJECT_DIR/bridge/hook.sh",
+            "timeout": 600
+          }
+        ]
+      }
+    ]
+  }
+}
+```
+
+Point it at `hook.sh`, not at `hook_bridge.py`. The wrapper is what denies when the Python process
+cannot start at all — a missing interpreter, a bad path, an import error. Those exit non-zero with
+nothing on stdout, which Claude Code reads as *no opinion*, and it runs the command.
+
+**Claude Code snapshots hook configuration at startup.** Editing `settings.json` mid-session has no
+effect; restart the session. The script contents are read on every call, so those can change freely.
+
+### The timeouts have to stay in order
+
+```
+approval deadline  <  bridge HTTP timeout  <  hook timeout
+      300s                    330s                600s
+```
+
+A hook that exceeds its timeout fails open — Claude Code discards it and runs the command. Every
+layer therefore has to answer before the one above it gives up. `hook.timeout` in `settings.json`
+must match `HALYARD_HOOK_TIMEOUT_SECONDS`; the service refuses to start if the three are out of
+order. Getting this wrong looks like nothing at all: approvals work, denials work, and only an
+unanswered request behaves differently — it runs instead of being denied.
+
 ## Development
 
 Requires Python 3.12+ and [uv](https://docs.astral.sh/uv/).

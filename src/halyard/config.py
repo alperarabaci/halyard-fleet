@@ -48,8 +48,19 @@ class Settings(BaseSettings):
     )
 
     bind: str = Field(default="127.0.0.1:8787", validation_alias="HALYARD_BIND")
+    #: How long an approval card stays answerable.
     approval_timeout_seconds: int = Field(
         default=300, validation_alias="HALYARD_APPROVAL_TIMEOUT_SECONDS", gt=0
+    )
+    #: How long `hook_bridge.py` waits on its HTTP call. Must exceed the
+    #: approval deadline, so the control plane is always the one that answers.
+    bridge_timeout_seconds: int = Field(
+        default=330, validation_alias="HALYARD_BRIDGE_TIMEOUT_SECONDS", gt=0
+    )
+    #: The `timeout` set on the hook in settings.json. Not read by Claude Code
+    #: from here — declared so the ordering below can be checked at all.
+    hook_timeout_seconds: int = Field(
+        default=600, validation_alias="HALYARD_HOOK_TIMEOUT_SECONDS", gt=0
     )
     db_path: Path = Field(default=Path("./halyard.db"), validation_alias="HALYARD_DB_PATH")
     audit_log: Path = Field(default=Path("./audit.jsonl"), validation_alias="HALYARD_AUDIT_LOG")
@@ -63,6 +74,33 @@ class Settings(BaseSettings):
     telegram_authorized_user_ids: frozenset[str] = Field(
         default_factory=frozenset, validation_alias="TELEGRAM_AUTHORIZED_USER_IDS"
     )
+
+    @model_validator(mode="after")
+    def _timeouts_must_be_ordered(self) -> Settings:
+        """Refuse to start unless approval < bridge < hook.
+
+        A hook that outruns its timeout fails open — Claude Code discards it and
+        runs the command. That was measured, not assumed. So every layer has to
+        answer before the one above it gives up:
+
+            approval deadline  <  bridge HTTP timeout  <  hook timeout
+
+        Get this backwards and nothing looks wrong. Approvals work, denials
+        work, the tests pass. The only visible symptom is that a request nobody
+        answers in time quietly executes instead of being denied, which is the
+        one case the whole system exists for.
+        """
+        if not (
+            self.approval_timeout_seconds < self.bridge_timeout_seconds < self.hook_timeout_seconds
+        ):
+            raise ValueError(
+                "Timeouts must satisfy HALYARD_APPROVAL_TIMEOUT_SECONDS < "
+                "HALYARD_BRIDGE_TIMEOUT_SECONDS < HALYARD_HOOK_TIMEOUT_SECONDS, but got "
+                f"{self.approval_timeout_seconds} < {self.bridge_timeout_seconds} < "
+                f"{self.hook_timeout_seconds}. A hook that exceeds its timeout fails open, "
+                "so an unanswered request would run instead of being denied."
+            )
+        return self
 
     @field_validator("telegram_authorized_user_ids", mode="before")
     @classmethod
