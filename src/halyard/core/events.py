@@ -60,6 +60,21 @@ class Role(StrEnum):
     REVIEWER = "reviewer"
 
 
+class RiskLevel(StrEnum):
+    """How much damage a tool call could do if it turns out to be wrong.
+
+    The vocabulary lives here because risk is spoken everywhere — approvals,
+    audit records, and the cards a channel renders. The *rules* that assign a
+    level live in `policy.py`, which is the only thing allowed to decide one.
+    An agent's own claim about risk may be an input to that decision, never the
+    source of it.
+    """
+
+    LOW = "low"
+    MEDIUM = "medium"
+    HIGH = "high"
+
+
 def _now() -> datetime:
     return datetime.now(UTC)
 
