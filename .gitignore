@@ -1,0 +1,36 @@
+# Environment and secrets
+.env
+.env.local
+
+# Runtime state (never committed)
+halyard.db
+halyard.db-shm
+halyard.db-wal
+audit.jsonl
+
+# Local Claude Code settings (may contain machine-specific hook wiring)
+.claude/settings.local.json
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+build/
+dist/
+
+# Tooling caches
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# Editors and OS
+.DS_Store
+.idea/
+.vscode/
+
+# Design conversation exports (kept locally, not published)
+docs/mobile-agent-control-plane.md
