@@ -17,9 +17,10 @@ from __future__ import annotations
 
 from enum import StrEnum
 from pathlib import Path
+from typing import Annotated
 
 from pydantic import Field, field_validator, model_validator
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 
 class ChannelKind(StrEnum):
@@ -71,7 +72,12 @@ class Settings(BaseSettings):
 
     telegram_bot_token: str | None = Field(default=None, validation_alias="TELEGRAM_BOT_TOKEN")
     telegram_chat_id: str | None = Field(default=None, validation_alias="TELEGRAM_CHAT_ID")
-    telegram_authorized_user_ids: frozenset[str] = Field(
+    #: `NoDecode` because pydantic-settings otherwise tries to JSON-decode any
+    #: set-typed environment variable before a validator can see it. A single
+    #: numeric id like `4242` is valid JSON, so it would arrive as an int; two
+    #: ids like `4242,1337` are not valid JSON, so that would fail outright.
+    #: Neither is a shape anyone writing a comma-separated list would expect.
+    telegram_authorized_user_ids: Annotated[frozenset[str], NoDecode] = Field(
         default_factory=frozenset, validation_alias="TELEGRAM_AUTHORIZED_USER_IDS"
     )
 
@@ -105,8 +111,13 @@ class Settings(BaseSettings):
     @field_validator("telegram_authorized_user_ids", mode="before")
     @classmethod
     def _split_user_ids(cls, value: object) -> object:
-        if isinstance(value, str):
-            return frozenset(part.strip() for part in value.split(",") if part.strip())
+        """Accept a comma-separated list, which is how a person writes this.
+
+        Ints are accepted too. A Telegram user id *is* a number, and somebody
+        setting one in code rather than in the environment will reach for one.
+        """
+        if isinstance(value, str | int):
+            return frozenset(part.strip() for part in str(value).split(",") if part.strip())
         return value
 
     @model_validator(mode="after")
