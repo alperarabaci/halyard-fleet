@@ -254,7 +254,7 @@ class ApprovalStore:
             # a decision that lost the race by a hair.
             return await asyncio.wait_for(asyncio.shield(future), timeout=max(remaining, 0.0))
         except TimeoutError:
-            return await self._resolve_unattended(
+            return await self.deny(
                 request_id,
                 reason=ResolutionReason.TIMEOUT,
                 note=(
@@ -352,10 +352,15 @@ class ApprovalStore:
                         note="Denied: the Halyard control plane shut down while this was pending.",
                     )
 
-    async def _resolve_unattended(
+    async def deny(
         self, request_id: str, *, reason: ResolutionReason, note: str
     ) -> ApprovalResolution:
-        """Deny a request that nobody decided, unless somebody just did.
+        """Deny a request nobody decided, unless somebody just did.
+
+        This is how the rest of the system fails closed once a request already
+        exists — the deadline passing, the control plane stopping, or a step
+        after creation failing in a way that means no human will ever see it.
+        No nonce, because there is no human on this path.
 
         The deadline and a button press can land in the same instant. Whoever
         reaches the lock first wins, and a human who answered in time keeps

@@ -1,0 +1,235 @@
+"""The path a permission request takes, start to finish.
+
+Redact, classify, record, ask, wait, record again. This lives in core rather
+than in a web handler because it is the part that has to be right: every step
+that can fail has a defined answer, and that answer is always the same one.
+
+    Anything that goes wrong produces a denial, not an exception.
+
+`request()` does not raise. It cannot, safely — the caller is an HTTP handler
+speaking to a hook bridge, and `docs/hook-payload-notes.md` records what Claude
+Code does with a hook that fails to answer cleanly: it runs the command. An
+exception escaping this method would eventually become an approval.
+"""
+
+from __future__ import annotations
+
+import logging
+from dataclasses import dataclass
+
+from halyard.core.approvals import (
+    ApprovalRequest,
+    ApprovalStore,
+    Decision,
+    ResolutionReason,
+)
+from halyard.core.audit import AuditLog, approval_requested, approval_resolved, bridge_error
+from halyard.core.events import RiskLevel, Role
+from halyard.core.policy import Policy
+from halyard.core.redaction import Redactor
+from halyard.core.registry import SessionRegistry
+
+logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class ApprovalOutcome:
+    """What the bridge gets back."""
+
+    decision: Decision
+    #: Handed to Claude Code as the denial reason and shown to the user, so it
+    #: is written for an agent to act on rather than for a log to be grepped.
+    reason: str
+    request_id: str | None = None
+    risk: RiskLevel | None = None
+
+    @property
+    def allowed(self) -> bool:
+        return self.decision is Decision.ALLOW
+
+
+class ApprovalService:
+    """Runs one permission request from arrival to answer."""
+
+    def __init__(
+        self,
+        *,
+        store: ApprovalStore,
+        policy: Policy,
+        redactor: Redactor,
+        audit: AuditLog,
+        registry: SessionRegistry,
+        channel,
+        project: str,
+    ) -> None:
+        self._store = store
+        self._policy = policy
+        self._redactor = redactor
+        self._audit = audit
+        self._registry = registry
+        self._channel = channel
+        self._project = project
+
+    async def request(
+        self,
+        *,
+        session_id: str,
+        agent_id: str,
+        tool: str,
+        command: str,
+        tool_use_id: str | None = None,
+        cwd: str | None = None,
+        role: Role | None = None,
+        reason: str | None = None,
+        declared_risk: RiskLevel | None = None,
+    ) -> ApprovalOutcome:
+        """Ask for permission, and answer. Never raises."""
+        try:
+            return await self._request(
+                session_id=session_id,
+                agent_id=agent_id,
+                tool=tool,
+                command=command,
+                tool_use_id=tool_use_id,
+                cwd=cwd,
+                role=role,
+                reason=reason,
+                declared_risk=declared_risk,
+            )
+        except Exception:
+            # The outer net. Anything not handled below still has to come out of
+            # here as a denial, because the alternative is a 500 and a hook that
+            # shrugs and runs the command.
+            logger.exception("Approval request failed unexpectedly; denying")
+            await self._try_to_record(
+                bridge_error(message="unhandled error while processing", session_id=session_id)
+            )
+            return ApprovalOutcome(
+                decision=Decision.DENY,
+                reason=(
+                    "Denied: the Halyard control plane hit an internal error and failed "
+                    "closed. Nothing was approved."
+                ),
+            )
+
+    async def _request(
+        self,
+        *,
+        session_id: str,
+        agent_id: str,
+        tool: str,
+        command: str,
+        tool_use_id: str | None,
+        cwd: str | None,
+        role: Role | None,
+        reason: str | None,
+        declared_risk: RiskLevel | None,
+    ) -> ApprovalOutcome:
+        # Redaction first, before the command is copied anywhere. Everything
+        # downstream — policy, the store, the audit log, the card — sees only
+        # what comes out of here.
+        prepared = self._redactor.prepare(command)
+        classification = self._policy.classify(prepared.full, declared=declared_risk)
+
+        await self._registry.observe(
+            session_id=session_id,
+            agent_id=agent_id,
+            project=self._project,
+            role=role,
+            cwd=cwd,
+        )
+
+        request = await self._store.create(
+            session_id=session_id,
+            agent_id=agent_id,
+            project=self._project,
+            tool=tool,
+            command_summary=prepared.summary,
+            command_full=prepared.full,
+            risk=classification.risk,
+            tool_use_id=tool_use_id,
+            role=role,
+            reason=reason,
+        )
+
+        # Record that it was asked before anybody can act on it. An approval
+        # that was never written down is one nobody can account for afterwards.
+        if not await self._try_to_record(approval_requested(request)):
+            return await self._fail_closed(
+                request,
+                ResolutionReason.SHUTDOWN,
+                "Denied: the Halyard audit log could not be written, so nothing was approved.",
+            )
+
+        try:
+            await self._channel.send_approval_request(request)
+        except Exception:
+            logger.exception("Channel refused the approval request; denying")
+            await self._try_to_record(
+                bridge_error(
+                    message="approval could not be delivered to the channel",
+                    session_id=session_id,
+                    request_id=request.request_id,
+                )
+            )
+            return await self._fail_closed(
+                request,
+                ResolutionReason.SHUTDOWN,
+                "Denied: the approval could not be delivered to anyone, so nobody saw it.",
+            )
+
+        # Blocks until a human answers or the deadline passes. Returns a
+        # denial on timeout; it does not raise.
+        resolution = await self._store.wait_for(request.request_id)
+
+        recorded = await self._try_to_record(approval_resolved(request, resolution))
+        if not recorded and resolution.allowed:
+            # A denial that went unrecorded is still a denial, so it stands. An
+            # approval that went unrecorded is a command about to run with no
+            # trace of who agreed to it, which is not something to let through.
+            return ApprovalOutcome(
+                decision=Decision.DENY,
+                reason=(
+                    "Denied: the approval was granted but could not be written to the "
+                    "audit log, so it was not honoured."
+                ),
+                request_id=request.request_id,
+                risk=request.risk,
+            )
+
+        return ApprovalOutcome(
+            decision=resolution.decision,
+            reason=resolution.note or f"{resolution.decision.value} ({resolution.reason.value})",
+            request_id=request.request_id,
+            risk=request.risk,
+        )
+
+    async def _fail_closed(
+        self, request: ApprovalRequest, reason: ResolutionReason, message: str
+    ) -> ApprovalOutcome:
+        """Close out a request that will never reach a human."""
+        try:
+            await self._store.deny(request.request_id, reason=reason, note=message)
+        except Exception:
+            # Already resolved, or already gone. Either way the answer below is
+            # the safe one, so there is nothing to do about it.
+            logger.debug("Could not close out %s", request.request_id, exc_info=True)
+        return ApprovalOutcome(
+            decision=Decision.DENY,
+            reason=message,
+            request_id=request.request_id,
+            risk=request.risk,
+        )
+
+    async def _try_to_record(self, record) -> bool:
+        """Write to the audit log, reporting failure instead of raising.
+
+        Callers decide what a failed write means; for most of them it means
+        denying. This method only refuses to make that decision for them.
+        """
+        try:
+            await self._audit.record(record)
+        except Exception:
+            logger.exception("Audit write failed for %s", record.action.value)
+            return False
+        return True
