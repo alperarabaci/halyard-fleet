@@ -239,6 +239,67 @@ exits 1 and fails open. Therefore:
 
 ---
 
+## Running more than one session at once
+
+The navigator/driver workflow this project exists for means two Claude Code sessions in one
+project directory at the same time. What that costs is mostly undocumented.
+
+**Hook configuration is strictly per-project or per-user.** There is no `--settings` flag and no
+environment variable pointing at an alternative settings file, so two sessions in one directory
+necessarily share one hook configuration. That is fine here — both should route through the same
+bridge — but it does mean a session cannot be given different hook behaviour at launch.
+
+**Nothing in the payload says which session is the navigator.** `session_id` distinguishes them and
+nothing else does; `agent_type` appears only for subagents. The role is known only to whoever
+started the session, so it has to be declared there:
+
+```bash
+HALYARD_ROLE=navigator claude
+HALYARD_ROLE=driver    claude
+```
+
+The docs say hooks run "with Claude Code's environment" and that "the hook process inherits the
+parent environment", which were never spelled out for custom variables. Observed indirectly: a
+Claude Code subprocess sees 46 variables including `SHELL`, `SHLVL`, `SSH_AUTH_SOCK` and
+`__CFBundleIdentifier` — none of which Claude Code sets — so the launching shell's environment does
+come through. Undocumented extras also present: `CLAUDE_CODE_SESSION_ID` and `CLAUDE_PID`. The
+payload already carries `session_id`, so neither is needed.
+
+### Measured
+
+Two real Claude Code sessions were launched in this directory at the same time, one with
+`HALYARD_ROLE=navigator` and one with `HALYARD_ROLE=driver`. The navigator ran a command carrying
+the eight-second block marker; the driver ran an ordinary command a few seconds later. Observed:
+
+```
+22:19:13  navigator (pid 42858)  hook starts, blocks for 8s
+22:19:20  driver    (pid 42944)  hook fires   ← inside the navigator's block
+22:19:21  navigator (pid 42858)  block released
+```
+
+✅ **Hooks fire independently across sessions.** The driver's hook ran at the seventh second of the
+navigator's eight-second block — they overlapped. There is no per-project serialization, so a
+session blocked on an approval does not stall another session's tools. This was the finding that
+could have forced a redesign of Phase 3; it did not.
+
+✅ **A variable set at launch reaches the hook.** `role=navigator` and `role=driver` were logged
+correctly by each session's hook, confirming that `HALYARD_ROLE=navigator claude` propagates. This
+is the whole mechanism behind the navigator/driver split — the docs only say hooks inherit "Claude
+Code's environment" without confirming it holds for custom variables, and now it is confirmed.
+
+As a side effect, the passive behaviour of `observe.sh` was reconfirmed: on an unmarked command it
+returns no opinion (exit 0, empty stdout) and Claude Code falls through to its own permission
+prompt.
+
+### Still to measure
+
+| Question | Why it matters | Status |
+|---|---|---|
+| Is there a ceiling on a hook's `timeout`? | The approval window cannot exceed it, and exceeding it fails open. 600s is the default; no maximum is documented. If a large value is honoured, the window can be hours. | ☐ |
+
+Only the timeout ceiling is left, and it does not block Phase 1 — it sets how long the approval
+window can reasonably be, which is a defaults question, not a design one.
+
 ## Open questions raised during observation
 
 - **`permission_mode: bypassPermissions`.** Does a PreToolUse hook still fire, and is its deny still
