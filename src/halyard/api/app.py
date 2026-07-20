@@ -21,6 +21,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
 
 from halyard.channels.stub import StubChannel
+from halyard.channels.telegram import TelegramApi, TelegramChannel
 from halyard.config import ChannelKind, Settings
 from halyard.core.approvals import ApprovalStore, Decision
 from halyard.core.audit import (
@@ -80,16 +81,18 @@ class HealthResponse(BaseModel):
     decides_without_a_human: bool = Field(default=False)
 
 
-def _build_channel(kind: ChannelKind, store: ApprovalStore, settings: Settings):
-    if kind is ChannelKind.STUB_ALLOW:
+def _build_channel(settings: Settings, store: ApprovalStore, audit: AuditLog):
+    if settings.channel is ChannelKind.STUB_ALLOW:
         return StubChannel(store, Decision.ALLOW)
-    if kind is ChannelKind.STUB_DENY:
+    if settings.channel is ChannelKind.STUB_DENY:
         return StubChannel(store, Decision.DENY)
-    # Telegram lands in #10. Until then, choosing it should say so rather than
-    # falling back to something that answers on its own.
-    raise NotImplementedError(
-        "The Telegram channel is not implemented yet. "
-        "Use HALYARD_CHANNEL=stub_allow or stub_deny for now."
+    # `Settings` has already refused to start if any of these are missing.
+    return TelegramChannel(
+        api=TelegramApi(settings.telegram_bot_token or ""),
+        store=store,
+        audit=audit,
+        chat_id=settings.telegram_chat_id or "",
+        authorized_user_ids=settings.telegram_authorized_user_ids,
     )
 
 
@@ -102,9 +105,7 @@ def create_app(settings: Settings, *, channel=None) -> FastAPI:
     store = ApprovalStore(ttl=timedelta(seconds=settings.approval_timeout_seconds))
     audit = AuditLog([JsonlAuditSink(settings.audit_log), SqliteAuditSink(settings.db_path)])
     registry = SessionRegistry()
-    resolved_channel = (
-        channel if channel is not None else _build_channel(settings.channel, store, settings)
-    )
+    resolved_channel = channel if channel is not None else _build_channel(settings, store, audit)
     service = ApprovalService(
         store=store,
         policy=Policy(),
