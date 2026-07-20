@@ -44,6 +44,12 @@ class StubChannel:
         """How many requests this channel has answered. Used by tests."""
         return self._sent
 
+    @property
+    def _past_tense(self) -> str:
+        # This string is handed to the agent verbatim, so "Deny by the stub
+        # channel" is not good enough.
+        return "Allowed" if self._decision is Decision.ALLOW else "Denied"
+
     async def start(self) -> None:
         if self._decision is Decision.ALLOW:
             logger.warning(
@@ -76,7 +82,7 @@ class StubChannel:
             nonce=request.nonce,
             decision=self._decision,
             decided_by=self.name,
-            note=(f"{self._decision.value.capitalize()} by the stub channel. No human was asked."),
+            note=f"{self._past_tense} by the stub channel. No human was asked.",
         )
         return f"stub-message-{self._sent}"
 
