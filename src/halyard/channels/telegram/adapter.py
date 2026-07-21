@@ -41,8 +41,12 @@ Clock = Callable[[], datetime]
 POLL_TIMEOUT_SECONDS = 30
 
 #: Backoff after a failed poll, so a Telegram outage does not become a tight
-#: loop against their API.
+#: loop against their API. Doubles per consecutive failure up to the cap.
 POLL_RETRY_SECONDS = 3.0
+
+#: Ceiling on the backoff. A long outage should not turn into a long silence
+#: after it ends, so recovery is never more than this far away.
+POLL_RETRY_MAX_SECONDS = 30.0
 
 
 def _default_clock() -> datetime:
@@ -61,6 +65,7 @@ class TelegramChannel:
         chat_id: str,
         authorized_user_ids: frozenset[str],
         clock: Clock = _default_clock,
+        poll_retry_seconds: float = POLL_RETRY_SECONDS,
     ) -> None:
         self._api = api
         self._store = store
@@ -68,6 +73,7 @@ class TelegramChannel:
         self._chat_id = chat_id
         self._authorized = authorized_user_ids
         self._clock = clock
+        self._poll_retry_seconds = poll_retry_seconds
         self._open: dict[str, tuple[ApprovalRequest, int]] = {}
         self._poller: asyncio.Task | None = None
         self._offset: int | None = None
@@ -137,7 +143,14 @@ class TelegramChannel:
         answered — they would all sit until their deadline and then be denied.
         That is the safe failure, but it is silent, so a poll that keeps failing
         says so at ERROR rather than letting the system look healthy.
+
+        It says so *once*, though. The first failure logs a full traceback,
+        because you need it to know what broke; every consecutive one after that
+        logs a single line with a running count. A transient DNS failure that
+        printed eighteen identical tracebacks is what prompted this — the noise
+        made a recoverable blip look like a crash.
         """
+        failures = 0
         while True:
             try:
                 updates = await self._api.get_updates(
@@ -145,12 +158,22 @@ class TelegramChannel:
                 )
             except asyncio.CancelledError:
                 raise
-            except Exception:
-                logger.exception(
-                    "Telegram poll failed; approvals cannot be answered until it recovers"
-                )
-                await asyncio.sleep(POLL_RETRY_SECONDS)
+            except Exception as exc:
+                failures += 1
+                if failures == 1:
+                    logger.exception(
+                        "Telegram poll failed; approvals cannot be answered until it recovers"
+                    )
+                else:
+                    logger.error("Telegram poll still failing (%d consecutive): %s", failures, exc)
+                await asyncio.sleep(self._backoff(failures))
                 continue
+
+            if failures:
+                # Say so explicitly. Errors stopping is not something anyone
+                # notices in a log; a line saying they stopped is.
+                logger.warning("Telegram poll recovered after %d consecutive failures", failures)
+                failures = 0
 
             for update in updates:
                 self._offset = int(update["update_id"]) + 1
@@ -232,6 +255,10 @@ class TelegramChannel:
         await self._dismiss(query_id, "Allowed." if decision is Decision.ALLOW else "Denied.")
 
     # --- helpers ------------------------------------------------------------
+
+    def _backoff(self, failures: int) -> float:
+        """Wait longer as failures pile up, but never longer than the cap."""
+        return min(self._poll_retry_seconds * (2 ** (failures - 1)), POLL_RETRY_MAX_SECONDS)
 
     async def _settle_card(
         self, request: ApprovalRequest, message_id: int, decision: str, by: str | None
