@@ -1,0 +1,35 @@
+# Secrets must never enter the build context. An image layer is forever, and
+# anyone who can pull the image can read it.
+.env
+.env.local
+
+# Runtime state belongs in a volume, not baked into an image.
+data/
+halyard.db
+halyard.db-shm
+halyard.db-wal
+audit.jsonl
+
+.git
+.gitignore
+.github
+.claude
+.venv
+venv
+
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+tests/
+docs/
+bridge/
+.DS_Store
