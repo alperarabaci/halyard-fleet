@@ -291,6 +291,27 @@ As a side effect, the passive behaviour of `observe.sh` was reconfirmed: on an u
 returns no opinion (exit 0, empty stdout) and Claude Code falls through to its own permission
 prompt.
 
+## Headless sessions
+
+The docs confirm `SessionStart` and `Setup` hooks fire under `claude -p`, but say nothing about
+`PreToolUse`. Measured by running a nested headless session from inside another one:
+
+```bash
+claude -p "Use the Bash tool to run exactly this one command and then stop: echo HEADLESSHOOKFIRED" \
+  --allowedTools "Bash" --max-turns 4
+```
+
+✅ **`PreToolUse` fires in headless mode.** The log picked up an entry under a new `session_id`,
+carrying the bare `echo HEADLESSHOOKFIRED` command. Also worth noting: `permission_mode` came
+through as `default` despite `--allowedTools "Bash"` pre-approving the tool, so pre-approval does
+not skip the hook.
+
+This makes a headless-driven smoke test possible, but the automated end-to-end tests deliberately
+do **not** use it. Driving a real Claude Code session costs tokens and needs working credentials on
+every run, and the behaviour above is measured rather than documented — which is fine for a note
+here and a poor foundation for a test suite. The tests feed the bridge synthetic payloads instead;
+the "does Claude Code really honour the decision" link is proven by hand, once, and recorded above.
+
 ### Still to measure
 
 | Question | Why it matters | Status |
