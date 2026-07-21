@@ -1,0 +1,147 @@
+"""Tests for how a bridge finds the control plane.
+
+This is load-bearing for a fail-closed path. A bridge that resolves the wrong
+address does not fail loudly — it denies every command with a message about a
+port, which is indistinguishable from the system working correctly and
+refusing you.
+"""
+
+from __future__ import annotations
+
+import subprocess
+import sys
+from pathlib import Path
+
+import pytest
+
+REPO = Path(__file__).resolve().parent.parent
+BRIDGE_DIR = REPO / "bridge"
+
+sys.path.insert(0, str(BRIDGE_DIR))
+import _settings  # noqa: E402
+
+
+@pytest.fixture
+def config_files(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """Point the lookup at files a test controls, not the developer's own."""
+    first = tmp_path / "project.env"
+    second = tmp_path / "home.config"
+    monkeypatch.setattr(_settings, "_CONFIG_FILES", (first, second))
+    monkeypatch.delenv("HALYARD_URL", raising=False)
+    return first, second
+
+
+def test_the_environment_wins(config_files, monkeypatch: pytest.MonkeyPatch) -> None:
+    first, _ = config_files
+    first.write_text("HALYARD_URL=http://from-file:1\n")
+    monkeypatch.setenv("HALYARD_URL", "http://from-env:2")
+
+    # An explicit export is still an override, for anyone who wants one.
+    assert _settings.control_plane_url() == "http://from-env:2"
+
+
+def test_a_file_is_used_when_nothing_is_exported(config_files) -> None:
+    first, _ = config_files
+    first.write_text("# a comment\nHALYARD_URL=http://127.0.0.1:8799\nOTHER=x\n")
+
+    # The point of the whole exercise: no export, and it still finds the address
+    # the control plane was configured with.
+    assert _settings.control_plane_url() == "http://127.0.0.1:8799"
+
+
+def test_the_first_file_wins(config_files) -> None:
+    first, second = config_files
+    first.write_text("HALYARD_URL=http://first:1\n")
+    second.write_text("HALYARD_URL=http://second:2\n")
+
+    assert _settings.control_plane_url() == "http://first:1"
+
+
+def test_a_later_file_is_used_when_the_first_says_nothing(config_files) -> None:
+    first, second = config_files
+    first.write_text("SOMETHING_ELSE=1\n")
+    second.write_text("HALYARD_URL=http://second:2\n")
+
+    assert _settings.control_plane_url() == "http://second:2"
+
+
+@pytest.mark.parametrize(
+    "line",
+    ['HALYARD_URL="http://q:1"', "HALYARD_URL='http://q:1'", "HALYARD_URL=  http://q:1  "],
+)
+def test_quotes_and_padding_are_stripped(config_files, line: str) -> None:
+    first, _ = config_files
+    first.write_text(line + "\n")
+
+    assert _settings.control_plane_url() == "http://q:1"
+
+
+@pytest.mark.parametrize(
+    "content", ["", "\n\n", "# only a comment\n", "HALYARD_URL=\n", "no equals sign here\n"]
+)
+def test_an_unhelpful_file_falls_back_to_the_default(config_files, content: str) -> None:
+    first, _ = config_files
+    first.write_text(content)
+
+    assert _settings.control_plane_url() == _settings.DEFAULT_URL
+
+
+def test_a_missing_file_is_not_an_error(config_files) -> None:
+    # Reading configuration must never be the thing that breaks a bridge.
+    assert _settings.control_plane_url() == _settings.DEFAULT_URL
+
+
+def test_a_directory_where_a_file_was_expected_is_not_an_error(
+    config_files, tmp_path: Path
+) -> None:
+    first, _ = config_files
+    first.mkdir()
+
+    assert _settings.control_plane_url() == _settings.DEFAULT_URL
+
+
+def test_a_bad_timeout_falls_back_rather_than_raising(config_files) -> None:
+    first, _ = config_files
+    first.write_text("HALYARD_BRIDGE_TIMEOUT_SECONDS=not-a-number\n")
+
+    assert _settings.timeout("HALYARD_BRIDGE_TIMEOUT_SECONDS", 330.0) == 330.0
+
+
+def test_the_lookup_works_when_the_bridge_runs_from_an_unrelated_directory(
+    tmp_path: Path,
+) -> None:
+    # Hooks run with whatever working directory Claude Code had. The import has
+    # to resolve from the script's own location, not the caller's.
+    result = subprocess.run(
+        [sys.executable, str(BRIDGE_DIR / "relay.py")],
+        input='{"session_id":"s","last_assistant_message":"hi"}',
+        capture_output=True,
+        text=True,
+        cwd=tmp_path,
+        env={"PATH": "/usr/bin:/bin", "HALYARD_URL": "http://127.0.0.1:1"},
+        timeout=30,
+    )
+
+    assert result.returncode == 0
+    assert result.stderr == ""
+
+
+# --- doctor -----------------------------------------------------------------
+
+
+def test_doctor_reports_a_problem_when_nothing_is_listening(
+    monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:
+    from halyard.doctor import run
+
+    monkeypatch.setenv("HALYARD_CHANNEL", "stub_deny")
+    monkeypatch.setenv("HALYARD_URL", "http://127.0.0.1:1")
+
+    exit_code = run()
+
+    output = capsys.readouterr().out
+    assert exit_code == 1
+    assert "nothing answering" in output
+    # The whole point is that it says where the setting came from, because
+    # "unreachable at 8787" is useless when a file says 8799.
+    assert "found in:" in output

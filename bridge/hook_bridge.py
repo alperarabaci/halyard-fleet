@@ -17,7 +17,9 @@ refusal by failing — it has to print one. So this script prints a decision on
 every path and exits 0, and `bridge/hook.sh` covers the case where it never got
 far enough to print anything at all.
 
-Configuration comes from the environment:
+Configuration is looked up rather than demanded — see `_settings.py`. A hook
+inherits the shell Claude Code was launched from, and requiring `HALYARD_URL` to
+be exported there would mean every forgotten export turns into a denied command:
 
     HALYARD_URL                       default http://127.0.0.1:8787
     HALYARD_BRIDGE_TIMEOUT_SECONDS    default 330
@@ -30,12 +32,13 @@ refuses to start if that ordering is broken.
 from __future__ import annotations
 
 import json
-import os
 import sys
 import urllib.error
 import urllib.request
 
-DEFAULT_URL = "http://127.0.0.1:8787"
+from _settings import control_plane_url
+from _settings import timeout as lookup_timeout
+
 DEFAULT_TIMEOUT_SECONDS = 330.0
 
 
@@ -108,11 +111,8 @@ def main() -> int:
         deny(f"the hook payload could not be read ({exc}).")
         return 0
 
-    url = os.environ.get("HALYARD_URL", DEFAULT_URL)
-    try:
-        timeout = float(os.environ.get("HALYARD_BRIDGE_TIMEOUT_SECONDS", DEFAULT_TIMEOUT_SECONDS))
-    except ValueError:
-        timeout = DEFAULT_TIMEOUT_SECONDS
+    url = control_plane_url()
+    timeout = lookup_timeout("HALYARD_BRIDGE_TIMEOUT_SECONDS", DEFAULT_TIMEOUT_SECONDS)
 
     try:
         answer = ask(url, build_body(payload), timeout)

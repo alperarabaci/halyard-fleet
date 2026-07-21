@@ -16,7 +16,7 @@ So every path here ends in exit 0 with empty stdout — "no opinion" — and the
 session carries on regardless. The two bridges have opposite rules on purpose,
 which is why they are two files rather than one with a branch in it.
 
-Configuration:
+Configuration is looked up rather than demanded — see `_settings.py`:
 
     HALYARD_URL                      default http://127.0.0.1:8787
     HALYARD_RELAY_TIMEOUT_SECONDS    default 5
@@ -25,11 +25,11 @@ Configuration:
 from __future__ import annotations
 
 import json
-import os
 import sys
 import urllib.request
 
-DEFAULT_URL = "http://127.0.0.1:8787"
+from _settings import control_plane_url
+from _settings import timeout as lookup_timeout
 
 #: Short on purpose. The agent's turn is waiting on this, and a slow relay is
 #: not worth stalling the session for.
@@ -54,13 +54,8 @@ def main() -> int:
             "cwd": payload.get("cwd"),
         }
 
-        url = os.environ.get("HALYARD_URL", DEFAULT_URL)
-        try:
-            timeout = float(
-                os.environ.get("HALYARD_RELAY_TIMEOUT_SECONDS", DEFAULT_TIMEOUT_SECONDS)
-            )
-        except ValueError:
-            timeout = DEFAULT_TIMEOUT_SECONDS
+        url = control_plane_url()
+        timeout = lookup_timeout("HALYARD_RELAY_TIMEOUT_SECONDS", DEFAULT_TIMEOUT_SECONDS)
 
         request = urllib.request.Request(
             url.rstrip("/") + "/v1/messages",
