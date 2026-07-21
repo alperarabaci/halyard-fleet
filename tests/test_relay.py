@@ -30,20 +30,20 @@ class RecordingChannel:
     async def stop(self) -> None: ...
     async def send_approval_request(self, request) -> str: ...
 
-    async def send_message(self, session_id: str, text: str) -> str:
+    async def send_message(self, session_id: str, text: str, role=None) -> str:
         self.messages.append((session_id, text))
         return "msg-1"
 
-    async def send_long_content(self, session_id: str, content: str, title: str) -> str:
+    async def send_long_content(self, session_id: str, content: str, title: str, role=None) -> str:
         self.documents.append((session_id, content, title))
         return "doc-1"
 
 
 class BrokenChannel(RecordingChannel):
-    async def send_message(self, session_id: str, text: str) -> str:
+    async def send_message(self, session_id: str, text: str, role=None) -> str:
         raise ConnectionError("telegram unreachable")
 
-    async def send_long_content(self, session_id: str, content: str, title: str) -> str:
+    async def send_long_content(self, session_id: str, content: str, title: str, role=None) -> str:
         raise ConnectionError("telegram unreachable")
 
 
@@ -192,7 +192,7 @@ async def test_an_empty_reply_is_still_handled_without_raising(tmp_path: Path, t
 
 async def test_relaying_survives_a_channel_that_returns_nonsense(tmp_path: Path) -> None:
     class WeirdChannel(RecordingChannel):
-        async def send_message(self, session_id: str, text: str):
+        async def send_message(self, session_id: str, text: str, role=None):
             return None
 
     relay, _, sink, _ = build(tmp_path, channel=WeirdChannel())

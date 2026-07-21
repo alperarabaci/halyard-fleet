@@ -43,6 +43,7 @@ USAGE = """usage: halyard [command]
   (no command)  run the control plane
   serve         run the control plane
   doctor        check the configuration and say what is wrong with it
+  sessions      list the session names this machine can see
 """
 
 
@@ -61,6 +62,11 @@ def main() -> None:
         from halyard.doctor import run
 
         raise SystemExit(run())
+
+    if command == "sessions":
+        from halyard.doctor import sessions
+
+        raise SystemExit(sessions())
 
     if command not in ("serve",):
         print(f"halyard: unknown command {command!r}\n\n{USAGE}", file=sys.stderr)

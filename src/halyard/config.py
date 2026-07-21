@@ -81,6 +81,33 @@ class Settings(BaseSettings):
         default_factory=frozenset, validation_alias="TELEGRAM_AUTHORIZED_USER_IDS"
     )
 
+    #: Where a navigator's and a driver's traffic goes, when you want them apart.
+    #: Both optional: leave them unset and everything lands in TELEGRAM_CHAT_ID,
+    #: exactly as before.
+    #:
+    #: Two seats, deliberately — not an open-ended map of role to destination.
+    #: A third session takes over one of these rather than adding a third place
+    #: to look, which is the point of splitting them at all.
+    #:
+    #: Each is a chat id, optionally with a forum topic after a colon:
+    #:     -1001234567890        a group of its own
+    #:     -1001234567890:12     topic 12 inside a shared group
+    telegram_navigator_chat_id: str | None = Field(
+        default=None, validation_alias="TELEGRAM_NAVIGATOR_CHAT_ID"
+    )
+    telegram_driver_chat_id: str | None = Field(
+        default=None, validation_alias="TELEGRAM_DRIVER_CHAT_ID"
+    )
+
+    #: Which named session sits in which seat. This is how the desktop app is
+    #: told apart: there is no shell there to set HALYARD_ROLE in, but every
+    #: session has a name, and that name survives restarts where session_id does
+    #: not. Copy them exactly — `halyard sessions` lists what it can see.
+    navigator_session: str | None = Field(
+        default=None, validation_alias="HALYARD_NAVIGATOR_SESSION"
+    )
+    driver_session: str | None = Field(default=None, validation_alias="HALYARD_DRIVER_SESSION")
+
     @model_validator(mode="after")
     def _timeouts_must_be_ordered(self) -> Settings:
         """Refuse to start unless approval < bridge < hook.

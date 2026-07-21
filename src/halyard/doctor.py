@@ -16,6 +16,7 @@ import os
 import sys
 import urllib.error
 import urllib.request
+from datetime import datetime
 from pathlib import Path
 
 from pydantic import ValidationError
@@ -127,3 +128,56 @@ def run() -> int:
     print()
     print(f"{problems} problem(s) found." if problems else "Everything checks out.")
     return 1 if problems else 0
+
+
+def sessions() -> int:
+    """List the session names this machine can see, newest first.
+
+    Exists so the two names in `.env` are copied rather than guessed. They have
+    to match exactly, and a name typed from memory that is nearly right routes
+    nothing and explains nothing.
+
+    Read on the host, not in the container: transcripts live in the user's home
+    directory, which the control plane cannot see.
+    """
+    sys.path.insert(0, str(BRIDGE_DIR))
+    try:
+        import _settings
+    finally:
+        sys.path.pop(0)
+
+    root = Path.home() / ".claude" / "projects"
+    if not root.exists():
+        print(f"No transcripts found under {root}.")
+        return 1
+
+    seen: dict[str, tuple[float, str]] = {}
+    for transcript in root.glob("*/*.jsonl"):
+        try:
+            modified = transcript.stat().st_mtime
+        except OSError:
+            continue
+        name = _settings.session_name(str(transcript))
+        if not name:
+            continue
+        # One named conversation spans many session ids; keep the most recent
+        # sighting of each name rather than listing it once per restart.
+        project = transcript.parent.name.strip("-").replace("-", "/")
+        if name not in seen or modified > seen[name][0]:
+            seen[name] = (modified, project)
+
+    if not seen:
+        print("No named sessions found.")
+        return 1
+
+    print("Session names visible on this machine, newest first:\n")
+    for name, (modified, project) in sorted(seen.items(), key=lambda i: -i[1][0]):
+        when = datetime.fromtimestamp(modified).strftime("%Y-%m-%d %H:%M")
+        print(f"  {when}  {name}")
+        print(f"{'':20}{project[-60:]}")
+    print(
+        "\nPut the two you want routed into .env, exactly as printed:\n"
+        "  HALYARD_NAVIGATOR_SESSION=...\n"
+        "  HALYARD_DRIVER_SESSION=..."
+    )
+    return 0

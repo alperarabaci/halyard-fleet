@@ -61,6 +61,9 @@ class ApprovalRequestBody(BaseModel):
     #: with. See `project_name` in core.
     project_dir: str | None = None
     role: Role | None = None
+    #: The session's name in the desktop app, where there is no shell to set
+    #: HALYARD_ROLE in. Matched against the configured seats.
+    session_name: str | None = None
     reason: str | None = None
     #: What the agent says about its own call. Can raise the risk, never lower
     #: it — see `policy.py`.
@@ -92,6 +95,7 @@ class MessageBody(BaseModel):
     cwd: str | None = None
     project_dir: str | None = None
     role: Role | None = None
+    session_name: str | None = None
 
 
 class MessageResponse(BaseModel):
@@ -127,6 +131,8 @@ def _build_channel(settings: Settings, store: ApprovalStore, audit: AuditLog, ga
         authorized_user_ids=settings.telegram_authorized_user_ids,
         gate=gate,
         project=settings.project_name,
+        navigator_chat_id=settings.telegram_navigator_chat_id,
+        driver_chat_id=settings.telegram_driver_chat_id,
     )
 
 
@@ -140,6 +146,16 @@ def create_app(settings: Settings, *, channel=None) -> FastAPI:
     audit = AuditLog([JsonlAuditSink(settings.audit_log), SqliteAuditSink(settings.db_path)])
     registry = SessionRegistry()
     gate = Gate()
+    # Names are matched case-insensitively, so they are folded once here
+    # rather than on every request.
+    seats = {
+        name.strip().casefold(): role
+        for name, role in (
+            (settings.navigator_session, Role.NAVIGATOR),
+            (settings.driver_session, Role.DRIVER),
+        )
+        if name
+    }
     resolved_channel = (
         channel if channel is not None else _build_channel(settings, store, audit, gate)
     )
@@ -150,6 +166,7 @@ def create_app(settings: Settings, *, channel=None) -> FastAPI:
         channel=resolved_channel,
         project=settings.project_name,
         gate=gate,
+        seats=seats,
     )
     service = ApprovalService(
         store=store,
@@ -160,6 +177,7 @@ def create_app(settings: Settings, *, channel=None) -> FastAPI:
         channel=resolved_channel,
         project=settings.project_name,
         gate=gate,
+        seats=seats,
     )
 
     @asynccontextmanager
@@ -258,6 +276,7 @@ def create_app(settings: Settings, *, channel=None) -> FastAPI:
             cwd=body.cwd,
             project_dir=body.project_dir,
             role=body.role,
+            session_name=body.session_name,
             reason=body.reason,
             declared_risk=body.declared_risk,
         )
@@ -284,6 +303,7 @@ def create_app(settings: Settings, *, channel=None) -> FastAPI:
             cwd=body.cwd,
             project_dir=body.project_dir,
             role=body.role,
+            session_name=body.session_name,
         )
         return MessageResponse(delivered=delivered)
 

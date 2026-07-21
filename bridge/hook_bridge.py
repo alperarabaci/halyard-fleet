@@ -37,7 +37,7 @@ import sys
 import urllib.error
 import urllib.request
 
-from _settings import control_plane_url
+from _settings import control_plane_url, session_name
 from _settings import timeout as lookup_timeout
 
 DEFAULT_TIMEOUT_SECONDS = 330.0
@@ -95,6 +95,15 @@ def build_body(payload: dict) -> dict:
         # than turned into a name here — the bridge is a courier, and deciding
         # what to call a project is core's job.
         "project_dir": os.environ.get("CLAUDE_PROJECT_DIR"),
+        # Which seat this session is sitting in. Two Claude Code sessions on one
+        # codebase look identical to a hook except for session_id, and that
+        # changes every restart — so the role has to come from whoever launched
+        # them: HALYARD_ROLE=navigator claude
+        "role": os.environ.get("HALYARD_ROLE") or None,
+        # The name the session carries in the desktop app, where there is
+        # no shell to put HALYARD_ROLE in. Stable across restarts, unlike
+        # session_id.
+        "session_name": session_name(payload.get("transcript_path")),
     }
 
 

@@ -86,11 +86,11 @@ class StubChannel:
         )
         return f"stub-message-{self._sent}"
 
-    async def send_message(self, session_id: str, text: str) -> str:
+    async def send_message(self, session_id: str, text: str, role=None) -> str:
         logger.info("StubChannel message to %s: %s", session_id, text)
         return f"stub-message-{session_id}"
 
-    async def send_long_content(self, session_id: str, content: str, title: str) -> str:
+    async def send_long_content(self, session_id: str, content: str, title: str, role=None) -> str:
         logger.info(
             "StubChannel long content to %s: %s (%d chars)", session_id, title, len(content)
         )
