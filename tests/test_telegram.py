@@ -545,8 +545,10 @@ async def test_pause_closes_the_gate_and_says_so(tmp_path: Path) -> None:
 
     assert gate.paused is True
     # It has to say it is not approving anything, because "paused" could be
-    # read as "waved through".
-    assert "not being relayed" in api.sent[0]["text"]
+    # read as "waved through" — and it has to say the replies stop too, so
+    # silence afterwards does not read as something being broken.
+    assert "no approval cards, no replies" in api.sent[0]["text"]
+    assert "auto-approved" in api.sent[0]["text"]
     assert AuditAction.GATE_PAUSED in {r.action for r in await sink.read_all()}
 
 

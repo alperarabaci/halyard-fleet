@@ -149,6 +149,7 @@ def create_app(settings: Settings, *, channel=None) -> FastAPI:
         audit=audit,
         channel=resolved_channel,
         project=settings.project_name,
+        gate=gate,
     )
     service = ApprovalService(
         store=store,

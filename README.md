@@ -237,6 +237,76 @@ Two practical habits follow:
 **Claude Code snapshots hook configuration at startup.** Editing `settings.json` mid-session has no
 effect; restart the session. The script contents are read on every call, so those can change freely.
 
+## Setting up Telegram
+
+Four values, three of which come from Telegram itself. None of them belong in the repository —
+they go in `.env`, which is gitignored.
+
+### 1. Create a bot
+
+Message [@BotFather](https://t.me/BotFather) and send `/newbot`. It asks for a display name and a
+username ending in `bot`. It replies with a token that looks like `8683402306:AAH…`.
+
+```bash
+TELEGRAM_BOT_TOKEN=<the token>
+```
+
+Treat it like a password. Anyone holding it can read every approval card this bot sends — the
+commands, which project they came from, when you were away. They cannot *approve* anything, because
+that check is on the user id rather than the bot, but reading is bad enough. If it ever leaks, send
+BotFather `/revoke`, pick the bot **from the buttons it offers** (typing the name gives
+`Invalid bot selected`), and it hands you a new one immediately.
+
+### 2. Find your own user id
+
+Message [@userinfobot](https://t.me/userinfobot). It replies with your numeric id.
+
+```bash
+TELEGRAM_AUTHORIZED_USER_IDS=<your id>
+```
+
+This is the list of people who may decide. A callback from anyone else is recorded as
+`unauthorized_callback` and ignored without a reply. Comma-separate for more than one.
+
+### 3. Find the chat id
+
+Send your new bot any message, then ask Telegram what it received:
+
+```bash
+curl -s "https://api.telegram.org/bot<TOKEN>/getUpdates" | python3 -m json.tool
+```
+
+Take `message.chat.id` from the response. A private chat gives a positive number; a group gives a
+negative one, which is normal.
+
+```bash
+TELEGRAM_CHAT_ID=<the chat id>
+```
+
+For a group, add the bot to it first and send a message there instead — group chats are what make
+it possible to keep separate conversations later, since a bot can only hold one private chat with
+you.
+
+### 4. Optional: a command menu
+
+Approvals work without this. It only makes the commands discoverable instead of remembered.
+
+Send BotFather `/setcommands`, choose your bot, and paste:
+
+```
+status - What is happening right now
+pause - Stop sending here; the terminal asks instead
+resume - Start sending here again
+```
+
+Typing `/` in the chat then offers them as a menu.
+
+### Use the app, not a browser tab
+
+A browser tab gives you no push notifications, so a card can expire unseen and the command is denied
+on the timeout. That is fine at the desk, where you are watching anyway. It defeats the purpose
+everywhere else, which is the only place this project is for.
+
 ### The timeouts have to stay in order
 
 ```

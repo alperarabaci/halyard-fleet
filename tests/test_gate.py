@@ -165,3 +165,81 @@ def test_the_record_says_which_way_it_went(paused: bool) -> None:
     record = gate_changed(paused=paused, actor="tg:4242", project="p")
 
     assert record.detail["paused"] is paused
+
+
+# --- pausing silences the phone in both directions ----------------------------
+
+
+async def test_a_paused_gate_does_not_relay_replies(tmp_path: Path) -> None:
+    from test_relay import RecordingChannel
+
+    from halyard.core.redaction import Redactor
+    from halyard.core.registry import SessionRegistry
+    from halyard.core.service import MessageRelay
+
+    gate = Gate()
+    await gate.pause("tg:4242")
+    channel = RecordingChannel()
+    sink = JsonlAuditSink(tmp_path / "audit.jsonl")
+    await sink.open()
+    relay = MessageRelay(
+        redactor=Redactor(),
+        registry=SessionRegistry(),
+        audit=AuditLog([sink]),
+        channel=channel,
+        project="alpha-engine",
+        gate=gate,
+    )
+
+    delivered = await relay.relay(session_id="s", agent_id="claude-code", text="Done.")
+
+    # Pausing means the phone is off, not that approvals alone stop. Someone
+    # who took the decisions back to the keyboard does not want replies buzzing
+    # on a device they are not looking at.
+    assert delivered is False
+    assert channel.messages == []
+    assert await sink.read_all() == []
+
+
+async def test_resuming_starts_relaying_replies_again(tmp_path: Path) -> None:
+    from test_relay import RecordingChannel
+
+    from halyard.core.redaction import Redactor
+    from halyard.core.registry import SessionRegistry
+    from halyard.core.service import MessageRelay
+
+    gate = Gate()
+    await gate.pause("tg:4242")
+    channel = RecordingChannel()
+    sink = JsonlAuditSink(tmp_path / "audit.jsonl")
+    await sink.open()
+    relay = MessageRelay(
+        redactor=Redactor(),
+        registry=SessionRegistry(),
+        audit=AuditLog([sink]),
+        channel=channel,
+        project="alpha-engine",
+        gate=gate,
+    )
+    await relay.relay(session_id="s", agent_id="claude-code", text="while paused")
+
+    await gate.resume("tg:4242")
+    await relay.relay(session_id="s", agent_id="claude-code", text="after resuming")
+
+    assert [text for _, text in channel.messages] == ["after resuming"]
+
+
+async def test_commands_still_work_while_paused(tmp_path: Path) -> None:
+    from test_telegram import gated, typed
+
+    channel, api, gate, _ = await gated(tmp_path)
+    await channel._handle_message(typed("/pause"))
+    api.sent.clear()
+
+    await channel._handle_message(typed("/status"))
+    await channel._handle_message(typed("/resume"))
+
+    # The switch has to be reachable from the place it silenced, or pausing
+    # would be a one-way door.
+    assert len(api.sent) == 2
+    assert gate.paused is False
