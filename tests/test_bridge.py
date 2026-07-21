@@ -254,3 +254,100 @@ def test_the_wrapper_denies_when_the_bridge_prints_nothing(tmp_path: Path) -> No
 
     # Empty stdout with a clean exit is how Claude Code spells "no opinion".
     assert decision["permissionDecision"] == "deny"
+
+
+# --- the output relay, which fails open on purpose ---------------------------
+
+RELAY = REPO / "bridge" / "relay.py"
+
+STOP_PAYLOAD = {
+    "session_id": "session-1",
+    "transcript_path": "/tmp/t.jsonl",
+    "cwd": "/repo",
+    "hook_event_name": "Stop",
+    "stop_hook_active": False,
+    "last_assistant_message": "Done. All 234 tests pass.",
+}
+
+
+def run_relay(payload: object = STOP_PAYLOAD, **env: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        [sys.executable, str(RELAY)],
+        input=payload if isinstance(payload, str) else json.dumps(payload),
+        capture_output=True,
+        text=True,
+        env={"PATH": "/usr/bin:/bin:/usr/local/bin", **env},
+        timeout=30,
+    )
+
+
+def test_the_relay_forwards_what_the_agent_said() -> None:
+    with control_plane(body={"delivered": True}) as (url, received):
+        result = run_relay(HALYARD_URL=url)
+
+    assert result.returncode == 0
+    assert received[0] == {
+        "session_id": "session-1",
+        "agent_id": "claude-code",
+        "text": "Done. All 234 tests pass.",
+        "cwd": "/repo",
+    }
+
+
+def test_the_relay_prints_nothing() -> None:
+    with control_plane(body={"delivered": True}) as (url, _):
+        result = run_relay(HALYARD_URL=url)
+
+    # A Stop hook writing to stdout is a Stop hook making a decision. This one
+    # has no opinion about anything.
+    assert result.stdout == ""
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {**STOP_PAYLOAD, "last_assistant_message": ""},
+        {**STOP_PAYLOAD, "last_assistant_message": "   "},
+        {k: v for k, v in STOP_PAYLOAD.items() if k != "last_assistant_message"},
+        {**STOP_PAYLOAD, "last_assistant_message": None},
+    ],
+)
+def test_a_turn_that_said_nothing_is_not_forwarded(payload: dict) -> None:
+    with control_plane(body={"delivered": True}) as (url, received):
+        result = run_relay(payload, HALYARD_URL=url)
+
+    assert result.returncode == 0
+    assert received == []
+
+
+@pytest.mark.parametrize("stdin", ["", "not json", "[]", "null"])
+def test_an_unreadable_payload_is_dropped_quietly(stdin: str) -> None:
+    result = run_relay(stdin, HALYARD_URL="http://127.0.0.1:1")
+
+    assert result.returncode == 0
+    assert result.stdout == ""
+
+
+def test_an_unreachable_control_plane_does_not_disturb_the_turn() -> None:
+    result = run_relay(HALYARD_URL="http://127.0.0.1:1")
+
+    # The opposite rule to hook_bridge.py. A lost chat message is not a lost
+    # decision, and blocking the agent over one would cost more than it saves.
+    assert result.returncode == 0
+    assert result.stdout == ""
+
+
+def test_a_server_error_does_not_disturb_the_turn() -> None:
+    with control_plane(status=500, body={"detail": "boom"}) as (url, _):
+        result = run_relay(HALYARD_URL=url)
+
+    assert result.returncode == 0
+    assert result.stdout == ""
+
+
+def test_a_slow_control_plane_does_not_hold_the_turn_open() -> None:
+    with control_plane(body={"delivered": True}, delay=2.0) as (url, _):
+        result = run_relay(HALYARD_URL=url, HALYARD_RELAY_TIMEOUT_SECONDS="0.3")
+
+    assert result.returncode == 0
+    assert result.stdout == ""

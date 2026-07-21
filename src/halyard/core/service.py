@@ -23,13 +23,24 @@ from halyard.core.approvals import (
     Decision,
     ResolutionReason,
 )
-from halyard.core.audit import AuditLog, approval_requested, approval_resolved, bridge_error
+from halyard.core.audit import (
+    AuditLog,
+    agent_message,
+    approval_requested,
+    approval_resolved,
+    bridge_error,
+)
 from halyard.core.events import RiskLevel, Role
 from halyard.core.policy import Policy
 from halyard.core.redaction import Redactor
 from halyard.core.registry import SessionRegistry
 
 logger = logging.getLogger(__name__)
+
+#: Above this, a reply is sent as a file instead of a message. Telegram's
+#: limit is 4096; the margin leaves room for whatever a channel wraps around
+#: it.
+MESSAGE_SPLIT_THRESHOLD = 3500
 
 
 @dataclass(frozen=True)
@@ -46,6 +57,90 @@ class ApprovalOutcome:
     @property
     def allowed(self) -> bool:
         return self.decision is Decision.ALLOW
+
+
+class MessageRelay:
+    """Carries an agent's own words out to a channel.
+
+    The mirror image of `ApprovalService`, and the rule is inverted. An approval
+    that cannot be delivered must deny, because a command is waiting on it.
+    A message that cannot be delivered is a lost notification, and stalling the
+    agent's turn over one would cost more than the message is worth. So this
+    reports failure instead of enforcing anything, and never raises.
+
+    Redaction still applies. The text is about to leave the machine for somebody
+    else's servers, which is the same reason approval cards are masked — an
+    agent quoting a command it just ran can quote a credential along with it.
+    """
+
+    def __init__(
+        self,
+        *,
+        redactor: Redactor,
+        registry: SessionRegistry,
+        audit: AuditLog,
+        channel,
+        project: str,
+    ) -> None:
+        self._redactor = redactor
+        self._registry = registry
+        self._audit = audit
+        self._channel = channel
+        self._project = project
+
+    async def relay(
+        self,
+        *,
+        session_id: str,
+        agent_id: str,
+        text: str,
+        cwd: str | None = None,
+        role: Role | None = None,
+    ) -> bool:
+        """Send an agent's reply out. Returns whether it was delivered."""
+        try:
+            masked = self._redactor.redact(text)
+            await self._registry.observe(
+                session_id=session_id,
+                agent_id=agent_id,
+                project=self._project,
+                role=role,
+                cwd=cwd,
+            )
+            delivered = await self._deliver(session_id, masked.text)
+        except Exception:
+            logger.exception("Could not relay a message from %s", session_id)
+            return False
+
+        try:
+            await self._audit.record(
+                agent_message(
+                    session_id=session_id,
+                    agent_id=agent_id,
+                    project=self._project,
+                    length=len(masked.text),
+                    redacted=masked.redacted,
+                    delivered=delivered,
+                )
+            )
+        except Exception:
+            # An unrecorded message is not an unrecorded decision. It does not
+            # change what happened, and there is nothing to undo.
+            logger.warning("Could not record a relayed message", exc_info=True)
+        return delivered
+
+    async def _deliver(self, session_id: str, text: str) -> bool:
+        try:
+            if len(text) > MESSAGE_SPLIT_THRESHOLD:
+                # Long replies go as a file rather than a wall of split
+                # messages — the same choice the full-command view makes.
+                await self._channel.send_long_content(session_id, text, "Agent reply")
+            else:
+                await self._channel.send_message(session_id, text)
+        except Exception:
+            logger.exception("Channel refused a relayed message from %s", session_id)
+            return False
+        return True
 
 
 class ApprovalService:

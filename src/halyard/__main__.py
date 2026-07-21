@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import sys
 
 import uvicorn
 
@@ -38,6 +39,11 @@ def configure_logging() -> None:
 
 
 def main() -> None:
+    if len(sys.argv) > 1 and sys.argv[1] == "doctor":
+        from halyard.doctor import run
+
+        raise SystemExit(run())
+
     configure_logging()
     settings = Settings()
     logger = logging.getLogger("halyard")

@@ -54,6 +54,9 @@ class AuditAction(StrEnum):
     REPLAYED_CALLBACK = "callback.replayed"
     #: The bridge could not complete a request and failed closed.
     BRIDGE_ERROR = "bridge.error"
+    #: An agent's reply was relayed out to a channel. Metadata only — see
+    #: `agent_message` for why the text itself is not kept here.
+    AGENT_MESSAGE = "agent.message"
     CONTROL_PLANE_STARTED = "control_plane.started"
     CONTROL_PLANE_STOPPED = "control_plane.stopped"
 
@@ -168,6 +171,36 @@ def replayed_callback(
         recorded_at=now or _default_clock(),
         actor=actor,
         request_id=request_id,
+    )
+
+
+def agent_message(
+    *,
+    session_id: str,
+    agent_id: str,
+    project: str,
+    length: int,
+    redacted: bool,
+    delivered: bool,
+    now: datetime | None = None,
+) -> AuditRecord:
+    """Record that an agent said something and it went out to a channel.
+
+    The text is deliberately not stored. This log is the permanent, append-only
+    record of *decisions*, and an assistant's conversation is not one — copying
+    it here would grow the permanent record without bound and fill it with
+    content nobody ever reviewed. The chat is where the conversation lives; this
+    line exists so that "was anything relayed at 03:14, and did it get through"
+    has an answer.
+    """
+    return AuditRecord(
+        action=AuditAction.AGENT_MESSAGE,
+        recorded_at=now or _default_clock(),
+        actor=agent_id,
+        session_id=session_id,
+        agent_id=agent_id,
+        project=project,
+        detail={"length": length, "redacted": redacted, "delivered": delivered},
     )
 
 
