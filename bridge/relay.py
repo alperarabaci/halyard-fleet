@@ -25,6 +25,7 @@ Configuration is looked up rather than demanded — see `_settings.py`:
 from __future__ import annotations
 
 import json
+import os
 import sys
 import urllib.request
 
@@ -52,6 +53,7 @@ def main() -> int:
             "agent_id": "claude-code",
             "text": text,
             "cwd": payload.get("cwd"),
+            "project_dir": os.environ.get("CLAUDE_PROJECT_DIR"),
         }
 
         url = control_plane_url()

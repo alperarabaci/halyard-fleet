@@ -16,11 +16,11 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
+from enum import StrEnum
 
 from halyard.core.approvals import (
     ApprovalRequest,
     ApprovalStore,
-    Decision,
     ResolutionReason,
 )
 from halyard.core.audit import (
@@ -31,6 +31,7 @@ from halyard.core.audit import (
     bridge_error,
 )
 from halyard.core.events import RiskLevel, Role
+from halyard.core.gate import Gate
 from halyard.core.policy import Policy
 from halyard.core.redaction import Redactor
 from halyard.core.registry import SessionRegistry
@@ -43,11 +44,52 @@ logger = logging.getLogger(__name__)
 MESSAGE_SPLIT_THRESHOLD = 3500
 
 
+def project_name(project_dir: str | None, cwd: str | None, configured: str) -> str:
+    """What to call the project a request came from.
+
+    `CLAUDE_PROJECT_NAME` is one value in one control plane, so on its own it
+    labels every card with the same name however many repositories are wired to
+    it. Gate a second project and its approvals arrive wearing the first one's
+    name — which was found in real use, with a command from `agent-platform`
+    arriving on a phone as `alpha-engine`. An approver who cannot tell which
+    codebase a command belongs to cannot meaningfully approve it, and that is
+    the whole premise.
+
+    Read from the path rather than the filesystem: the control plane usually
+    runs in a container and cannot see the host's directories, so this has only
+    the string to work with.
+    """
+    for path in (project_dir, cwd):
+        if not path:
+            continue
+        name = path.replace("\\", "/").rstrip("/").rsplit("/", 1)[-1]
+        if name:
+            return name
+    return configured
+
+
+class BridgeDecision(StrEnum):
+    """What the bridge is told to do.
+
+    Three values here, where the approval store has two. An approval is only
+    ever allowed or denied — but the bridge can also be told that no approval
+    happened at all, which is what a paused gate means. Keeping that third value
+    out of `Decision` keeps the store's invariant honest: it never records a
+    resolution that was neither.
+    """
+
+    ALLOW = "allow"
+    DENY = "deny"
+    #: Halyard is not answering. Claude Code falls back to its own permission
+    #: prompt — the question moves back to the terminal rather than vanishing.
+    DEFER = "defer"
+
+
 @dataclass(frozen=True)
 class ApprovalOutcome:
     """What the bridge gets back."""
 
-    decision: Decision
+    decision: BridgeDecision
     #: Handed to Claude Code as the denial reason and shown to the user, so it
     #: is written for an agent to act on rather than for a log to be grepped.
     reason: str
@@ -56,7 +98,7 @@ class ApprovalOutcome:
 
     @property
     def allowed(self) -> bool:
-        return self.decision is Decision.ALLOW
+        return self.decision is BridgeDecision.ALLOW
 
 
 class MessageRelay:
@@ -95,15 +137,17 @@ class MessageRelay:
         agent_id: str,
         text: str,
         cwd: str | None = None,
+        project_dir: str | None = None,
         role: Role | None = None,
     ) -> bool:
         """Send an agent's reply out. Returns whether it was delivered."""
+        project = project_name(project_dir, cwd, self._project)
         try:
             masked = self._redactor.redact(text)
             await self._registry.observe(
                 session_id=session_id,
                 agent_id=agent_id,
-                project=self._project,
+                project=project,
                 role=role,
                 cwd=cwd,
             )
@@ -117,7 +161,7 @@ class MessageRelay:
                 agent_message(
                     session_id=session_id,
                     agent_id=agent_id,
-                    project=self._project,
+                    project=project,
                     length=len(masked.text),
                     redacted=masked.redacted,
                     delivered=delivered,
@@ -156,8 +200,10 @@ class ApprovalService:
         registry: SessionRegistry,
         channel,
         project: str,
+        gate: Gate | None = None,
     ) -> None:
         self._store = store
+        self._gate = gate or Gate()
         self._policy = policy
         self._redactor = redactor
         self._audit = audit
@@ -174,6 +220,7 @@ class ApprovalService:
         command: str,
         tool_use_id: str | None = None,
         cwd: str | None = None,
+        project_dir: str | None = None,
         role: Role | None = None,
         reason: str | None = None,
         declared_risk: RiskLevel | None = None,
@@ -187,6 +234,7 @@ class ApprovalService:
                 command=command,
                 tool_use_id=tool_use_id,
                 cwd=cwd,
+                project_dir=project_dir,
                 role=role,
                 reason=reason,
                 declared_risk=declared_risk,
@@ -200,7 +248,7 @@ class ApprovalService:
                 bridge_error(message="unhandled error while processing", session_id=session_id)
             )
             return ApprovalOutcome(
-                decision=Decision.DENY,
+                decision=BridgeDecision.DENY,
                 reason=(
                     "Denied: the Halyard control plane hit an internal error and failed "
                     "closed. Nothing was approved."
@@ -216,6 +264,7 @@ class ApprovalService:
         command: str,
         tool_use_id: str | None,
         cwd: str | None,
+        project_dir: str | None,
         role: Role | None,
         reason: str | None,
         declared_risk: RiskLevel | None,
@@ -223,13 +272,24 @@ class ApprovalService:
         # Redaction first, before the command is copied anywhere. Everything
         # downstream — policy, the store, the audit log, the card — sees only
         # what comes out of here.
+        if self._gate.paused:
+            # Nothing is created, nothing is asked, nothing is decided. Claude
+            # Code falls back to its own permission prompt, which is where the
+            # question lived before Halyard existed. Deferring is not approving,
+            # and this path must never become one.
+            return ApprovalOutcome(
+                decision=BridgeDecision.DEFER,
+                reason="Halyard is paused; this was not relayed for approval.",
+            )
+
         prepared = self._redactor.prepare(command)
         classification = self._policy.classify(prepared.full, declared=declared_risk)
+        project = project_name(project_dir, cwd, self._project)
 
         await self._registry.observe(
             session_id=session_id,
             agent_id=agent_id,
-            project=self._project,
+            project=project,
             role=role,
             cwd=cwd,
         )
@@ -237,7 +297,7 @@ class ApprovalService:
         request = await self._store.create(
             session_id=session_id,
             agent_id=agent_id,
-            project=self._project,
+            project=project,
             tool=tool,
             command_summary=prepared.summary,
             command_full=prepared.full,
@@ -283,7 +343,7 @@ class ApprovalService:
             # approval that went unrecorded is a command about to run with no
             # trace of who agreed to it, which is not something to let through.
             return ApprovalOutcome(
-                decision=Decision.DENY,
+                decision=BridgeDecision.DENY,
                 reason=(
                     "Denied: the approval was granted but could not be written to the "
                     "audit log, so it was not honoured."
@@ -293,7 +353,7 @@ class ApprovalService:
             )
 
         return ApprovalOutcome(
-            decision=resolution.decision,
+            decision=BridgeDecision(resolution.decision.value),
             reason=resolution.note or f"{resolution.decision.value} ({resolution.reason.value})",
             request_id=request.request_id,
             risk=request.risk,
@@ -310,7 +370,7 @@ class ApprovalService:
             # the safe one, so there is nothing to do about it.
             logger.debug("Could not close out %s", request.request_id, exc_info=True)
         return ApprovalOutcome(
-            decision=Decision.DENY,
+            decision=BridgeDecision.DENY,
             reason=message,
             request_id=request.request_id,
             risk=request.risk,

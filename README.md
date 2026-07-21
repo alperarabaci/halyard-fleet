@@ -1,5 +1,7 @@
 # Halyard Fleet
 
+[![CI](https://github.com/alperarabaci/halyard-fleet/actions/workflows/ci.yml/badge.svg)](https://github.com/alperarabaci/halyard-fleet/actions/workflows/ci.yml)
+
 > A control plane for orchestrating coding agents remotely. Approve tool calls, steer sessions,
 > route work between agents, and hand off state — from any channel, across any agent runtime.
 
@@ -138,18 +140,23 @@ The published port is bound to `127.0.0.1` on purpose. Writing `8787:8787` inste
 control plane on every interface of the host, and anything on the network could then approve
 commands on your machine.
 
-> **If port 8787 is already in use, set `HALYARD_HOST_PORT`** in `.env` and point `HALYARD_URL` at
-> the same port. Docker Desktop itself listens on 8787 on some machines.
+> **If port 8787 is already in use, change `HALYARD_BIND`** in `.env` — Docker Desktop itself
+> listens on 8787 on some machines. That one key is the whole address: the service binds to it,
+> compose publishes to it, and the bridges derive their URL from it. There is nothing else to keep
+> in sync.
 >
-> This is worth checking before you debug anything else, because the symptom points somewhere
-> else entirely. When the port cannot be bound, Docker starts the container **without a network**
-> rather than refusing to start it, so the logs fill with `Temporary failure in name resolution`
-> and it looks like broken DNS. It is not:
+> Check it before you debug anything else, because the symptom points somewhere else entirely.
+> When the port cannot be bound, Docker starts the container **without a network** rather than
+> refusing to start it, so the logs fill with `Temporary failure in name resolution` and it looks
+> like broken DNS. It is not:
 >
 > ```bash
 > docker inspect halyard-control-plane --format '{{json .NetworkSettings.Networks}}'
 > # {}  ← no network attached; check the port, not the resolver
 > ```
+>
+> `halyard doctor` walks the same path a hook does and reports which step broke and where each
+> setting came from.
 
 The audit log lives in a named volume so it survives rebuilds. To read it:
 
@@ -204,6 +211,28 @@ The two have opposite rules, which is why they are separate files. The approval 
 every error, because something is waiting on its answer. The relay swallows every error and prints
 nothing, because a lost chat message is not worth interrupting a session over. Neither should ever
 be given the other's behaviour.
+
+### Once the hook is wired, the terminal stops asking
+
+This is the part worth understanding before you wire it up.
+
+A `PreToolUse` hook decides *instead of* Claude Code's own permission prompt, not alongside it. So
+from the moment the hook is installed, **the prompt in your terminal no longer appears for the
+tools it matches** — the question goes to your phone and the answer comes back from there. Sitting
+at the keyboard does not give you a second way to say yes.
+
+The consequence to plan for: if the control plane is not reachable, every matching command is
+denied, and there is no terminal fallback to approve it with. That is the fail-closed guarantee
+working correctly, and it means the recovery path is fixing the control plane — not clicking
+through a prompt.
+
+Two practical habits follow:
+
+- **Do not wire the gate into the repository you fix Halyard from.** If the control plane breaks
+  and the only place you can run commands is behind the gate it is holding shut, you have locked
+  yourself out of the repair.
+- **Keep a Telegram client where notifications actually reach you.** An approval expires after
+  `HALYARD_APPROVAL_TIMEOUT_SECONDS` and is then denied. A browser tab you closed is not a client.
 
 **Claude Code snapshots hook configuration at startup.** Editing `settings.json` mid-session has no
 effect; restart the session. The script contents are read on every call, so those can change freely.

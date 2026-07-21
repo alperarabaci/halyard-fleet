@@ -32,6 +32,7 @@ refuses to start if that ordering is broken.
 from __future__ import annotations
 
 import json
+import os
 import sys
 import urllib.error
 import urllib.request
@@ -40,6 +41,10 @@ from _settings import control_plane_url
 from _settings import timeout as lookup_timeout
 
 DEFAULT_TIMEOUT_SECONDS = 330.0
+
+#: Exit code meaning "deliberately no opinion", understood by `hook.sh`.
+#: Anything else with empty output is a crash, and a crash denies.
+DEFER_EXIT_CODE = 64
 
 
 def emit(decision: str, reason: str) -> None:
@@ -86,6 +91,10 @@ def build_body(payload: dict) -> dict:
         "command": command,
         "tool_use_id": payload.get("tool_use_id"),
         "cwd": payload.get("cwd"),
+        # Which project this came from, so a card can say so. Passed on rather
+        # than turned into a name here — the bridge is a courier, and deciding
+        # what to call a project is core's job.
+        "project_dir": os.environ.get("CLAUDE_PROJECT_DIR"),
     }
 
 
@@ -126,11 +135,24 @@ def main() -> int:
         deny(f"the control plane at {url} failed ({exc}). Failing closed.")
         return 0
 
+    decision = answer.get("decision")
     reason = answer.get("reason") or "no reason given"
+
     # Only an exact allow allows. A missing field, a typo, a null, a decision
     # this bridge has never heard of — all of them mean deny.
-    if answer.get("decision") == "allow":
+    if decision == "allow":
         emit("allow", reason)
+    elif decision == "defer":
+        # Halyard is paused: no opinion, so Claude Code asks in the terminal the
+        # way it would if this hook were not installed. Held to the same
+        # narrowness as allow — only the exact word does this.
+        #
+        # Signalled by exit code rather than by silence. `hook.sh` treats empty
+        # output as "this script died", which is the right default and is what
+        # keeps a crash from being read as consent — so a deliberate silence
+        # has to be distinguishable from an accidental one, or pausing gets
+        # turned into denying everything. It did, once.
+        return DEFER_EXIT_CODE
     else:
         emit("deny", reason)
     return 0
