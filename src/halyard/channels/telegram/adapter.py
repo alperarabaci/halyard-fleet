@@ -230,8 +230,11 @@ class TelegramChannel:
             if changed:
                 await self._record(gate_changed(paused=True, actor=actor, project=self._project))
             await self._say(
-                "⏸ <b>Paused.</b> Approvals are not being relayed; Claude Code will ask "
-                "in the terminal instead. Nothing is being auto-approved."
+                (
+                    "⏸ <b>Paused.</b> Nothing more will be sent here — no approval "
+                    "cards, no replies. Claude Code asks in the terminal instead, "
+                    "and nothing is being auto-approved."
+                )
                 if changed
                 else "⏸ Already paused."
             )

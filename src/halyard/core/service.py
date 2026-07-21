@@ -123,12 +123,14 @@ class MessageRelay:
         audit: AuditLog,
         channel,
         project: str,
+        gate: Gate | None = None,
     ) -> None:
         self._redactor = redactor
         self._registry = registry
         self._audit = audit
         self._channel = channel
         self._project = project
+        self._gate = gate or Gate()
 
     async def relay(
         self,
@@ -141,6 +143,12 @@ class MessageRelay:
         role: Role | None = None,
     ) -> bool:
         """Send an agent's reply out. Returns whether it was delivered."""
+        if self._gate.paused:
+            # Pausing means the phone is off, not that approvals alone stop.
+            # Someone who has taken the decisions back to the keyboard does not
+            # want the replies buzzing on a device they are not looking at.
+            return False
+
         project = project_name(project_dir, cwd, self._project)
         try:
             masked = self._redactor.redact(text)
