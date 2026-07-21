@@ -143,5 +143,64 @@ def test_doctor_reports_a_problem_when_nothing_is_listening(
     assert exit_code == 1
     assert "nothing answering" in output
     # The whole point is that it says where the setting came from, because
-    # "unreachable at 8787" is useless when a file says 8799.
-    assert "found in:" in output
+    # "unreachable at 8787" is useless on its own.
+    assert "HALYARD_URL, set in the environment" in output
+
+
+# --- one key, derived ---------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("bind", "expected"),
+    [
+        ("127.0.0.1:8799", "http://127.0.0.1:8799"),
+        ("127.0.0.1:8787", "http://127.0.0.1:8787"),
+        ("192.168.1.5:9000", "http://192.168.1.5:9000"),
+        # A server on every interface is still reached over loopback, and a
+        # bridge told to connect to 0.0.0.0 is a bridge about to deny everything.
+        ("0.0.0.0:8787", "http://127.0.0.1:8787"),
+        ("::1:8787", "http://::1:8787"),
+    ],
+)
+def test_the_url_is_derived_from_the_bind_address(config_files, bind: str, expected: str) -> None:
+    first, _ = config_files
+    first.write_text(f"HALYARD_BIND={bind}\n")
+
+    # One key decides where the service listens, where compose publishes it, and
+    # where the bridges look. Three keys kept in agreement by hand was three
+    # chances to deny every command with a message about a port.
+    assert _settings.control_plane_url() == expected
+
+
+@pytest.mark.parametrize("bind", ["garbage", "127.0.0.1:", "", "127.0.0.1:notaport"])
+def test_an_unusable_bind_falls_back_rather_than_producing_nonsense(
+    config_files, bind: str
+) -> None:
+    first, _ = config_files
+    first.write_text(f"HALYARD_BIND={bind}\n")
+
+    assert _settings.control_plane_url() == _settings.DEFAULT_URL
+
+
+def test_an_explicit_url_still_wins_over_the_derivation(config_files) -> None:
+    first, _ = config_files
+    first.write_text("HALYARD_BIND=127.0.0.1:8799\nHALYARD_URL=http://100.64.0.2:8787\n")
+
+    # The derivation cannot cover a control plane on another machine reached
+    # over Tailscale, so the override stays.
+    assert _settings.control_plane_url() == "http://100.64.0.2:8787"
+
+
+def test_doctor_says_where_the_address_came_from(
+    config_files, monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:
+    from halyard.doctor import run
+
+    first, _ = config_files
+    first.write_text("HALYARD_BIND=127.0.0.1:1\n")
+    monkeypatch.setenv("HALYARD_CHANNEL", "stub_deny")
+
+    run()
+
+    output = capsys.readouterr().out
+    assert "derived from HALYARD_BIND" in output

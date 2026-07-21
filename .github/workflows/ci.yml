@@ -1,0 +1,85 @@
+name: CI
+
+# Every push and every pull request. The suite is the thing that catches what
+# code scanning cannot: a bridge that resolves the wrong address, an approval
+# that stops failing closed, a secret that starts reaching a log.
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# Cancel a superseded run rather than paying for both.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Install dependencies
+        # --frozen, so CI installs what the lockfile says rather than quietly
+        # resolving something newer. A green run should mean the committed
+        # versions work, not that today's happened to.
+        run: uv sync --frozen --extra dev
+
+      - name: Lint
+        run: uv run ruff check .
+
+      - name: Check formatting
+        run: uv run ruff format --check .
+
+      - name: Test
+        # The end-to-end tests start the real service on a real socket and run
+        # the real bridge against it, so this needs a working loopback and
+        # nothing else.
+        run: uv run pytest -q
+
+  docker:
+    # The control plane ships as an image, so a broken Dockerfile is a broken
+    # release. Building it is cheap; finding out at deploy time is not.
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build the image
+        run: docker build -t halyard-fleet:ci .
+
+      - name: It starts, serves, and answers
+        run: |
+          docker run -d --name halyard-ci \
+            -e HALYARD_CHANNEL=stub_deny \
+            -e CLAUDE_PROJECT_NAME=ci \
+            -p 127.0.0.1:8787:8787 \
+            halyard-fleet:ci
+
+          for _ in $(seq 1 60); do
+            curl -sf http://127.0.0.1:8787/health >/dev/null && break
+            sleep 1
+          done
+
+          curl -sf http://127.0.0.1:8787/health | tee /dev/stderr | grep -q '"status":"ok"'
+
+      - name: It runs as a non-root user
+        # It decides whether commands may run on the machine it is wired to. It
+        # has no business having more privilege than it needs.
+        run: |
+          test "$(docker exec halyard-ci id -u)" != "0"
+
+      - name: Stop it
+        if: always()
+        run: docker rm -f halyard-ci || true

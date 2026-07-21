@@ -1,5 +1,7 @@
 # Halyard Fleet
 
+[![CI](https://github.com/alperarabaci/halyard-fleet/actions/workflows/ci.yml/badge.svg)](https://github.com/alperarabaci/halyard-fleet/actions/workflows/ci.yml)
+
 > A control plane for orchestrating coding agents remotely. Approve tool calls, steer sessions,
 > route work between agents, and hand off state — from any channel, across any agent runtime.
 
@@ -138,18 +140,23 @@ The published port is bound to `127.0.0.1` on purpose. Writing `8787:8787` inste
 control plane on every interface of the host, and anything on the network could then approve
 commands on your machine.
 
-> **If port 8787 is already in use, set `HALYARD_HOST_PORT`** in `.env` and point `HALYARD_URL` at
-> the same port. Docker Desktop itself listens on 8787 on some machines.
+> **If port 8787 is already in use, change `HALYARD_BIND`** in `.env` — Docker Desktop itself
+> listens on 8787 on some machines. That one key is the whole address: the service binds to it,
+> compose publishes to it, and the bridges derive their URL from it. There is nothing else to keep
+> in sync.
 >
-> This is worth checking before you debug anything else, because the symptom points somewhere
-> else entirely. When the port cannot be bound, Docker starts the container **without a network**
-> rather than refusing to start it, so the logs fill with `Temporary failure in name resolution`
-> and it looks like broken DNS. It is not:
+> Check it before you debug anything else, because the symptom points somewhere else entirely.
+> When the port cannot be bound, Docker starts the container **without a network** rather than
+> refusing to start it, so the logs fill with `Temporary failure in name resolution` and it looks
+> like broken DNS. It is not:
 >
 > ```bash
 > docker inspect halyard-control-plane --format '{{json .NetworkSettings.Networks}}'
 > # {}  ← no network attached; check the port, not the resolver
 > ```
+>
+> `halyard doctor` walks the same path a hook does and reports which step broke and where each
+> setting came from.
 
 The audit log lives in a named volume so it survives rebuilds. To read it:
 

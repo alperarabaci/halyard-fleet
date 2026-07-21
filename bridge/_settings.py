@@ -57,8 +57,36 @@ def lookup(key: str, default: str) -> str:
     return default
 
 
+def _url_from_bind(bind: str) -> str:
+    """Turn `host:port` into the address a client on this machine would use.
+
+    A server bound to every interface is still reached over loopback, and a
+    bridge asked to connect to 0.0.0.0 is a bridge about to deny everything.
+    """
+    host, _, port = bind.rpartition(":")
+    if not port.isdigit():
+        return DEFAULT_URL
+    if host in ("", "0.0.0.0", "::", "[::]", "*"):
+        host = "127.0.0.1"
+    return f"http://{host}:{port}"
+
+
 def control_plane_url() -> str:
-    return lookup("HALYARD_URL", DEFAULT_URL)
+    """Where the control plane is reachable from this machine.
+
+    Derived from `HALYARD_BIND`, which is the one place the address is written
+    down. Three keys that had to be kept in agreement by hand — the bind, the
+    published Docker port, and a URL — is three chances to get it wrong, and
+    getting it wrong denies every command with a message about a port.
+
+    `HALYARD_URL` still overrides, for the case the derivation cannot cover: a
+    control plane on another machine, reached over Tailscale or WireGuard.
+    """
+    explicit = lookup("HALYARD_URL", "")
+    if explicit:
+        return explicit
+    bind = lookup("HALYARD_BIND", "")
+    return _url_from_bind(bind) if bind else DEFAULT_URL
 
 
 def timeout(key: str, default: float) -> float:
