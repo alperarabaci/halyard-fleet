@@ -131,11 +131,20 @@ def main() -> int:
         deny(f"the control plane at {url} failed ({exc}). Failing closed.")
         return 0
 
+    decision = answer.get("decision")
     reason = answer.get("reason") or "no reason given"
+
     # Only an exact allow allows. A missing field, a typo, a null, a decision
     # this bridge has never heard of — all of them mean deny.
-    if answer.get("decision") == "allow":
+    if decision == "allow":
         emit("allow", reason)
+    elif decision == "defer":
+        # Halyard is paused. Print nothing at all: empty stdout is how a hook
+        # says it has no opinion, and Claude Code then asks in the terminal the
+        # way it would if this hook were not installed. Held to the same
+        # narrowness as allow — only the exact word does this, and everything
+        # else still denies.
+        pass
     else:
         emit("deny", reason)
     return 0

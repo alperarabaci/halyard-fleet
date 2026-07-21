@@ -32,10 +32,11 @@ from halyard.core.audit import (
     SqliteAuditSink,
 )
 from halyard.core.events import RiskLevel, Role
+from halyard.core.gate import Gate
 from halyard.core.policy import Policy
 from halyard.core.redaction import Redactor
 from halyard.core.registry import SessionRegistry
-from halyard.core.service import ApprovalService, MessageRelay
+from halyard.core.service import ApprovalService, BridgeDecision, MessageRelay
 
 logger = logging.getLogger(__name__)
 
@@ -67,9 +68,14 @@ class ApprovalRequestBody(BaseModel):
 
 
 class ApprovalResponse(BaseModel):
-    """What the bridge turns into a hook decision."""
+    """What the bridge turns into a hook decision.
 
-    decision: Decision
+    Three values, where an approval only ever has two. `defer` means no
+    approval happened at all — the gate is paused and Claude Code should ask in
+    the terminal instead.
+    """
+
+    decision: BridgeDecision
     reason: str
     request_id: str | None = None
     risk: RiskLevel | None = None
@@ -99,12 +105,15 @@ class HealthResponse(BaseModel):
     channel: str
     project: str
     open_approvals: int
+    #: True while approvals are not being relayed — the terminal is asking
+    #: instead. Visible from outside for the same reason as the field below.
+    paused: bool = False
     #: True when the configured channel answers by itself. Surfaced so it is
     #: possible to notice from outside that nobody is actually being asked.
     decides_without_a_human: bool = Field(default=False)
 
 
-def _build_channel(settings: Settings, store: ApprovalStore, audit: AuditLog):
+def _build_channel(settings: Settings, store: ApprovalStore, audit: AuditLog, gate: Gate):
     if settings.channel is ChannelKind.STUB_ALLOW:
         return StubChannel(store, Decision.ALLOW)
     if settings.channel is ChannelKind.STUB_DENY:
@@ -116,6 +125,8 @@ def _build_channel(settings: Settings, store: ApprovalStore, audit: AuditLog):
         audit=audit,
         chat_id=settings.telegram_chat_id or "",
         authorized_user_ids=settings.telegram_authorized_user_ids,
+        gate=gate,
+        project=settings.project_name,
     )
 
 
@@ -128,7 +139,10 @@ def create_app(settings: Settings, *, channel=None) -> FastAPI:
     store = ApprovalStore(ttl=timedelta(seconds=settings.approval_timeout_seconds))
     audit = AuditLog([JsonlAuditSink(settings.audit_log), SqliteAuditSink(settings.db_path)])
     registry = SessionRegistry()
-    resolved_channel = channel if channel is not None else _build_channel(settings, store, audit)
+    gate = Gate()
+    resolved_channel = (
+        channel if channel is not None else _build_channel(settings, store, audit, gate)
+    )
     relay = MessageRelay(
         redactor=Redactor(),
         registry=registry,
@@ -144,6 +158,7 @@ def create_app(settings: Settings, *, channel=None) -> FastAPI:
         registry=registry,
         channel=resolved_channel,
         project=settings.project_name,
+        gate=gate,
     )
 
     @asynccontextmanager
@@ -192,6 +207,7 @@ def create_app(settings: Settings, *, channel=None) -> FastAPI:
     app.state.channel = resolved_channel
     app.state.service = service
     app.state.relay = relay
+    app.state.gate = gate
 
     @app.middleware("http")
     async def deny_on_unhandled_error(request: Request, call_next) -> Response:
@@ -217,7 +233,7 @@ def create_app(settings: Settings, *, channel=None) -> FastAPI:
             return JSONResponse(
                 status_code=200,
                 content=ApprovalResponse(
-                    decision=Decision.DENY,
+                    decision=BridgeDecision.DENY,
                     reason=(
                         "Denied: the Halyard control plane hit an internal error and failed "
                         "closed. Nothing was approved."
@@ -276,6 +292,7 @@ def create_app(settings: Settings, *, channel=None) -> FastAPI:
             channel=resolved_channel.name,
             project=settings.project_name,
             open_approvals=len(await store.list_open()),
+            paused=gate.paused,
             decides_without_a_human=settings.channel.decides_without_a_human,
         )
 

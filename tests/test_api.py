@@ -198,3 +198,25 @@ async def test_a_relayed_message_needs_a_session_and_text(allowing) -> None:
 
     assert (await client.post("/v1/messages", json={"text": "orphan"})).status_code == 422
     assert (await client.post("/v1/messages", json={"session_id": "s"})).status_code == 422
+
+
+async def test_health_reports_whether_the_gate_is_paused(allowing) -> None:
+    client, app = allowing
+
+    assert (await client.get("/health")).json()["paused"] is False
+
+    await app.state.gate.pause("tg:4242")
+
+    # Visible from outside, so a control plane that has quietly stopped asking
+    # can be noticed without reading its logs.
+    assert (await client.get("/health")).json()["paused"] is True
+
+
+async def test_a_paused_gate_answers_defer(allowing) -> None:
+    client, app = allowing
+    await app.state.gate.pause("tg:4242")
+
+    body = (await client.post("/v1/approvals", json=BODY)).json()
+
+    assert body["decision"] == "defer"
+    assert body["request_id"] is None

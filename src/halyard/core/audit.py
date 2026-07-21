@@ -57,6 +57,10 @@ class AuditAction(StrEnum):
     #: An agent's reply was relayed out to a channel. Metadata only — see
     #: `agent_message` for why the text itself is not kept here.
     AGENT_MESSAGE = "agent.message"
+    #: Someone stopped approvals being relayed, or started them again. A
+    #: security-relevant state change, so it is recorded with who did it.
+    GATE_PAUSED = "gate.paused"
+    GATE_RESUMED = "gate.resumed"
     CONTROL_PLANE_STARTED = "control_plane.started"
     CONTROL_PLANE_STOPPED = "control_plane.stopped"
 
@@ -201,6 +205,28 @@ def agent_message(
         agent_id=agent_id,
         project=project,
         detail={"length": length, "redacted": redacted, "delivered": delivered},
+    )
+
+
+def gate_changed(
+    *,
+    paused: bool,
+    actor: str | None,
+    project: str,
+    now: datetime | None = None,
+) -> AuditRecord:
+    """Record that the gate was opened or closed.
+
+    Pausing does not approve anything — it hands the question back to the
+    terminal — but it does change whether anyone is being asked, and that is
+    worth being able to reconstruct afterwards.
+    """
+    return AuditRecord(
+        action=AuditAction.GATE_PAUSED if paused else AuditAction.GATE_RESUMED,
+        recorded_at=now or _default_clock(),
+        actor=actor or "system",
+        project=project,
+        detail={"paused": paused},
     )
 
 

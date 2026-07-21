@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import html
 import logging
 from collections.abc import Callable
 from datetime import UTC, datetime
@@ -31,7 +32,14 @@ from halyard.core.approvals import (
     InvalidNonceError,
     UnknownApprovalError,
 )
-from halyard.core.audit import AuditLog, invalid_nonce, replayed_callback, unauthorized_callback
+from halyard.core.audit import (
+    AuditLog,
+    gate_changed,
+    invalid_nonce,
+    replayed_callback,
+    unauthorized_callback,
+)
+from halyard.core.gate import Gate
 
 logger = logging.getLogger(__name__)
 
@@ -66,8 +74,12 @@ class TelegramChannel:
         authorized_user_ids: frozenset[str],
         clock: Clock = _default_clock,
         poll_retry_seconds: float = POLL_RETRY_SECONDS,
+        gate: Gate | None = None,
+        project: str = "unknown",
     ) -> None:
         self._api = api
+        self._gate = gate or Gate()
+        self._project = project
         self._store = store
         self._audit = audit
         self._chat_id = chat_id
@@ -177,17 +189,95 @@ class TelegramChannel:
 
             for update in updates:
                 self._offset = int(update["update_id"]) + 1
-                callback = update.get("callback_query")
-                if callback is None:
-                    continue
                 try:
-                    await self._handle_callback(callback)
+                    if callback := update.get("callback_query"):
+                        await self._handle_callback(callback)
+                    elif message := update.get("message"):
+                        await self._handle_message(message)
                 except asyncio.CancelledError:
                     raise
                 except Exception:
-                    # One bad callback must not take the loop down with it, or a
-                    # single malformed update would silence every future answer.
-                    logger.exception("Failed to handle a Telegram callback")
+                    # One bad update must not take the loop down with it, or a
+                    # single malformed message would silence every future answer.
+                    logger.exception("Failed to handle a Telegram update")
+
+    async def _handle_message(self, message: dict) -> None:
+        """Handle a typed command.
+
+        The same authorization as a button press, for the same reason: closing
+        the gate stops anyone being asked, and a stranger must not be able to do
+        that any more than they can approve something.
+
+        Silent for anything that is not a command. A chat where the bot argues
+        with every stray message is a chat nobody keeps notifications on for,
+        and notifications are the entire point.
+        """
+        text = (message.get("text") or "").strip()
+        if not text.startswith("/"):
+            return
+
+        command = text.split()[0].lstrip("/").split("@")[0].lower()
+        user_id = str((message.get("from") or {}).get("id", ""))
+
+        if user_id not in self._authorized:
+            await self._record(unauthorized_callback(actor=f"tg:{user_id}", channel="telegram"))
+            logger.warning("Ignoring /%s from unauthorized Telegram user %s", command, user_id)
+            return
+
+        actor = f"tg:{user_id}"
+        if command == "pause":
+            _, changed = await self._gate.pause(actor)
+            if changed:
+                await self._record(gate_changed(paused=True, actor=actor, project=self._project))
+            await self._say(
+                "⏸ <b>Paused.</b> Approvals are not being relayed; Claude Code will ask "
+                "in the terminal instead. Nothing is being auto-approved."
+                if changed
+                else "⏸ Already paused."
+            )
+        elif command == "resume":
+            _, changed = await self._gate.resume(actor)
+            if changed:
+                await self._record(gate_changed(paused=False, actor=actor, project=self._project))
+            await self._say(
+                "▶️ <b>Resumed.</b> Approvals are coming back here."
+                if changed
+                else "▶️ Already running."
+            )
+        elif command == "status":
+            await self._say(await self._status())
+        elif command in ("start", "help"):
+            await self._say(
+                "<b>Halyard</b>\n\n"
+                "/status — what is happening right now\n"
+                "/pause — stop relaying approvals; the terminal asks instead\n"
+                "/resume — start relaying again"
+            )
+
+    async def _status(self) -> str:
+        state = await self._gate.state()
+        open_requests = await self._store.list_open()
+        lines = [
+            f"<b>Halyard — {html.escape(self._project)}</b>",
+            "",
+            f"Gate: {'⏸ paused' if state.paused else '▶️ running'}",
+        ]
+        if state.changed_by:
+            lines.append(f"  last changed by {html.escape(state.changed_by)}")
+        lines.append(f"Open approvals: {len(open_requests)}")
+        for request in open_requests[:5]:
+            remaining = cards.format_remaining(request.expires_at, self._clock())
+            lines.append(
+                f"  • {html.escape(request.project)} — "
+                f"<code>{html.escape(request.command_summary[:60])}</code> ({remaining})"
+            )
+        return "\n".join(lines)
+
+    async def _say(self, text: str) -> None:
+        try:
+            await self._api.send_message(self._chat_id, text)
+        except Exception:
+            logger.warning("Could not answer a command", exc_info=True)
 
     async def _handle_callback(self, callback: dict) -> None:
         query_id = str(callback.get("id", ""))

@@ -507,3 +507,120 @@ def test_the_api_object_never_prints_its_token() -> None:
     # into a log or an audit record.
     assert "SUPER-SECRET" not in repr(api)
     assert "SUPER-SECRET" not in str(api)
+
+
+# --- typed commands -----------------------------------------------------------
+
+
+def typed(text: str, *, user: str = APPROVER) -> dict:
+    return {"message_id": 1, "from": {"id": int(user)}, "text": text}
+
+
+async def gated(tmp_path: Path):
+    from halyard.core.gate import Gate
+
+    store = ApprovalStore(ttl=timedelta(minutes=5))
+    sink = JsonlAuditSink(tmp_path / "audit.jsonl")
+    audit = AuditLog([sink])
+    await audit.open()
+    api = FakeTelegramApi()
+    gate = Gate()
+    channel = TelegramChannel(
+        api=api,
+        store=store,
+        audit=audit,
+        chat_id=CHAT,
+        authorized_user_ids=frozenset({APPROVER}),
+        poll_retry_seconds=0.01,
+        gate=gate,
+        project="alpha-engine",
+    )
+    return channel, api, gate, sink
+
+
+async def test_pause_closes_the_gate_and_says_so(tmp_path: Path) -> None:
+    channel, api, gate, sink = await gated(tmp_path)
+
+    await channel._handle_message(typed("/pause"))
+
+    assert gate.paused is True
+    # It has to say it is not approving anything, because "paused" could be
+    # read as "waved through".
+    assert "not being relayed" in api.sent[0]["text"]
+    assert AuditAction.GATE_PAUSED in {r.action for r in await sink.read_all()}
+
+
+async def test_pause_twice_confirms_rather_than_complains(tmp_path: Path) -> None:
+    channel, api, gate, sink = await gated(tmp_path)
+    await channel._handle_message(typed("/pause"))
+
+    await channel._handle_message(typed("/pause"))
+
+    assert gate.paused is True
+    assert "Already paused" in api.sent[1]["text"]
+    # Idempotent all the way down: no second record for a change that did not
+    # happen.
+    assert len([r for r in await sink.read_all() if r.action is AuditAction.GATE_PAUSED]) == 1
+
+
+async def test_resume_reopens_the_gate(tmp_path: Path) -> None:
+    channel, _api, gate, sink = await gated(tmp_path)
+    await channel._handle_message(typed("/pause"))
+
+    await channel._handle_message(typed("/resume"))
+
+    assert gate.paused is False
+    assert AuditAction.GATE_RESUMED in {r.action for r in await sink.read_all()}
+
+
+async def test_resume_twice_confirms(tmp_path: Path) -> None:
+    channel, api, gate, _ = await gated(tmp_path)
+
+    await channel._handle_message(typed("/resume"))
+
+    assert gate.paused is False
+    assert "Already running" in api.sent[0]["text"]
+
+
+async def test_status_reports_the_gate_and_what_is_open(tmp_path: Path) -> None:
+    channel, api, _, _ = await gated(tmp_path)
+    await channel._handle_message(typed("/pause"))
+
+    await channel._handle_message(typed("/status"))
+
+    text = api.sent[-1]["text"]
+    assert "paused" in text
+    assert "Open approvals: 0" in text
+
+
+async def test_a_stranger_cannot_close_the_gate(tmp_path: Path) -> None:
+    channel, api, gate, sink = await gated(tmp_path)
+
+    await channel._handle_message(typed("/pause", user=STRANGER))
+
+    # Closing the gate stops anyone being asked. A stranger must not be able to
+    # do that any more than they can approve something.
+    assert gate.paused is False
+    assert api.sent == []
+    assert AuditAction.UNAUTHORIZED_CALLBACK in {r.action for r in await sink.read_all()}
+
+
+@pytest.mark.parametrize("text", ["hello", "pause", "  ", "just chatting about /pause"])
+async def test_ordinary_chat_is_ignored(tmp_path: Path, text: str) -> None:
+    channel, api, gate, _ = await gated(tmp_path)
+
+    await channel._handle_message(typed(text))
+
+    # A bot that argues with every stray message is a bot you mute, and
+    # notifications are the entire point.
+    assert api.sent == []
+    assert gate.paused is False
+
+
+@pytest.mark.parametrize("text", ["/pause@halyard_bot", "/PAUSE", "/pause now"])
+async def test_a_command_is_recognised_however_it_is_typed(tmp_path: Path, text: str) -> None:
+    channel, _, gate, _ = await gated(tmp_path)
+
+    await channel._handle_message(typed(text))
+
+    assert gate.paused is True

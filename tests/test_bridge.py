@@ -371,3 +371,22 @@ def test_the_relay_reports_the_project_too() -> None:
         run_relay(HALYARD_URL=url, CLAUDE_PROJECT_DIR="/Users/j/dev/agent-platform")
 
     assert received[0]["project_dir"] == "/Users/j/dev/agent-platform"
+
+
+def test_defer_prints_nothing_so_the_terminal_asks() -> None:
+    with control_plane(body={"decision": "defer", "reason": "Halyard is paused."}) as (url, _):
+        result = run(BRIDGE, HALYARD_URL=url)
+
+    # Empty stdout is how a hook says it has no opinion; Claude Code then shows
+    # its own prompt, the way it would if this hook were not installed.
+    assert result.returncode == 0
+    assert result.stdout == ""
+
+
+@pytest.mark.parametrize("word", ["DEFER", "deferred", "defer ", "pause", "skip"])
+def test_only_the_exact_word_defers(word: str) -> None:
+    with control_plane(body={"decision": word, "reason": "x"}) as (url, _):
+        decision = decision_of(run(BRIDGE, HALYARD_URL=url))
+
+    # Held to the same narrowness as allow. Anything else still denies.
+    assert decision["permissionDecision"] == "deny"
