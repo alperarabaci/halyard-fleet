@@ -124,6 +124,9 @@ def test_the_payload_is_forwarded_without_being_reinterpreted() -> None:
         "command": "docker compose down",
         "tool_use_id": "toolu_1",
         "cwd": "/repo",
+        # Absent from the environment here, and sent as null rather than
+        # omitted so the shape does not depend on where the hook ran.
+        "project_dir": None,
     }
 
 
@@ -291,6 +294,7 @@ def test_the_relay_forwards_what_the_agent_said() -> None:
         "agent_id": "claude-code",
         "text": "Done. All 234 tests pass.",
         "cwd": "/repo",
+        "project_dir": None,
     }
 
 
@@ -351,3 +355,19 @@ def test_a_slow_control_plane_does_not_hold_the_turn_open() -> None:
 
     assert result.returncode == 0
     assert result.stdout == ""
+
+
+def test_the_bridge_reports_which_project_the_call_came_from() -> None:
+    with control_plane(body={"decision": "allow", "reason": "ok"}) as (url, received):
+        run(BRIDGE, HALYARD_URL=url, CLAUDE_PROJECT_DIR="/Users/j/dev/agent-platform")
+
+    # Passed on rather than turned into a name here: the bridge is a courier,
+    # and deciding what to call a project is core's job.
+    assert received[0]["project_dir"] == "/Users/j/dev/agent-platform"
+
+
+def test_the_relay_reports_the_project_too() -> None:
+    with control_plane(body={"delivered": True}) as (url, received):
+        run_relay(HALYARD_URL=url, CLAUDE_PROJECT_DIR="/Users/j/dev/agent-platform")
+
+    assert received[0]["project_dir"] == "/Users/j/dev/agent-platform"

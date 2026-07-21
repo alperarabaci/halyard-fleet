@@ -32,6 +32,7 @@ refuses to start if that ordering is broken.
 from __future__ import annotations
 
 import json
+import os
 import sys
 import urllib.error
 import urllib.request
@@ -86,6 +87,10 @@ def build_body(payload: dict) -> dict:
         "command": command,
         "tool_use_id": payload.get("tool_use_id"),
         "cwd": payload.get("cwd"),
+        # Which project this came from, so a card can say so. Passed on rather
+        # than turned into a name here — the bridge is a courier, and deciding
+        # what to call a project is core's job.
+        "project_dir": os.environ.get("CLAUDE_PROJECT_DIR"),
     }
 
 

@@ -43,6 +43,30 @@ logger = logging.getLogger(__name__)
 MESSAGE_SPLIT_THRESHOLD = 3500
 
 
+def project_name(project_dir: str | None, cwd: str | None, configured: str) -> str:
+    """What to call the project a request came from.
+
+    `CLAUDE_PROJECT_NAME` is one value in one control plane, so on its own it
+    labels every card with the same name however many repositories are wired to
+    it. Gate a second project and its approvals arrive wearing the first one's
+    name — which was found in real use, with a command from `agent-platform`
+    arriving on a phone as `alpha-engine`. An approver who cannot tell which
+    codebase a command belongs to cannot meaningfully approve it, and that is
+    the whole premise.
+
+    Read from the path rather than the filesystem: the control plane usually
+    runs in a container and cannot see the host's directories, so this has only
+    the string to work with.
+    """
+    for path in (project_dir, cwd):
+        if not path:
+            continue
+        name = path.replace("\\", "/").rstrip("/").rsplit("/", 1)[-1]
+        if name:
+            return name
+    return configured
+
+
 @dataclass(frozen=True)
 class ApprovalOutcome:
     """What the bridge gets back."""
@@ -95,15 +119,17 @@ class MessageRelay:
         agent_id: str,
         text: str,
         cwd: str | None = None,
+        project_dir: str | None = None,
         role: Role | None = None,
     ) -> bool:
         """Send an agent's reply out. Returns whether it was delivered."""
+        project = project_name(project_dir, cwd, self._project)
         try:
             masked = self._redactor.redact(text)
             await self._registry.observe(
                 session_id=session_id,
                 agent_id=agent_id,
-                project=self._project,
+                project=project,
                 role=role,
                 cwd=cwd,
             )
@@ -117,7 +143,7 @@ class MessageRelay:
                 agent_message(
                     session_id=session_id,
                     agent_id=agent_id,
-                    project=self._project,
+                    project=project,
                     length=len(masked.text),
                     redacted=masked.redacted,
                     delivered=delivered,
@@ -174,6 +200,7 @@ class ApprovalService:
         command: str,
         tool_use_id: str | None = None,
         cwd: str | None = None,
+        project_dir: str | None = None,
         role: Role | None = None,
         reason: str | None = None,
         declared_risk: RiskLevel | None = None,
@@ -187,6 +214,7 @@ class ApprovalService:
                 command=command,
                 tool_use_id=tool_use_id,
                 cwd=cwd,
+                project_dir=project_dir,
                 role=role,
                 reason=reason,
                 declared_risk=declared_risk,
@@ -216,6 +244,7 @@ class ApprovalService:
         command: str,
         tool_use_id: str | None,
         cwd: str | None,
+        project_dir: str | None,
         role: Role | None,
         reason: str | None,
         declared_risk: RiskLevel | None,
@@ -225,11 +254,12 @@ class ApprovalService:
         # what comes out of here.
         prepared = self._redactor.prepare(command)
         classification = self._policy.classify(prepared.full, declared=declared_risk)
+        project = project_name(project_dir, cwd, self._project)
 
         await self._registry.observe(
             session_id=session_id,
             agent_id=agent_id,
-            project=self._project,
+            project=project,
             role=role,
             cwd=cwd,
         )
@@ -237,7 +267,7 @@ class ApprovalService:
         request = await self._store.create(
             session_id=session_id,
             agent_id=agent_id,
-            project=self._project,
+            project=project,
             tool=tool,
             command_summary=prepared.summary,
             command_full=prepared.full,

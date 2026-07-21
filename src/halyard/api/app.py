@@ -55,6 +55,10 @@ class ApprovalRequestBody(BaseModel):
     agent_id: str = "claude-code"
     tool_use_id: str | None = None
     cwd: str | None = None
+    #: The session's project root, so a card can name the codebase a command
+    #: came from rather than whatever one name the control plane was configured
+    #: with. See `project_name` in core.
+    project_dir: str | None = None
     role: Role | None = None
     reason: str | None = None
     #: What the agent says about its own call. Can raise the risk, never lower
@@ -80,6 +84,7 @@ class MessageBody(BaseModel):
     text: str
     agent_id: str = "claude-code"
     cwd: str | None = None
+    project_dir: str | None = None
     role: Role | None = None
 
 
@@ -234,6 +239,7 @@ def create_app(settings: Settings, *, channel=None) -> FastAPI:
             command=body.command,
             tool_use_id=body.tool_use_id,
             cwd=body.cwd,
+            project_dir=body.project_dir,
             role=body.role,
             reason=body.reason,
             declared_risk=body.declared_risk,
@@ -259,6 +265,7 @@ def create_app(settings: Settings, *, channel=None) -> FastAPI:
             agent_id=body.agent_id,
             text=body.text,
             cwd=body.cwd,
+            project_dir=body.project_dir,
             role=body.role,
         )
         return MessageResponse(delivered=delivered)

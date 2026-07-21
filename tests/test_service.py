@@ -9,6 +9,8 @@ from __future__ import annotations
 from datetime import timedelta
 from pathlib import Path
 
+import pytest
+
 from halyard.channels.stub import StubChannel
 from halyard.core.approvals import ApprovalRequest, ApprovalStore, Decision
 from halyard.core.audit import AuditAction, AuditLog, AuditRecord, JsonlAuditSink
@@ -258,3 +260,54 @@ async def test_an_unexpected_failure_denies_instead_of_raising(tmp_path: Path) -
     # hook that gets a 500 without a decision runs the command.
     assert not outcome.allowed
     assert "internal error" in outcome.reason.lower()
+
+
+# --- naming the project a request came from -----------------------------------
+
+
+@pytest.mark.parametrize(
+    ("project_dir", "cwd", "expected"),
+    [
+        ("/Users/j/dev/agent-platform", "/Users/j/dev/agent-platform/sub", "agent-platform"),
+        (None, "/Users/j/dev/agent-platform", "agent-platform"),
+        ("/Users/j/dev/halyard-fleet/", None, "halyard-fleet"),
+        # Nothing to go on, so the configured name is all that is left.
+        (None, None, "configured-name"),
+        ("", "", "configured-name"),
+    ],
+)
+def test_the_project_is_named_from_the_path_it_came_from(
+    project_dir: str | None, cwd: str | None, expected: str
+) -> None:
+    from halyard.core.service import project_name
+
+    # CLAUDE_PROJECT_NAME is one value in one control plane. Gate a second
+    # repository and its approvals would arrive wearing the first one's name —
+    # found in real use, with a command from agent-platform arriving as
+    # alpha-engine.
+    assert project_name(project_dir, cwd, "configured-name") == expected
+
+
+async def test_an_approval_card_names_the_calling_project(tmp_path: Path) -> None:
+    channel = SilentChannel()
+    service, _, sink = build_service(tmp_path, channel=channel, ttl=timedelta(milliseconds=50))
+    await sink.open()
+
+    await ask(service, "ls", project_dir="/Users/j/dev/agent-platform")
+
+    assert channel.last_request is not None
+    # The service was configured with "alpha-engine".
+    assert channel.last_request.project == "agent-platform"
+
+
+async def test_a_request_without_a_project_dir_keeps_the_configured_name(
+    tmp_path: Path,
+) -> None:
+    channel = SilentChannel()
+    service, _, sink = build_service(tmp_path, channel=channel, ttl=timedelta(milliseconds=50))
+    await sink.open()
+
+    await ask(service, "ls")
+
+    assert channel.last_request is not None
+    assert channel.last_request.project == "alpha-engine"
