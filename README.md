@@ -136,8 +136,20 @@ Claude Code ──hook──► bridge/hook.sh ──HTTP──► 127.0.0.1:878
 
 The published port is bound to `127.0.0.1` on purpose. Writing `8787:8787` instead would put the
 control plane on every interface of the host, and anything on the network could then approve
-commands on your machine. If port 8787 is already taken — Docker Desktop uses it on some
-machines — set `HALYARD_HOST_PORT` in `.env` and point `HALYARD_URL` at the same port.
+commands on your machine.
+
+> **If port 8787 is already in use, set `HALYARD_HOST_PORT`** in `.env` and point `HALYARD_URL` at
+> the same port. Docker Desktop itself listens on 8787 on some machines.
+>
+> This is worth checking before you debug anything else, because the symptom points somewhere
+> else entirely. When the port cannot be bound, Docker starts the container **without a network**
+> rather than refusing to start it, so the logs fill with `Temporary failure in name resolution`
+> and it looks like broken DNS. It is not:
+>
+> ```bash
+> docker inspect halyard-control-plane --format '{{json .NetworkSettings.Networks}}'
+> # {}  ← no network attached; check the port, not the resolver
+> ```
 
 The audit log lives in a named volume so it survives rebuilds. To read it:
 

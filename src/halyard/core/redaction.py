@@ -24,6 +24,7 @@ function nobody wants to touch.
 
 from __future__ import annotations
 
+import logging
 import re
 from dataclasses import dataclass
 
@@ -101,6 +102,10 @@ DEFAULT_RULES: tuple[RedactionRule, ...] = (
     ),
     # Recognisable token formats, keeping the prefix so the approver can see
     # what kind of credential was in the command.
+    # A Telegram bot token lives in the URL path, so it turns up in anything
+    # that logs a request line. Keep the numeric bot id, which identifies the
+    # bot without granting anything, and drop the half that is the secret.
+    _rule("telegram_bot_token", r"(bot\d{5,12}):[A-Za-z0-9_-]{30,}", rf"\g<1>:{MASK}"),
     _rule("github_token", r"\b(gh[pousr]_)[A-Za-z0-9]{16,}", rf"\g<1>{MASK}"),
     _rule("openai_key", r"\bsk-(?:proj-)?[A-Za-z0-9_\-]{16,}", f"sk-{MASK}"),
     _rule("slack_token", r"\bxox[baprs]-[A-Za-z0-9\-]{10,}", f"xox-{MASK}"),
@@ -174,6 +179,37 @@ class Redactor:
             summary=summarize(result.text, limit=summary_limit),
             applied=result.applied,
         )
+
+
+class SecretRedactingFilter(logging.Filter):
+    """Masks secrets in anything that reaches a log handler.
+
+    Installed on the root logger, so it covers libraries as well as this code.
+    That is the point: `TelegramApi.__repr__` was overridden to keep the bot
+    token out of tracebacks, and then httpx logged the full request URL at INFO
+    — token included, once every poll. Keeping a secret out of *our* log lines
+    is not the same as keeping it out of the log.
+
+    Raising the level of the offending logger is the direct fix, and this sits
+    underneath it so the next library to do the same thing is already handled.
+    """
+
+    def __init__(self, redactor: Redactor | None = None) -> None:
+        super().__init__()
+        self._redactor = redactor or Redactor()
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        try:
+            message = record.getMessage()
+        except Exception:
+            return True
+        result = self._redactor.redact(message)
+        if result.redacted:
+            # Collapsed into msg because the arguments have been folded in
+            # already; leaving them would re-interpolate the unmasked values.
+            record.msg = result.text
+            record.args = ()
+        return True
 
 
 def summarize(text: str, *, limit: int = DEFAULT_SUMMARY_LIMIT) -> str:

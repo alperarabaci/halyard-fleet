@@ -8,6 +8,7 @@ correctly, and that everything it refuses is written down.
 from __future__ import annotations
 
 import asyncio
+import logging
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -80,6 +81,7 @@ async def setup(tmp_path: Path):
         audit=audit,
         chat_id=CHAT,
         authorized_user_ids=frozenset({APPROVER}),
+        poll_retry_seconds=0.01,
     )
     try:
         yield channel, api, store, sink
@@ -421,6 +423,66 @@ async def test_one_bad_update_does_not_silence_the_rest(setup) -> None:
     await channel.stop()
 
     assert (await store.resolution_of(request.request_id)) is not None
+
+
+async def test_a_long_outage_logs_one_traceback_and_then_counts(setup, caplog) -> None:
+    channel, api, _, _ = setup
+
+    async def always_fails(**kwargs):
+        raise ConnectionError("[Errno -3] Temporary failure in name resolution")
+
+    api.get_updates = always_fails
+
+    with caplog.at_level(logging.ERROR, logger="halyard.channels.telegram.adapter"):
+        await channel.start()
+        await asyncio.sleep(0.2)
+        await channel.stop()
+
+    records = [r for r in caplog.records if "poll" in r.message.lower()]
+    # A transient DNS failure that printed eighteen identical tracebacks is what
+    # prompted this. One traceback tells you what broke; the rest is noise that
+    # makes a recoverable blip look like a crash.
+    assert sum(1 for r in records if r.exc_info) == 1
+    assert len(records) > 1
+    assert any("consecutive" in r.message for r in records)
+
+
+async def test_recovery_is_announced(setup, caplog) -> None:
+    channel, api, _, _ = setup
+    failed = {"once": False}
+    original = api.get_updates
+
+    async def flaky(**kwargs):
+        if not failed["once"]:
+            failed["once"] = True
+            raise ConnectionError("telegram is down")
+        return await original(**kwargs)
+
+    api.get_updates = flaky
+
+    with caplog.at_level(logging.WARNING, logger="halyard.channels.telegram.adapter"):
+        await channel.start()
+        await asyncio.sleep(0.2)
+        await channel.stop()
+
+    # Errors stopping is not something anyone notices in a log. A line saying
+    # they stopped is.
+    assert any("recovered" in r.message for r in caplog.records)
+
+
+def test_backoff_grows_and_then_stops_growing() -> None:
+    channel = TelegramChannel(
+        api=FakeTelegramApi(),
+        store=ApprovalStore(),
+        audit=AuditLog([]),
+        chat_id=CHAT,
+        authorized_user_ids=frozenset({APPROVER}),
+        poll_retry_seconds=3.0,
+    )
+
+    assert [channel._backoff(n) for n in (1, 2, 3, 4)] == [3.0, 6.0, 12.0, 24.0]
+    # Capped, so a long outage does not turn into a long silence after it ends.
+    assert channel._backoff(20) == 30.0
 
 
 async def test_stopping_closes_the_connection(setup) -> None:
