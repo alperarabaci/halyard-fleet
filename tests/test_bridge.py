@@ -378,8 +378,9 @@ def test_defer_prints_nothing_so_the_terminal_asks() -> None:
         result = run(BRIDGE, HALYARD_URL=url)
 
     # Empty stdout is how a hook says it has no opinion; Claude Code then shows
-    # its own prompt, the way it would if this hook were not installed.
-    assert result.returncode == 0
+    # its own prompt, the way it would if this hook were not installed. The
+    # wrapper is what turns this into that — see the deferral tests below for
+    # why the exit code has to carry the intent.
     assert result.stdout == ""
 
 
@@ -389,4 +390,58 @@ def test_only_the_exact_word_defers(word: str) -> None:
         decision = decision_of(run(BRIDGE, HALYARD_URL=url))
 
     # Held to the same narrowness as allow. Anything else still denies.
+    assert decision["permissionDecision"] == "deny"
+
+
+# --- deferring through the wrapper -------------------------------------------
+#
+# This is the seam that broke once. `defer` was expressed as silence, and the
+# wrapper reads silence as "the script died" — correctly, because that is what
+# keeps a crash from being read as consent. So pausing turned into denying
+# everything. Deliberate silence now travels by exit code, and these tests hold
+# the two apart.
+
+
+def test_a_deferred_decision_passes_through_the_wrapper_as_silence() -> None:
+    with control_plane(body={"decision": "defer", "reason": "Halyard is paused."}) as (url, _):
+        result = run(WRAPPER, HALYARD_URL=url)
+
+    assert result.returncode == 0
+    assert result.stdout == ""
+
+
+def test_the_bridge_signals_a_deferral_with_its_exit_code() -> None:
+    with control_plane(body={"decision": "defer", "reason": "paused"}) as (url, _):
+        result = run(BRIDGE, HALYARD_URL=url)
+
+    # Silence alone cannot carry the meaning, because a crash is also silent.
+    assert result.stdout == ""
+    assert result.returncode == 64
+
+
+def test_a_silent_crash_still_denies(tmp_path: Path) -> None:
+    interpreter = fake_python(tmp_path, "exit 1")
+
+    decision = decision_of(run(WRAPPER, HALYARD_PYTHON=interpreter))
+
+    # The invariant the exit code exists to protect: silence on its own is
+    # still a failure, and a failure still denies.
+    assert decision["permissionDecision"] == "deny"
+
+
+def test_a_clean_but_silent_exit_still_denies(tmp_path: Path) -> None:
+    interpreter = fake_python(tmp_path, "exit 0")
+
+    decision = decision_of(run(WRAPPER, HALYARD_PYTHON=interpreter))
+
+    assert decision["permissionDecision"] == "deny"
+
+
+def test_the_defer_code_does_not_launder_output(tmp_path: Path) -> None:
+    interpreter = fake_python(tmp_path, "echo 'unexpected chatter'; exit 64")
+
+    decision = decision_of(run(WRAPPER, HALYARD_PYTHON=interpreter))
+
+    # 64 means "I said nothing on purpose". A process that exits 64 while
+    # printing something did not mean that, whatever it meant.
     assert decision["permissionDecision"] == "deny"

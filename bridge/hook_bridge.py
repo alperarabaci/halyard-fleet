@@ -42,6 +42,10 @@ from _settings import timeout as lookup_timeout
 
 DEFAULT_TIMEOUT_SECONDS = 330.0
 
+#: Exit code meaning "deliberately no opinion", understood by `hook.sh`.
+#: Anything else with empty output is a crash, and a crash denies.
+DEFER_EXIT_CODE = 64
+
 
 def emit(decision: str, reason: str) -> None:
     """Print a hook decision and nothing else.
@@ -139,12 +143,16 @@ def main() -> int:
     if decision == "allow":
         emit("allow", reason)
     elif decision == "defer":
-        # Halyard is paused. Print nothing at all: empty stdout is how a hook
-        # says it has no opinion, and Claude Code then asks in the terminal the
+        # Halyard is paused: no opinion, so Claude Code asks in the terminal the
         # way it would if this hook were not installed. Held to the same
-        # narrowness as allow — only the exact word does this, and everything
-        # else still denies.
-        pass
+        # narrowness as allow — only the exact word does this.
+        #
+        # Signalled by exit code rather than by silence. `hook.sh` treats empty
+        # output as "this script died", which is the right default and is what
+        # keeps a crash from being read as consent — so a deliberate silence
+        # has to be distinguishable from an accidental one, or pausing gets
+        # turned into denying everything. It did, once.
+        return DEFER_EXIT_CODE
     else:
         emit("deny", reason)
     return 0
