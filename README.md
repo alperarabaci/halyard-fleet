@@ -176,14 +176,34 @@ Then point Claude Code at the bridge in `.claude/settings.json`:
           }
         ]
       }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "$CLAUDE_PROJECT_DIR/bridge/relay.py",
+            "timeout": 15
+          }
+        ]
+      }
     ]
   }
 }
 ```
 
-Point it at `hook.sh`, not at `hook_bridge.py`. The wrapper is what denies when the Python process
-cannot start at all — a missing interpreter, a bad path, an import error. Those exit non-zero with
-nothing on stdout, which Claude Code reads as *no opinion*, and it runs the command.
+**`PreToolUse` → `hook.sh`** is the approval gate. Point it at the wrapper, not at
+`hook_bridge.py`: the wrapper is what denies when the Python process cannot start at all — a
+missing interpreter, a bad path, an import error. Those exit non-zero with nothing on stdout, which
+Claude Code reads as *no opinion*, and it runs the command.
+
+**`Stop` → `relay.py`** sends the agent's replies to your phone. It is optional; approvals work
+without it.
+
+The two have opposite rules, which is why they are separate files. The approval bridge denies on
+every error, because something is waiting on its answer. The relay swallows every error and prints
+nothing, because a lost chat message is not worth interrupting a session over. Neither should ever
+be given the other's behaviour.
 
 **Claude Code snapshots hook configuration at startup.** Editing `settings.json` mid-session has no
 effect; restart the session. The script contents are read on every call, so those can change freely.

@@ -156,3 +156,45 @@ async def test_shutdown_leaves_nothing_open(allowing, tmp_path: Path) -> None:
     await client.post("/v1/approvals", json=BODY)
 
     assert await app.state.store.list_open() == []
+
+
+# --- relaying an agent's output ---------------------------------------------
+
+
+async def test_a_relayed_message_is_accepted(allowing) -> None:
+    client, _ = allowing
+    response = await client.post(
+        "/v1/messages",
+        json={"session_id": "session-1", "text": "Done. Tests pass."},
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {"delivered": True}
+
+
+async def test_a_relayed_message_is_masked_before_it_leaves(allowing, tmp_path: Path) -> None:
+    client, _ = allowing
+    await client.post(
+        "/v1/messages",
+        json={"session_id": "session-1", "text": f"I ran psql postgres://a:{SECRET}@db/x"},
+    )
+
+    assert SECRET not in (tmp_path / "audit.jsonl").read_text(encoding="utf-8")
+
+
+async def test_relaying_never_blocks_on_a_decision(denying) -> None:
+    client, _ = denying
+    # /v1/approvals holds the caller until a human decides. This must not: the
+    # agent's turn is waiting on it.
+    response = await client.post(
+        "/v1/messages", json={"session_id": "session-1", "text": "still working"}
+    )
+
+    assert response.status_code == 200
+
+
+async def test_a_relayed_message_needs_a_session_and_text(allowing) -> None:
+    client, _ = allowing
+
+    assert (await client.post("/v1/messages", json={"text": "orphan"})).status_code == 422
+    assert (await client.post("/v1/messages", json={"session_id": "s"})).status_code == 422

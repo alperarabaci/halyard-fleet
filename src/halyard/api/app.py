@@ -35,7 +35,7 @@ from halyard.core.events import RiskLevel, Role
 from halyard.core.policy import Policy
 from halyard.core.redaction import Redactor
 from halyard.core.registry import SessionRegistry
-from halyard.core.service import ApprovalService
+from halyard.core.service import ApprovalService, MessageRelay
 
 logger = logging.getLogger(__name__)
 
@@ -69,6 +69,24 @@ class ApprovalResponse(BaseModel):
     reason: str
     request_id: str | None = None
     risk: RiskLevel | None = None
+
+
+class MessageBody(BaseModel):
+    """What the Stop-hook relay posts: whatever the agent just said."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    session_id: str
+    text: str
+    agent_id: str = "claude-code"
+    cwd: str | None = None
+    role: Role | None = None
+
+
+class MessageResponse(BaseModel):
+    #: Whether the channel accepted it. The relay does not act on this — it is
+    #: here so a failure is visible to anything that does look.
+    delivered: bool
 
 
 class HealthResponse(BaseModel):
@@ -106,6 +124,13 @@ def create_app(settings: Settings, *, channel=None) -> FastAPI:
     audit = AuditLog([JsonlAuditSink(settings.audit_log), SqliteAuditSink(settings.db_path)])
     registry = SessionRegistry()
     resolved_channel = channel if channel is not None else _build_channel(settings, store, audit)
+    relay = MessageRelay(
+        redactor=Redactor(),
+        registry=registry,
+        audit=audit,
+        channel=resolved_channel,
+        project=settings.project_name,
+    )
     service = ApprovalService(
         store=store,
         policy=Policy(),
@@ -161,6 +186,7 @@ def create_app(settings: Settings, *, channel=None) -> FastAPI:
     app.state.registry = registry
     app.state.channel = resolved_channel
     app.state.service = service
+    app.state.relay = relay
 
     @app.middleware("http")
     async def deny_on_unhandled_error(request: Request, call_next) -> Response:
@@ -218,6 +244,24 @@ def create_app(settings: Settings, *, channel=None) -> FastAPI:
             request_id=outcome.request_id,
             risk=outcome.risk,
         )
+
+    @app.post("/v1/messages", response_model=MessageResponse)
+    async def relay_message(body: MessageBody) -> MessageResponse:
+        """Push an agent's reply out to the channel.
+
+        Answers immediately and never blocks — the agent's turn is waiting on
+        this call, and a chat message is not worth stalling a session for. The
+        opposite of `/v1/approvals`, which holds the caller until a human
+        decides.
+        """
+        delivered = await relay.relay(
+            session_id=body.session_id,
+            agent_id=body.agent_id,
+            text=body.text,
+            cwd=body.cwd,
+            role=body.role,
+        )
+        return MessageResponse(delivered=delivered)
 
     @app.get("/health", response_model=HealthResponse)
     async def health() -> HealthResponse:
