@@ -204,3 +204,41 @@ def test_doctor_says_where_the_address_came_from(
 
     output = capsys.readouterr().out
     assert "derived from HALYARD_BIND" in output
+
+
+# --- the command line ---------------------------------------------------------
+
+
+@pytest.mark.parametrize("argv", [["halyard", "doctor."], ["halyard", "docter"], ["halyard", "-h"]])
+def test_a_mistyped_command_does_not_start_a_server(
+    argv: list[str], monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:
+    import halyard.__main__ as entry
+
+    started = []
+    monkeypatch.setattr(entry, "serve", lambda: started.append(True))
+    monkeypatch.setattr(sys, "argv", argv)
+
+    with pytest.raises(SystemExit) as exit_info:
+        entry.main()
+
+    # `halyard doctor.` once bound a port and connected to Telegram when it was
+    # asked to run a read-only check. A typo gets a usage message.
+    assert exit_info.value.code == 2
+    assert started == []
+    assert "unknown command" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("argv", [["halyard"], ["halyard", "serve"]])
+def test_serving_is_the_default_and_can_be_named(
+    argv: list[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import halyard.__main__ as entry
+
+    started = []
+    monkeypatch.setattr(entry, "serve", lambda: started.append(True))
+    monkeypatch.setattr(sys, "argv", argv)
+
+    entry.main()
+
+    assert started == [True]

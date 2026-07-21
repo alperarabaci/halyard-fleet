@@ -38,12 +38,38 @@ def configure_logging() -> None:
         handler.addFilter(SecretRedactingFilter())
 
 
+USAGE = """usage: halyard [command]
+
+  (no command)  run the control plane
+  serve         run the control plane
+  doctor        check the configuration and say what is wrong with it
+"""
+
+
 def main() -> None:
-    if len(sys.argv) > 1 and sys.argv[1] == "doctor":
+    """Dispatch a command, or refuse to guess.
+
+    An unrecognised argument must not fall through to starting the server.
+    A mistyped `halyard doctor.` once bound a port and connected to Telegram
+    when it was asked to run a read-only check — a typo should produce a usage
+    message, not a running service.
+    """
+    args = sys.argv[1:]
+    command = args[0] if args else "serve"
+
+    if command == "doctor":
         from halyard.doctor import run
 
         raise SystemExit(run())
 
+    if command not in ("serve",):
+        print(f"halyard: unknown command {command!r}\n\n{USAGE}", file=sys.stderr)
+        raise SystemExit(2)
+
+    serve()
+
+
+def serve() -> None:
     configure_logging()
     settings = Settings()
     logger = logging.getLogger("halyard")
