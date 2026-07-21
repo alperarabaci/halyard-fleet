@@ -12,6 +12,7 @@ from __future__ import annotations
 from typing import Protocol, runtime_checkable
 
 from halyard.core.approvals import ApprovalRequest
+from halyard.core.events import Role
 
 
 @runtime_checkable
@@ -39,10 +40,16 @@ class ChannelAdapter(Protocol):
         """
         ...
 
-    async def send_message(self, session_id: str, text: str) -> str:
-        """Send plain text. Returns a channel-side message id."""
+    async def send_message(self, session_id: str, text: str, role: Role | None = None) -> str:
+        """Send plain text. Returns a channel-side message id.
+
+        `role` is where the message belongs, for a channel that keeps a
+        navigator and a driver apart. A channel with one destination ignores it.
+        """
         ...
 
-    async def send_long_content(self, session_id: str, content: str, title: str) -> str:
+    async def send_long_content(
+        self, session_id: str, content: str, title: str, role: Role | None = None
+    ) -> str:
         """Send something too large for one message, however the channel prefers."""
         ...

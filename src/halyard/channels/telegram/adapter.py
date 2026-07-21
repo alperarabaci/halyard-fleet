@@ -39,6 +39,7 @@ from halyard.core.audit import (
     replayed_callback,
     unauthorized_callback,
 )
+from halyard.core.events import Role
 from halyard.core.gate import Gate
 
 logger = logging.getLogger(__name__)
@@ -61,6 +62,21 @@ def _default_clock() -> datetime:
     return datetime.now(UTC)
 
 
+def parse_destination(value: str | None) -> tuple[str, int | None] | None:
+    """Read `chat_id` or `chat_id:thread_id` into where a message goes.
+
+    One syntax for both shapes a group can take: a chat of its own, or a forum
+    topic inside a shared one. Which you want is a matter of how you like your
+    phone organised, and not something the code should have an opinion about.
+    """
+    if not value:
+        return None
+    chat, _, thread = value.rpartition(":")
+    if chat and thread.isdigit():
+        return chat, int(thread)
+    return value, None
+
+
 class TelegramChannel:
     """Puts approvals in a chat and brings the answers back."""
 
@@ -76,6 +92,8 @@ class TelegramChannel:
         poll_retry_seconds: float = POLL_RETRY_SECONDS,
         gate: Gate | None = None,
         project: str = "unknown",
+        navigator_chat_id: str | None = None,
+        driver_chat_id: str | None = None,
     ) -> None:
         self._api = api
         self._gate = gate or Gate()
@@ -83,10 +101,21 @@ class TelegramChannel:
         self._store = store
         self._audit = audit
         self._chat_id = chat_id
+        # Two seats and a default. A role with nowhere of its own falls back to
+        # the main chat, so an existing single-chat setup keeps working
+        # untouched by any of this.
+        self._routes = {
+            Role.NAVIGATOR: parse_destination(navigator_chat_id),
+            Role.DRIVER: parse_destination(driver_chat_id),
+        }
         self._authorized = authorized_user_ids
         self._clock = clock
         self._poll_retry_seconds = poll_retry_seconds
-        self._open: dict[str, tuple[ApprovalRequest, int]] = {}
+        # The chat is remembered alongside the message, because a card that
+        # was routed to a seat has to be edited in that seat. Keeping only
+        # the message id means editing against the wrong chat, which fails
+        # quietly and leaves live-looking buttons on a settled question.
+        self._open: dict[str, tuple[ApprovalRequest, int, str]] = {}
         self._poller: asyncio.Task | None = None
         self._offset: int | None = None
 
@@ -110,6 +139,10 @@ class TelegramChannel:
 
     # --- sending ------------------------------------------------------------
 
+    def _route(self, role: Role | None) -> tuple[str, int | None]:
+        """Where this role's traffic goes."""
+        return (role and self._routes.get(role)) or (self._chat_id, None)
+
     async def send_approval_request(self, request: ApprovalRequest) -> str:
         """Put a card in the chat.
 
@@ -122,16 +155,22 @@ class TelegramChannel:
         markup = cards.keyboard(
             request, include_full=request.command_full != request.command_summary
         )
-        message = await self._api.send_message(self._chat_id, text, reply_markup=markup)
+        chat_id, thread_id = self._route(request.role)
+        message = await self._api.send_message(
+            chat_id, text, reply_markup=markup, message_thread_id=thread_id
+        )
         message_id = int(message["message_id"])
-        self._open[cards.handle_of(request)] = (request, message_id)
+        self._open[cards.handle_of(request)] = (request, message_id, chat_id)
         return str(message_id)
 
-    async def send_message(self, session_id: str, text: str) -> str:
-        message = await self._api.send_message(self._chat_id, text)
+    async def send_message(self, session_id: str, text: str, role: Role | None = None) -> str:
+        chat_id, thread_id = self._route(role)
+        message = await self._api.send_message(chat_id, text, message_thread_id=thread_id)
         return str(message["message_id"])
 
-    async def send_long_content(self, session_id: str, content: str, title: str) -> str:
+    async def send_long_content(
+        self, session_id: str, content: str, title: str, role: Role | None = None
+    ) -> str:
         """Send something that will not fit in a message.
 
         As a file rather than a wall of split messages: a diff or a full command
@@ -139,10 +178,13 @@ class TelegramChannel:
         from six chat bubbles.
         """
         if len(content) <= cards.MESSAGE_LIMIT - 100:
-            return await self.send_message(session_id, f"<b>{title}</b>\n<pre>{content}</pre>")
+            return await self.send_message(
+                session_id, f"<b>{title}</b>\n<pre>{content}</pre>", role
+            )
+        chat_id, _ = self._route(role)
         filename = f"{title.lower().replace(' ', '-')}.txt"
         result = await self._api.send_document(
-            self._chat_id, filename, content.encode("utf-8"), caption=title
+            chat_id, filename, content.encode("utf-8"), caption=title
         )
         return str(result["message_id"])
 
@@ -311,7 +353,7 @@ class TelegramChannel:
             await self._dismiss(query_id, "That request is no longer open.")
             return
 
-        request, message_id = entry
+        request, message_id, chat_id = entry
 
         if action == cards.SHOW_FULL:
             await self.send_long_content(request.session_id, request.command_full, "Full command")
@@ -335,7 +377,7 @@ class TelegramChannel:
             await self._dismiss(query_id)
             return
         except ApprovalExpiredError:
-            await self._settle_card(request, message_id, "deny", None)
+            await self._settle_card(request, message_id, chat_id, "deny", None)
             await self._dismiss(query_id, "Too late — that expired and was denied.")
             return
         except UnknownApprovalError:
@@ -344,7 +386,7 @@ class TelegramChannel:
             await self._dismiss(query_id, "That request is no longer open.")
             return
 
-        await self._settle_card(request, message_id, decision.value, actor)
+        await self._settle_card(request, message_id, chat_id, decision.value, actor)
         await self._dismiss(query_id, "Allowed." if decision is Decision.ALLOW else "Denied.")
 
     # --- helpers ------------------------------------------------------------
@@ -354,12 +396,17 @@ class TelegramChannel:
         return min(self._poll_retry_seconds * (2 ** (failures - 1)), POLL_RETRY_MAX_SECONDS)
 
     async def _settle_card(
-        self, request: ApprovalRequest, message_id: int, decision: str, by: str | None
+        self,
+        request: ApprovalRequest,
+        message_id: int,
+        chat_id: str,
+        decision: str,
+        by: str | None,
     ) -> None:
         """Rewrite the card to show the outcome and drop the buttons."""
         try:
             await self._api.edit_message_text(
-                self._chat_id,
+                chat_id,
                 message_id,
                 cards.render_resolved(request, decision=decision, by=by),
                 reply_markup=None,
@@ -394,5 +441,5 @@ class TelegramChannel:
         them anyway.
         """
         now = self._clock()
-        for handle in [h for h, (r, _) in self._open.items() if now >= r.expires_at]:
+        for handle in [h for h, (r, _, _) in self._open.items() if now >= r.expires_at]:
             del self._open[handle]

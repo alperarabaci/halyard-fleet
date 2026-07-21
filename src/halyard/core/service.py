@@ -68,6 +68,31 @@ def project_name(project_dir: str | None, cwd: str | None, configured: str) -> s
     return configured
 
 
+def seat_of(
+    role: Role | None,
+    session_name: str | None,
+    seats: dict[str, Role] | None,
+) -> Role | None:
+    """Which seat a request came from.
+
+    Two ways in, because two kinds of session exist. One launched from a shell
+    can say so directly — `HALYARD_ROLE=navigator claude` — and that wins,
+    because it is the more explicit statement. One started from the desktop app
+    has no shell to say it in, so it is recognised by its name instead.
+
+    The name is the workable key rather than `session_id`, which is a fresh
+    UUID on every restart. A named conversation keeps its name, so this is
+    configured once instead of re-paired every morning.
+
+    Matched case-insensitively and trimmed, because it is copied by hand.
+    """
+    if role is not None:
+        return role
+    if not session_name or not seats:
+        return None
+    return seats.get(session_name.strip().casefold())
+
+
 class BridgeDecision(StrEnum):
     """What the bridge is told to do.
 
@@ -124,7 +149,9 @@ class MessageRelay:
         channel,
         project: str,
         gate: Gate | None = None,
+        seats: dict[str, Role] | None = None,
     ) -> None:
+        self._seats = seats or {}
         self._redactor = redactor
         self._registry = registry
         self._audit = audit
@@ -141,6 +168,7 @@ class MessageRelay:
         cwd: str | None = None,
         project_dir: str | None = None,
         role: Role | None = None,
+        session_name: str | None = None,
     ) -> bool:
         """Send an agent's reply out. Returns whether it was delivered."""
         if self._gate.paused:
@@ -150,6 +178,7 @@ class MessageRelay:
             return False
 
         project = project_name(project_dir, cwd, self._project)
+        role = seat_of(role, session_name, self._seats)
         try:
             masked = self._redactor.redact(text)
             await self._registry.observe(
@@ -159,7 +188,7 @@ class MessageRelay:
                 role=role,
                 cwd=cwd,
             )
-            delivered = await self._deliver(session_id, masked.text)
+            delivered = await self._deliver(session_id, masked.text, role)
         except Exception:
             logger.exception("Could not relay a message from %s", session_id)
             return False
@@ -181,14 +210,14 @@ class MessageRelay:
             logger.warning("Could not record a relayed message", exc_info=True)
         return delivered
 
-    async def _deliver(self, session_id: str, text: str) -> bool:
+    async def _deliver(self, session_id: str, text: str, role: Role | None) -> bool:
         try:
             if len(text) > MESSAGE_SPLIT_THRESHOLD:
                 # Long replies go as a file rather than a wall of split
                 # messages — the same choice the full-command view makes.
-                await self._channel.send_long_content(session_id, text, "Agent reply")
+                await self._channel.send_long_content(session_id, text, "Agent reply", role)
             else:
-                await self._channel.send_message(session_id, text)
+                await self._channel.send_message(session_id, text, role)
         except Exception:
             logger.exception("Channel refused a relayed message from %s", session_id)
             return False
@@ -209,7 +238,9 @@ class ApprovalService:
         channel,
         project: str,
         gate: Gate | None = None,
+        seats: dict[str, Role] | None = None,
     ) -> None:
+        self._seats = seats or {}
         self._store = store
         self._gate = gate or Gate()
         self._policy = policy
@@ -230,6 +261,7 @@ class ApprovalService:
         cwd: str | None = None,
         project_dir: str | None = None,
         role: Role | None = None,
+        session_name: str | None = None,
         reason: str | None = None,
         declared_risk: RiskLevel | None = None,
     ) -> ApprovalOutcome:
@@ -244,6 +276,7 @@ class ApprovalService:
                 cwd=cwd,
                 project_dir=project_dir,
                 role=role,
+                session_name=session_name,
                 reason=reason,
                 declared_risk=declared_risk,
             )
@@ -274,6 +307,7 @@ class ApprovalService:
         cwd: str | None,
         project_dir: str | None,
         role: Role | None,
+        session_name: str | None,
         reason: str | None,
         declared_risk: RiskLevel | None,
     ) -> ApprovalOutcome:
@@ -293,6 +327,7 @@ class ApprovalService:
         prepared = self._redactor.prepare(command)
         classification = self._policy.classify(prepared.full, declared=declared_risk)
         project = project_name(project_dir, cwd, self._project)
+        role = seat_of(role, session_name, self._seats)
 
         await self._registry.observe(
             session_id=session_id,

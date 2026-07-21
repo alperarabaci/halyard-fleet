@@ -29,7 +29,7 @@ import os
 import sys
 import urllib.request
 
-from _settings import control_plane_url
+from _settings import control_plane_url, session_name
 from _settings import timeout as lookup_timeout
 
 #: Short on purpose. The agent's turn is waiting on this, and a slow relay is
@@ -54,6 +54,9 @@ def main() -> int:
             "text": text,
             "cwd": payload.get("cwd"),
             "project_dir": os.environ.get("CLAUDE_PROJECT_DIR"),
+            # Which seat this session is sitting in — see hook_bridge.py.
+            "role": os.environ.get("HALYARD_ROLE") or None,
+            "session_name": session_name(payload.get("transcript_path")),
         }
 
         url = control_plane_url()

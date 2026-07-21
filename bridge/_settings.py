@@ -16,6 +16,7 @@ own configuration is worse than one that falls back to the default.
 
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 
@@ -94,3 +95,52 @@ def timeout(key: str, default: float) -> float:
         return float(lookup(key, str(default)))
     except ValueError:
         return default
+
+
+#: How much of a transcript's tail to read looking for its title. Measured on a
+#: 5 MB transcript: titles are rewritten repeatedly through the last few percent
+#: of the file, and reading this much costs about a tenth of a millisecond.
+TRANSCRIPT_TAIL_BYTES = 256 * 1024
+
+
+def session_name(transcript_path: str | None) -> str | None:
+    """The name shown on a session in the desktop app, if it can be found.
+
+    Two Claude Code sessions on one codebase are indistinguishable to a hook
+    except by `session_id`, which is a fresh UUID every time a session is
+    resumed — useless for saying "this one is the navigator". The *name* is not:
+    the same title was observed across three different session ids belonging to
+    one named conversation.
+
+    There is no name in the hook payload, so it is read out of the transcript,
+    which the payload does point at. The transcript format is documented as
+    internal and liable to change between releases, so this is written to fail
+    quietly: no name simply means no routing, and everything lands in the
+    default chat exactly as it would have anyway.
+
+    A title the user set wins over one Claude generated, because the generated
+    one changes as the conversation moves and the point of this is to be stable.
+    """
+    if not transcript_path:
+        return None
+    try:
+        path = Path(transcript_path)
+        with path.open("rb") as handle:
+            handle.seek(max(0, path.stat().st_size - TRANSCRIPT_TAIL_BYTES))
+            tail = handle.read()
+    except OSError:
+        return None
+
+    custom = generated = None
+    for raw in tail.split(b"\n"):
+        if b"-title" not in raw:
+            continue
+        try:
+            record = json.loads(raw)
+        except Exception:
+            continue
+        if record.get("type") == "custom-title" and record.get("customTitle"):
+            custom = str(record["customTitle"])
+        elif record.get("type") == "ai-title" and record.get("aiTitle"):
+            generated = str(record["aiTitle"])
+    return custom or generated

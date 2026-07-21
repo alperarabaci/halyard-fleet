@@ -127,6 +127,10 @@ def test_the_payload_is_forwarded_without_being_reinterpreted() -> None:
         # Absent from the environment here, and sent as null rather than
         # omitted so the shape does not depend on where the hook ran.
         "project_dir": None,
+        "role": None,
+        # No transcript at that path, so no name — and no routing, which lands
+        # everything in the default chat exactly as it would have anyway.
+        "session_name": None,
     }
 
 
@@ -295,6 +299,8 @@ def test_the_relay_forwards_what_the_agent_said() -> None:
         "text": "Done. All 234 tests pass.",
         "cwd": "/repo",
         "project_dir": None,
+        "role": None,
+        "session_name": None,
     }
 
 
@@ -445,3 +451,69 @@ def test_the_defer_code_does_not_launder_output(tmp_path: Path) -> None:
     # 64 means "I said nothing on purpose". A process that exits 64 while
     # printing something did not mean that, whatever it meant.
     assert decision["permissionDecision"] == "deny"
+
+
+def test_the_bridge_reports_which_seat_the_session_is_in() -> None:
+    with control_plane(body={"decision": "allow", "reason": "ok"}) as (url, received):
+        run(BRIDGE, HALYARD_URL=url, HALYARD_ROLE="navigator")
+
+    # Two sessions on one codebase are identical to a hook except for a
+    # session_id that changes every restart, so the role comes from whoever
+    # launched them.
+    assert received[0]["role"] == "navigator"
+
+
+def test_an_unset_role_is_null_rather_than_empty() -> None:
+    with control_plane(body={"decision": "allow", "reason": "ok"}) as (url, received):
+        run(BRIDGE, HALYARD_URL=url, HALYARD_ROLE="")
+
+    # An empty string is not a role, and would fail validation as one.
+    assert received[0]["role"] is None
+
+
+def test_the_bridge_reads_the_session_name_from_its_transcript(tmp_path: Path) -> None:
+    transcript = tmp_path / "session.jsonl"
+    transcript.write_text(
+        '{"type":"ai-title","aiTitle":"generated name","sessionId":"s"}\n'
+        '{"type":"custom-title","customTitle":"alpha-engine-navigator","sessionId":"s"}\n',
+        encoding="utf-8",
+    )
+    payload = {**PAYLOAD, "transcript_path": str(transcript)}
+
+    with control_plane(body={"decision": "allow", "reason": "ok"}) as (url, received):
+        run(BRIDGE, payload, HALYARD_URL=url)
+
+    # The desktop app has no shell to set HALYARD_ROLE in, so the session is
+    # recognised by the name it already carries.
+    assert received[0]["session_name"] == "alpha-engine-navigator"
+
+
+def test_a_generated_title_is_used_only_when_there_is_no_chosen_one(tmp_path: Path) -> None:
+    transcript = tmp_path / "session.jsonl"
+    transcript.write_text(
+        '{"type":"ai-title","aiTitle":"run the ls command","sessionId":"s"}\n', encoding="utf-8"
+    )
+    payload = {**PAYLOAD, "transcript_path": str(transcript)}
+
+    with control_plane(body={"decision": "allow", "reason": "ok"}) as (url, received):
+        run(BRIDGE, payload, HALYARD_URL=url)
+
+    # A chosen title is stable; a generated one moves with the conversation.
+    assert received[0]["session_name"] == "run the ls command"
+
+
+@pytest.mark.parametrize(
+    "content",
+    ["", "not json\n", '{"type":"assistant"}\n', '{"type":"custom-title","customTitle":""}\n'],
+)
+def test_an_unreadable_transcript_simply_yields_no_name(tmp_path: Path, content: str) -> None:
+    transcript = tmp_path / "session.jsonl"
+    transcript.write_text(content, encoding="utf-8")
+    payload = {**PAYLOAD, "transcript_path": str(transcript)}
+
+    with control_plane(body={"decision": "allow", "reason": "ok"}) as (url, received):
+        run(BRIDGE, payload, HALYARD_URL=url)
+
+    # The transcript format is documented as internal and liable to change, so
+    # failing to read it must cost nothing: no name means no routing.
+    assert received[0]["session_name"] is None

@@ -301,6 +301,66 @@ resume - Start sending here again
 
 Typing `/` in the chat then offers them as a menu.
 
+### Optional: keep a navigator and a driver apart
+
+Two sessions working one codebase in one chat is a mess to read on a phone. To split them, give
+each seat its own conversation.
+
+**One bot is enough.** A bot is an identity, not a conversation — the same way one person is in many
+group chats. The limit people run into is that a bot can hold only *one private chat* with you, so
+separate conversations means separate **groups**, not separate bots.
+
+```
+@your_bot                                    one bot, one token
+  ├── group "alpha-engine / navigator"       chat id -1001111111111
+  └── group "alpha-engine / driver"          chat id -1002222222222
+```
+
+1. Create two groups and add the same bot to both. A group of one is fine.
+2. Send `/status` in each. It has to be a command: a bot in a group only sees messages starting
+   with `/` unless privacy mode is turned off, and leaving it on is the better default.
+3. **Stop the control plane**, then read the chat ids. This matters — `getUpdates` hands each
+   update to whoever asks first, so a running poll loop will swallow them before your `curl` sees
+   anything:
+
+   ```bash
+   docker compose down
+   curl -s "https://api.telegram.org/bot<TOKEN>/getUpdates" | python3 -c "
+   import sys, json
+   for u in json.load(sys.stdin)['result']:
+       c = (u.get('message') or {}).get('chat') or {}
+       if c: print(c.get('id'), '→', c.get('title') or c.get('username'))"
+   ```
+
+4. Put them in `.env` and start again:
+
+   ```bash
+   TELEGRAM_NAVIGATOR_CHAT_ID=-1001111111111
+   TELEGRAM_DRIVER_CHAT_ID=-1002222222222
+   ```
+
+   Either one may be a forum topic instead of a group of its own — `-1001234567890:12` sends to
+   topic 12 in a shared group.
+
+Then tell each session which seat it is when you launch it. There is no pairing step and no list to
+pick from: the environment a session was started with is the answer, and every hook it fires
+inherits it.
+
+```bash
+HALYARD_ROLE=navigator claude     # one terminal
+HALYARD_ROLE=driver    claude     # the other
+```
+
+Worth two aliases, since it is every launch:
+
+```bash
+alias nav='HALYARD_ROLE=navigator claude'
+alias drv='HALYARD_ROLE=driver claude'
+```
+
+Leave the two chat ids unset and none of this applies — everything goes to `TELEGRAM_CHAT_ID`, the
+way it does with one session.
+
 ### Use the app, not a browser tab
 
 A browser tab gives you no push notifications, so a card can expire unseen and the command is denied

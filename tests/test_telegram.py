@@ -44,13 +44,29 @@ class FakeTelegramApi:
     async def close(self) -> None:
         self.opened = False
 
-    async def send_message(self, chat_id, text, *, reply_markup=None, **kwargs) -> dict:
+    async def send_message(
+        self, chat_id, text, *, reply_markup=None, message_thread_id=None, **kwargs
+    ) -> dict:
         self._next_message_id += 1
-        self.sent.append({"chat_id": chat_id, "text": text, "reply_markup": reply_markup})
+        self.sent.append(
+            {
+                "chat_id": chat_id,
+                "text": text,
+                "reply_markup": reply_markup,
+                "message_thread_id": message_thread_id,
+            }
+        )
         return {"message_id": self._next_message_id}
 
     async def edit_message_text(self, chat_id, message_id, text, *, reply_markup=None, **kwargs):
-        self.edits.append({"message_id": message_id, "text": text, "reply_markup": reply_markup})
+        self.edits.append(
+            {
+                "chat_id": chat_id,
+                "message_id": message_id,
+                "text": text,
+                "reply_markup": reply_markup,
+            }
+        )
         return {"message_id": message_id}
 
     async def answer_callback_query(self, callback_query_id, *, text=None):
@@ -58,7 +74,9 @@ class FakeTelegramApi:
 
     async def send_document(self, chat_id, filename, content, *, caption=None) -> dict:
         self._next_message_id += 1
-        self.documents.append({"filename": filename, "content": content, "caption": caption})
+        self.documents.append(
+            {"chat_id": chat_id, "filename": filename, "content": content, "caption": caption}
+        )
         return {"message_id": self._next_message_id}
 
     async def get_updates(self, *, offset=None, timeout=30) -> list[dict]:
@@ -626,3 +644,158 @@ async def test_a_command_is_recognised_however_it_is_typed(tmp_path: Path, text:
     await channel._handle_message(typed(text))
 
     assert gate.paused is True
+
+
+# --- keeping a navigator and a driver apart -----------------------------------
+
+NAV_CHAT = "-1001111111111"
+DRV_CHAT = "-1002222222222"
+
+
+async def routed(tmp_path: Path, *, navigator=NAV_CHAT, driver=DRV_CHAT, ttl=timedelta(minutes=5)):
+    store = ApprovalStore(ttl=ttl)
+    sink = JsonlAuditSink(tmp_path / "audit.jsonl")
+    audit = AuditLog([sink])
+    await audit.open()
+    api = FakeTelegramApi()
+    channel = TelegramChannel(
+        api=api,
+        store=store,
+        audit=audit,
+        chat_id=CHAT,
+        authorized_user_ids=frozenset({APPROVER}),
+        poll_retry_seconds=0.01,
+        navigator_chat_id=navigator,
+        driver_chat_id=driver,
+    )
+    return channel, api, store
+
+
+@pytest.mark.parametrize(
+    ("role", "expected"),
+    [(Role.NAVIGATOR, NAV_CHAT), (Role.DRIVER, DRV_CHAT), (None, CHAT)],
+)
+async def test_a_card_goes_to_its_own_seat(tmp_path: Path, role, expected: str) -> None:
+    channel, api, store = await routed(tmp_path)
+    request = await an_approval(store, role=role)
+
+    await channel.send_approval_request(request)
+
+    assert api.sent[0]["chat_id"] == expected
+
+
+async def test_a_topic_can_stand_in_for_a_group(tmp_path: Path) -> None:
+    channel, api, store = await routed(tmp_path, navigator=f"{NAV_CHAT}:12")
+    request = await an_approval(store, role=Role.NAVIGATOR)
+
+    await channel.send_approval_request(request)
+
+    # One syntax covers both shapes a group can take — a chat of its own, or a
+    # forum topic inside a shared one.
+    assert api.sent[0]["chat_id"] == NAV_CHAT
+    assert api.sent[0]["message_thread_id"] == 12
+
+
+async def test_replies_follow_the_same_route(tmp_path: Path) -> None:
+    channel, api, _ = await routed(tmp_path)
+
+    await channel.send_message("session-1", "done", Role.DRIVER)
+
+    assert api.sent[0]["chat_id"] == DRV_CHAT
+
+
+async def test_a_long_reply_follows_the_route_too(tmp_path: Path) -> None:
+    channel, api, _ = await routed(tmp_path)
+
+    await channel.send_long_content("session-1", "x" * 5000, "Agent reply", Role.NAVIGATOR)
+
+    assert api.documents[0]["chat_id"] == NAV_CHAT
+
+
+# --- an existing single-chat setup must not notice any of this ----------------
+
+
+@pytest.mark.parametrize("role", [Role.NAVIGATOR, Role.DRIVER, None])
+async def test_without_seats_everything_lands_where_it_always_did(tmp_path: Path, role) -> None:
+    channel, api, store = await routed(tmp_path, navigator=None, driver=None)
+    request = await an_approval(store, role=role)
+
+    await channel.send_approval_request(request)
+    await channel.send_message("session-1", "done", role)
+
+    # Nobody who has not opted in should see a behaviour change.
+    assert {message["chat_id"] for message in api.sent} == {CHAT}
+    assert all(message["message_thread_id"] is None for message in api.sent)
+
+
+async def test_a_seat_that_is_configured_alone_still_leaves_the_other_default(
+    tmp_path: Path,
+) -> None:
+    channel, api, store = await routed(tmp_path, driver=None)
+
+    await channel.send_approval_request(await an_approval(store, role=Role.NAVIGATOR))
+    await channel.send_approval_request(await an_approval(store, role=Role.DRIVER))
+
+    assert [message["chat_id"] for message in api.sent] == [NAV_CHAT, CHAT]
+
+
+async def test_a_named_session_reaches_its_seat_without_any_shell(tmp_path: Path) -> None:
+    """The desktop-app path, end to end: no shell, no HALYARD_ROLE, just a name."""
+    from halyard.core.policy import Policy
+    from halyard.core.redaction import Redactor
+    from halyard.core.registry import SessionRegistry
+    from halyard.core.service import ApprovalService
+
+    # A short deadline: nobody answers this card, and the test should not
+    # sit through the real one.
+    channel, api, store = await routed(tmp_path, ttl=timedelta(milliseconds=50))
+    sink = JsonlAuditSink(tmp_path / "service.jsonl")
+    await sink.open()
+    service = ApprovalService(
+        store=store,
+        policy=Policy(),
+        redactor=Redactor(),
+        audit=AuditLog([sink]),
+        registry=SessionRegistry(),
+        channel=channel,
+        project="alpha-engine",
+        seats={"alpha-engine-navigator": Role.NAVIGATOR},
+    )
+
+    await service.request(
+        session_id="s",
+        agent_id="claude-code",
+        tool="Bash",
+        command="ls",
+        session_name="alpha-engine-navigator",
+    )
+
+    # Nothing set HALYARD_ROLE anywhere. The name did the routing.
+    assert api.sent[0]["chat_id"] == NAV_CHAT
+    assert "NAVIGATOR" in api.sent[0]["text"]
+
+
+async def test_a_routed_card_is_settled_in_the_chat_it_was_sent_to(tmp_path: Path) -> None:
+    channel, api, store = await routed(tmp_path)
+    request = await an_approval(store, role=Role.DRIVER)
+    await channel.send_approval_request(request)
+
+    await channel._handle_callback(press(request, cards.ALLOW))
+
+    # Routing the send but not the edit leaves the buttons live on a settled
+    # card: the edit goes to the default chat with a message id from another
+    # one, fails, and is only logged. Pressing Allow appeared to do nothing.
+    assert api.sent[0]["chat_id"] == DRV_CHAT
+    assert api.edits[0]["chat_id"] == DRV_CHAT
+    assert api.edits[0]["reply_markup"] is None
+    assert "✅ ALLOWED" in api.edits[0]["text"]
+
+
+async def test_an_unrouted_card_is_still_settled_in_the_default_chat(tmp_path: Path) -> None:
+    channel, api, store = await routed(tmp_path, navigator=None, driver=None)
+    request = await an_approval(store, role=Role.DRIVER)
+    await channel.send_approval_request(request)
+
+    await channel._handle_callback(press(request, cards.DENY))
+
+    assert api.edits[0]["chat_id"] == CHAT
