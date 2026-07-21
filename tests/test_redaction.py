@@ -194,3 +194,41 @@ def test_summarize_marks_where_it_cut() -> None:
 
 def test_summarize_leaves_short_text_alone() -> None:
     assert summarize("git status", limit=100) == "git status"
+
+
+# --- keeping secrets out of the log -----------------------------------------
+
+
+def test_a_telegram_bot_token_in_a_url_is_masked(redactor: Redactor) -> None:
+    line = "HTTP Request: POST https://api.telegram.org/bot8683402306:AAFAKEfake_TOKEN-value-here-1234567/getUpdates"
+
+    result = redactor.redact(line)
+
+    assert "AAFAKEfake_TOKEN-value-here-1234567" not in result.text
+    # The numeric bot id survives: it names the bot without granting anything.
+    assert "bot8683402306:***" in result.text
+
+
+def test_the_log_filter_masks_secrets_a_library_prints(caplog) -> None:
+    import logging
+
+    from halyard.core.redaction import SecretRedactingFilter
+
+    handler = logging.StreamHandler()
+    handler.addFilter(SecretRedactingFilter())
+    record = logging.LogRecord(
+        name="httpx",
+        level=logging.INFO,
+        pathname=__file__,
+        lineno=1,
+        msg="HTTP Request: POST https://api.telegram.org/bot123456789:%s/getUpdates",
+        args=("AAFAKEfake_TOKEN-value-here-1234567",),
+        exc_info=None,
+    )
+
+    assert handler.filters[0].filter(record) is True
+    # Overriding TelegramApi.__repr__ kept the token out of tracebacks and httpx
+    # printed it anyway. Keeping a secret out of your own log lines is not the
+    # same as keeping it out of the log.
+    assert "AAFAKEfake_TOKEN-value-here-1234567" not in record.getMessage()
+    assert "bot123456789:***" in record.getMessage()
