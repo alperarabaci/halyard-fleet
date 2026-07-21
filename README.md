@@ -117,6 +117,37 @@ uv sync --extra dev
 uv run halyard
 ```
 
+Or without installing Python at all:
+
+```bash
+cp .env.example .env       # then set HALYARD_CHANNEL
+docker compose up -d
+docker compose logs -f
+```
+
+**Only the control plane is containerised.** The hook bridge cannot be — it runs inside Claude
+Code's process tree on your machine, so it stays on the host and reaches the container over
+`HALYARD_URL`:
+
+```
+Claude Code ──hook──► bridge/hook.sh ──HTTP──► 127.0.0.1:8787 ──► control-plane container
+   (host)              (host)                    (published)         (Telegram, audit log)
+```
+
+The published port is bound to `127.0.0.1` on purpose. Writing `8787:8787` instead would put the
+control plane on every interface of the host, and anything on the network could then approve
+commands on your machine. If port 8787 is already taken — Docker Desktop uses it on some
+machines — set `HALYARD_HOST_PORT` in `.env` and point `HALYARD_URL` at the same port.
+
+The audit log lives in a named volume so it survives rebuilds. To read it:
+
+```bash
+docker compose exec control-plane cat /data/audit.jsonl
+```
+
+If you would rather open it in an editor, swap the volume for a bind mount — there is a commented
+line in `docker-compose.yml` showing how, and a note about the ownership it needs.
+
 Then point Claude Code at the bridge in `.claude/settings.json`:
 
 ```json

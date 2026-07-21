@@ -1,0 +1,38 @@
+services:
+  control-plane:
+    build: .
+    image: halyard-fleet:local
+    container_name: halyard-control-plane
+
+    # Secrets come from .env at run time and are never baked into the image.
+    # .env is in .dockerignore for that reason.
+    env_file:
+      - .env
+
+    # These win over anything in .env, because they describe where things live
+    # *inside the container* rather than on a developer's machine.
+    environment:
+      HALYARD_BIND: 0.0.0.0:8787
+      HALYARD_DB_PATH: /data/halyard.db
+      HALYARD_AUDIT_LOG: /data/audit.jsonl
+
+    ports:
+      # The 127.0.0.1 prefix is the whole security posture of this file. Writing
+      # "8787:8787" would publish the control plane on every interface of the
+      # host — anything on the network could then approve commands on this
+      # machine. For remote access, put Tailscale or WireGuard in front instead.
+      - "127.0.0.1:${HALYARD_HOST_PORT:-8787}:8787"
+
+    volumes:
+      # A named volume, so the audit log survives the container being rebuilt
+      # and arrives owned by the non-root user in the image.
+      #
+      # To read audit.jsonl directly from your editor instead, swap this for a
+      # bind mount — but the host directory has to be writable by uid 10001:
+      #   - ./data:/data
+      - halyard-data:/data
+
+    restart: unless-stopped
+
+volumes:
+  halyard-data:
