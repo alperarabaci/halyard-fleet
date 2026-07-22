@@ -306,6 +306,33 @@ waiting for a release:
 HALYARD_CLAUDE_MODELS=opus,sonnet,haiku,fable,whatever-is-new
 ```
 
+### What a message from a phone runs on
+
+Sonnet, unless you say otherwise:
+
+```
+HALYARD_CLAUDE_DEFAULT_MODEL=sonnet
+```
+
+This is an opinion, and it is deliberately not the CLI's. `claude -p` with no
+`--model` runs on haiku — measured, not read. That is a sensible default for a
+one-shot prompt and the wrong one for continuing work on a codebase, and it is
+the kind of wrong you do not notice: the turn still answers, plausibly, and
+nothing in the reply mentions which model wrote it.
+
+Two things follow that are worth knowing before they surprise you.
+
+**The model shown in the app is not the model answering your phone.** They are
+separate settings and nothing here can reach the first one. A session sitting on
+opus at the desk still answers a message from Telegram with whatever this
+control plane sends. `/status` prints both, which is why it names them
+separately.
+
+**`/model default` returns to this setting, not to the session's.** There is no
+way to hand the choice back to the app, so "default" means the default here.
+
+Set it empty to pass no `--model` at all and take whatever the CLI does.
+
 ### Optional: keep a navigator and a driver apart
 
 Two sessions working one codebase in one chat is a mess to read on a phone. To split them, give

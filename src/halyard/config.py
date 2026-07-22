@@ -113,6 +113,15 @@ class Settings(BaseSettings):
     #: without waiting for a release, because models ship faster than this does.
     claude_models: str | None = Field(default=None, validation_alias="HALYARD_CLAUDE_MODELS")
 
+    #: What a turn started from a chat runs on before anybody says otherwise.
+    #: Not the CLI's own default, which is haiku: a message sent from a phone
+    #: continues real work in a real codebase, and picking the cheapest model
+    #: for it silently is the kind of default that is only noticed in the
+    #: quality of the answer. Set it empty to pass no `--model` at all.
+    claude_default_model: str = Field(
+        default="sonnet", validation_alias="HALYARD_CLAUDE_DEFAULT_MODEL"
+    )
+
     @model_validator(mode="after")
     def _timeouts_must_be_ordered(self) -> Settings:
         """Refuse to start unless approval < bridge < hook.

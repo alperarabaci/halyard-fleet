@@ -523,11 +523,21 @@ class TelegramChannel:
             setter = self._runner.set_model if what == "model" else self._runner.set_effort
             cleared = value.lower() in ("default", "clear", "reset")
             setter(session_id, None if cleared else value)
-            answer = (
-                f"Cleared. Turns from here will use the session's own {what}."
-                if cleared
-                else f"Turns started from here will use <b>{html.escape(value)}</b>."
-            )
+            if cleared:
+                # Say what it fell back to rather than that it was cleared.
+                # Clearing a model does not hand the choice to the session —
+                # nothing here can reach a session's own setting — it hands it
+                # to whatever this control plane was configured with, and the
+                # difference is a model nobody chose answering for days.
+                model, effort = self._runner.preferences(session_id)
+                back_to = model if what == "model" else effort
+                answer = (
+                    f"Cleared. Turns from here will use <b>{html.escape(back_to)}</b>."
+                    if back_to
+                    else f"Cleared. Turns from here will not set a {what} at all."
+                )
+            else:
+                answer = f"Turns started from here will use <b>{html.escape(value)}</b>."
             await self._say(answer, chat_id, thread_id)
             return
 
@@ -586,7 +596,16 @@ class TelegramChannel:
                 continue
             details = " · ".join(filter(None, [ref.model, ref.effort and f"effort {ref.effort}"]))
             busy = " · ⏳ working" if self._runner and self._runner.busy(ref.session_id) else ""
-            lines.append(f"  {label}\n     {html.escape(details) or 'unknown'}{busy}")
+            lines.append(f"  {label}\n     at the desk: {html.escape(details) or 'unknown'}{busy}")
+            if self._runner is not None:
+                # Not the same thing as the line above, and the two are easy to
+                # confuse into a wrong conclusion. What the app is set to says
+                # nothing about what a message typed here will run on: a session
+                # sitting on opus still answers a phone with whatever this
+                # control plane sends, which is its own default until told.
+                model, effort = self._runner.preferences(ref.session_id)
+                mine = " · ".join(filter(None, [model, effort and f"effort {effort}"]))
+                lines.append(f"     from here: {html.escape(mine) or 'the CLI default'}")
         return lines
 
     async def _say(
