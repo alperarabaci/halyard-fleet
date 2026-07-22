@@ -35,3 +35,7 @@ htmlcov/
 # Design conversation exports (kept locally, not published)
 docs/mobile-agent-control-plane.md
 
+
+# Running log
+halyard.log
+halyard.log.*

@@ -152,7 +152,7 @@ def main() -> int:
     if decision == "allow":
         emit("allow", reason)
     elif decision == "defer":
-        # Halyard is paused: no opinion, so Claude Code asks in the terminal the
+        # Halyard is paused: no opinion, so Claude Code decides on its own the
         # way it would if this hook were not installed. Held to the same
         # narrowness as allow — only the exact word does this.
         #

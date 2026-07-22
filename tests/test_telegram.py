@@ -562,11 +562,16 @@ async def test_pause_closes_the_gate_and_says_so(tmp_path: Path) -> None:
     await channel._handle_message(typed("/pause"))
 
     assert gate.paused is True
-    # It has to say it is not approving anything, because "paused" could be
-    # read as "waved through" — and it has to say the replies stop too, so
-    # silence afterwards does not read as something being broken.
+    # It has to say the replies stop too, so the silence afterwards does not
+    # read as something being broken.
     assert "no approval cards, no replies" in api.sent[0]["text"]
-    assert "auto-approved" in api.sent[0]["text"]
+    # And it has to say who decides instead. This assertion used to require the
+    # words "nothing is being auto-approved", which was measured to be false:
+    # pausing hands the decision to Claude Code, whose own permissions.allow
+    # list then runs matching commands with no prompt at all. Saying otherwise
+    # made pausing sound stricter than it is, in the one message somebody reads
+    # while deciding whether it is safe to walk away.
+    assert "permissions.allow" in api.sent[0]["text"]
     assert AuditAction.GATE_PAUSED in {r.action for r in await sink.read_all()}
 
 
