@@ -20,8 +20,15 @@ class AgentRunner(Protocol):
         """Short identifier, used in audit records."""
         ...
 
-    def options(self) -> dict[str, tuple[tuple[str, ...], bool]]:
+    def options(self, session_id: str | None = None) -> dict[str, tuple[tuple[str, ...], bool]]:
         """What can be chosen here, as {name: (values, whether it is enforced)}.
+
+        `session_id` is optional and a runtime may ignore it. Codex cannot:
+        its effort levels depend on the model, with `ultra` on the two newest
+        and `max` absent from the older ones — measured from the CLI's own
+        catalog. Answering without knowing the session would offer a level
+        that model then refuses, in the one place somebody looks to avoid
+        being refused.
 
         Each runtime answers for itself. The alternative — a list of models kept
         in the channel — would have to be edited every time a runtime is added
