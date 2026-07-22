@@ -806,6 +806,9 @@ class FakeRunner:
         self.efforts: dict[str, str] = {}
         self._works = works
 
+    def options(self) -> dict[str, tuple[tuple[str, ...], bool]]:
+        return {"model": (("opus", "haiku"), False), "effort": (("low", "max"), True)}
+
     def busy(self, session_id: str) -> bool:
         return session_id in self.working
 
@@ -1274,3 +1277,49 @@ def test_a_single_enormous_line_is_still_sent() -> None:
     # Cut anyway: the alternative is not sending it.
     assert len(chunks) == 5
     assert all(len(c) <= 1000 for c in chunks)
+
+
+async def test_options_lists_what_the_runtime_accepts(tmp_path: Path) -> None:
+    """One question, everything answerable.
+
+    Asked from a phone, where the alternative is guessing and paying a round
+    trip for each wrong guess.
+    """
+    channel, api, _, _ = await wired(tmp_path)
+
+    await channel._handle_message(typed_in("/options", NAV_CHAT))
+
+    text = api.sent[-1]["text"]
+    assert "claude-code" in text
+    for value in ("opus", "haiku", "low", "max"):
+        assert value in text
+
+
+async def test_options_says_which_values_are_only_a_hint(tmp_path: Path) -> None:
+    """A model that shipped this morning is not on any list written before it.
+
+    Printing the models as if they were the whole set would make a working
+    name look unavailable, which is the failure this command exists to avoid.
+    """
+    channel, api, _, _ = await wired(tmp_path)
+
+    await channel._handle_message(typed_in("/options", NAV_CHAT))
+
+    text = api.sent[-1]["text"]
+    assert "passed through" in text
+    # Said about models, which are open, and not about effort, which is not.
+    assert text.count("passed through") == 1
+
+
+async def test_options_comes_from_the_runtime_not_from_this_module(tmp_path: Path) -> None:
+    """A second runtime — Codex, whatever follows — needs no change here."""
+    channel, api, runner, _ = await wired(tmp_path)
+    runner.id = "codex"
+    runner.options = lambda: {"model": (("gpt-nitro",), True)}
+
+    await channel._handle_message(typed_in("/options", NAV_CHAT))
+
+    text = api.sent[-1]["text"]
+    assert "codex" in text
+    assert "gpt-nitro" in text
+    assert "passed through" not in text

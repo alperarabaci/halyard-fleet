@@ -268,12 +268,43 @@ Approvals work without this. It only makes the commands discoverable instead of 
 Send BotFather `/setcommands`, choose your bot, and paste:
 
 ```
+chat - Send a message into the session
+options - Every model and effort level you can pick
+model - What answers, for turns sent from here
+effort - How hard it thinks
 status - What is happening right now
 pause - Stop sending here; the terminal asks instead
 resume - Start sending here again
 ```
 
 Typing `/` in the chat then offers them as a menu.
+
+`/options` is the one to remember, because it lists the rest:
+
+```
+claude-code
+
+/model  opus sonnet haiku fable
+  ↳ anything else is passed through and may work.
+
+/effort  low medium high xhigh max
+
+Add default to give a choice back to the session.
+```
+
+Each runtime answers that question for itself, so a runtime added later appears
+there without anything here being edited. The model list is a suggestion rather
+than a gate — a name Halyard has never heard of is still handed to the CLI,
+because a list written months ago has no business refusing a model that shipped
+this morning. Effort is checked, because the CLI documents a closed set and a
+typo would otherwise cost a whole turn to discover.
+
+When a new model appears and you would like it offered by name, say so without
+waiting for a release:
+
+```
+HALYARD_CLAUDE_MODELS=opus,sonnet,haiku,fable,whatever-is-new
+```
 
 ### Optional: keep a navigator and a driver apart
 

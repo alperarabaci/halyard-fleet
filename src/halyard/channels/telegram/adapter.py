@@ -339,6 +339,8 @@ class TelegramChannel:
             )
         elif command in ("model", "effort"):
             await self._choose(command, argument, here, thread)
+        elif command == "options":
+            await self._say(self._options(), here, thread)
         elif command == "status":
             await self._say(await self._status(), here, thread)
         elif command in ("start", "help"):
@@ -348,6 +350,7 @@ class TelegramChannel:
                 "/chat &lt;message&gt; — the same, said explicitly\n"
                 "/model &lt;name&gt; — what answers, for turns sent from here\n"
                 "/effort &lt;level&gt; — how hard it thinks\n"
+                "/options — everything those two accept\n"
                 "/status — what is happening right now\n"
                 "/pause — stop sending here; the terminal asks instead\n"
                 "/resume — start again",
@@ -540,6 +543,31 @@ class TelegramChannel:
             lines.append(f"  from here: <b>{html.escape(chosen)}</b>")
         lines.append(f"\nSet with <code>/{what} &lt;value&gt;</code>, or <code>default</code>.")
         await self._say("\n".join(lines), chat_id, thread_id)
+
+    def _options(self) -> str:
+        """Everything that can be chosen, asked of the runtime rather than known.
+
+        One message, because the question it answers — "what can I even say
+        here?" — is asked from a phone, where reading a manual is not an option
+        and a wrong guess costs a round trip.
+
+        Nothing here is hardcoded in this module. A second runtime shows up in
+        this output by existing, and a model list updated in the environment
+        appears without a release.
+        """
+        if self._runner is None:
+            return "No runner: this control plane cannot start turns."
+
+        lines = [f"<b>{html.escape(self._runner.id)}</b>"]
+        for name, (values, enforced) in self._runner.options().items():
+            shown = " ".join(html.escape(v) for v in values)
+            lines.append(f"\n/{name}  <code>{shown}</code>")
+            if not enforced:
+                # Otherwise a model released after this list was written looks
+                # unavailable, and the honest answer is that it probably works.
+                lines.append("  ↳ anything else is passed through and may work.")
+        lines.append("\nAdd <code>default</code> to give a choice back to the session.")
+        return "\n".join(lines)
 
     async def _describe_seats(self) -> list[str]:
         """One line per configured seat: what it is, and what is answering.

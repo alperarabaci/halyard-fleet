@@ -36,9 +36,15 @@ logger = logging.getLogger(__name__)
 #: approval, which is a human deciding on a phone.
 DEFAULT_TURN_TIMEOUT_SECONDS = 900.0
 
-#: What `--effort` accepts. A closed set, so a typo can be caught here rather
-#: than by a turn that fails a minute later.
+#: What `--effort` accepts. A closed set the CLI documents, so a typo can be
+#: caught here rather than by a turn that fails a minute later.
 EFFORT_LEVELS = ("low", "medium", "high", "xhigh", "max")
+
+#: Model aliases the CLI names. A hint, not a gate — new models ship faster than
+#: this project does, and rejecting one because it is not on a list written
+#: months ago would be worse than passing it through and letting the CLI answer.
+#: Override with HALYARD_CLAUDE_MODELS when something new appears.
+DEFAULT_MODELS = ("opus", "sonnet", "haiku", "fable")
 
 #: Where the CLI usually is when PATH does not have it, which is the common case
 #: for a service started outside a login shell.
@@ -70,7 +76,9 @@ class ClaudeCodeRunner:
         *,
         binary: str | None = None,
         timeout_seconds: float = DEFAULT_TURN_TIMEOUT_SECONDS,
+        models: tuple[str, ...] | None = None,
     ) -> None:
+        self._known_models = models or DEFAULT_MODELS
         self._binary = find_claude_binary(binary)
         self._timeout = timeout_seconds
         self._locks: dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
@@ -91,6 +99,21 @@ class ClaudeCodeRunner:
         reporting plainly rather than discovering it on the first message.
         """
         return self._binary is not None
+
+    def options(self) -> dict[str, tuple[tuple[str, ...], bool]]:
+        """What can be chosen, as {name: (values, whether it is enforced)}.
+
+        The adapter answers for itself so the channel can print it without
+        knowing anything about a runtime. A second adapter — Codex, whatever
+        comes after — replies with its own, and the command that shows this
+        needs no change to cover it.
+
+        Models are a hint: a name not on the list is still passed through,
+        because a list written months ago should not be able to refuse a model
+        that shipped this morning. Effort is enforced, because the CLI
+        documents a closed set.
+        """
+        return {"model": (self._known_models, False), "effort": (EFFORT_LEVELS, True)}
 
     def preferences(self, session_id: str) -> tuple[str | None, str | None]:
         """The model and effort this runner will use for that session, if set."""
