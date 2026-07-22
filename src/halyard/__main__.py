@@ -77,6 +77,8 @@ USAGE = """usage: halyard [command]
   serve         run the control plane
   doctor        check the configuration and say what is wrong with it
   sessions      list the session names this machine can see
+  wire [dir]    put the gate on a project (merges; keeps a backup)
+  unwire [dir]  take it off again, leaving everything else in place
 """
 
 
@@ -101,11 +103,58 @@ def main() -> None:
 
         raise SystemExit(sessions())
 
+    if command in ("wire", "unwire"):
+        from halyard import wiring
+
+        where = Path(args[1]).expanduser() if len(args) > 1 else Path.cwd()
+        if not where.is_dir():
+            print(f"halyard: {where} is not a directory", file=sys.stderr)
+            raise SystemExit(2)
+        action = wiring.wire if command == "wire" else wiring.unwire
+        raise SystemExit(action(where.resolve()))
+
     if command not in ("serve",):
         print(f"halyard: unknown command {command!r}\n\n{USAGE}", file=sys.stderr)
         raise SystemExit(2)
 
     serve()
+
+
+def _announce_the_rules(settings: Settings) -> None:
+    """Say what running this commits you to, every time it starts.
+
+    Not decoration. Each line below is something somebody has already been
+    caught by, and none of them announce themselves at the moment they bite —
+    a denied `ls` looks like a broken tool, a paused gate looks like a closed
+    one, an expired approval looks like a command that hung.
+
+    On startup rather than in the docs alone, because the person who wired this
+    up and the person restarting it three weeks later are the same person with
+    different amounts of memory.
+    """
+    print(
+        f"""
+────────────────────────────────────────────────────────────────────────
+  Halyard is now the gate for every wired project. Three things to know:
+
+  1. A wired project needs this process running.
+     With Halyard down, a Bash command is DENIED — all of them, `ls`
+     included. There is no terminal fallback to approve one with.
+     To hand a project back:  halyard unwire <path>   (keeps a backup)
+
+  2. It is live from the first command. Nothing to arm.
+     Approvals go straight to Telegram. `/pause` stops that — and
+     pausing needs this process running too.
+
+  3. An approval expires after {settings.approval_timeout_seconds}s and is then DENIED.
+     Not left waiting, not approved. A phone with notifications off is
+     the same as saying no.
+
+  `/pause` does not deny anything — it steps aside, and Claude Code's own
+  permissions.allow list then runs matching commands without asking.
+────────────────────────────────────────────────────────────────────────
+"""
+    )
 
 
 def serve() -> None:
@@ -127,6 +176,7 @@ def serve() -> None:
     )
     if settings.log_file is not None:
         logger.info("Logging to %s at %s", settings.log_file.resolve(), settings.log_level)
+    _announce_the_rules(settings)
     if settings.channel.decides_without_a_human:
         logger.warning(
             "Channel %s answers every approval by itself. Nobody is being asked.",

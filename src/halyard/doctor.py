@@ -63,6 +63,27 @@ def _resolved_url(settings_module) -> tuple[str, str]:
     return settings_module.DEFAULT_URL, "the built-in default — nothing is configured"
 
 
+def project_root(directory: Path) -> Path:
+    """Where Claude Code will look for `.claude/settings.json`.
+
+    Not the directory the session is sitting in. Measured: a session opened in
+    a subdirectory picks up hooks from `.claude/` at the **repository root**,
+    and does not when there is no repository — with no `.git` above it, a
+    parent's hooks never fire.
+
+    That distinction is the whole reason this exists. A monorepo where the web
+    app lives under the backend has one `.claude/` at the top gating every
+    session inside it, and a checker that only looked at the session's own
+    directory reported that nothing was gating a project that was fully gated.
+    Being told a gate is missing when it is not is worse than not checking:
+    the obvious response is to go and wire a second one.
+    """
+    for candidate in (directory, *directory.parents):
+        if (candidate / ".git").exists():
+            return candidate
+    return directory
+
+
 def _hook_commands(settings_file: Path, project_dir: Path) -> list[tuple[str, str]]:
     """Every hook command in a settings file, as (event, resolved path)."""
     try:
@@ -100,9 +121,12 @@ def _check_gated_project(role: str, name: str) -> tuple[list[str], int]:
     if not ref.cwd:
         return [f"{WARN}{role}: {name} has no recorded directory"], 0
 
-    project_dir = Path(ref.cwd)
+    session_dir = Path(ref.cwd)
+    project_dir = project_root(session_dir)
     lines.append(f"{OK}{role}: {name}")
-    lines.append(f"        {project_dir}")
+    lines.append(f"        {session_dir}")
+    if project_dir != session_dir:
+        lines.append(f"        gated from the repository root: {project_dir}")
 
     settings_files = [
         project_dir / ".claude" / "settings.json",
