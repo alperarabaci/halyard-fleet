@@ -14,7 +14,7 @@ import pytest
 from halyard.core.audit import AuditAction, AuditLog, AuditRecord, JsonlAuditSink
 from halyard.core.redaction import Redactor
 from halyard.core.registry import SessionRegistry
-from halyard.core.service import MESSAGE_SPLIT_THRESHOLD, MessageRelay
+from halyard.core.service import MessageRelay
 
 SECRET = "hunter2SuperSecretValue"
 
@@ -88,15 +88,16 @@ async def test_the_session_is_observed(tmp_path: Path) -> None:
     assert session.cwd == "/repo"
 
 
-async def test_a_long_reply_goes_as_a_file(tmp_path: Path) -> None:
+async def test_a_long_reply_still_arrives_as_a_message(tmp_path: Path) -> None:
     relay, channel, sink, _ = build(tmp_path)
     await sink.open()
 
-    await say(relay, "x" * (MESSAGE_SPLIT_THRESHOLD + 1))
+    await say(relay, "x" * 9000)
 
-    # Something you want to scroll and search, not reassemble from six bubbles.
-    assert channel.messages == []
-    assert len(channel.documents) == 1
+    # A reply arriving as a file has to be tapped, downloaded and opened, and
+    # reading it where it lands is the entire point. The channel splits it.
+    assert channel.documents == []
+    assert len(channel.messages) == 1
 
 
 # --- secrets ----------------------------------------------------------------

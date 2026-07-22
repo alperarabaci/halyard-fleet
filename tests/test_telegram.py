@@ -1218,3 +1218,59 @@ async def test_a_nonsense_effort_is_refused_before_it_costs_a_turn(tmp_path: Pat
     # minute later.
     assert runner.efforts.get("session-nav") is None
     assert "low medium high" in api.sent[-1]["text"]
+
+
+# --- long replies stay readable ----------------------------------------------
+
+
+async def test_a_long_reply_is_split_across_messages(tmp_path: Path) -> None:
+    channel, api, _, _ = await wired(tmp_path)
+    reply = "\n".join(f"line {n} of a long answer" for n in range(600))
+
+    await channel.send_message("session-nav", reply, Role.NAVIGATOR)
+
+    # Not a .txt: on a phone that has to be tapped, downloaded and opened, and
+    # reading the reply where it lands is the entire point.
+    assert api.documents == []
+    assert len(api.sent) > 1
+    assert all(len(m["text"]) <= cards.MESSAGE_LIMIT for m in api.sent)
+    assert "(1/" in api.sent[0]["text"]
+
+
+async def test_a_short_reply_is_one_message_with_no_marker(tmp_path: Path) -> None:
+    channel, api, _, _ = await wired(tmp_path)
+
+    await channel.send_message("session-nav", "done", Role.NAVIGATOR)
+
+    assert len(api.sent) == 1
+    assert api.sent[0]["text"] == "done"
+
+
+async def test_a_reply_that_looks_like_markup_survives(tmp_path: Path) -> None:
+    channel, api, _, _ = await wired(tmp_path)
+
+    await channel.send_message("session-nav", "wrap it in a <div> & move on", Role.NAVIGATOR)
+
+    # Sent as HTML, an agent mentioning a tag makes Telegram refuse the whole
+    # message — and the reply disappears with only a log line to show for it.
+    assert "&lt;div&gt;" in api.sent[0]["text"]
+    assert "&amp;" in api.sent[0]["text"]
+
+
+def test_splitting_prefers_line_boundaries() -> None:
+    text = "\n".join("x" * 100 for _ in range(100))
+
+    chunks = cards.split_for_telegram(text, limit=1000)
+
+    assert len(chunks) > 1
+    # A code block cut mid-token is harder to read than one cut between lines.
+    assert all(not c.startswith("x" * 100 + "x") for c in chunks)
+    assert "".join(c.replace("\n", "") for c in chunks) == text.replace("\n", "")
+
+
+def test_a_single_enormous_line_is_still_sent() -> None:
+    chunks = cards.split_for_telegram("y" * 5000, limit=1000)
+
+    # Cut anyway: the alternative is not sending it.
+    assert len(chunks) == 5
+    assert all(len(c) <= 1000 for c in chunks)
