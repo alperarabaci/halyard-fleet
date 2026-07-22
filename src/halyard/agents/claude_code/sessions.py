@@ -42,6 +42,11 @@ class SessionRef:
     #: run from somewhere else — which is what a control plane running from its
     #: own repository always is.
     cwd: str | None
+    #: What is answering, and how hard it is thinking. Worth showing: the two
+    #: sessions in a navigator/driver pair are usually deliberately different,
+    #: and which one you are talking to is otherwise invisible from a phone.
+    model: str | None = None
+    effort: str | None = None
 
 
 def _read_tail(transcript: Path) -> bytes | None:
@@ -68,23 +73,34 @@ def describe(transcript: Path) -> SessionRef | None:
     if tail is None:
         return None
 
-    custom = generated = cwd = None
+    custom = generated = cwd = model = effort = None
     for raw in tail.split(b"\n"):
-        if b"-title" not in raw and b'"cwd"' not in raw:
-            continue
         try:
             record = json.loads(raw)
         except Exception:
             continue
-        if record.get("type") == "custom-title" and record.get("customTitle"):
+        kind = record.get("type")
+        if kind == "custom-title" and record.get("customTitle"):
             custom = str(record["customTitle"])
-        elif record.get("type") == "ai-title" and record.get("aiTitle"):
+        elif kind == "ai-title" and record.get("aiTitle"):
             generated = str(record["aiTitle"])
         if record.get("cwd"):
             cwd = str(record["cwd"])
+        # A dict in a hook payload, a plain string in a transcript. Same
+        # value, two shapes, and guessing one of them reads as "no effort set".
+        raw_effort = record.get("effort")
+        if isinstance(raw_effort, dict) and raw_effort.get("level"):
+            effort = str(raw_effort["level"])
+        elif isinstance(raw_effort, str) and raw_effort:
+            effort = raw_effort
+        message = record.get("message")
+        if isinstance(message, dict) and message.get("model"):
+            model = str(message["model"])
 
     name = custom or generated
-    return SessionRef(session_id=transcript.stem, name=name, cwd=cwd) if name else None
+    if not name:
+        return None
+    return SessionRef(session_id=transcript.stem, name=name, cwd=cwd, model=model, effort=effort)
 
 
 def title_of(transcript: Path) -> str | None:
