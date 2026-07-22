@@ -46,6 +46,16 @@ EFFORT_LEVELS = ("low", "medium", "high", "xhigh", "max")
 #: Override with HALYARD_CLAUDE_MODELS when something new appears.
 DEFAULT_MODELS = ("opus", "sonnet", "haiku", "fable")
 
+#: What a turn runs on when nobody has said otherwise.
+#:
+#: An opinion, and deliberately not the CLI's. `claude -p` with no `--model`
+#: uses haiku — measured, not read — which is a fine default for a one-shot
+#: prompt and the wrong one for continuing work on a real codebase. Left alone,
+#: every message sent from a phone would quietly run on the cheapest model
+#: available while the session it landed in was set to something else, and
+#: nothing in the reply would say so.
+DEFAULT_MODEL = "sonnet"
+
 #: Where the CLI usually is when PATH does not have it, which is the common case
 #: for a service started outside a login shell.
 _FALLBACK_BINARIES = (
@@ -77,8 +87,10 @@ class ClaudeCodeRunner:
         binary: str | None = None,
         timeout_seconds: float = DEFAULT_TURN_TIMEOUT_SECONDS,
         models: tuple[str, ...] | None = None,
+        default_model: str | None = DEFAULT_MODEL,
     ) -> None:
         self._known_models = models or DEFAULT_MODELS
+        self._default_model = default_model or None
         self._binary = find_claude_binary(binary)
         self._timeout = timeout_seconds
         self._locks: dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
@@ -116,8 +128,14 @@ class ClaudeCodeRunner:
         return {"model": (self._known_models, False), "effort": (EFFORT_LEVELS, True)}
 
     def preferences(self, session_id: str) -> tuple[str | None, str | None]:
-        """The model and effort this runner will use for that session, if set."""
-        return self._models.get(session_id), self._efforts.get(session_id)
+        """The model and effort this runner will use for that session.
+
+        What will actually happen, not what was typed — so the model reported
+        here is the configured default until somebody overrides it. Reporting
+        the override alone would print nothing in the ordinary case and leave
+        the real answer to be guessed.
+        """
+        return self._models.get(session_id) or self._default_model, self._efforts.get(session_id)
 
     def set_model(self, session_id: str, model: str | None) -> None:
         """Choose the model for turns started from a channel. None clears it."""
@@ -168,7 +186,7 @@ class ClaudeCodeRunner:
     async def _run(self, session_id: str, text: str, cwd: str | None) -> bool:
         try:
             arguments = [self._binary, "-p", "--resume", session_id]
-            if model := self._models.get(session_id):
+            if model := self._models.get(session_id) or self._default_model:
                 arguments += ["--model", model]
             if effort := self._efforts.get(session_id):
                 arguments += ["--effort", effort]

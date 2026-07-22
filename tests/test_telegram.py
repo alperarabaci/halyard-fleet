@@ -798,7 +798,8 @@ class FakeRunner:
     id = "claude-code"
     available = True
 
-    def __init__(self, *, works: bool = True) -> None:
+    def __init__(self, *, works: bool = True, default_model: str | None = "sonnet") -> None:
+        self.default_model = default_model
         self.sent: list[tuple[str, str]] = []
         self.directories: list[str | None] = []
         self.working: set[str] = set()
@@ -813,7 +814,7 @@ class FakeRunner:
         return session_id in self.working
 
     def preferences(self, session_id: str) -> tuple[str | None, str | None]:
-        return self.models.get(session_id), self.efforts.get(session_id)
+        return self.models.get(session_id) or self.default_model, self.efforts.get(session_id)
 
     def set_model(self, session_id: str, model: str | None) -> None:
         if model:
@@ -1323,3 +1324,46 @@ async def test_options_comes_from_the_runtime_not_from_this_module(tmp_path: Pat
     assert "codex" in text
     assert "gpt-nitro" in text
     assert "passed through" not in text
+
+
+async def test_clearing_a_model_names_what_it_fell_back_to(tmp_path: Path) -> None:
+    """ "Cleared" alone leaves the real answer to be guessed.
+
+    And the guess people make — that it went back to whatever the app is set
+    to — is wrong. Nothing here can reach that. It went to this control plane's
+    own default, and a model nobody chose could otherwise answer for days.
+    """
+    channel, api, _, _ = await wired(tmp_path)
+
+    await channel._handle_message(typed_in("/model opus", NAV_CHAT))
+    await channel._handle_message(typed_in("/model default", NAV_CHAT))
+
+    text = api.sent[-1]["text"]
+    assert "sonnet" in text
+    assert "the session's own" not in text
+
+
+async def test_status_separates_the_desk_from_the_phone(tmp_path: Path, monkeypatch) -> None:
+    """Two different settings that are easy to read as one.
+
+    A session on opus at the desk still answers a message from here with
+    whatever this control plane sends. Printing one number invites the wrong
+    conclusion right before an expensive instruction is sent.
+    """
+    from halyard.agents.claude_code import SessionRef
+
+    channel, api, _runner, _ = await wired(tmp_path)
+    channel._session_names = {Role.NAVIGATOR: "nav"}
+    monkeypatch.setattr(
+        "halyard.channels.telegram.adapter.find_session",
+        lambda name: SessionRef("session-nav", "nav", "/repo", "claude-opus-4-8", "xhigh"),
+    )
+
+    await channel._handle_message(typed_in("/status", NAV_CHAT))
+
+    text = api.sent[-1]["text"]
+    # The app is on opus; a message from here is not.
+    assert "claude-opus-4-8" in text
+    assert "at the desk" in text
+    assert "from here" in text
+    assert "sonnet" in text
