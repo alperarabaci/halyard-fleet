@@ -18,6 +18,7 @@ from __future__ import annotations
 import json
 import logging
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -47,6 +48,9 @@ class SessionRef:
     #: and which one you are talking to is otherwise invisible from a phone.
     model: str | None = None
     effort: str | None = None
+    #: When the session began. Hook configuration is snapshotted at that
+    #: moment, so settings changed afterwards have not taken effect yet.
+    started_at: datetime | None = None
 
 
 def _read_tail(transcript: Path) -> bytes | None:
@@ -100,13 +104,44 @@ def describe(transcript: Path) -> SessionRef | None:
     name = custom or generated
     if not name:
         return None
-    return SessionRef(session_id=transcript.stem, name=name, cwd=cwd, model=model, effort=effort)
+    return SessionRef(
+        session_id=transcript.stem,
+        name=name,
+        cwd=cwd,
+        model=model,
+        effort=effort,
+        started_at=started_at(transcript),
+    )
 
 
 def title_of(transcript: Path) -> str | None:
     """The name shown on a session, or None if it has none or cannot be read."""
     ref = describe(transcript)
     return ref.name if ref else None
+
+
+def started_at(transcript: Path) -> datetime | None:
+    """When a session began, from the first record that carries a time.
+
+    Read from the head rather than from the file's creation time, which does
+    not survive a copy between machines and is not what "this session started"
+    means anyway.
+    """
+    try:
+        with transcript.open(encoding="utf-8", errors="ignore") as handle:
+            for _ in range(50):
+                line = handle.readline()
+                if not line:
+                    break
+                try:
+                    stamp = json.loads(line).get("timestamp")
+                except Exception:
+                    continue
+                if stamp:
+                    return datetime.fromisoformat(str(stamp).replace("Z", "+00:00"))
+    except OSError:
+        return None
+    return None
 
 
 def find_session(name: str, *, root: Path | None = None) -> SessionRef | None:

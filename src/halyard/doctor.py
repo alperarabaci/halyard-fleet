@@ -63,6 +63,91 @@ def _resolved_url(settings_module) -> tuple[str, str]:
     return settings_module.DEFAULT_URL, "the built-in default — nothing is configured"
 
 
+def _hook_commands(settings_file: Path, project_dir: Path) -> list[tuple[str, str]]:
+    """Every hook command in a settings file, as (event, resolved path)."""
+    try:
+        config = json.loads(settings_file.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    found: list[tuple[str, str]] = []
+    for event, groups in (config.get("hooks") or {}).items():
+        for group in groups if isinstance(groups, list) else []:
+            for hook in (group or {}).get("hooks") or []:
+                command = hook.get("command")
+                if not isinstance(command, str):
+                    continue
+                resolved = command.replace("$CLAUDE_PROJECT_DIR", str(project_dir)).replace(
+                    "${CLAUDE_PROJECT_DIR}", str(project_dir)
+                )
+                found.append((event, resolved.split()[0] if resolved else ""))
+    return found
+
+
+def _check_gated_project(role: str, name: str) -> tuple[list[str], int]:
+    """Check the hooks wired into the project a named session works in.
+
+    This is the check that would have caught an afternoon: settings copied from
+    one machine to another still pointed at the first machine's paths, so the
+    wrapper denied every command and nothing in the control plane knew why —
+    the hook never reached it.
+    """
+    from halyard.agents.claude_code import find_session
+
+    lines: list[str] = []
+    ref = find_session(name)
+    if ref is None:
+        return [f"{FAIL}{role}: no session named {name!r} on this machine"], 1
+    if not ref.cwd:
+        return [f"{WARN}{role}: {name} has no recorded directory"], 0
+
+    project_dir = Path(ref.cwd)
+    lines.append(f"{OK}{role}: {name}")
+    lines.append(f"        {project_dir}")
+
+    settings_files = [
+        project_dir / ".claude" / "settings.json",
+        project_dir / ".claude" / "settings.local.json",
+    ]
+    present = [f for f in settings_files if f.exists()]
+    if not present:
+        lines.append(f"{FAIL}        no .claude/settings.json — nothing is gating this project")
+        return lines, 1
+
+    problems = 0
+    newest_settings = max(f.stat().st_mtime for f in present)
+    seen_events: set[str] = set()
+    for settings_file in present:
+        for event, command in _hook_commands(settings_file, project_dir):
+            seen_events.add(event)
+            path = Path(command)
+            if not path.exists():
+                problems += 1
+                lines.append(f"{FAIL}        {event} → {command}")
+                lines.append("                that path does not exist on this machine")
+            elif not path.stat().st_mode & 0o111:
+                problems += 1
+                lines.append(f"{FAIL}        {event} → {command} is not executable")
+            else:
+                elsewhere = path.resolve().parent != BRIDGE_DIR.resolve()
+                note = "  (a different Halyard install)" if elsewhere else ""
+                lines.append(f"{OK}        {event} → {path.name}{note}")
+
+    if "PreToolUse" not in seen_events:
+        problems += 1
+        lines.append(f"{FAIL}        no PreToolUse hook — approvals will never be asked for")
+    if "Stop" not in seen_events:
+        lines.append(f"{WARN}        no Stop hook — replies will not reach the channel")
+
+    if ref.started_at and ref.started_at.timestamp() < newest_settings:
+        # With the date, because the two are often a day apart and bare
+        # clock times then read as though the warning had it backwards.
+        changed = datetime.fromtimestamp(newest_settings).strftime("%b %d %H:%M")
+        began = ref.started_at.astimezone().strftime("%b %d %H:%M")
+        lines.append(f"{WARN}        settings changed at {changed}, session started at {began}")
+        lines.append("                hooks are read at startup — restart it to pick them up")
+    return lines, problems
+
+
 def run() -> int:
     """Check the chain end to end. Returns a process exit code."""
     problems = 0
@@ -114,6 +199,25 @@ def run() -> int:
         print(f"{WARN}the running control plane answers approvals by itself")
 
     print()
+    seats = []
+    try:
+        settings_for_seats = Settings()
+        seats = [
+            ("navigator", settings_for_seats.navigator_session),
+            ("driver", settings_for_seats.driver_session),
+        ]
+    except ValidationError:
+        pass
+    for role, name in seats:
+        if not name:
+            continue
+        lines, found = _check_gated_project(role, name)
+        problems += found
+        for line in lines:
+            print(line)
+    if any(name for _, name in seats):
+        print()
+
     for name, required in (("hook.sh", True), ("hook_bridge.py", True), ("relay.py", False)):
         path = BRIDGE_DIR / name
         if not path.exists():

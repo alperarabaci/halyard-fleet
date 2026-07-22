@@ -8,8 +8,10 @@ refusing you.
 
 from __future__ import annotations
 
+import json
 import subprocess
 import sys
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -242,3 +244,123 @@ def test_serving_is_the_default_and_can_be_named(
     entry.main()
 
     assert started == [True]
+
+
+# --- checking the projects the hooks are wired into ---------------------------
+#
+# This is the check that would have caught an afternoon: settings copied from
+# one machine to another still named the first machine's paths, so the wrapper
+# denied every command and the control plane never heard about any of it.
+
+
+def gated_project(tmp_path: Path, hooks: dict, *, bridge_dir: Path | None = None) -> Path:
+    project = tmp_path / "repo"
+    (project / ".claude").mkdir(parents=True)
+    (project / ".claude" / "settings.local.json").write_text(
+        json.dumps({"hooks": hooks}), encoding="utf-8"
+    )
+    return project
+
+
+def a_session(project: Path, *, started: datetime | None = None):
+    from halyard.agents.claude_code import SessionRef
+
+    return SessionRef(
+        session_id="sid",
+        name="a-session",
+        cwd=str(project),
+        started_at=started or datetime.now(UTC),
+    )
+
+
+def hook_entry(command: str) -> list[dict]:
+    return [{"hooks": [{"type": "command", "command": command}]}]
+
+
+def test_a_hook_path_from_another_machine_is_reported(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from halyard import doctor
+
+    project = gated_project(
+        tmp_path,
+        {"PreToolUse": hook_entry("/Users/someone-else/halyard-fleet/bridge/hook.sh")},
+    )
+    monkeypatch.setattr(doctor, "find_session", lambda name: a_session(project), raising=False)
+    monkeypatch.setattr("halyard.agents.claude_code.find_session", lambda name: a_session(project))
+
+    lines, problems = doctor._check_gated_project("navigator", "a-session")
+
+    assert problems >= 1
+    assert any("does not exist on this machine" in line for line in lines)
+
+
+def test_a_project_with_no_settings_is_reported(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from halyard import doctor
+
+    project = tmp_path / "repo"
+    project.mkdir()
+    monkeypatch.setattr("halyard.agents.claude_code.find_session", lambda name: a_session(project))
+
+    lines, problems = doctor._check_gated_project("navigator", "a-session")
+
+    assert problems == 1
+    assert any("nothing is gating this project" in line for line in lines)
+
+
+def test_a_project_without_a_pretooluse_hook_is_reported(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from halyard import doctor
+
+    project = gated_project(tmp_path, {"Stop": hook_entry(str(BRIDGE_DIR / "relay.py"))})
+    monkeypatch.setattr("halyard.agents.claude_code.find_session", lambda name: a_session(project))
+
+    lines, problems = doctor._check_gated_project("navigator", "a-session")
+
+    assert problems >= 1
+    assert any("approvals will never be asked for" in line for line in lines)
+
+
+def test_a_session_older_than_its_settings_is_flagged(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from halyard import doctor
+
+    project = gated_project(tmp_path, {"PreToolUse": hook_entry(str(BRIDGE_DIR / "hook.sh"))})
+    stale = datetime.now(UTC) - timedelta(days=3)
+    monkeypatch.setattr(
+        "halyard.agents.claude_code.find_session", lambda name: a_session(project, started=stale)
+    )
+
+    lines, problems = doctor._check_gated_project("navigator", "a-session")
+
+    # Hooks are snapshotted at startup, so a session older than the settings is
+    # running with the previous ones and nothing says so anywhere else.
+    assert problems == 0
+    assert any("restart it" in line for line in lines)
+
+
+def test_a_correctly_wired_project_passes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from halyard import doctor
+
+    project = gated_project(
+        tmp_path,
+        {
+            "PreToolUse": hook_entry("$CLAUDE_PROJECT_DIR/../bridge/hook.sh"),
+            "Stop": hook_entry(str(BRIDGE_DIR / "relay.py")),
+        },
+    )
+    # $CLAUDE_PROJECT_DIR is expanded before the path is checked.
+    (tmp_path / "bridge").mkdir(exist_ok=True)
+    wrapper = tmp_path / "bridge" / "hook.sh"
+    wrapper.write_text("#!/bin/sh\n")
+    wrapper.chmod(0o755)
+    monkeypatch.setattr("halyard.agents.claude_code.find_session", lambda name: a_session(project))
+
+    lines, problems = doctor._check_gated_project("navigator", "a-session")
+
+    assert problems == 0
+    assert any("PreToolUse" in line for line in lines)
