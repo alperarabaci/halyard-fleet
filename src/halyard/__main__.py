@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import logging
 import sys
+from logging.handlers import RotatingFileHandler
+from pathlib import Path
 
 import uvicorn
 
@@ -12,7 +14,13 @@ from halyard.config import Settings
 from halyard.core.redaction import SecretRedactingFilter
 
 
-def configure_logging() -> None:
+def configure_logging(
+    *,
+    level: str = "INFO",
+    log_file: Path | None = None,
+    max_bytes: int = 5_000_000,
+    backups: int = 5,
+) -> None:
     """Set up logging so a credential cannot get out through it.
 
     Two layers, because one is not enough. httpx logs every request line at
@@ -24,16 +32,41 @@ def configure_logging() -> None:
     Quieting httpx removes the known leak. The filter sits on the handler, so
     it covers every logger that reaches it, and is there for the next library
     that decides a URL is worth printing.
+
+    **The file matters as much as the console.** A control plane is a service:
+    it runs for days and nobody is watching the terminal at the moment
+    something goes wrong. Without a file, working out what happened means
+    reproducing it, and some of the things worth diagnosing are exactly the
+    ones you cannot reproduce on demand. Rotation is there so an always-on
+    service cannot fill a disk.
+
+    A file that cannot be opened is a warning, not a failure. Losing the log is
+    bad; refusing to run the gate because of it would be worse.
     """
+    handlers: list[logging.Handler] = [logging.StreamHandler()]
+    if log_file is not None:
+        try:
+            log_file.parent.mkdir(parents=True, exist_ok=True)
+            handlers.append(
+                RotatingFileHandler(
+                    log_file, maxBytes=max_bytes, backupCount=backups, encoding="utf-8"
+                )
+            )
+        except OSError as error:
+            print(f"halyard: cannot write to {log_file} ({error}); logging to console only")
+
     logging.basicConfig(
-        level=logging.INFO,
+        level=getattr(logging, level.upper(), logging.INFO),
         format="%(asctime)s %(levelname)-8s %(name)s: %(message)s",
+        handlers=handlers,
+        force=True,
     )
     logging.getLogger("httpx").setLevel(logging.WARNING)
     logging.getLogger("httpcore").setLevel(logging.WARNING)
 
-    # On the handler rather than the root logger: a filter on a logger does not
-    # see records that propagate up to it from elsewhere.
+    # On each handler rather than the root logger: a filter on a logger does
+    # not see records that propagate up to it from elsewhere. Every handler
+    # needs its own, or the file gets the unredacted copy.
     for handler in logging.getLogger().handlers:
         handler.addFilter(SecretRedactingFilter())
 
@@ -76,8 +109,15 @@ def main() -> None:
 
 
 def serve() -> None:
-    configure_logging()
+    # Settings first: the log file and level are read from them, and a
+    # configuration error is readable on its own without a logger set up.
     settings = Settings()
+    configure_logging(
+        level=settings.log_level,
+        log_file=settings.log_file,
+        max_bytes=settings.log_max_bytes,
+        backups=settings.log_backups,
+    )
     logger = logging.getLogger("halyard")
     logger.info(
         "Halyard Fleet starting on %s for project %r via channel %s",
@@ -85,6 +125,8 @@ def serve() -> None:
         settings.project_name,
         settings.channel.value,
     )
+    if settings.log_file is not None:
+        logger.info("Logging to %s at %s", settings.log_file.resolve(), settings.log_level)
     if settings.channel.decides_without_a_human:
         logger.warning(
             "Channel %s answers every approval by itself. Nobody is being asked.",

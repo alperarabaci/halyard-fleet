@@ -170,6 +170,29 @@ Use an absolute path when the project being gated is not Halyard itself — `$CL
 points at whichever repository the session is in. Put it in `.claude/settings.local.json`, which is
 gitignored, so a machine-specific path does not break a teammate's checkout.
 
+> **Merge it into that file. Do not replace the file.**
+>
+> `settings.local.json` is not yours — Claude Code writes to it too. Every time you answer a
+> permission prompt with "don't ask again", the rule is appended to a `permissions.allow` list
+> that lives in exactly this file. Pasting the block above over the top deletes that list, and
+> nothing announces it: approvals still work, the hook still fires, and the only symptom is that
+> the session starts asking about commands it stopped asking about months ago.
+>
+> It is also gitignored, so there is no history to recover it from. Copy the file somewhere first.
+>
+> ```bash
+> cp .claude/settings.local.json .claude/settings.local.json.bak
+> ```
+>
+> The result should have both keys side by side:
+>
+> ```json
+> {
+>   "hooks": { "PreToolUse": [ ... ], "Stop": [ ... ] },
+>   "permissions": { "allow": [ "Bash(uv run *)", "..." ] }
+> }
+> ```
+
 **Claude Code snapshots hook configuration at startup.** Editing settings mid-session has no
 effect; restart the session. Script contents are read on every call, so those can change freely.
 
@@ -199,6 +222,15 @@ The consequence to plan for: if the control plane is not reachable, every matchi
 denied, and there is no terminal fallback to approve it with. That is the fail-closed guarantee
 working correctly, and it means the recovery path is fixing the control plane — not clicking
 through a prompt.
+
+**`/pause` is not that.** Pausing does not deny anything; it takes Halyard out of the loop. The
+hook returns no opinion, and Claude Code then decides exactly as it would if the hook had never
+been installed — which means its own `permissions.allow` list decides. Anything that list covers
+runs with no prompt, no card, and no audit entry, and everything else it asks you at the desk.
+
+Both halves of that are worth knowing. It is why pausing from your phone is safe to do while you
+are away from the machine, and it is why a long `permissions.allow` list means pausing lets more
+through than you might picture.
 
 Two practical habits follow:
 
@@ -273,7 +305,7 @@ options - Every model and effort level you can pick
 model - What answers, for turns sent from here
 effort - How hard it thinks
 status - What is happening right now
-pause - Stop sending here; the terminal asks instead
+pause - Step out of the way; Claude Code decides on its own
 resume - Start sending here again
 ```
 

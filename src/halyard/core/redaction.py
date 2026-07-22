@@ -106,6 +106,12 @@ DEFAULT_RULES: tuple[RedactionRule, ...] = (
     # that logs a request line. Keep the numeric bot id, which identifies the
     # bot without granting anything, and drop the half that is the secret.
     _rule("telegram_bot_token", r"(bot\d{5,12}):[A-Za-z0-9_-]{30,}", rf"\g<1>:{MASK}"),
+    # The same token without the URL around it. The rule above is anchored on
+    # `bot` because that is how the known leak looked — httpx printing a request
+    # line — and a bare token written into a log message would have walked past
+    # it. That mattered less when logs only scrolled through a terminal; they
+    # are written to a file now, so a miss here is a secret left on disk.
+    _rule("telegram_bot_token", r"\b(\d{8,12}):AA[A-Za-z0-9_-]{30,}", rf"\g<1>:{MASK}"),
     _rule("github_token", r"\b(gh[pousr]_)[A-Za-z0-9]{16,}", rf"\g<1>{MASK}"),
     _rule("openai_key", r"\bsk-(?:proj-)?[A-Za-z0-9_\-]{16,}", f"sk-{MASK}"),
     _rule("slack_token", r"\bxox[baprs]-[A-Za-z0-9\-]{10,}", f"xox-{MASK}"),

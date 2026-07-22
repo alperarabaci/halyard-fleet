@@ -219,12 +219,40 @@ Consequences for Telegram's 4,096-character limit:
 | Exit code | stdout | Observed result |
 |---|---|---|
 | 0 | valid decision JSON | Decision applied. |
-| 0 | empty | Tool **runs** (no opinion). |
-| 0 | malformed / not JSON | Tool **runs**. Garbage is treated as no opinion. |
-| 1 | anything | Tool **runs**. stderr shown as a non-blocking hook error notice. |
+| 0 | empty | **No opinion** — Claude Code's own permission flow decides. |
+| 0 | malformed / not JSON | **No opinion**. Garbage is treated the same way. |
+| 1 | anything | **No opinion**. stderr shown as a non-blocking hook error notice. |
 | 2 | anything | Tool **blocked**. stderr shown, prefixed with `PreToolUse:Bash hook error:`. |
 
-Exit 2 is the only failure mode that denies. Everything else lets the command through.
+Exit 2 is the only failure mode that denies. Everything else hands the decision back.
+
+> **Corrected 2026-07-22.** Those three rows read *"Tool **runs**"* for two days, written as an
+> unconditional rule. It is not one, and the difference is load-bearing — it is what `/pause`
+> rests on.
+>
+> No opinion returns the decision to Claude Code's own permission flow. What that flow does next
+> depends on `permissions.allow` in `.claude/settings.local.json`: a command it covers runs
+> silently, one it does not is put to the user. The original measurement happened to use a command
+> that was already permitted, watched it run, and wrote that down as the mechanism.
+>
+> Re-measured with three sessions differing only in the hook, each asked to run `touch ran.proof`:
+>
+> | Setup | Result |
+> |---|---|
+> | hook returning exit 0 with empty stdout | did not run |
+> | no hook at all | did not run — **indistinguishable from the row above** |
+> | hook returning an explicit deny | did not run, with the deny reason shown |
+>
+> A no-opinion hook and no hook are the same thing. In that same setup `echo` *did* run while
+> `touch` did not, which is the allow list deciding rather than the hook.
+>
+> The lesson is about measuring, not about the feature. One command is not a sample: anything
+> that falls through to somebody else's policy has to be tested against a case that policy
+> **rejects**, or you have measured the policy and named it the mechanism.
+
+**Fail-closed still holds where it matters.** None of the above changes what happens when the
+control plane cannot be reached — the bridge prints an explicit deny, which is a decision and not a
+fall-through. What changed is the description of the *deliberate* no-opinion path.
 
 **This is the reason the bridge cannot be naively "fail closed by crashing."** A Python traceback
 exits 1 and fails open. Therefore:

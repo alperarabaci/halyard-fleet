@@ -66,6 +66,20 @@ class Settings(BaseSettings):
     db_path: Path = Field(default=Path("./halyard.db"), validation_alias="HALYARD_DB_PATH")
     audit_log: Path = Field(default=Path("./audit.jsonl"), validation_alias="HALYARD_AUDIT_LOG")
 
+    #: Where the running log is kept, as opposed to the audit log beside it.
+    #: They answer different questions and neither replaces the other: the audit
+    #: log records decisions, this one records what the process was doing when
+    #: it made them — and, more to the point, what it was doing when it made
+    #: none. On by default, because the moment you want it is always in the past.
+    #: Set it empty to log only to the console.
+    log_file: Path | None = Field(
+        default=Path("./halyard.log"), validation_alias="HALYARD_LOG_FILE"
+    )
+    log_level: str = Field(default="INFO", validation_alias="HALYARD_LOG_LEVEL")
+    #: Rotation, so an always-on service cannot fill a disk.
+    log_max_bytes: int = Field(default=5_000_000, validation_alias="HALYARD_LOG_MAX_BYTES", gt=0)
+    log_backups: int = Field(default=5, validation_alias="HALYARD_LOG_BACKUPS", ge=0)
+
     channel: ChannelKind = Field(validation_alias="HALYARD_CHANNEL")
 
     project_name: str = Field(default="unknown", validation_alias="CLAUDE_PROJECT_NAME")
@@ -148,6 +162,30 @@ class Settings(BaseSettings):
                 "so an unanswered request would run instead of being denied."
             )
         return self
+
+    @field_validator("log_level", mode="before")
+    @classmethod
+    def _known_level(cls, value: object) -> object:
+        """Refuse a level that does not exist rather than quietly using INFO.
+
+        A typo here is invisible in the worst way: `HALYARD_LOG_LEVEL=DEBUGG`
+        would leave you reading an INFO log while believing you had turned
+        debugging on, and concluding from its silence that nothing happened.
+        """
+        if isinstance(value, str):
+            level = value.strip().upper()
+            if level not in ("CRITICAL", "ERROR", "WARNING", "INFO", "DEBUG"):
+                raise ValueError(
+                    f"HALYARD_LOG_LEVEL={value!r} is not a level. "
+                    "Use one of CRITICAL, ERROR, WARNING, INFO, DEBUG."
+                )
+            return level
+        return value
+
+    @field_validator("log_file", mode="before")
+    @classmethod
+    def _empty_means_console_only(cls, value: object) -> object:
+        return None if isinstance(value, str) and not value.strip() else value
 
     @field_validator("telegram_authorized_user_ids", mode="before")
     @classmethod

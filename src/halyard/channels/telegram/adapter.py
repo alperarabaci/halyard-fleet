@@ -317,9 +317,11 @@ class TelegramChannel:
                 await self._record(gate_changed(paused=True, actor=actor, project=self._project))
             await self._say(
                 (
-                    "⏸ <b>Paused.</b> Nothing more will be sent here — no approval "
-                    "cards, no replies. Claude Code asks in the terminal instead, "
-                    "and nothing is being auto-approved."
+                    "⏸ <b>Paused.</b> Halyard steps out of the way — no approval "
+                    "cards, no replies. Claude Code decides on its own again, "
+                    "exactly as if the hook were not installed: whatever its "
+                    "<code>permissions.allow</code> list covers runs without "
+                    "asking anybody, and the rest it asks you at the desk."
                 )
                 if changed
                 else "⏸ Already paused.",
@@ -352,7 +354,7 @@ class TelegramChannel:
                 "/effort &lt;level&gt; — how hard it thinks\n"
                 "/options — everything those two accept\n"
                 "/status — what is happening right now\n"
-                "/pause — stop sending here; the terminal asks instead\n"
+                "/pause — step out of the way; Claude Code decides on its own\n"
                 "/resume — start again",
                 here,
                 thread,

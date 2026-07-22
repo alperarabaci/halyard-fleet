@@ -75,8 +75,8 @@ class ApprovalResponse(BaseModel):
     """What the bridge turns into a hook decision.
 
     Three values, where an approval only ever has two. `defer` means no
-    approval happened at all — the gate is paused and Claude Code should ask in
-    the terminal instead.
+    approval happened at all — the gate is paused, so Halyard steps aside and
+    Claude Code decides on its own, exactly as if the hook were not installed.
     """
 
     decision: BridgeDecision
@@ -113,8 +113,9 @@ class HealthResponse(BaseModel):
     #: False when this control plane cannot send messages into a session —
     #: it has no claude CLI, which is what a container looks like.
     can_send_messages: bool = False
-    #: True while approvals are not being relayed — the terminal is asking
-    #: instead. Visible from outside for the same reason as the field below.
+    #: True while approvals are not being relayed — Halyard has stepped aside
+    #: and Claude Code is deciding on its own. Visible from outside for the same
+    #: reason as the field below.
     paused: bool = False
     #: True when the configured channel answers by itself. Surfaced so it is
     #: possible to notice from outside that nobody is actually being asked.
