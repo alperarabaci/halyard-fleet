@@ -108,6 +108,11 @@ class Settings(BaseSettings):
     )
     driver_session: str | None = Field(default=None, validation_alias="HALYARD_DRIVER_SESSION")
 
+    #: Model names offered by /options, comma separated. Only a suggestion —
+    #: anything is passed through to the CLI — but worth being able to update
+    #: without waiting for a release, because models ship faster than this does.
+    claude_models: str | None = Field(default=None, validation_alias="HALYARD_CLAUDE_MODELS")
+
     @model_validator(mode="after")
     def _timeouts_must_be_ordered(self) -> Settings:
         """Refuse to start unless approval < bridge < hook.

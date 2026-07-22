@@ -20,6 +20,20 @@ class AgentRunner(Protocol):
         """Short identifier, used in audit records."""
         ...
 
+    def options(self) -> dict[str, tuple[tuple[str, ...], bool]]:
+        """What can be chosen here, as {name: (values, whether it is enforced)}.
+
+        Each runtime answers for itself. The alternative — a list of models kept
+        in the channel — would have to be edited every time a runtime is added
+        or a model ships, and would be wrong in a way nobody notices until a
+        setting is silently ignored.
+
+        An unenforced list is a hint: values outside it are still passed
+        through. Say a set is enforced only when the runtime genuinely rejects
+        everything else.
+        """
+        ...
+
     def busy(self, session_id: str) -> bool:
         """Whether this runner is already mid-turn in that session.
 

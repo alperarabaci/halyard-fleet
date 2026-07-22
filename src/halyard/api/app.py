@@ -177,7 +177,11 @@ def create_app(settings: Settings, *, channel=None) -> FastAPI:
         )
         if name
     }
-    runner = ClaudeCodeRunner()
+    runner = ClaudeCodeRunner(
+        models=tuple(m.strip() for m in settings.claude_models.split(",") if m.strip())
+        if settings.claude_models
+        else None
+    )
     resolved_channel = (
         channel
         if channel is not None
