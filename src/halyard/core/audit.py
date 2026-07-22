@@ -57,6 +57,8 @@ class AuditAction(StrEnum):
     #: An agent's reply was relayed out to a channel. Metadata only — see
     #: `agent_message` for why the text itself is not kept here.
     AGENT_MESSAGE = "agent.message"
+    #: Someone sent an instruction into a session from a channel.
+    USER_MESSAGE = "user.message"
     #: Someone stopped approvals being relayed, or started them again. A
     #: security-relevant state change, so it is recorded with who did it.
     GATE_PAUSED = "gate.paused"
@@ -205,6 +207,32 @@ def agent_message(
         agent_id=agent_id,
         project=project,
         detail={"length": length, "redacted": redacted, "delivered": delivered},
+    )
+
+
+def user_message(
+    *,
+    session_id: str,
+    actor: str,
+    project: str,
+    length: int,
+    delivered: bool,
+    now: datetime | None = None,
+) -> AuditRecord:
+    """Record that a person told a session to do something, from a channel.
+
+    Metadata only, for the same reason as `agent_message`: this log is the
+    permanent record, and a conversation copied into it grows without bound. The
+    chat holds what was said. This holds that something was said, by whom, to
+    which session, and whether it arrived.
+    """
+    return AuditRecord(
+        action=AuditAction.USER_MESSAGE,
+        recorded_at=now or _default_clock(),
+        actor=actor,
+        session_id=session_id,
+        project=project,
+        detail={"length": length, "delivered": delivered},
     )
 
 

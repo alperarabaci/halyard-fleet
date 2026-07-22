@@ -19,11 +19,13 @@ before anything was built, the way `hook-payload-notes.md` was.
    mechanism Phase 1 already uses — a hook, a bridge, an HTTP call — with no transcript parsing.
 2. **`--resume` continues the same session.** Same `session_id`, same transcript, context intact.
    This is how a message gets *in*; there is no bidirectional stream to write to.
-3. **Concurrent access does not fail, it forks silently.** Two resumes of one session at the same
+3. **Two writes that overlap in time fork silently.** Two resumes of one session at the same
    moment both succeed, both append, and neither sees the other's turn. Nothing errors, nothing
    is corrupted, and the conversation quietly becomes two threads in one file.
 
-The third is the one that decides the architecture.
+The third was first read as "so nothing may write into a session somebody has open", and that
+reading was wrong — see the correction below. Overlapping writes fork; one writer at a time is
+fine, including into a session the desktop app is holding.
 
 ---
 
@@ -134,22 +136,36 @@ afterwards sees it in the history like any other turn.
 
 That is what makes handoff work, and it holds exactly as long as one writer owns the session.
 
-### What this forces
+### What this forces, and what it does not
 
-Halyard cannot relay messages into a session that a human is also typing into. Both would work,
-and the session would quietly diverge.
+The narrow reading of the above — *therefore nothing may write into a session somebody has open* —
+was wrong, and it cost two days of building around a wall that was not there.
 
-That leaves the fork the design document anticipated:
+**Measured afterwards:** a message typed in Telegram was delivered with `claude -p --resume` into a
+session the desktop app had open, and the app picked the turn up and displayed it. Writing into a
+live session works. The documentation says concurrent access is not *documented* as supported,
+which is a different claim from not working, and a measurement outranks a silence.
 
-- **Halyard owns the session.** Sessions are started and driven headless, and the terminal is not
-  used for that session at all. Coherent by construction, and it is the model that makes the
-  navigator/driver split from a phone actually work.
-- **Halyard observes but does not write.** Output relays out via the `Stop` hook; messages in are
-  refused while an interactive session holds it.
+What the fork measurement actually establishes is narrower: **two writes that overlap in time**
+diverge. One writer at a time is fine, whoever it is. So:
 
-The first is the one worth building, with the second as the safe behaviour when a session was not
-started by Halyard. Which means the registry needs to know *how* a session came to exist — a
-session Halyard started can be written to, one it merely observed cannot.
+- Sends are serialised per session in the runner, so Halyard never races itself.
+- The case left is a person typing at the desk in the same moment a message arrives from the
+  channel. That is a real hazard and a rare one — being away is what makes somebody use the phone.
+
+No ownership model, no handoff protocol, no registry field recording how a session was born. A
+session is addressable by name, and messages go into it.
+
+### Running it from the right directory
+
+`claude --resume <id>` looks for the conversation **inside the current project**. Run it from
+anywhere else and it answers `No conversation found with session ID`, with the transcript sitting
+on disk the whole time. A control plane runs from its own repository, so it has to change directory
+into the session's before resuming.
+
+The directory comes from the `cwd` a transcript record carries, not from the encoded folder name
+transcripts are filed under: that encoding replaces path separators with dashes and cannot be
+reversed, since a real dash in a folder name looks identical.
 
 ---
 

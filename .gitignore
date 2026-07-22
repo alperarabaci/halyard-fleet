@@ -35,5 +35,3 @@ htmlcov/
 # Design conversation exports (kept locally, not published)
 docs/mobile-agent-control-plane.md
 
-# Docker bind-mount data directory (if you swap the named volume)
-data/
