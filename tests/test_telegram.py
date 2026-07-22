@@ -625,18 +625,6 @@ async def test_a_stranger_cannot_close_the_gate(tmp_path: Path) -> None:
     assert AuditAction.UNAUTHORIZED_CALLBACK in {r.action for r in await sink.read_all()}
 
 
-@pytest.mark.parametrize("text", ["hello", "pause", "  ", "just chatting about /pause"])
-async def test_ordinary_chat_is_ignored(tmp_path: Path, text: str) -> None:
-    channel, api, gate, _ = await gated(tmp_path)
-
-    await channel._handle_message(typed(text))
-
-    # A bot that argues with every stray message is a bot you mute, and
-    # notifications are the entire point.
-    assert api.sent == []
-    assert gate.paused is False
-
-
 @pytest.mark.parametrize("text", ["/pause@halyard_bot", "/PAUSE", "/pause now"])
 async def test_a_command_is_recognised_however_it_is_typed(tmp_path: Path, text: str) -> None:
     channel, _, gate, _ = await gated(tmp_path)
@@ -799,3 +787,255 @@ async def test_an_unrouted_card_is_still_settled_in_the_default_chat(tmp_path: P
     await channel._handle_callback(press(request, cards.DENY))
 
     assert api.edits[0]["chat_id"] == CHAT
+
+
+# --- typing into a session ----------------------------------------------------
+
+
+class FakeRunner:
+    """Records what would have been sent into a session."""
+
+    id = "claude-code"
+    available = True
+
+    def __init__(self, *, works: bool = True) -> None:
+        self.sent: list[tuple[str, str]] = []
+        self.directories: list[str | None] = []
+        self._works = works
+
+    async def send(self, session_id: str, text: str, cwd: str | None = None) -> bool:
+        self.sent.append((session_id, text))
+        self.directories.append(cwd)
+        return self._works
+
+
+async def wired(tmp_path: Path, *, works: bool = True, seat=None, chat=None):
+    """A channel that can actually deliver a message into a session."""
+    from halyard.core.gate import Gate
+    from halyard.core.registry import SessionRegistry
+
+    store = ApprovalStore(ttl=timedelta(minutes=5))
+    sink = JsonlAuditSink(tmp_path / "audit.jsonl")
+    audit = AuditLog([sink])
+    await audit.open()
+    registry = SessionRegistry()
+    await registry.observe(
+        session_id="session-nav",
+        agent_id="claude-code",
+        project="alpha-engine",
+        role=Role.NAVIGATOR,
+    )
+    await registry.observe(
+        session_id="session-drv",
+        agent_id="claude-code",
+        project="alpha-engine",
+        role=Role.DRIVER,
+    )
+    api = FakeTelegramApi()
+    runner = FakeRunner(works=works)
+    channel = TelegramChannel(
+        api=api,
+        store=store,
+        audit=audit,
+        chat_id=CHAT,
+        authorized_user_ids=frozenset({APPROVER}),
+        poll_retry_seconds=0.01,
+        gate=Gate(),
+        project="alpha-engine",
+        navigator_chat_id=NAV_CHAT,
+        driver_chat_id=DRV_CHAT,
+        registry=registry,
+        runner=runner,
+    )
+    return channel, api, runner, sink
+
+
+def typed_in(text: str, chat: str, *, user: str = APPROVER) -> dict:
+    return {"message_id": 1, "from": {"id": int(user)}, "chat": {"id": chat}, "text": text}
+
+
+async def drain() -> None:
+    """Let the detached delivery task finish."""
+    await asyncio.sleep(0.05)
+
+
+async def test_typing_in_a_seat_reaches_that_seat_s_session(tmp_path: Path) -> None:
+    channel, _, runner, _ = await wired(tmp_path)
+
+    await channel._handle_message(typed_in("run the tests", NAV_CHAT))
+    await drain()
+
+    # The message lands in the session itself, not a side conversation, so it
+    # is in the history when that session is opened at a desk later.
+    assert runner.sent == [("session-nav", "run the tests")]
+
+
+async def test_each_seat_reaches_its_own_session(tmp_path: Path) -> None:
+    channel, _, runner, _ = await wired(tmp_path)
+
+    await channel._handle_message(typed_in("navigator work", NAV_CHAT))
+    await channel._handle_message(typed_in("driver work", DRV_CHAT))
+    await drain()
+
+    assert runner.sent == [("session-nav", "navigator work"), ("session-drv", "driver work")]
+
+
+async def test_delivery_does_not_block_the_caller(tmp_path: Path) -> None:
+    channel, _, runner, _ = await wired(tmp_path)
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def slow(session_id: str, text: str, cwd: str | None = None) -> bool:
+        started.set()
+        await release.wait()
+        return True
+
+    runner.send = slow
+
+    await channel._handle_message(typed_in("something long-running", NAV_CHAT))
+
+    # A turn runs tools, and each one may stop for an approval that arrives as
+    # a button press this same loop has to read. Waiting here for the turn would
+    # be waiting for an approval that can never be delivered.
+    await asyncio.wait_for(started.wait(), timeout=1)
+    release.set()
+
+
+async def test_a_stranger_cannot_type_into_a_session(tmp_path: Path) -> None:
+    channel, _, runner, sink = await wired(tmp_path)
+
+    await channel._handle_message(typed_in("do something", NAV_CHAT, user=STRANGER))
+    await drain()
+
+    assert runner.sent == []
+    assert AuditAction.UNAUTHORIZED_CALLBACK in {r.action for r in await sink.read_all()}
+
+
+async def test_a_message_is_recorded_without_its_text(tmp_path: Path) -> None:
+    channel, _, _, sink = await wired(tmp_path)
+
+    await channel._handle_message(typed_in("a distinctive instruction", NAV_CHAT))
+    await drain()
+
+    record = next(r for r in await sink.read_all() if r.action is AuditAction.USER_MESSAGE)
+    assert record.session_id == "session-nav"
+    assert record.actor == f"tg:{APPROVER}"
+    assert record.detail["delivered"] is True
+    # Same reasoning as an agent's reply: the chat holds what was said.
+    assert "distinctive instruction" not in (tmp_path / "audit.jsonl").read_text()
+
+
+async def test_a_failed_delivery_says_so(tmp_path: Path) -> None:
+    channel, api, _, sink = await wired(tmp_path, works=False)
+
+    await channel._handle_message(typed_in("run the tests", NAV_CHAT))
+    await drain()
+
+    assert "did not reach" in api.sent[-1]["text"]
+    record = next(r for r in await sink.read_all() if r.action is AuditAction.USER_MESSAGE)
+    assert record.detail["delivered"] is False
+
+
+async def test_a_paused_gate_refuses_to_forward(tmp_path: Path) -> None:
+    channel, api, runner, _ = await wired(tmp_path)
+    await channel._handle_message(typed("/pause"))
+    api.sent.clear()
+
+    await channel._handle_message(typed_in("do something", NAV_CHAT))
+    await drain()
+
+    # Pausing means the phone is disconnected in both directions, including
+    # this one.
+    assert runner.sent == []
+    assert "Paused" in api.sent[-1]["text"]
+
+
+async def test_a_control_plane_without_a_runner_says_why(tmp_path: Path) -> None:
+    channel, api, _, _ = await gated(tmp_path)
+
+    await channel._handle_message(typed_in("do something", CHAT))
+    await drain()
+
+    # A container has no claude CLI. Better to say that than to fail silently.
+    assert "host" in api.sent[-1]["text"]
+
+
+async def test_commands_are_still_commands(tmp_path: Path) -> None:
+    channel, api, runner, _ = await wired(tmp_path)
+
+    await channel._handle_message(typed_in("/status", NAV_CHAT))
+    await drain()
+
+    assert runner.sent == []
+    assert "Halyard" in api.sent[-1]["text"]
+
+
+async def test_a_configured_name_finds_the_session_without_any_hook(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The path that matters after a restart, when the registry knows nothing."""
+    from halyard.core.gate import Gate
+    from halyard.core.registry import SessionRegistry
+
+    root = tmp_path / "projects" / "-repo"
+    root.mkdir(parents=True)
+    (root / "72704a07-2785-45df-980c-231f318d00c5.jsonl").write_text(
+        '{"type":"custom-title","customTitle":"alpha-engine-navigator","sessionId":"x"}\n'
+        '{"type":"assistant","cwd":"/repos/alpha-engine","sessionId":"x"}\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        "halyard.agents.claude_code.sessions.transcript_root", lambda: tmp_path / "projects"
+    )
+
+    sink = JsonlAuditSink(tmp_path / "audit.jsonl")
+    audit = AuditLog([sink])
+    await audit.open()
+    api = FakeTelegramApi()
+    runner = FakeRunner()
+    channel = TelegramChannel(
+        api=api,
+        store=ApprovalStore(),
+        audit=audit,
+        chat_id=CHAT,
+        authorized_user_ids=frozenset({APPROVER}),
+        gate=Gate(),
+        project="alpha-engine",
+        navigator_chat_id=NAV_CHAT,
+        # Deliberately empty: nothing has fired a hook since this came up.
+        registry=SessionRegistry(),
+        runner=runner,
+        session_names={Role.NAVIGATOR: "alpha-engine-navigator"},
+    )
+
+    await channel._handle_message(typed_in("summarise where we are", NAV_CHAT))
+    await drain()
+
+    # Telling somebody to go run a command somewhere before they can send a
+    # message is not an answer, so the name is addressable from a standing start.
+    assert runner.sent == [("72704a07-2785-45df-980c-231f318d00c5", "summarise where we are")]
+    # And run there, because `--resume` looks for a conversation inside the
+    # current project: from anywhere else it reports no such session, even with
+    # the transcript sitting on disk.
+    assert runner.directories == ["/repos/alpha-engine"]
+
+
+async def test_chat_says_the_same_thing_explicitly(tmp_path: Path) -> None:
+    channel, _, runner, _ = await wired(tmp_path)
+
+    await channel._handle_message(typed_in("/chat run the tests", NAV_CHAT))
+    await drain()
+
+    # Needed by anyone who leaves group privacy mode on, where a bot sees only
+    # commands.
+    assert runner.sent == [("session-nav", "run the tests")]
+
+
+async def test_chat_without_a_message_explains_itself(tmp_path: Path) -> None:
+    channel, api, runner, _ = await wired(tmp_path)
+
+    await channel._handle_message(typed_in("/chat", NAV_CHAT))
+    await drain()
+
+    assert runner.sent == []
+    assert "Usage" in api.sent[-1]["text"]

@@ -20,6 +20,7 @@ from fastapi import FastAPI, Request, Response
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
 
+from halyard.agents.claude_code import ClaudeCodeRunner
 from halyard.channels.stub import StubChannel
 from halyard.channels.telegram import TelegramApi, TelegramChannel
 from halyard.config import ChannelKind, Settings
@@ -109,6 +110,9 @@ class HealthResponse(BaseModel):
     channel: str
     project: str
     open_approvals: int
+    #: False when this control plane cannot send messages into a session —
+    #: it has no claude CLI, which is what a container looks like.
+    can_send_messages: bool = False
     #: True while approvals are not being relayed — the terminal is asking
     #: instead. Visible from outside for the same reason as the field below.
     paused: bool = False
@@ -117,7 +121,14 @@ class HealthResponse(BaseModel):
     decides_without_a_human: bool = Field(default=False)
 
 
-def _build_channel(settings: Settings, store: ApprovalStore, audit: AuditLog, gate: Gate):
+def _build_channel(
+    settings: Settings,
+    store: ApprovalStore,
+    audit: AuditLog,
+    gate: Gate,
+    registry: SessionRegistry,
+    runner,
+):
     if settings.channel is ChannelKind.STUB_ALLOW:
         return StubChannel(store, Decision.ALLOW)
     if settings.channel is ChannelKind.STUB_DENY:
@@ -133,6 +144,16 @@ def _build_channel(settings: Settings, store: ApprovalStore, audit: AuditLog, ga
         project=settings.project_name,
         navigator_chat_id=settings.telegram_navigator_chat_id,
         driver_chat_id=settings.telegram_driver_chat_id,
+        registry=registry,
+        runner=runner,
+        session_names={
+            role: name
+            for name, role in (
+                (settings.navigator_session, Role.NAVIGATOR),
+                (settings.driver_session, Role.DRIVER),
+            )
+            if name
+        },
     )
 
 
@@ -156,8 +177,11 @@ def create_app(settings: Settings, *, channel=None) -> FastAPI:
         )
         if name
     }
+    runner = ClaudeCodeRunner()
     resolved_channel = (
-        channel if channel is not None else _build_channel(settings, store, audit, gate)
+        channel
+        if channel is not None
+        else _build_channel(settings, store, audit, gate, registry, runner)
     )
     relay = MessageRelay(
         redactor=Redactor(),
@@ -227,6 +251,7 @@ def create_app(settings: Settings, *, channel=None) -> FastAPI:
     app.state.service = service
     app.state.relay = relay
     app.state.gate = gate
+    app.state.runner = runner
 
     @app.middleware("http")
     async def deny_on_unhandled_error(request: Request, call_next) -> Response:
@@ -314,6 +339,7 @@ def create_app(settings: Settings, *, channel=None) -> FastAPI:
             project=settings.project_name,
             open_approvals=len(await store.list_open()),
             paused=gate.paused,
+            can_send_messages=runner.available,
             decides_without_a_human=settings.channel.decides_without_a_human,
         )
 

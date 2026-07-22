@@ -119,55 +119,22 @@ uv sync --extra dev
 uv run halyard
 ```
 
-Or without installing Python at all:
+### It runs on your machine, not in a container
 
-```bash
-cp .env.example .env       # then set HALYARD_CHANNEL
-docker compose up -d
-docker compose logs -f
-```
+There was a Docker image for a while, and removing it is the honest correction to a mistake.
 
-**Only the control plane is containerised.** The hook bridge cannot be — it runs inside Claude
-Code's process tree on your machine, so it stays on the host and reaches the container over
-`HALYARD_URL`:
+The control plane sends messages into a Claude Code session by running the `claude` CLI, and it
+reads session names out of `~/.claude/projects`. A container has neither — no binary, no
+credentials, no home directory. So a containerised control plane could relay approvals and output
+but could never accept a message back, which is half the product, and having two ways to run it
+that quietly differ in what they can do is worse than having one.
 
-```
-Claude Code ──hook──► bridge/hook.sh ──HTTP──► 127.0.0.1:8787 ──► control-plane container
-   (host)              (host)                    (published)         (Telegram, audit log)
-```
+`halyard doctor` reports `can_send_messages`, so if this ever regresses it says so rather than
+failing at the moment you need it.
 
-The published port is bound to `127.0.0.1` on purpose. Writing `8787:8787` instead would put the
-control plane on every interface of the host, and anything on the network could then approve
-commands on your machine.
+### Wiring the hooks
 
-> **If port 8787 is already in use, change `HALYARD_BIND`** in `.env` — Docker Desktop itself
-> listens on 8787 on some machines. That one key is the whole address: the service binds to it,
-> compose publishes to it, and the bridges derive their URL from it. There is nothing else to keep
-> in sync.
->
-> Check it before you debug anything else, because the symptom points somewhere else entirely.
-> When the port cannot be bound, Docker starts the container **without a network** rather than
-> refusing to start it, so the logs fill with `Temporary failure in name resolution` and it looks
-> like broken DNS. It is not:
->
-> ```bash
-> docker inspect halyard-control-plane --format '{{json .NetworkSettings.Networks}}'
-> # {}  ← no network attached; check the port, not the resolver
-> ```
->
-> `halyard doctor` walks the same path a hook does and reports which step broke and where each
-> setting came from.
-
-The audit log lives in a named volume so it survives rebuilds. To read it:
-
-```bash
-docker compose exec control-plane cat /data/audit.jsonl
-```
-
-If you would rather open it in an editor, swap the volume for a bind mount — there is a commented
-line in `docker-compose.yml` showing how, and a note about the ownership it needs.
-
-Then point Claude Code at the bridge in `.claude/settings.json`:
+Point Claude Code at the bridges in `.claude/settings.json`:
 
 ```json
 {
@@ -178,7 +145,7 @@ Then point Claude Code at the bridge in `.claude/settings.json`:
         "hooks": [
           {
             "type": "command",
-            "command": "$CLAUDE_PROJECT_DIR/bridge/hook.sh",
+            "command": "/absolute/path/to/halyard-fleet/bridge/hook.sh",
             "timeout": 600
           }
         ]
@@ -189,7 +156,7 @@ Then point Claude Code at the bridge in `.claude/settings.json`:
         "hooks": [
           {
             "type": "command",
-            "command": "$CLAUDE_PROJECT_DIR/bridge/relay.py",
+            "command": "/absolute/path/to/halyard-fleet/bridge/relay.py",
             "timeout": 15
           }
         ]
@@ -198,6 +165,13 @@ Then point Claude Code at the bridge in `.claude/settings.json`:
   }
 }
 ```
+
+Use an absolute path when the project being gated is not Halyard itself — `$CLAUDE_PROJECT_DIR`
+points at whichever repository the session is in. Put it in `.claude/settings.local.json`, which is
+gitignored, so a machine-specific path does not break a teammate's checkout.
+
+**Claude Code snapshots hook configuration at startup.** Editing settings mid-session has no
+effect; restart the session. Script contents are read on every call, so those can change freely.
 
 **`PreToolUse` → `hook.sh`** is the approval gate. Point it at the wrapper, not at
 `hook_bridge.py`: the wrapper is what denies when the Python process cannot start at all — a
@@ -324,7 +298,7 @@ separate conversations means separate **groups**, not separate bots.
    anything:
 
    ```bash
-   docker compose down
+   # stop the control plane first
    curl -s "https://api.telegram.org/bot<TOKEN>/getUpdates" | python3 -c "
    import sys, json
    for u in json.load(sys.stdin)['result']:

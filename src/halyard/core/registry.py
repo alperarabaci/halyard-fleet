@@ -134,6 +134,33 @@ class SessionRegistry:
         async with self._lock:
             return sorted(self._sessions.values(), key=lambda s: s.first_seen_at)
 
+    async def latest(self) -> SessionInfo | None:
+        """The most recently seen session, whatever seat it is in.
+
+        For the ordinary setup with one session and one chat, where asking
+        which seat a message belongs to would be asking about a distinction
+        that does not exist.
+        """
+        async with self._lock:
+            candidates = [s for s in self._sessions.values() if s.status is not SessionStatus.ENDED]
+        return max(candidates, key=lambda s: s.last_seen_at, default=None)
+
+    async def latest_for_role(self, role: Role) -> SessionInfo | None:
+        """The most recently seen session sitting in a given seat.
+
+        This is how a message typed in a chat finds the session it belongs to.
+        Most recent rather than any, because a named conversation is resumed
+        under a new id each time it restarts, and the one heard from last is the
+        one still running.
+        """
+        async with self._lock:
+            candidates = [
+                session
+                for session in self._sessions.values()
+                if session.role is role and session.status is not SessionStatus.ENDED
+            ]
+        return max(candidates, key=lambda s: s.last_seen_at, default=None)
+
     async def set_status(self, session_id: str, status: SessionStatus) -> SessionInfo:
         """Move a session to an explicit status.
 

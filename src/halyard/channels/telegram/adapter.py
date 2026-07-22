@@ -21,6 +21,7 @@ import logging
 from collections.abc import Callable
 from datetime import UTC, datetime
 
+from halyard.agents.claude_code import find_session
 from halyard.channels.telegram import cards
 from halyard.channels.telegram.api import TelegramApi
 from halyard.core.approvals import (
@@ -38,9 +39,11 @@ from halyard.core.audit import (
     invalid_nonce,
     replayed_callback,
     unauthorized_callback,
+    user_message,
 )
 from halyard.core.events import Role
 from halyard.core.gate import Gate
+from halyard.core.registry import SessionRegistry
 
 logger = logging.getLogger(__name__)
 
@@ -94,6 +97,9 @@ class TelegramChannel:
         project: str = "unknown",
         navigator_chat_id: str | None = None,
         driver_chat_id: str | None = None,
+        registry: SessionRegistry | None = None,
+        runner=None,
+        session_names: dict[Role, str] | None = None,
     ) -> None:
         self._api = api
         self._gate = gate or Gate()
@@ -108,6 +114,10 @@ class TelegramChannel:
             Role.NAVIGATOR: parse_destination(navigator_chat_id),
             Role.DRIVER: parse_destination(driver_chat_id),
         }
+        self._registry = registry
+        self._runner = runner
+        self._session_names = session_names or {}
+        self._sending: set[asyncio.Task] = set()
         self._authorized = authorized_user_ids
         self._clock = clock
         self._poll_retry_seconds = poll_retry_seconds
@@ -255,18 +265,36 @@ class TelegramChannel:
         and notifications are the entire point.
         """
         text = (message.get("text") or "").strip()
-        if not text.startswith("/"):
+        if not text:
             return
 
-        command = text.split()[0].lstrip("/").split("@")[0].lower()
         user_id = str((message.get("from") or {}).get("id", ""))
-
         if user_id not in self._authorized:
             await self._record(unauthorized_callback(actor=f"tg:{user_id}", channel="telegram"))
-            logger.warning("Ignoring /%s from unauthorized Telegram user %s", command, user_id)
+            logger.warning("Ignoring a message from unauthorized Telegram user %s", user_id)
             return
 
         actor = f"tg:{user_id}"
+
+        if not text.startswith("/"):
+            await self._forward_to_session(text, actor, str(message.get("chat", {}).get("id", "")))
+            return
+
+        command, _, argument = text.partition(" ")
+        command = command.lstrip("/").split("@")[0].lower()
+        argument = argument.strip()
+
+        if command == "chat":
+            # An explicit way to say the same thing as plain text. Worth having:
+            # a bot in a group sees only commands while privacy mode is on, and
+            # leaving that on is a reasonable thing to want.
+            if not argument:
+                await self._say("Usage: <code>/chat &lt;message&gt;</code>")
+                return
+            await self._forward_to_session(
+                argument, actor, str(message.get("chat", {}).get("id", ""))
+            )
+            return
         if command == "pause":
             _, changed = await self._gate.pause(actor)
             if changed:
@@ -294,10 +322,95 @@ class TelegramChannel:
         elif command in ("start", "help"):
             await self._say(
                 "<b>Halyard</b>\n\n"
+                "Type anything to send it into the session.\n\n"
+                "/chat &lt;message&gt; — the same, said explicitly\n"
                 "/status — what is happening right now\n"
-                "/pause — stop relaying approvals; the terminal asks instead\n"
-                "/resume — start relaying again"
+                "/pause — stop sending here; the terminal asks instead\n"
+                "/resume — start again"
             )
+
+    async def _forward_to_session(self, text: str, actor: str, chat_id: str) -> None:
+        """Put a typed message into the session that chat belongs to.
+
+        Started as a detached task rather than awaited. A turn runs tools, and
+        each tool may stop for an approval — which arrives as a button press
+        this same poll loop has to read. Waiting here for the turn to finish
+        would mean waiting for an approval that can never be delivered.
+        """
+        if self._gate.paused:
+            await self._say("⏸ Paused. Send /resume first.")
+            return
+        if self._runner is None or self._registry is None:
+            await self._say(
+                "This control plane cannot send messages into a session. That needs "
+                "the claude CLI, so it has to run on the host rather than in a container."
+            )
+            return
+
+        found = await self._session_for(chat_id)
+        if found is None:
+            await self._say(
+                "No session to send that to. Name the one you mean in .env — "
+                "<code>HALYARD_NAVIGATOR_SESSION</code> or "
+                "<code>HALYARD_DRIVER_SESSION</code> — using a name from "
+                "<code>halyard sessions</code>."
+            )
+            return
+
+        task = asyncio.create_task(self._deliver(found, text, actor))
+        # Held so the loop does not drop the only reference and cancel it.
+        self._sending.add(task)
+        task.add_done_callback(self._sending.discard)
+
+    async def _session_for(self, chat_id: str) -> tuple[str, str, str | None] | None:
+        """Which session a chat belongs to, as (session_id, project, directory).
+
+        The configured name is tried first. It is addressable from a standing
+        start — a control plane that restarted a second ago can still find the
+        session — whereas the registry only knows what has fired a hook since it
+        came up. Telling somebody to go run a command somewhere before they can
+        send a message is not an answer.
+        """
+        role = self._role_for_chat(chat_id)
+
+        if role is not None and (name := self._session_names.get(role)):
+            found = await asyncio.to_thread(find_session, name)
+            if found:
+                return found.session_id, self._project, found.cwd
+            logger.warning("No session found named %r for the %s seat", name, role.value)
+
+        session = (
+            await self._registry.latest_for_role(role)
+            if role is not None
+            else await self._registry.latest()
+        )
+        return (session.session_id, session.project, session.cwd) if session else None
+
+    def _role_for_chat(self, chat_id: str) -> Role | None:
+        for role, destination in self._routes.items():
+            if destination and destination[0] == chat_id:
+                return role
+        return None
+
+    async def _deliver(self, session: tuple[str, str, str | None], text: str, actor: str) -> None:
+        session_id, project, cwd = session
+        delivered = False
+        try:
+            delivered = await self._runner.send(session_id, text, cwd)
+        except Exception:
+            logger.exception("Could not deliver a message to %s", session_id)
+        finally:
+            await self._record(
+                user_message(
+                    session_id=session_id,
+                    actor=actor,
+                    project=project,
+                    length=len(text),
+                    delivered=delivered,
+                )
+            )
+        if not delivered:
+            await self._say("⚠️ That did not reach the session. Check the control plane's log.")
 
     async def _status(self) -> str:
         state = await self._gate.state()
