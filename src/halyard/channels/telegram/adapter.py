@@ -22,7 +22,6 @@ from collections.abc import Callable
 from datetime import UTC, datetime
 
 from halyard.agents.claude_code import find_session
-from halyard.agents.claude_code.runner import EFFORT_LEVELS
 from halyard.channels.telegram import cards
 from halyard.channels.telegram.api import TelegramApi
 from halyard.core.approvals import (
@@ -515,9 +514,22 @@ class TelegramChannel:
             return
         session_id, _, _ = found
 
-        if value and what == "effort" and value.lower() not in EFFORT_LEVELS:
+        # Ask the runtime what it accepts rather than importing one runtime's
+        # list. The channel held `EFFORT_LEVELS` from the Claude Code module
+        # until a Codex investigation pointed at it: a chat layer that knows a
+        # specific runtime's constants is the thing this architecture exists to
+        # prevent, and it would have rejected a perfectly valid Codex effort.
+        #
+        # `enforced` is why the flag is in `options()` at all. Effort is a
+        # closed set worth checking; models are not, and refusing one released
+        # this morning because it is missing from a list written months ago
+        # would be worse than passing it through.
+        allowed, enforced = self._runner.options().get(what, ((), False))
+        if value and enforced and value.lower() not in allowed:
             await self._say(
-                f"Effort is one of: <code>{' '.join(EFFORT_LEVELS)}</code>", chat_id, thread_id
+                f"{what.capitalize()} is one of: <code>{' '.join(allowed)}</code>",
+                chat_id,
+                thread_id,
             )
             return
 

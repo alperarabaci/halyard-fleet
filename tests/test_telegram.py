@@ -813,7 +813,12 @@ class FakeRunner:
         self._works = works
 
     def options(self) -> dict[str, tuple[tuple[str, ...], bool]]:
-        return {"model": (("opus", "haiku"), False), "effort": (("low", "max"), True)}
+        # The same sets the real runner reports. A double that accepts less
+        # than the thing it stands in for fails tests the real code passes.
+        return {
+            "model": (("opus", "sonnet", "haiku", "fable"), False),
+            "effort": (("low", "medium", "high", "xhigh", "max"), True),
+        }
 
     def busy(self, session_id: str) -> bool:
         return session_id in self.working
@@ -1372,3 +1377,33 @@ async def test_status_separates_the_desk_from_the_phone(tmp_path: Path, monkeypa
     assert "at the desk" in text
     assert "from here" in text
     assert "sonnet" in text
+
+
+async def test_effort_is_validated_against_the_runtime_not_a_hardcoded_list(tmp_path) -> None:
+    """The channel must not carry one runtime's constants.
+
+    It imported Claude Code's EFFORT_LEVELS and checked against that, so a
+    runtime with a different set — Codex has an `ultra` on some models and no
+    `max` on others — would have had valid input refused by the chat layer.
+    """
+    channel, api, runner, _ = await wired(tmp_path)
+    runner.options = lambda: {"effort": (("gentle", "fierce"), True), "model": ((), False)}
+
+    await channel._handle_message(typed_in("/effort fierce", NAV_CHAT))
+    assert runner.efforts["session-nav"] == "fierce"
+
+    await channel._handle_message(typed_in("/effort xhigh", NAV_CHAT))
+    assert runner.efforts["session-nav"] == "fierce"
+    assert "gentle fierce" in api.sent[-1]["text"]
+
+
+async def test_an_unenforced_choice_is_passed_through(tmp_path) -> None:
+    """A model list is a hint. Refusing a name released this morning because it
+    is absent from a list written months ago is worse than letting the runtime
+    answer for itself."""
+    channel, _, runner, _ = await wired(tmp_path)
+    runner.options = lambda: {"model": (("opus", "haiku"), False), "effort": ((), True)}
+
+    await channel._handle_message(typed_in("/model something-brand-new", NAV_CHAT))
+
+    assert runner.models["session-nav"] == "something-brand-new"
