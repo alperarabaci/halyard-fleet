@@ -102,6 +102,7 @@ These are out of scope, and will not be added in later phases without a stated r
 | [Hook behaviour](docs/hook-payload-notes.md) | What Claude Code's hooks actually do — measured |
 | [Session I/O](docs/session-io-notes.md) | Writing into a live session, and what forks it |
 | [Design document](docs/mobile-agent-control-plane.md) | The full plan this is built from |
+| [Codex brief](docs/codex-adapter-brief.md) | Open question: what a second runtime would need |
 
 ## Quick start
 
