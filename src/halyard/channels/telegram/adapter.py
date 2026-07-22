@@ -22,6 +22,7 @@ from collections.abc import Callable
 from datetime import UTC, datetime
 
 from halyard.agents.claude_code import find_session
+from halyard.agents.claude_code.runner import EFFORT_LEVELS
 from halyard.channels.telegram import cards
 from halyard.channels.telegram.api import TelegramApi
 from halyard.core.approvals import (
@@ -275,9 +276,11 @@ class TelegramChannel:
             return
 
         actor = f"tg:{user_id}"
+        here = str((message.get("chat") or {}).get("id") or "") or None
+        thread = message.get("message_thread_id")
 
         if not text.startswith("/"):
-            await self._forward_to_session(text, actor, str(message.get("chat", {}).get("id", "")))
+            await self._forward_to_session(text, actor, here or "", thread)
             return
 
         command, _, argument = text.partition(" ")
@@ -289,11 +292,9 @@ class TelegramChannel:
             # a bot in a group sees only commands while privacy mode is on, and
             # leaving that on is a reasonable thing to want.
             if not argument:
-                await self._say("Usage: <code>/chat &lt;message&gt;</code>")
+                await self._say("Usage: <code>/chat &lt;message&gt;</code>", here, thread)
                 return
-            await self._forward_to_session(
-                argument, actor, str(message.get("chat", {}).get("id", ""))
-            )
+            await self._forward_to_session(argument, actor, here or "", thread)
             return
         if command == "pause":
             _, changed = await self._gate.pause(actor)
@@ -306,7 +307,9 @@ class TelegramChannel:
                     "and nothing is being auto-approved."
                 )
                 if changed
-                else "⏸ Already paused."
+                else "⏸ Already paused.",
+                here,
+                thread,
             )
         elif command == "resume":
             _, changed = await self._gate.resume(actor)
@@ -315,21 +318,31 @@ class TelegramChannel:
             await self._say(
                 "▶️ <b>Resumed.</b> Approvals are coming back here."
                 if changed
-                else "▶️ Already running."
+                else "▶️ Already running.",
+                here,
+                thread,
             )
+        elif command in ("model", "effort"):
+            await self._choose(command, argument, here, thread)
         elif command == "status":
-            await self._say(await self._status())
+            await self._say(await self._status(), here, thread)
         elif command in ("start", "help"):
             await self._say(
                 "<b>Halyard</b>\n\n"
                 "Type anything to send it into the session.\n\n"
                 "/chat &lt;message&gt; — the same, said explicitly\n"
+                "/model &lt;name&gt; — what answers, for turns sent from here\n"
+                "/effort &lt;level&gt; — how hard it thinks\n"
                 "/status — what is happening right now\n"
                 "/pause — stop sending here; the terminal asks instead\n"
-                "/resume — start again"
+                "/resume — start again",
+                here,
+                thread,
             )
 
-    async def _forward_to_session(self, text: str, actor: str, chat_id: str) -> None:
+    async def _forward_to_session(
+        self, text: str, actor: str, chat_id: str, thread_id: int | None = None
+    ) -> None:
         """Put a typed message into the session that chat belongs to.
 
         Started as a detached task rather than awaited. A turn runs tools, and
@@ -338,26 +351,39 @@ class TelegramChannel:
         would mean waiting for an approval that can never be delivered.
         """
         if self._gate.paused:
-            await self._say("⏸ Paused. Send /resume first.")
+            await self._say("⏸ Paused. Send /resume first.", chat_id, thread_id)
             return
         if self._runner is None or self._registry is None:
             await self._say(
                 "This control plane cannot send messages into a session. That needs "
-                "the claude CLI, so it has to run on the host rather than in a container."
+                "the claude CLI, so it has to run on the host rather than in a container.",
+                chat_id,
+                thread_id,
             )
             return
 
         found = await self._session_for(chat_id)
+        if found is not None and self._runner.busy(found[0]):
+            # The runner serialises per session, so this would sit in silence
+            # until the turn before it finished. Silence is what makes people
+            # think a message was lost.
+            await self._say(
+                "⏳ Still working on the last one — yours is queued behind it.",
+                chat_id,
+                thread_id,
+            )
         if found is None:
             await self._say(
                 "No session to send that to. Name the one you mean in .env — "
                 "<code>HALYARD_NAVIGATOR_SESSION</code> or "
                 "<code>HALYARD_DRIVER_SESSION</code> — using a name from "
-                "<code>halyard sessions</code>."
+                "<code>halyard sessions</code>.",
+                chat_id,
+                thread_id,
             )
             return
 
-        task = asyncio.create_task(self._deliver(found, text, actor))
+        task = asyncio.create_task(self._deliver(found, text, actor, chat_id, thread_id))
         # Held so the loop does not drop the only reference and cancel it.
         self._sending.add(task)
         task.add_done_callback(self._sending.discard)
@@ -392,7 +418,14 @@ class TelegramChannel:
                 return role
         return None
 
-    async def _deliver(self, session: tuple[str, str, str | None], text: str, actor: str) -> None:
+    async def _deliver(
+        self,
+        session: tuple[str, str, str | None],
+        text: str,
+        actor: str,
+        chat_id: str | None = None,
+        thread_id: int | None = None,
+    ) -> None:
         session_id, project, cwd = session
         delivered = False
         try:
@@ -410,7 +443,11 @@ class TelegramChannel:
                 )
             )
         if not delivered:
-            await self._say("⚠️ That did not reach the session. Check the control plane's log.")
+            await self._say(
+                "⚠️ That did not reach the session. Check the control plane's log.",
+                chat_id,
+                thread_id,
+            )
 
     async def _status(self) -> str:
         state = await self._gate.state()
@@ -422,6 +459,13 @@ class TelegramChannel:
         ]
         if state.changed_by:
             lines.append(f"  last changed by {html.escape(state.changed_by)}")
+
+        seats = await self._describe_seats()
+        if seats:
+            lines += ["", "<b>Sessions</b>"]
+            lines += seats
+
+        lines.append("")
         lines.append(f"Open approvals: {len(open_requests)}")
         for request in open_requests[:5]:
             remaining = cards.format_remaining(request.expires_at, self._clock())
@@ -431,9 +475,90 @@ class TelegramChannel:
             )
         return "\n".join(lines)
 
-    async def _say(self, text: str) -> None:
+    async def _choose(
+        self, what: str, value: str, chat_id: str | None, thread_id: int | None
+    ) -> None:
+        """Show or set the model or effort a seat will use.
+
+        Only for turns started from here. A turn begun at a keyboard uses
+        whatever the app is set to, and nothing in this process can reach that —
+        worth saying plainly rather than letting a setting look more powerful
+        than it is.
+        """
+        if self._runner is None:
+            await self._say("No runner: this control plane cannot start turns.", chat_id, thread_id)
+            return
+
+        found = await self._session_for(chat_id or "")
+        if found is None:
+            await self._say("No session for this chat.", chat_id, thread_id)
+            return
+        session_id, _, _ = found
+
+        if value and what == "effort" and value.lower() not in EFFORT_LEVELS:
+            await self._say(
+                f"Effort is one of: <code>{' '.join(EFFORT_LEVELS)}</code>", chat_id, thread_id
+            )
+            return
+
+        if value:
+            setter = self._runner.set_model if what == "model" else self._runner.set_effort
+            cleared = value.lower() in ("default", "clear", "reset")
+            setter(session_id, None if cleared else value)
+            answer = (
+                f"Cleared. Turns from here will use the session's own {what}."
+                if cleared
+                else f"Turns started from here will use <b>{html.escape(value)}</b>."
+            )
+            await self._say(answer, chat_id, thread_id)
+            return
+
+        model, effort = self._runner.preferences(session_id)
+        chosen = model if what == "model" else effort
+        ref = await asyncio.to_thread(
+            find_session,
+            self._session_names.get(self._role_for_chat(chat_id or "") or Role.NAVIGATOR, ""),
+        )
+        in_use = (ref.model if what == "model" else ref.effort) if ref else None
+        lines = [f"<b>{what}</b>", f"  in the session: {html.escape(str(in_use or 'unknown'))}"]
+        if chosen:
+            lines.append(f"  from here: <b>{html.escape(chosen)}</b>")
+        lines.append(f"\nSet with <code>/{what} &lt;value&gt;</code>, or <code>default</code>.")
+        await self._say("\n".join(lines), chat_id, thread_id)
+
+    async def _describe_seats(self) -> list[str]:
+        """One line per configured seat: what it is, and what is answering.
+
+        Which model a seat is on is invisible from a phone otherwise, and in a
+        navigator/driver pair the two are usually deliberately different — a
+        thinking one and a cheap one. Worth being able to check before sending
+        an expensive instruction to the wrong one.
+        """
+        lines: list[str] = []
+        for role, name in self._session_names.items():
+            ref = await asyncio.to_thread(find_session, name)
+            label = f"{role.value}: <b>{html.escape(name)}</b>"
+            if ref is None:
+                lines.append(f"  {label} — not found")
+                continue
+            details = " · ".join(filter(None, [ref.model, ref.effort and f"effort {ref.effort}"]))
+            busy = " · ⏳ working" if self._runner and self._runner.busy(ref.session_id) else ""
+            lines.append(f"  {label}\n     {html.escape(details) or 'unknown'}{busy}")
+        return lines
+
+    async def _say(
+        self, text: str, chat_id: str | None = None, thread_id: int | None = None
+    ) -> None:
+        """Answer in the conversation that asked.
+
+        Not in the configured default chat, which is where this used to go: ask
+        the navigator group something and the reply appeared in a private chat
+        with the bot, which reads as the message having been lost.
+        """
         try:
-            await self._api.send_message(self._chat_id, text)
+            await self._api.send_message(
+                chat_id or self._chat_id, text, message_thread_id=thread_id
+            )
         except Exception:
             logger.warning("Could not answer a command", exc_info=True)
 

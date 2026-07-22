@@ -36,6 +36,10 @@ logger = logging.getLogger(__name__)
 #: approval, which is a human deciding on a phone.
 DEFAULT_TURN_TIMEOUT_SECONDS = 900.0
 
+#: What `--effort` accepts. A closed set, so a typo can be caught here rather
+#: than by a turn that fails a minute later.
+EFFORT_LEVELS = ("low", "medium", "high", "xhigh", "max")
+
 #: Where the CLI usually is when PATH does not have it, which is the common case
 #: for a service started outside a login shell.
 _FALLBACK_BINARIES = (
@@ -69,7 +73,11 @@ class ClaudeCodeRunner:
     ) -> None:
         self._binary = find_claude_binary(binary)
         self._timeout = timeout_seconds
-        self._locks: defaultdict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
+        self._locks: dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
+        # Per-session overrides for turns *this* runner starts. A turn begun at
+        # a keyboard uses whatever the app is set to; nothing here can reach it.
+        self._models: dict[str, str] = {}
+        self._efforts: dict[str, str] = {}
 
     @property
     def id(self) -> str:
@@ -83,6 +91,34 @@ class ClaudeCodeRunner:
         reporting plainly rather than discovering it on the first message.
         """
         return self._binary is not None
+
+    def preferences(self, session_id: str) -> tuple[str | None, str | None]:
+        """The model and effort this runner will use for that session, if set."""
+        return self._models.get(session_id), self._efforts.get(session_id)
+
+    def set_model(self, session_id: str, model: str | None) -> None:
+        """Choose the model for turns started from a channel. None clears it."""
+        if model:
+            self._models[session_id] = model
+        else:
+            self._models.pop(session_id, None)
+
+    def set_effort(self, session_id: str, effort: str | None) -> None:
+        """Choose the reasoning effort. None clears it."""
+        if effort:
+            self._efforts[session_id] = effort
+        else:
+            self._efforts.pop(session_id, None)
+
+    def busy(self, session_id: str) -> bool:
+        """Whether a turn this runner started is still going in that session.
+
+        Only what Halyard itself is doing — a turn somebody started at the desk
+        is invisible from here, and claiming otherwise would be worse than
+        saying nothing.
+        """
+        lock = self._locks.get(session_id)
+        return lock is not None and lock.locked()
 
     async def send(self, session_id: str, text: str, cwd: str | None = None) -> bool:
         """Resume the session with `text` as the next thing the user said.
@@ -108,12 +144,15 @@ class ClaudeCodeRunner:
 
     async def _run(self, session_id: str, text: str, cwd: str | None) -> bool:
         try:
+            arguments = [self._binary, "-p", "--resume", session_id]
+            if model := self._models.get(session_id):
+                arguments += ["--model", model]
+            if effort := self._efforts.get(session_id):
+                arguments += ["--effort", effort]
+            arguments.append(text)
+
             process = await asyncio.create_subprocess_exec(
-                self._binary,
-                "-p",
-                "--resume",
-                session_id,
-                text,
+                *arguments,
                 # Closed rather than inherited: a resumed run warns and stalls
                 # for three seconds when it is handed a stdin that never
                 # produces anything.

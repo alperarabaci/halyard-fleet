@@ -801,7 +801,28 @@ class FakeRunner:
     def __init__(self, *, works: bool = True) -> None:
         self.sent: list[tuple[str, str]] = []
         self.directories: list[str | None] = []
+        self.working: set[str] = set()
+        self.models: dict[str, str] = {}
+        self.efforts: dict[str, str] = {}
         self._works = works
+
+    def busy(self, session_id: str) -> bool:
+        return session_id in self.working
+
+    def preferences(self, session_id: str) -> tuple[str | None, str | None]:
+        return self.models.get(session_id), self.efforts.get(session_id)
+
+    def set_model(self, session_id: str, model: str | None) -> None:
+        if model:
+            self.models[session_id] = model
+        else:
+            self.models.pop(session_id, None)
+
+    def set_effort(self, session_id: str, effort: str | None) -> None:
+        if effort:
+            self.efforts[session_id] = effort
+        else:
+            self.efforts.pop(session_id, None)
 
     async def send(self, session_id: str, text: str, cwd: str | None = None) -> bool:
         self.sent.append((session_id, text))
@@ -1039,3 +1060,161 @@ async def test_chat_without_a_message_explains_itself(tmp_path: Path) -> None:
 
     assert runner.sent == []
     assert "Usage" in api.sent[-1]["text"]
+
+
+# --- knowing what is answering, and whether it is busy -------------------------
+
+
+async def test_status_shows_what_each_seat_is_running(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from halyard.agents.claude_code import SessionRef
+
+    channel, api, _runner, _ = await wired(tmp_path)
+    channel._session_names = {Role.NAVIGATOR: "nav", Role.DRIVER: "drv"}
+    refs = {
+        "nav": SessionRef("id-nav", "nav", "/repo", "claude-opus-4-8", "xhigh"),
+        "drv": SessionRef("id-drv", "drv", "/repo", "claude-opus-4-8", "low"),
+    }
+    monkeypatch.setattr(
+        "halyard.channels.telegram.adapter.find_session", lambda name: refs.get(name)
+    )
+
+    await channel._handle_message(typed("/status"))
+
+    text = api.sent[-1]["text"]
+    # Which model a seat is on is invisible from a phone otherwise, and in a
+    # navigator/driver pair the two are deliberately different.
+    assert "claude-opus-4-8" in text
+    assert "effort xhigh" in text
+    assert "effort low" in text
+
+
+async def test_status_says_when_a_seat_is_mid_turn(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from halyard.agents.claude_code import SessionRef
+
+    channel, api, runner, _ = await wired(tmp_path)
+    channel._session_names = {Role.NAVIGATOR: "nav"}
+    monkeypatch.setattr(
+        "halyard.channels.telegram.adapter.find_session",
+        lambda name: SessionRef("id-nav", "nav", "/repo", "claude-opus-4-8", "xhigh"),
+    )
+    runner.working.add("id-nav")
+
+    await channel._handle_message(typed("/status"))
+
+    assert "working" in api.sent[-1]["text"]
+
+
+async def test_a_message_sent_while_a_turn_is_running_says_it_is_queued(
+    tmp_path: Path,
+) -> None:
+    channel, api, runner, _ = await wired(tmp_path)
+    runner.working.add("session-nav")
+
+    await channel._handle_message(typed_in("and another thing", NAV_CHAT))
+    await drain()
+
+    # Sends are serialised per session, so this would otherwise sit in silence
+    # until the turn ahead of it finished — and silence is what makes people
+    # think a message was lost.
+    assert "queued" in api.sent[0]["text"]
+    assert runner.sent == [("session-nav", "and another thing")]
+
+
+async def test_a_missing_seat_is_reported_rather_than_hidden(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    channel, api, _, _ = await wired(tmp_path)
+    channel._session_names = {Role.NAVIGATOR: "a name that is not there"}
+    monkeypatch.setattr("halyard.channels.telegram.adapter.find_session", lambda name: None)
+
+    await channel._handle_message(typed("/status"))
+
+    # A name copied slightly wrong routes nothing and explains nothing, so the
+    # place you go to check has to say it could not find it.
+    assert "not found" in api.sent[-1]["text"]
+
+
+async def test_the_bot_answers_in_the_chat_that_asked(tmp_path: Path) -> None:
+    channel, api, _, _ = await wired(tmp_path)
+
+    await channel._handle_message(typed_in("/status", DRV_CHAT))
+
+    # Ask in the driver group and the reply used to appear in a private chat
+    # with the bot, which reads exactly like the message having been lost.
+    assert api.sent[-1]["chat_id"] == DRV_CHAT
+
+
+async def test_a_queued_notice_lands_where_the_message_was_typed(tmp_path: Path) -> None:
+    channel, api, runner, _ = await wired(tmp_path)
+    runner.working.add("session-nav")
+
+    await channel._handle_message(typed_in("another thing", NAV_CHAT))
+    await drain()
+
+    assert api.sent[0]["chat_id"] == NAV_CHAT
+
+
+async def test_a_reply_stays_in_its_forum_topic(tmp_path: Path) -> None:
+    channel, api, _, _ = await wired(tmp_path)
+    message = typed_in("/status", NAV_CHAT)
+    message["message_thread_id"] = 12
+
+    await channel._handle_message(message)
+
+    assert api.sent[-1]["message_thread_id"] == 12
+
+
+# --- choosing what answers ----------------------------------------------------
+
+
+async def test_model_can_be_set_from_the_chat(tmp_path: Path) -> None:
+    channel, api, runner, _ = await wired(tmp_path)
+
+    await channel._handle_message(typed_in("/model claude-sonnet-5", NAV_CHAT))
+
+    assert runner.models["session-nav"] == "claude-sonnet-5"
+    assert "claude-sonnet-5" in api.sent[-1]["text"]
+
+
+async def test_effort_can_be_set_from_the_chat(tmp_path: Path) -> None:
+    channel, _, runner, _ = await wired(tmp_path)
+
+    await channel._handle_message(typed_in("/effort low", DRV_CHAT))
+
+    assert runner.efforts["session-drv"] == "low"
+
+
+async def test_each_seat_keeps_its_own_choice(tmp_path: Path) -> None:
+    channel, _, runner, _ = await wired(tmp_path)
+
+    await channel._handle_message(typed_in("/effort xhigh", NAV_CHAT))
+    await channel._handle_message(typed_in("/effort low", DRV_CHAT))
+
+    # The point of a navigator and a driver is that they are not the same.
+    assert runner.efforts["session-nav"] == "xhigh"
+    assert runner.efforts["session-drv"] == "low"
+
+
+@pytest.mark.parametrize("value", ["default", "clear", "reset"])
+async def test_a_choice_can_be_given_back(tmp_path: Path, value: str) -> None:
+    channel, _, runner, _ = await wired(tmp_path)
+    await channel._handle_message(typed_in("/model claude-sonnet-5", NAV_CHAT))
+
+    await channel._handle_message(typed_in(f"/model {value}", NAV_CHAT))
+
+    assert runner.models.get("session-nav") is None
+
+
+async def test_a_nonsense_effort_is_refused_before_it_costs_a_turn(tmp_path: Path) -> None:
+    channel, api, runner, _ = await wired(tmp_path)
+
+    await channel._handle_message(typed_in("/effort enormous", NAV_CHAT))
+
+    # A closed set, so a typo is caught here rather than by a turn that fails a
+    # minute later.
+    assert runner.efforts.get("session-nav") is None
+    assert "low medium high" in api.sent[-1]["text"]
