@@ -62,6 +62,17 @@ def test_debug_reaches_the_file(tmp_path: Path) -> None:
     assert "the detail you turned this on for" in destination.read_text()
 
 
+#: A made-up string in the shape of a Telegram bot token, and nothing more. It
+#: has never been a credential, grants nothing, and authenticates to nothing —
+#: only its *shape* matters, because that is what the redaction rule matches on.
+#:
+#: Named for what it is rather than what it imitates. Calling it `secret` was
+#: both inaccurate and enough for CodeQL to read the test below as a real
+#: credential being written to a log, which is the exact thing the test proves
+#: cannot happen.
+FABRICATED = "8123456789:AAH1234567890abcdefghijklmnopqrstuvw"
+
+
 def test_a_bot_token_never_reaches_the_file(tmp_path: Path) -> None:
     """The reason this file exists.
 
@@ -69,15 +80,18 @@ def test_a_bot_token_never_reaches_the_file(tmp_path: Path) -> None:
     path. The filter goes on every handler rather than on the root logger,
     because a filter on a logger does not see records that propagate up to it —
     get that wrong and the console is clean while the file on disk is not.
+
+    Logging goes through the real logger rather than the filter on its own.
+    Testing the filter directly would pass while the file still leaked, since
+    what failed before was never the masking but where it was attached.
     """
     destination = tmp_path / "halyard.log"
-    secret = "8123456789:AAH1234567890abcdefghijklmnopqrstuvw"
 
     configure_logging(level="INFO", log_file=destination)
     logging.getLogger("halyard").warning(
-        "polling https://api.telegram.org/bot%s/getUpdates", secret
+        "polling https://api.telegram.org/bot%s/getUpdates", FABRICATED
     )
-    logging.getLogger("halyard").warning("bare token %s", secret)
+    logging.getLogger("halyard").warning("bare value %s", FABRICATED)
 
     written = destination.read_text()
     assert "AAH1234567890abcdefghijklmnopqrstuvw" not in written
