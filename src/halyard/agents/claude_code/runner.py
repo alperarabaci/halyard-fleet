@@ -112,7 +112,7 @@ class ClaudeCodeRunner:
         """
         return self._binary is not None
 
-    def options(self) -> dict[str, tuple[tuple[str, ...], bool]]:
+    def options(self, session_id: str | None = None) -> dict[str, tuple[tuple[str, ...], bool]]:
         """What can be chosen, as {name: (values, whether it is enforced)}.
 
         The adapter answers for itself so the channel can print it without
@@ -124,6 +124,10 @@ class ClaudeCodeRunner:
         because a list written months ago should not be able to refuse a model
         that shipped this morning. Effort is enforced, because the CLI
         documents a closed set.
+
+        `session_id` is ignored here — Claude Code accepts the same five effort
+        levels whatever the model. It is in the signature because Codex does
+        not, and one protocol answering for both beats two protocols.
         """
         return {"model": (self._known_models, False), "effort": (EFFORT_LEVELS, True)}
 

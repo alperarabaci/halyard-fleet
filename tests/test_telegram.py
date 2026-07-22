@@ -812,7 +812,7 @@ class FakeRunner:
         self.efforts: dict[str, str] = {}
         self._works = works
 
-    def options(self) -> dict[str, tuple[tuple[str, ...], bool]]:
+    def options(self, session_id: str | None = None) -> dict[str, tuple[tuple[str, ...], bool]]:
         # The same sets the real runner reports. A double that accepts less
         # than the thing it stands in for fails tests the real code passes.
         return {
@@ -1326,7 +1326,7 @@ async def test_options_comes_from_the_runtime_not_from_this_module(tmp_path: Pat
     """A second runtime — Codex, whatever follows — needs no change here."""
     channel, api, runner, _ = await wired(tmp_path)
     runner.id = "codex"
-    runner.options = lambda: {"model": (("gpt-nitro",), True)}
+    runner.options = lambda session_id=None: {"model": (("gpt-nitro",), True)}
 
     await channel._handle_message(typed_in("/options", NAV_CHAT))
 
@@ -1387,7 +1387,10 @@ async def test_effort_is_validated_against_the_runtime_not_a_hardcoded_list(tmp_
     `max` on others — would have had valid input refused by the chat layer.
     """
     channel, api, runner, _ = await wired(tmp_path)
-    runner.options = lambda: {"effort": (("gentle", "fierce"), True), "model": ((), False)}
+    runner.options = lambda session_id=None: {
+        "effort": (("gentle", "fierce"), True),
+        "model": ((), False),
+    }
 
     await channel._handle_message(typed_in("/effort fierce", NAV_CHAT))
     assert runner.efforts["session-nav"] == "fierce"
@@ -1402,7 +1405,10 @@ async def test_an_unenforced_choice_is_passed_through(tmp_path) -> None:
     is absent from a list written months ago is worse than letting the runtime
     answer for itself."""
     channel, _, runner, _ = await wired(tmp_path)
-    runner.options = lambda: {"model": (("opus", "haiku"), False), "effort": ((), True)}
+    runner.options = lambda session_id=None: {
+        "model": (("opus", "haiku"), False),
+        "effort": ((), True),
+    }
 
     await channel._handle_message(typed_in("/model something-brand-new", NAV_CHAT))
 

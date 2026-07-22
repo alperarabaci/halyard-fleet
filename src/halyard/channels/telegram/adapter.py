@@ -524,7 +524,7 @@ class TelegramChannel:
         # closed set worth checking; models are not, and refusing one released
         # this morning because it is missing from a list written months ago
         # would be worse than passing it through.
-        allowed, enforced = self._runner.options().get(what, ((), False))
+        allowed, enforced = self._runner.options(session_id).get(what, ((), False))
         if value and enforced and value.lower() not in allowed:
             await self._say(
                 f"{what.capitalize()} is one of: <code>{' '.join(allowed)}</code>",
