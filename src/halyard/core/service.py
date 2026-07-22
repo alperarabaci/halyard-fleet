@@ -38,11 +38,6 @@ from halyard.core.registry import SessionRegistry
 
 logger = logging.getLogger(__name__)
 
-#: Above this, a reply is sent as a file instead of a message. Telegram's
-#: limit is 4096; the margin leaves room for whatever a channel wraps around
-#: it.
-MESSAGE_SPLIT_THRESHOLD = 3500
-
 
 def project_name(project_dir: str | None, cwd: str | None, configured: str) -> str:
     """What to call the project a request came from.
@@ -212,12 +207,10 @@ class MessageRelay:
 
     async def _deliver(self, session_id: str, text: str, role: Role | None) -> bool:
         try:
-            if len(text) > MESSAGE_SPLIT_THRESHOLD:
-                # Long replies go as a file rather than a wall of split
-                # messages — the same choice the full-command view makes.
-                await self._channel.send_long_content(session_id, text, "Agent reply", role)
-            else:
-                await self._channel.send_message(session_id, text, role)
+            # Always as messages, however long. A reply arriving as a file has
+            # to be tapped, downloaded and opened, and reading it where it
+            # lands is the entire point. The channel splits if it must.
+            await self._channel.send_message(session_id, text, role)
         except Exception:
             logger.exception("Channel refused a relayed message from %s", session_id)
             return False

@@ -141,6 +141,45 @@ def keyboard(request: ApprovalRequest, *, include_full: bool) -> dict:
     return {"inline_keyboard": rows}
 
 
+#: Room left under the 4096 limit for a continuation marker and the escaping
+#: that can grow a chunk after it has been measured.
+CHUNK_LIMIT = 3500
+
+
+def split_for_telegram(text: str, *, limit: int = CHUNK_LIMIT) -> list[str]:
+    """Break a long reply into messages that can be read in the chat.
+
+    A phone is a bad place to receive a `.txt`: it has to be tapped,
+    downloaded and opened, and an agent's reply is something you want to read
+    where it arrives. A document is right for a command dump you want to search
+    — not for prose.
+
+    Split on blank lines first, then single lines, so a code block is cut at a
+    line boundary rather than mid-token. A single line longer than the limit is
+    cut anyway, because the alternative is not sending it.
+    """
+    if len(text) <= limit:
+        return [text]
+
+    chunks: list[str] = []
+    current = ""
+    for block in text.split("\n"):
+        while len(block) > limit:
+            if current:
+                chunks.append(current)
+                current = ""
+            chunks.append(block[:limit])
+            block = block[limit:]
+        if len(current) + len(block) + 1 > limit:
+            chunks.append(current)
+            current = block
+        else:
+            current = f"{current}\n{block}" if current else block
+    if current:
+        chunks.append(current)
+    return [c.strip("\n") for c in chunks if c.strip()]
+
+
 def _short_session(session_id: str) -> str:
     return session_id if len(session_id) <= 13 else f"{session_id[:4]}…{session_id[-4:]}"
 

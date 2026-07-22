@@ -175,9 +175,21 @@ class TelegramChannel:
         return str(message_id)
 
     async def send_message(self, session_id: str, text: str, role: Role | None = None) -> str:
+        """Send an agent's own words, split across messages if they are long.
+
+        Escaped, because this is somebody else's prose: a reply mentioning a
+        `<div>` is not markup, and sending it as markup makes Telegram refuse
+        the whole message.
+        """
         chat_id, thread_id = self._route(role)
-        message = await self._api.send_message(chat_id, text, message_thread_id=thread_id)
-        return str(message["message_id"])
+        chunks = cards.split_for_telegram(text)
+        message = None
+        for index, chunk in enumerate(chunks, start=1):
+            marker = f"<i>({index}/{len(chunks)})</i>\n" if len(chunks) > 1 else ""
+            message = await self._api.send_message(
+                chat_id, marker + html.escape(chunk), message_thread_id=thread_id
+            )
+        return str(message["message_id"]) if message else ""
 
     async def send_long_content(
         self, session_id: str, content: str, title: str, role: Role | None = None
@@ -188,11 +200,14 @@ class TelegramChannel:
         is something you want to be able to scroll and search, not reassemble
         from six chat bubbles.
         """
-        if len(content) <= cards.MESSAGE_LIMIT - 100:
-            return await self.send_message(
-                session_id, f"<b>{title}</b>\n<pre>{content}</pre>", role
+        chat_id, thread_id = self._route(role)
+        if len(content) <= cards.MESSAGE_LIMIT - 200:
+            message = await self._api.send_message(
+                chat_id,
+                f"<b>{html.escape(title)}</b>\n<pre>{html.escape(content)}</pre>",
+                message_thread_id=thread_id,
             )
-        chat_id, _ = self._route(role)
+            return str(message["message_id"])
         filename = f"{title.lower().replace(' ', '-')}.txt"
         result = await self._api.send_document(
             chat_id, filename, content.encode("utf-8"), caption=title
