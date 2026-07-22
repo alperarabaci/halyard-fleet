@@ -268,44 +268,57 @@ def sessions() -> int:
     Read on the host, not in the container: transcripts live in the user's home
     directory, which the control plane cannot see.
     """
-    sys.path.insert(0, str(BRIDGE_DIR))
-    try:
-        import _settings
-    finally:
-        sys.path.pop(0)
+    from halyard.agents.claude_code.sessions import describe
 
     root = Path.home() / ".claude" / "projects"
     if not root.exists():
         print(f"No transcripts found under {root}.")
         return 1
 
-    seen: dict[str, tuple[float, str]] = {}
+    seen: dict[str, tuple[float, str, bool]] = {}
     for transcript in root.glob("*/*.jsonl"):
         try:
             modified = transcript.stat().st_mtime
         except OSError:
             continue
-        name = _settings.session_name(str(transcript))
-        if not name:
+        ref = describe(transcript)
+        if ref is None or not ref.name:
             continue
+        # The directory comes from the transcript's own `cwd`, never from the
+        # name of the folder transcripts are filed under: that name replaced
+        # every separator with a dash, so `halyard-fleet` and `halyard/fleet`
+        # encode identically and decoding produces a path that does not exist.
+        project = ref.cwd or "(directory not recorded)"
         # One named conversation spans many session ids; keep the most recent
         # sighting of each name rather than listing it once per restart.
-        project = transcript.parent.name.strip("-").replace("-", "/")
-        if name not in seen or modified > seen[name][0]:
-            seen[name] = (modified, project)
+        if ref.name not in seen or modified > seen[ref.name][0]:
+            seen[ref.name] = (modified, project, ref.named_by_a_person)
 
     if not seen:
         print("No named sessions found.")
         return 1
 
     print("Session names visible on this machine, newest first:\n")
-    for name, (modified, project) in sorted(seen.items(), key=lambda i: -i[1][0]):
+    generated = False
+    for name, (modified, project, chosen) in sorted(seen.items(), key=lambda i: -i[1][0]):
         when = datetime.fromtimestamp(modified).strftime("%Y-%m-%d %H:%M")
-        print(f"  {when}  {name}")
-        print(f"{'':20}{project[-60:]}")
+        generated = generated or not chosen
+        print(f"  {when}  {name}{'' if chosen else '   ⚠ auto-titled'}")
+        print(f"{'':20}{project}")
     print(
         "\nPut the two you want routed into .env, exactly as printed:\n"
         "  HALYARD_NAVIGATOR_SESSION=...\n"
         "  HALYARD_DRIVER_SESSION=..."
     )
+    if generated:
+        # Worth interrupting for. A generated title routes correctly the day it
+        # is copied and stops without an error the moment Claude rewrites it,
+        # which looks like Halyard losing messages rather than like a name
+        # having moved underneath it.
+        print(
+            "\n⚠ Names marked auto-titled were written by Claude, not by you, and\n"
+            "  are rewritten as the conversation moves. A seat pointed at one\n"
+            "  works until it changes, then quietly routes nothing. Rename the\n"
+            "  session in the app first, then copy the name you chose."
+        )
     return 0
