@@ -220,11 +220,24 @@ RUNTIMES = (
         binary="codex",
         settings=".codex/hooks.json",
         matcher="^Bash$",
-        # Sandbox and approvals are opened deliberately, and only inside a
-        # throwaway directory. The harness has to remove every blocker except
-        # the gate: a command stopped by Codex's own approval flow looks
-        # exactly like one the gate stopped, and reading that as a pass is how
-        # a project with no gate at all gets a clean bill of health.
+        # Sandbox, approvals and hook trust are all opened deliberately, and
+        # only inside a throwaway directory this process just created.
+        #
+        # The harness has to remove every blocker except the gate: a command
+        # stopped by Codex's own approval flow looks exactly like one the gate
+        # stopped, and reading that as a pass is how a project with no gate at
+        # all gets a clean bill of health.
+        #
+        # Trust is the same problem in a form that cannot be worked around.
+        # These hooks are written here, seconds ago, in a directory that will
+        # not exist afterwards — so they have never been trusted and never can
+        # be, and without the bypass every case is inconclusive forever.
+        # Approving the hooks in a real project does nothing for them.
+        #
+        # That is not a hole: what trust protects against is a hook somebody
+        # else wrote, and this one is written by the check itself. Whether the
+        # hooks on a *real* project are trusted is a different question, and
+        # `halyard doctor` is what answers it.
         command=(
             "exec",
             "-m",
@@ -234,6 +247,7 @@ RUNTIMES = (
             "danger-full-access",
             "-c",
             'approval_policy="never"',
+            "--dangerously-bypass-hook-trust",
             PROMPT,
         ),
         hook_timeout=5,
@@ -244,32 +258,34 @@ RUNTIMES = (
 def _write_settings(project: Path, runtime: Runtime, hook: Path) -> None:
     path = project / runtime.settings
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        json.dumps(
-            {
-                "hooks": {
-                    "PreToolUse": [
+    config: dict = {
+        "hooks": {
+            "PreToolUse": [
+                {
+                    "matcher": runtime.matcher,
+                    "hooks": [
                         {
-                            "matcher": runtime.matcher,
-                            "hooks": [
-                                {
-                                    "type": "command",
-                                    "command": str(hook),
-                                    "timeout": runtime.hook_timeout,
-                                }
-                            ],
+                            "type": "command",
+                            "command": str(hook),
+                            "timeout": runtime.hook_timeout,
                         }
-                    ]
-                },
-                # The command is allow-listed on purpose. Without it the
-                # runtime's own permission flow would stop the command in
-                # headless mode and every case would look like a pass — the
-                # trap that made an earlier measurement of this wrong.
-                "permissions": {"allow": [f"Bash(touch {MARKER})"]},
-            },
-            indent=2,
-        )
-    )
+                    ],
+                }
+            ]
+        }
+    }
+    if runtime.name == "claude-code":
+        # Allow-listed on purpose: without it, Claude Code's own permission
+        # flow stops the command in headless mode and every case looks like a
+        # pass. Measured, after an earlier version of this check was wrong for
+        # exactly that reason.
+        #
+        # Only for Claude Code. Codex refuses a hooks file containing a field
+        # it does not recognise — the whole file, not the field — and says so
+        # in a warning on stderr while the gate quietly ceases to exist. That
+        # is how this check spent an evening reporting that no hook ever ran.
+        config["permissions"] = {"allow": [f"Bash(touch {MARKER})"]}
+    path.write_text(json.dumps(config, indent=2))
 
 
 def _run_case(project: Path, runtime: Runtime, case: Case, binary: str) -> tuple[bool, bool, str]:
@@ -309,9 +325,9 @@ def _run_case(project: Path, runtime: Runtime, case: Case, binary: str) -> tuple
 
     note = ""
     if runtime.name == "codex" and "hook:" not in (done.stdout + done.stderr):
-        # The measured symptom of an untrusted hook: no mention of a hook at
-        # all, and a turn that completes as though none were configured.
-        note = "Codex skips untrusted hooks silently — approve them and re-run"
+        # With trust bypassed this should not happen; if it does, something
+        # else is stopping the hook and saying which is more use than a guess.
+        note = "no hook was mentioned at all by the run"
     return marker.exists(), witness.exists(), note
 
 

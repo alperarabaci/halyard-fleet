@@ -104,37 +104,88 @@ def _hook_commands(settings_file: Path, project_dir: Path) -> list[tuple[str, st
     return found
 
 
-def _check_gated_project(role: str, name: str) -> tuple[list[str], int]:
-    """Check the hooks wired into the project a named session works in.
+def _check_seat(seat) -> tuple[list[str], int]:
+    """Everything one seat needs, checked against the runtime it actually is.
+
+    Four seats and two runtimes means a name that resolves perfectly for one is
+    absent from the other, and the mistake is easy to make because the names
+    look alike. Asking the seat's own runtime is the only way to tell.
+    """
+    lines: list[str] = []
+    label = f"{seat.label} ({seat.runtime})"
+
+    if not seat.session:
+        return [f"{WARN}{label}: no session name, so nothing can be sent to it"], 0
+
+    if seat.runtime == "codex":
+        from halyard.agents.codex import find_codex_binary
+        from halyard.agents.codex import find_session as look_up
+
+        if find_codex_binary() is None:
+            return [f"{FAIL}{label}: the codex CLI is not on this machine"], 1
+    else:
+        from halyard.agents.claude_code import find_session as look_up
+        from halyard.agents.claude_code.runner import find_claude_binary
+
+        if find_claude_binary() is None:
+            return [f"{FAIL}{label}: the claude CLI is not on this machine"], 1
+
+    ref = look_up(seat.session)
+    if ref is None:
+        lines.append(f"{FAIL}{label}: no session named {seat.session!r}")
+        lines.append(f"        {seat.runtime} does not know that name — check it against")
+        lines.append(
+            "        `halyard sessions`"
+            if seat.runtime == "claude-code"
+            else "        the Codex thread names on this machine"
+        )
+        return lines, 1
+
+    lines.append(f"{OK}{label}: {seat.session}")
+    if not ref.named_by_a_person:
+        lines.append(f"{WARN}        that name was generated, and generated names are rewritten")
+    if not seat.chat:
+        lines.append(f"{WARN}        no chat, so it has nowhere of its own to speak")
+    if not ref.cwd:
+        lines.append(f"{WARN}        no directory recorded, so nothing can be gated")
+        return lines, 0
+
+    gate_lines, gate_problems = _check_gated_project(label, ref, seat)
+    return lines + gate_lines, gate_problems
+
+
+def _check_gated_project(label: str, ref, seat) -> tuple[list[str], int]:
+    """Check the hooks wired into the project this seat's session works in.
 
     This is the check that would have caught an afternoon: settings copied from
     one machine to another still pointed at the first machine's paths, so the
     wrapper denied every command and nothing in the control plane knew why —
     the hook never reached it.
+
+    Which file holds those hooks depends on the runtime. Looking in `.claude/`
+    for a Codex seat would report a gate missing on a project that has one, and
+    the obvious response to that is to go and wire a second.
     """
-    from halyard.agents.claude_code import find_session
-
     lines: list[str] = []
-    ref = find_session(name)
-    if ref is None:
-        return [f"{FAIL}{role}: no session named {name!r} on this machine"], 1
-    if not ref.cwd:
-        return [f"{WARN}{role}: {name} has no recorded directory"], 0
-
     session_dir = Path(ref.cwd)
     project_dir = project_root(session_dir)
-    lines.append(f"{OK}{role}: {name}")
     lines.append(f"        {session_dir}")
     if project_dir != session_dir:
         lines.append(f"        gated from the repository root: {project_dir}")
 
-    settings_files = [
-        project_dir / ".claude" / "settings.json",
-        project_dir / ".claude" / "settings.local.json",
-    ]
+    settings_files = (
+        [project_dir / ".codex" / "hooks.json"]
+        if seat.runtime == "codex"
+        else [
+            project_dir / ".claude" / "settings.json",
+            project_dir / ".claude" / "settings.local.json",
+        ]
+    )
     present = [f for f in settings_files if f.exists()]
     if not present:
-        lines.append(f"{FAIL}        no .claude/settings.json — nothing is gating this project")
+        where = ".codex/hooks.json" if seat.runtime == "codex" else ".claude/settings.json"
+        lines.append(f"{FAIL}        no {where} — nothing is gating this project")
+        lines.append(f"                halyard wire {project_dir}")
         return lines, 1
 
     problems = 0
@@ -161,6 +212,34 @@ def _check_gated_project(role: str, name: str) -> tuple[list[str], int]:
         lines.append(f"{FAIL}        no PreToolUse hook — approvals will never be asked for")
     if "Stop" not in seen_events:
         lines.append(f"{WARN}        no Stop hook — replies will not reach the channel")
+
+    if seat.runtime == "codex":
+        from halyard.wiring import codex_trust_is_stale, codex_untrusted
+
+        hooks_file = project_dir / ".codex" / "hooks.json"
+        # Codex accepts `description` and `hooks` and refuses a file containing
+        # anything else — the whole file, not the field. It says so in a
+        # warning on stderr and then behaves as though no hooks existed, which
+        # is a gate that has silently ceased to exist on a project that looks
+        # correctly wired. Measured: one stray key cost an evening.
+        try:
+            keys = set(json.loads(hooks_file.read_text(encoding="utf-8")))
+        except (OSError, ValueError):
+            keys = set()
+        stray = sorted(keys - {"description", "hooks"})
+        if stray:
+            problems += 1
+            lines.append(f"{FAIL}        hooks.json has field(s) Codex rejects: {', '.join(stray)}")
+            lines.append("                it refuses the whole file over one, so nothing is gated")
+        if codex_untrusted(hooks_file):
+            problems += 1
+            lines.append(f"{FAIL}        hooks here have never been trusted")
+            lines.append("                Codex skips an untrusted hook without a word, so")
+            lines.append("                this project has no gate. Open it in Codex and approve.")
+        elif codex_trust_is_stale(hooks_file):
+            lines.append(f"{WARN}        hooks edited since trust was last recorded")
+            lines.append("                Codex skips a hook whose hash no longer matches,")
+            lines.append("                silently. Open it in Codex and approve again.")
 
     if ref.started_at and ref.started_at.timestamp() < newest_settings:
         # With the date, because the two are often a day apart and bare
@@ -223,23 +302,28 @@ def run() -> int:
         print(f"{WARN}the running control plane answers approvals by itself")
 
     print()
-    seats = []
+    from halyard.core.seats import from_environment
+
     try:
-        settings_for_seats = Settings()
-        seats = [
-            ("navigator", settings_for_seats.navigator_session),
-            ("driver", settings_for_seats.driver_session),
-        ]
-    except ValidationError:
-        pass
-    for role, name in seats:
-        if not name:
-            continue
-        lines, found = _check_gated_project(role, name)
+        configured = from_environment()
+    except ValueError as error:
+        # A seat that will not parse is a seat you believe you have.
+        print(f"{FAIL}seats: {error}")
+        configured = []
+        problems += 1
+
+    if not configured:
+        # Silence used to mean "checked and fine". It meant "checked nothing":
+        # when seats replaced the two role settings this stopped looking at
+        # anything and still printed a clean bill of health.
+        print(f"{WARN}no seats configured — nothing is being routed anywhere")
+        print("        set HALYARD_SEATS, or the navigator/driver pair, in .env")
+    for seat in configured:
+        lines, found = _check_seat(seat)
         problems += found
         for line in lines:
             print(line)
-    if any(name for _, name in seats):
+    if configured:
         print()
 
     for name, required in (("hook.sh", True), ("hook_bridge.py", True), ("relay.py", False)):
