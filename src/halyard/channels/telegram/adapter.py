@@ -188,9 +188,20 @@ class TelegramChannel:
             for seat in self._seats:
                 if seat.session and seat.session.strip().casefold() in identifiers and seat.chat:
                     return parse_destination(seat.chat) or (self._chat_id, None)
-        for seat in self._seats:
-            if seat.role is role and seat.chat and (agent_id is None or seat.runtime == agent_id):
-                return parse_destination(seat.chat) or (self._chat_id, None)
+        # Only when a role was actually declared. Falling back on `None`
+        # matches any seat that also has no role, so a seat with nowhere of its
+        # own to speak would borrow the group of an unrelated one — measured
+        # with seven seats, where a scratch seat's card landed in a reviewer's
+        # group. No destination should mean the default chat, not somebody
+        # else's.
+        if role is not None:
+            for seat in self._seats:
+                if (
+                    seat.role is role
+                    and seat.chat
+                    and (agent_id is None or seat.runtime == agent_id)
+                ):
+                    return parse_destination(seat.chat) or (self._chat_id, None)
         return (role and self._routes.get(role)) or (self._chat_id, None)
 
     async def send_approval_request(self, request: ApprovalRequest) -> str:
