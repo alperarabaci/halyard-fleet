@@ -100,30 +100,31 @@ HALYARD_CLAUDE_MODELS=opus,sonnet,haiku,fable,whatever-is-new
 
 ### What a message from a phone runs on
 
-Sonnet, unless you say otherwise:
+The model already selected by the resumed session, unless you say otherwise
+with `/model`.
+
+On macOS Halyard sends that turn through Claude Desktop's bundled Claude Code
+engine by default, and sends no `--model` flag unless an override was chosen.
+Both details restore the shape that was measured working: an external resume
+into an open Desktop-owned opus session continued on opus and appeared in the
+open task.
+
+The earlier conclusion that no model flag meant haiku mixed up two different
+commands. A fresh headless `claude -p` did use haiku; a `--resume` into the live
+Desktop session inherited that session's opus model. The fresh-prompt
+measurement does not define resume behavior.
+
+`/model default` clears Halyard's override and returns model choice to the
+resumed session/runtime. If you intentionally want every phone turn to replace
+the session choice, configure it explicitly:
 
 ```
 HALYARD_CLAUDE_DEFAULT_MODEL=sonnet
 ```
 
-This is an opinion, and it is deliberately not the CLI's. `claude -p` with no
-`--model` runs on haiku — measured, not read. That is a sensible default for a
-one-shot prompt and the wrong one for continuing work on a codebase, and it is
-the kind of wrong you do not notice: the turn still answers, plausibly, and
-nothing in the reply mentions which model wrote it.
-
-Two things follow that are worth knowing before they surprise you.
-
-**The model shown in the app is not the model answering your phone.** They are
-separate settings and nothing here can reach the first one. A session sitting on
-opus at the desk still answers a message from Telegram with whatever this
-control plane sends. `/status` prints both, which is why it names them
+An explicit `HALYARD_CLAUDE_BINARY` similarly overrides the selected
+executable. `/status` shows the session model and any Halyard override
 separately.
-
-**`/model default` returns to this setting, not to the session's.** There is no
-way to hand the choice back to the app, so "default" means the default here.
-
-Set it empty to pass no `--model` at all and take whatever the CLI does.
 
 ### Optional: keep a navigator and a driver apart
 

@@ -39,6 +39,17 @@ def test_the_defaults_keep_the_service_local() -> None:
     assert settings.host == "127.0.0.1"
     assert settings.port == 8787
     assert settings.approval_timeout_seconds == 300
+    assert settings.claude_binary is None
+    assert settings.claude_default_model == ""
+
+
+def test_the_claude_binary_can_be_pinned() -> None:
+    settings = build(
+        HALYARD_CHANNEL="stub_deny",
+        HALYARD_CLAUDE_BINARY="/Applications/Claude.app/Contents/claude",
+    )
+
+    assert settings.claude_binary == "/Applications/Claude.app/Contents/claude"
 
 
 def test_telegram_will_not_start_without_its_credentials() -> None:

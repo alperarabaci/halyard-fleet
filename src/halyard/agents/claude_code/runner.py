@@ -25,6 +25,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import re
 import shutil
 from collections import defaultdict
 from pathlib import Path
@@ -46,15 +47,11 @@ EFFORT_LEVELS = ("low", "medium", "high", "xhigh", "max")
 #: Override with HALYARD_CLAUDE_MODELS when something new appears.
 DEFAULT_MODELS = ("opus", "sonnet", "haiku", "fable")
 
-#: What a turn runs on when nobody has said otherwise.
-#:
-#: An opinion, and deliberately not the CLI's. `claude -p` with no `--model`
-#: uses haiku — measured, not read — which is a fine default for a one-shot
-#: prompt and the wrong one for continuing work on a real codebase. Left alone,
-#: every message sent from a phone would quietly run on the cheapest model
-#: available while the session it landed in was set to something else, and
-#: nothing in the reply would say so.
-DEFAULT_MODEL = "sonnet"
+#: No model override by default. Measured on a live Desktop-owned session:
+#: `--resume` with no `--model` continued on that session's opus model. The
+#: earlier haiku measurement came from a fresh headless prompt and was wrongly
+#: applied to resumed sessions. Supplying a default here broke that inheritance.
+DEFAULT_MODEL: str | None = None
 
 #: Where the CLI usually is when PATH does not have it, which is the common case
 #: for a service started outside a login shell.
@@ -64,11 +61,39 @@ _FALLBACK_BINARIES = (
     Path("/opt/homebrew/bin/claude"),
 )
 
+# Claude Desktop ships the Claude Code engine it uses for its open sessions.
+# Running a different installed CLI version against a session owned by the app
+# has regressed live transcript refresh in practice. Prefer the app's engine on
+# macOS so the external resume writer and the desktop reader speak the same
+# version. HALYARD_CLAUDE_BINARY remains an explicit escape hatch.
+_DESKTOP_CLAUDE_CODE_DIR = (
+    Path.home() / "Library" / "Application Support" / "Claude" / "claude-code"
+)
+
+
+def _desktop_claude_binary() -> str | None:
+    """Return the newest Claude Code engine bundled with Claude Desktop."""
+
+    def version_key(binary: Path) -> tuple[int, ...]:
+        version = binary.parents[3].name
+        return tuple(int(part) for part in re.findall(r"\d+", version))
+
+    candidates = [
+        candidate
+        for candidate in _DESKTOP_CLAUDE_CODE_DIR.glob("*/claude.app/Contents/MacOS/claude")
+        if candidate.is_file()
+    ]
+    if not candidates:
+        return None
+    return str(max(candidates, key=version_key))
+
 
 def find_claude_binary(configured: str | None = None) -> str | None:
-    """Locate the CLI, preferring an explicit setting."""
+    """Locate the CLI, preferring an explicit setting then Desktop's engine."""
     if configured:
         return configured if Path(configured).exists() else shutil.which(configured)
+    if desktop := _desktop_claude_binary():
+        return desktop
     found = shutil.which("claude")
     if found:
         return found

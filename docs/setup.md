@@ -26,6 +26,12 @@ that quietly differ in what they can do is worse than having one.
 `halyard doctor` reports `can_send_messages`, so if this ever regresses it says so rather than
 failing at the moment you need it.
 
+On macOS, message delivery prefers the Claude Code engine bundled with Claude
+Desktop. This keeps Halyard's external `--resume` writer on the same Claude
+Code version as the process holding the open desktop task. `halyard doctor`
+prints the executable it selected. Set `HALYARD_CLAUDE_BINARY` to a command name
+or absolute path only when you need to override that choice.
+
 ### Wiring the hooks
 
 One command, from anywhere inside the project:
@@ -35,16 +41,38 @@ halyard wire .        # or: halyard wire ~/code/my-project
 halyard unwire .      # take it back off
 ```
 
-It merges into `.claude/settings.local.json` rather than replacing it, copies the
-file aside first with a timestamp, and finds the repository root on its own — a
-session opened in a subdirectory is gated from the top of its repo, so wiring
-next to the session would gate nothing while looking like it had.
+For every installed runtime, it loads the existing project configuration,
+copies the exact file aside first with a timestamp, and then merges Halyard's
+hook entries without replacing the document:
+
+- Claude Code: `.claude/settings.local.json`
+- Codex: `.codex/hooks.json`
+
+A session opened in a subdirectory is gated from the top of its repository, so
+wiring next to the session would gate nothing while looking like it had.
 
 Unwiring removes only the hooks pointing at *this* install, so it cannot
 uninstall a hook it did not install.
 
-The rest of this section is what that command writes, for when you want to check
-it or do it by hand:
+For the multi-runtime routing transition, the repository also includes paired
+rollout and rollback helpers:
+
+```bash
+scripts/rollout-runtime-routing-fixes.sh ~/code/project-a ~/code/project-b
+# The rollout prints the state directory it created. Keep that path:
+scripts/rollback-runtime-routing-fixes.sh ~/.local/state/halyard-fleet/transitions/TIMESTAMP
+```
+
+The rollout records exact pre-transition copies of both runtime settings before
+calling `halyard wire`; `wire` then performs its own merge and timestamped
+backup. Rollback retains the post-transition files before restoring those
+copies. Neither script restarts Halyard or an agent application automatically.
+Review the scripts and run them deliberately; they are operational helpers, not
+installation hooks.
+
+The rest of this section shows the Claude Code portion for inspection. Prefer
+`halyard wire`; hand-editing either runtime's file bypasses the backup and merge
+guarantees.
 
 ```json
 {
@@ -103,8 +131,11 @@ gitignored, so a machine-specific path does not break a teammate's checkout.
 > }
 > ```
 
-**Claude Code snapshots hook configuration at startup.** Editing settings mid-session has no
-effect; restart the session. Script contents are read on every call, so those can change freely.
+**Hook configuration is loaded when the task starts.** Editing settings mid-task
+has no effect. Restart the Claude Code session, or restart the Codex task or
+application, after wiring. Codex also requires the newly added hook to be
+reviewed and trusted. Script contents are read on every call, so those can
+change without another configuration edit.
 
 **`PreToolUse` → `hook.sh`** is the approval gate. Point it at the wrapper, not at
 `hook_bridge.py`: the wrapper is what denies when the Python process cannot start at all — a

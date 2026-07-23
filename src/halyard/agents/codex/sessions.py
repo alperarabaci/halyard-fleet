@@ -22,15 +22,17 @@ from __future__ import annotations
 
 import json
 import logging
+import mmap
 from pathlib import Path
 
 from halyard.agents.base import SessionRef
 
 logger = logging.getLogger(__name__)
 
-#: Enough of a rollout to find the newest `turn_context` without reading a
-#: conversation that may be megabytes of tool output.
-TRANSCRIPT_TAIL_BYTES = 256 * 1024
+#: Context records are small. Refuse to materialise an unexpectedly enormous
+#: JSON line while walking backwards over tool output; it cannot be one of the
+#: records this adapter is looking for.
+MAX_CONTEXT_RECORD_BYTES = 2 * 1024 * 1024
 
 
 def codex_home(root: Path | None = None) -> Path:
@@ -74,41 +76,60 @@ def _rollout_for(session_id: str, root: Path | None = None) -> Path | None:
     return matches[0] if matches else None
 
 
-def _read_tail(path: Path) -> bytes | None:
-    try:
-        with path.open("rb") as handle:
-            size = path.stat().st_size
-            handle.seek(max(0, size - TRANSCRIPT_TAIL_BYTES))
-            return handle.read()
-    except OSError:
-        return None
-
-
 def _context_of(transcript: Path) -> tuple[str | None, str | None, str | None]:
     """The directory, model and effort a session was last running with.
 
     `turn_context` is written per turn and is therefore current; `session_meta`
-    is written once at the start and is the fallback. Reading only the first
-    record would report the model a long conversation began with, which in a
-    navigator/driver pair is exactly the thing being checked.
+    is written at each app attachment and supplies the newest directory when it
+    follows the last turn. Walk records backwards rather than reading a fixed
+    byte tail: a 283 MB production rollout had 350 ordinary records after its
+    latest context, so the previous 256 KiB window contained no context at all
+    and incorrectly reported that the session had no working directory.
+
+    The file is memory-mapped, not read into memory. Oversized tool-output lines
+    are skipped by length before slicing, and the scan stops at the first
+    `turn_context` after collecting any newer `session_meta` values.
     """
-    tail = _read_tail(transcript)
-    if tail is None:
+    try:
+        handle = transcript.open("rb")
+    except OSError:
         return None, None, None
 
     cwd = model = effort = None
-    for raw in tail.split(b"\n"):
-        try:
-            record = json.loads(raw)
-        except ValueError:
-            continue
-        payload = record.get("payload") if isinstance(record, dict) else None
-        if not isinstance(payload, dict):
-            continue
-        if record.get("type") in ("session_meta", "turn_context"):
-            cwd = payload.get("cwd") or cwd
-            model = payload.get("model") or model
-            effort = payload.get("effort") or payload.get("reasoning_effort") or effort
+    try:
+        with handle:
+            if transcript.stat().st_size == 0:
+                return None, None, None
+            with mmap.mmap(handle.fileno(), 0, access=mmap.ACCESS_READ) as data:
+                end = len(data)
+                if data[-1:] == b"\n":
+                    end -= 1
+
+                while end >= 0:
+                    newline = data.rfind(b"\n", 0, end)
+                    start = newline + 1
+                    if end - start <= MAX_CONTEXT_RECORD_BYTES:
+                        try:
+                            record = json.loads(data[start:end])
+                        except ValueError:
+                            record = None
+                        payload = record.get("payload") if isinstance(record, dict) else None
+                        if isinstance(payload, dict) and record.get("type") in (
+                            "session_meta",
+                            "turn_context",
+                        ):
+                            cwd = cwd or payload.get("cwd")
+                            model = model or payload.get("model")
+                            effort = (
+                                effort or payload.get("effort") or payload.get("reasoning_effort")
+                            )
+                            if record.get("type") == "turn_context":
+                                break
+                    if newline < 0:
+                        break
+                    end = newline
+    except (OSError, ValueError):
+        return None, None, None
     return cwd, model, effort
 
 

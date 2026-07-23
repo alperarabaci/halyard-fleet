@@ -9,10 +9,12 @@ answers, plausibly, and says nothing about it.
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
 
 import pytest
 
-from halyard.agents.claude_code.runner import DEFAULT_MODEL, ClaudeCodeRunner
+from halyard.agents.claude_code import runner as runner_module
+from halyard.agents.claude_code.runner import ClaudeCodeRunner
 
 pytestmark = pytest.mark.asyncio
 
@@ -43,32 +45,59 @@ def runner(**kwargs) -> ClaudeCodeRunner:
     return made
 
 
-async def test_a_turn_runs_on_sonnet_when_nobody_has_said_otherwise(monkeypatch) -> None:
-    """The CLI's own default is haiku, which is not a default for real work.
+async def test_desktop_engine_is_preferred_over_a_different_cli_on_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    desktop_root = tmp_path / "claude-code"
+    older = desktop_root / "2.1.99" / "claude.app" / "Contents" / "MacOS" / "claude"
+    current = desktop_root / "2.1.217" / "claude.app" / "Contents" / "MacOS" / "claude"
+    older.parent.mkdir(parents=True)
+    current.parent.mkdir(parents=True)
+    older.touch()
+    current.touch()
+    monkeypatch.setattr(runner_module, "_DESKTOP_CLAUDE_CODE_DIR", desktop_root)
+    monkeypatch.setattr(runner_module.shutil, "which", lambda _name: "/standalone/claude")
 
-    Measured: `claude -p` with no --model answered as claude-haiku-4-5. A
-    message sent from a phone continues work in a real codebase, so leaving
-    that unset would quietly put every one of them on the cheapest model
-    available — visible only in the quality of the answer.
+    assert runner_module.find_claude_binary() == str(current)
+
+
+async def test_explicit_claude_binary_overrides_desktop_engine(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    desktop_root = tmp_path / "claude-code"
+    bundled = desktop_root / "2.1.217" / "claude.app" / "Contents" / "MacOS" / "claude"
+    bundled.parent.mkdir(parents=True)
+    bundled.touch()
+    explicit = tmp_path / "claude"
+    explicit.touch()
+    monkeypatch.setattr(runner_module, "_DESKTOP_CLAUDE_CODE_DIR", desktop_root)
+
+    assert runner_module.find_claude_binary(str(explicit)) == str(explicit)
+
+
+async def test_a_turn_inherits_the_resumed_session_model_by_default(monkeypatch) -> None:
+    """A live Desktop-owned opus session stayed on opus without --model.
+
+    The haiku measurement was a fresh headless prompt, not a resume. Applying
+    it here introduced a model override that the working desktop path did not
+    have.
     """
     calls = spying(monkeypatch)
 
     await runner().send("session-1", "carry on")
 
-    assert calls[0][calls[0].index("--model") :][:2] == ["--model", DEFAULT_MODEL]
+    assert "--model" not in calls[0]
 
 
-async def test_the_default_can_be_replaced_from_the_environment(monkeypatch) -> None:
+async def test_a_model_override_can_be_configured_from_the_environment(monkeypatch) -> None:
     calls = spying(monkeypatch)
 
     await runner(default_model="opus").send("session-1", "carry on")
 
     assert "opus" in calls[0]
-    assert DEFAULT_MODEL not in calls[0]
 
 
-async def test_no_model_is_sent_when_the_default_is_cleared(monkeypatch) -> None:
-    """An empty setting means "do not pass --model", not "fall back to ours"."""
+async def test_explicit_none_still_preserves_session_model_inheritance(monkeypatch) -> None:
     calls = spying(monkeypatch)
 
     await runner(default_model=None).send("session-1", "carry on")
@@ -76,7 +105,7 @@ async def test_no_model_is_sent_when_the_default_is_cleared(monkeypatch) -> None
     assert "--model" not in calls[0]
 
 
-async def test_a_chosen_model_beats_the_default(monkeypatch) -> None:
+async def test_a_chosen_model_beats_session_inheritance(monkeypatch) -> None:
     calls = spying(monkeypatch)
     made = runner()
 
@@ -84,16 +113,9 @@ async def test_a_chosen_model_beats_the_default(monkeypatch) -> None:
     await made.send("session-1", "carry on")
 
     assert "fable" in calls[0]
-    assert DEFAULT_MODEL not in calls[0]
 
 
-async def test_clearing_a_choice_returns_to_the_default_not_to_the_cli(monkeypatch) -> None:
-    """Where "clear" lands is the whole question.
-
-    It cannot hand the choice back to the session — nothing in this process can
-    reach what the app is set to — so it lands on this control plane's default.
-    Landing on the CLI's instead would silently be haiku.
-    """
+async def test_clearing_a_choice_restores_session_inheritance(monkeypatch) -> None:
     calls = spying(monkeypatch)
     made = runner()
 
@@ -101,7 +123,7 @@ async def test_clearing_a_choice_returns_to_the_default_not_to_the_cli(monkeypat
     made.set_model("session-1", None)
     await made.send("session-1", "carry on")
 
-    assert DEFAULT_MODEL in calls[0]
+    assert "--model" not in calls[0]
     assert "fable" not in calls[0]
 
 
@@ -116,18 +138,14 @@ async def test_a_choice_belongs_to_one_session_only(monkeypatch) -> None:
 
     assert "opus" in calls[0]
     assert "opus" not in calls[1]
-    assert DEFAULT_MODEL in calls[1]
+    assert "--model" not in calls[1]
 
 
 async def test_preferences_report_what_will_happen_not_what_was_typed() -> None:
-    """Reporting only the override would print nothing in the ordinary case.
-
-    Which is exactly when somebody asks — before sending an expensive
-    instruction, to check where it is going.
-    """
+    """None means the resumed session/runtime owns the choice."""
     made = runner()
 
-    assert made.preferences("session-1") == (DEFAULT_MODEL, None)
+    assert made.preferences("session-1") == (None, None)
 
     made.set_effort("session-1", "xhigh")
-    assert made.preferences("session-1") == (DEFAULT_MODEL, "xhigh")
+    assert made.preferences("session-1") == (None, "xhigh")

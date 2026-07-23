@@ -19,8 +19,10 @@ import contextlib
 import html
 import logging
 from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import UTC, datetime
 
+from halyard.agents.base import AgentRunner
 from halyard.channels.telegram import cards
 from halyard.channels.telegram.api import TelegramApi
 from halyard.core.approvals import (
@@ -63,6 +65,21 @@ POLL_RETRY_MAX_SECONDS = 30.0
 
 def _default_clock() -> datetime:
     return datetime.now(UTC)
+
+
+@dataclass(frozen=True)
+class _SessionTarget:
+    """A resolved session together with the runtime that owns it.
+
+    Keeping these together matters. A session id is only meaningful to its
+    runtime: handing a Codex id to Claude Code produces the very plausible
+    "No conversation found" error that hid this boundary leak.
+    """
+
+    session_id: str
+    project: str
+    cwd: str | None
+    runner: AgentRunner
 
 
 def parse_destination(value: str | None) -> tuple[str, int | None] | None:
@@ -236,14 +253,22 @@ class TelegramChannel:
         )
         return str(message_id)
 
-    async def send_message(self, session_id: str, text: str, role: Role | None = None) -> str:
+    async def send_message(
+        self,
+        session_id: str,
+        text: str,
+        role: Role | None = None,
+        *,
+        agent_id: str | None = None,
+        session_name: str | None = None,
+    ) -> str:
         """Send an agent's own words, split across messages if they are long.
 
         Escaped, because this is somebody else's prose: a reply mentioning a
         `<div>` is not markup, and sending it as markup makes Telegram refuse
         the whole message.
         """
-        chat_id, thread_id = self._route(role)
+        chat_id, thread_id = self._route(role, session_name, agent_id, session_id)
         chunks = cards.split_for_telegram(text)
         message = None
         for index, chunk in enumerate(chunks, start=1):
@@ -254,7 +279,14 @@ class TelegramChannel:
         return str(message["message_id"]) if message else ""
 
     async def send_long_content(
-        self, session_id: str, content: str, title: str, role: Role | None = None
+        self,
+        session_id: str,
+        content: str,
+        title: str,
+        role: Role | None = None,
+        *,
+        agent_id: str | None = None,
+        session_name: str | None = None,
     ) -> str:
         """Send something that will not fit in a message.
 
@@ -262,7 +294,7 @@ class TelegramChannel:
         is something you want to be able to scroll and search, not reassemble
         from six chat bubbles.
         """
-        chat_id, thread_id = self._route(role)
+        chat_id, thread_id = self._route(role, session_name, agent_id, session_id)
         if len(content) <= cards.MESSAGE_LIMIT - 200:
             message = await self._api.send_message(
                 chat_id,
@@ -272,7 +304,11 @@ class TelegramChannel:
             return str(message["message_id"])
         filename = f"{title.lower().replace(' ', '-')}.txt"
         result = await self._api.send_document(
-            chat_id, filename, content.encode("utf-8"), caption=title
+            chat_id,
+            filename,
+            content.encode("utf-8"),
+            caption=title,
+            message_thread_id=thread_id,
         )
         return str(result["message_id"])
 
@@ -404,7 +440,7 @@ class TelegramChannel:
         elif command in ("model", "effort"):
             await self._choose(command, argument, here, thread)
         elif command == "options":
-            await self._say(self._options(), here, thread)
+            await self._say(self._options(here), here, thread)
         elif command == "status":
             await self._say(await self._status(), here, thread)
         elif command in ("start", "help"):
@@ -435,17 +471,17 @@ class TelegramChannel:
         if self._gate.paused:
             await self._say("⏸ Paused. Send /resume first.", chat_id, thread_id)
             return
-        if self._runner is None or self._registry is None:
+        if not (self._runner or self._runners) or self._registry is None:
             await self._say(
                 "This control plane cannot send messages into a session. That needs "
-                "the claude CLI, so it has to run on the host rather than in a container.",
+                "the agent CLI, so it has to run on the host rather than in a container.",
                 chat_id,
                 thread_id,
             )
             return
 
         found = await self._session_for(chat_id)
-        if found is not None and self._runner.busy(found[0]):
+        if found is not None and found.runner.busy(found.session_id):
             # The runner serialises per session, so this would sit in silence
             # until the turn before it finished. Silence is what makes people
             # think a message was lost.
@@ -470,8 +506,8 @@ class TelegramChannel:
         self._sending.add(task)
         task.add_done_callback(self._sending.discard)
 
-    async def _session_for(self, chat_id: str) -> tuple[str, str, str | None] | None:
-        """Which session a chat belongs to, as (session_id, project, directory).
+    async def _session_for(self, chat_id: str) -> _SessionTarget | None:
+        """Which runtime-owned session a chat belongs to.
 
         The configured name is tried first. It is addressable from a standing
         start — a control plane that restarted a second ago can still find the
@@ -489,7 +525,9 @@ class TelegramChannel:
         if name:
             found = await self._resolve(seat, name)
             if found:
-                return found.session_id, self._project, found.cwd
+                runner = self._runner_for(seat)
+                if runner is not None:
+                    return _SessionTarget(found.session_id, self._project, found.cwd, runner)
             logger.warning(
                 "No session named %r for the %s seat", name, seat.label if seat else role
             )
@@ -499,7 +537,12 @@ class TelegramChannel:
             if role is not None
             else await self._registry.latest()
         )
-        return (session.session_id, session.project, session.cwd) if session else None
+        if session is None:
+            return None
+        runner = self._runners.get(session.agent_id) or self._runner_for(seat)
+        if runner is None:
+            return None
+        return _SessionTarget(session.session_id, session.project, session.cwd, runner)
 
     def _seat_for_chat(self, chat_id: str) -> Seat | None:
         return for_chat(self._seats, chat_id) if self._seats else None
@@ -528,16 +571,16 @@ class TelegramChannel:
 
     async def _deliver(
         self,
-        session: tuple[str, str, str | None],
+        session: _SessionTarget,
         text: str,
         actor: str,
         chat_id: str | None = None,
         thread_id: int | None = None,
     ) -> None:
-        session_id, project, cwd = session
+        session_id, project, cwd = session.session_id, session.project, session.cwd
         delivered = False
         try:
-            delivered = await self._runner.send(session_id, text, cwd)
+            delivered = await session.runner.send(session_id, text, cwd)
         except Exception:
             logger.exception("Could not deliver a message to %s", session_id)
         finally:
@@ -588,12 +631,13 @@ class TelegramChannel:
     ) -> None:
         """Show or set the model or effort a seat will use.
 
-        Only for turns started from here. A turn begun at a keyboard uses
-        whatever the app is set to, and nothing in this process can reach that —
-        worth saying plainly rather than letting a setting look more powerful
-        than it is.
+        Only for turns started from here. Without an override, a resumed Claude
+        session inherits its existing model. Other runtimes answer through the
+        same preference interface with their own defaults.
         """
-        if self._runner is None:
+        seat = self._seat_for_chat(chat_id or "")
+        runner = self._runner_for(seat)
+        if runner is None:
             await self._say("No runner: this control plane cannot start turns.", chat_id, thread_id)
             return
 
@@ -601,7 +645,10 @@ class TelegramChannel:
         if found is None:
             await self._say("No session for this chat.", chat_id, thread_id)
             return
-        session_id, _, _ = found
+        session_id = found.session_id
+        # Use the runner carried by the resolved target. The registry fallback
+        # may know the runtime even when the chat has no configured seat.
+        runner = found.runner
 
         # Ask the runtime what it accepts rather than importing one runtime's
         # list. The channel held `EFFORT_LEVELS` from the Claude Code module
@@ -613,7 +660,7 @@ class TelegramChannel:
         # closed set worth checking; models are not, and refusing one released
         # this morning because it is missing from a list written months ago
         # would be worse than passing it through.
-        allowed, enforced = self._runner.options(session_id).get(what, ((), False))
+        allowed, enforced = runner.options(session_id).get(what, ((), False))
         if value and enforced and value.lower() not in allowed:
             await self._say(
                 f"{what.capitalize()} is one of: <code>{' '.join(allowed)}</code>",
@@ -623,30 +670,27 @@ class TelegramChannel:
             return
 
         if value:
-            setter = self._runner.set_model if what == "model" else self._runner.set_effort
+            setter = runner.set_model if what == "model" else runner.set_effort
             cleared = value.lower() in ("default", "clear", "reset")
             setter(session_id, None if cleared else value)
             if cleared:
-                # Say what it fell back to rather than that it was cleared.
-                # Clearing a model does not hand the choice to the session —
-                # nothing here can reach a session's own setting — it hands it
-                # to whatever this control plane was configured with, and the
-                # difference is a model nobody chose answering for days.
-                model, effort = self._runner.preferences(session_id)
+                model, effort = runner.preferences(session_id)
                 back_to = model if what == "model" else effort
                 answer = (
                     f"Cleared. Turns from here will use <b>{html.escape(back_to)}</b>."
                     if back_to
-                    else f"Cleared. Turns from here will not set a {what} at all."
+                    else (
+                        f"Cleared. Turns from here will leave the {what} "
+                        "to the resumed session/runtime."
+                    )
                 )
             else:
                 answer = f"Turns started from here will use <b>{html.escape(value)}</b>."
             await self._say(answer, chat_id, thread_id)
             return
 
-        model, effort = self._runner.preferences(session_id)
+        model, effort = runner.preferences(session_id)
         chosen = model if what == "model" else effort
-        seat = self._seat_for_chat(chat_id or "")
         role = seat.role if seat else self._role_for_chat(chat_id or "")
         wanted = seat.session if seat else self._session_names.get(role or Role.NAVIGATOR, "")
         ref = await self._resolve(seat, wanted or "")
@@ -657,7 +701,7 @@ class TelegramChannel:
         lines.append(f"\nSet with <code>/{what} &lt;value&gt;</code>, or <code>default</code>.")
         await self._say("\n".join(lines), chat_id, thread_id)
 
-    def _options(self) -> str:
+    def _options(self, chat_id: str | None = None) -> str:
         """Everything that can be chosen, asked of the runtime rather than known.
 
         One message, because the question it answers — "what can I even say
@@ -668,11 +712,12 @@ class TelegramChannel:
         this output by existing, and a model list updated in the environment
         appears without a release.
         """
-        if self._runner is None:
+        runner = self._runner_for(self._seat_for_chat(chat_id or ""))
+        if runner is None:
             return "No runner: this control plane cannot start turns."
 
-        lines = [f"<b>{html.escape(self._runner.id)}</b>"]
-        for name, (values, enforced) in self._runner.options().items():
+        lines = [f"<b>{html.escape(runner.id)}</b>"]
+        for name, (values, enforced) in runner.options().items():
             shown = " ".join(html.escape(v) for v in values)
             lines.append(f"\n/{name}  <code>{shown}</code>")
             if not enforced:
@@ -712,14 +757,11 @@ class TelegramChannel:
             busy = " · ⏳ working" if seat_runner and seat_runner.busy(ref.session_id) else ""
             lines.append(f"  {label}\n     at the desk: {html.escape(details) or 'unknown'}{busy}")
             if seat_runner is not None:
-                # Not the same thing as the line above, and the two are easy to
-                # confuse into a wrong conclusion. What the app is set to says
-                # nothing about what a message typed here will run on: a session
-                # sitting on opus still answers a phone with whatever this
-                # control plane sends, which is its own default until told.
                 model, effort = seat_runner.preferences(ref.session_id)
                 mine = " · ".join(filter(None, [model, effort and f"effort {effort}"]))
-                lines.append(f"     from here: {html.escape(mine) or 'the CLI default'}")
+                lines.append(
+                    f"     from here: {html.escape(mine) or 'inherits the session/runtime'}"
+                )
         return lines
 
     async def _say(
@@ -770,7 +812,14 @@ class TelegramChannel:
         request, message_id, chat_id = entry
 
         if action == cards.SHOW_FULL:
-            await self.send_long_content(request.session_id, request.command_full, "Full command")
+            await self.send_long_content(
+                request.session_id,
+                request.command_full,
+                "Full command",
+                request.role,
+                agent_id=request.agent_id,
+                session_name=request.session_name,
+            )
             await self._dismiss(query_id)
             return
 

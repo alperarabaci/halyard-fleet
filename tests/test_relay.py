@@ -12,6 +12,7 @@ from pathlib import Path
 import pytest
 
 from halyard.core.audit import AuditAction, AuditLog, AuditRecord, JsonlAuditSink
+from halyard.core.events import Role
 from halyard.core.redaction import Redactor
 from halyard.core.registry import SessionRegistry
 from halyard.core.service import MessageRelay
@@ -24,26 +25,62 @@ class RecordingChannel:
 
     def __init__(self) -> None:
         self.messages: list[tuple[str, str]] = []
+        self.routes: list[tuple[str | None, str | None, object]] = []
         self.documents: list[tuple[str, str, str]] = []
 
     async def start(self) -> None: ...
     async def stop(self) -> None: ...
     async def send_approval_request(self, request) -> str: ...
 
-    async def send_message(self, session_id: str, text: str, role=None) -> str:
+    async def send_message(
+        self,
+        session_id: str,
+        text: str,
+        role=None,
+        *,
+        agent_id=None,
+        session_name=None,
+    ) -> str:
         self.messages.append((session_id, text))
+        self.routes.append((agent_id, session_name, role))
         return "msg-1"
 
-    async def send_long_content(self, session_id: str, content: str, title: str, role=None) -> str:
+    async def send_long_content(
+        self,
+        session_id: str,
+        content: str,
+        title: str,
+        role=None,
+        *,
+        agent_id=None,
+        session_name=None,
+    ) -> str:
         self.documents.append((session_id, content, title))
         return "doc-1"
 
 
 class BrokenChannel(RecordingChannel):
-    async def send_message(self, session_id: str, text: str, role=None) -> str:
+    async def send_message(
+        self,
+        session_id: str,
+        text: str,
+        role=None,
+        *,
+        agent_id=None,
+        session_name=None,
+    ) -> str:
         raise ConnectionError("telegram unreachable")
 
-    async def send_long_content(self, session_id: str, content: str, title: str, role=None) -> str:
+    async def send_long_content(
+        self,
+        session_id: str,
+        content: str,
+        title: str,
+        role=None,
+        *,
+        agent_id=None,
+        session_name=None,
+    ) -> str:
         raise ConnectionError("telegram unreachable")
 
 
@@ -75,6 +112,20 @@ async def test_a_reply_reaches_the_channel(tmp_path: Path) -> None:
 
     assert await say(relay) is True
     assert channel.messages == [("session-1", "Done. Tests pass.")]
+
+
+async def test_a_reply_keeps_its_runtime_and_session_route(tmp_path: Path) -> None:
+    relay, channel, sink, _ = build(tmp_path)
+    await sink.open()
+
+    await say(
+        relay,
+        agent_id="codex",
+        session_name="alpha-engine-xdriver",
+        role=Role.DRIVER,
+    )
+
+    assert channel.routes == [("codex", "alpha-engine-xdriver", Role.DRIVER)]
 
 
 async def test_the_session_is_observed(tmp_path: Path) -> None:
@@ -193,7 +244,15 @@ async def test_an_empty_reply_is_still_handled_without_raising(tmp_path: Path, t
 
 async def test_relaying_survives_a_channel_that_returns_nonsense(tmp_path: Path) -> None:
     class WeirdChannel(RecordingChannel):
-        async def send_message(self, session_id: str, text: str, role=None):
+        async def send_message(
+            self,
+            session_id: str,
+            text: str,
+            role=None,
+            *,
+            agent_id=None,
+            session_name=None,
+        ):
             return None
 
     relay, _, sink, _ = build(tmp_path, channel=WeirdChannel())

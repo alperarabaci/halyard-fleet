@@ -24,8 +24,9 @@ before anything was built, the way `hook-payload-notes.md` was.
    is corrupted, and the conversation quietly becomes two threads in one file.
 
 The third was first read as "so nothing may write into a session somebody has open", and that
-reading was wrong — see the correction below. Overlapping writes fork; one writer at a time is
-fine, including into a session the desktop app is holding.
+reading was too broad — see the versioned measurements below. One writer at a time preserves the
+durable session. Whether an already-open desktop view renders an external writer's turn live is a
+separate client-state question.
 
 ---
 
@@ -141,10 +142,28 @@ That is what makes handoff work, and it holds exactly as long as one writer owns
 The narrow reading of the above — *therefore nothing may write into a session somebody has open* —
 was wrong, and it cost two days of building around a wall that was not there.
 
-**Measured afterwards:** a message typed in Telegram was delivered with `claude -p --resume` into a
-session the desktop app had open, and the app picked the turn up and displayed it. Writing into a
-live session works. The documentation says concurrent access is not *documented* as supported,
-which is a different claim from not working, and a measurement outranks a silence.
+**Measured in the original proof:** a message typed in Telegram was delivered with
+`claude -p --resume` into a session the desktop app had open, and that version of the app picked the
+turn up and displayed it.
+
+**Measured again on 2026-07-23:** the original live proof used Claude Code `2.1.215`. During the
+regression Halyard's standalone CLI was `2.1.216`, while Claude Desktop `1.24012.1` owned the open
+session with its bundled Claude Code `2.1.217`. Halyard's separate `claude -p --resume` process
+still appended the phone turn to the same transcript and parent chain, but the already-open
+desktop process did not render that writer's event. The app displayed it after the
+session/application was reopened and the transcript was loaded again.
+
+There was a second Halyard-side difference. The working external turn passed no `--model` and
+continued on the open session's `claude-opus-4-8`. A later change added a default
+`--model sonnet`; the non-refreshing turns consequently ran as `claude-sonnet-5`. That change was
+based on a fresh headless `claude -p` measurement, which used haiku, not a resumed Desktop session.
+The working resume itself proves the assumption did not transfer.
+
+That does not establish that live display is unsupported; the earlier measurement proves that it
+worked. Halyard now restores both properties of the working path: it prefers Claude Desktop's
+bundled Claude Code engine on macOS, and it supplies no model override unless one was explicitly
+chosen. The version-matched live result still has to be measured in the open app; durable
+persistence alone does not prove it.
 
 What the fork measurement actually establishes is narrower: **two writes that overlap in time**
 diverge. One writer at a time is fine, whoever it is. So:
@@ -154,7 +173,8 @@ diverge. One writer at a time is fine, whoever it is. So:
   channel. That is a real hazard and a rare one — being away is what makes somebody use the phone.
 
 No ownership model, no handoff protocol, no registry field recording how a session was born. A
-session is addressable by name, and messages go into it.
+session is addressable by name, and messages go into its durable history. A live desktop view may
+need to be reopened to render an externally resumed turn.
 
 ### Running it from the right directory
 

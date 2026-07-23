@@ -336,7 +336,7 @@ def test_a_project_without_a_pretooluse_hook_is_reported(
     assert any("approvals will never be asked for" in line for line in lines)
 
 
-def test_a_session_older_than_its_settings_is_flagged(
+def test_conversation_age_is_not_mistaken_for_process_age(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     from halyard import doctor
@@ -349,10 +349,11 @@ def test_a_session_older_than_its_settings_is_flagged(
 
     lines, problems = doctor._check_seat(a_seat())
 
-    # Hooks are snapshotted at startup, so a session older than the settings is
-    # running with the previous ones and nothing says so anywhere else.
+    # `started_at` is the conversation's birthday. It remains old after the
+    # app is restarted, so it cannot establish that the current process missed
+    # a settings change.
     assert problems == 0
-    assert any("restart it" in line for line in lines)
+    assert not any("restart it" in line for line in lines)
 
 
 def test_a_correctly_wired_project_passes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

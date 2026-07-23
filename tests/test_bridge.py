@@ -26,6 +26,7 @@ import pytest
 REPO = Path(__file__).resolve().parent.parent
 BRIDGE = REPO / "bridge" / "hook_bridge.py"
 WRAPPER = REPO / "bridge" / "hook.sh"
+PERMISSION_WRAPPER = REPO / "bridge" / "permission_hook.sh"
 
 PAYLOAD = {
     "session_id": "session-1",
@@ -36,6 +37,21 @@ PAYLOAD = {
     "tool_name": "Bash",
     "tool_input": {"command": "docker compose down", "description": "Stop the stack"},
     "tool_use_id": "toolu_1",
+}
+
+PERMISSION_PAYLOAD = {
+    "session_id": "session-1",
+    "turn_id": "turn-1",
+    "transcript_path": "/Users/me/.codex/sessions/2026/07/22/rollout-abc.jsonl",
+    "cwd": "/repo",
+    "permission_mode": "default",
+    "hook_event_name": "PermissionRequest",
+    "tool_name": "exec_command",
+    "tool_input": {
+        "cmd": "ps -ax",
+        "justification": "Check whether the detached test process is still running.",
+        "sandbox_permissions": "require_escalated",
+    },
 }
 
 
@@ -131,6 +147,7 @@ def test_the_payload_is_forwarded_without_being_reinterpreted() -> None:
         # No transcript at that path, so no name — and no routing, which lands
         # everything in the default chat exactly as it would have anyway.
         "session_name": None,
+        "reason": None,
     }
 
 
@@ -140,6 +157,32 @@ def test_a_tool_without_a_command_is_described_rather_than_dropped() -> None:
         run(BRIDGE, payload, HALYARD_URL=url)
 
     assert json.loads(received[0]["command"]) == {"file_path": "/a", "content": "b"}
+
+
+def test_a_codex_permission_request_prints_its_native_decision_shape() -> None:
+    with control_plane(body={"decision": "allow", "reason": "Allowed by tg:4242."}) as (url, _):
+        decision = decision_of(run(BRIDGE, PERMISSION_PAYLOAD, HALYARD_URL=url))
+
+    assert decision == {
+        "hookEventName": "PermissionRequest",
+        "decision": {"behavior": "allow", "message": "Allowed by tg:4242."},
+    }
+
+
+def test_a_codex_permission_request_keeps_the_native_justification() -> None:
+    with control_plane(body={"decision": "deny", "reason": "no"}) as (url, received):
+        run(BRIDGE, PERMISSION_PAYLOAD, HALYARD_URL=url)
+
+    assert received[0]["reason"] == ("Check whether the detached test process is still running.")
+
+
+def test_the_permission_wrapper_denies_in_its_own_schema_when_halyard_is_down() -> None:
+    decision = decision_of(
+        run(PERMISSION_WRAPPER, PERMISSION_PAYLOAD, HALYARD_URL="http://127.0.0.1:1")
+    )
+
+    assert decision["hookEventName"] == "PermissionRequest"
+    assert decision["decision"]["behavior"] == "deny"
 
 
 # --- everything that can go wrong -------------------------------------------

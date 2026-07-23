@@ -112,13 +112,21 @@ class TelegramApi:
         )
 
     async def send_document(
-        self, chat_id: str, filename: str, content: bytes, *, caption: str | None = None
+        self,
+        chat_id: str,
+        filename: str,
+        content: bytes,
+        *,
+        caption: str | None = None,
+        message_thread_id: int | None = None,
     ) -> dict:
         if self._client is None:
             raise TelegramError("TelegramApi.open() must be awaited before use")
         data = {"chat_id": chat_id}
         if caption:
             data["caption"] = caption
+        if message_thread_id is not None:
+            data["message_thread_id"] = str(message_thread_id)
         response = await self._client.post(
             f"{self._base}/sendDocument",
             data=data,

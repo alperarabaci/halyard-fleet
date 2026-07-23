@@ -19,7 +19,7 @@ and forget; it is something the project now depends on. Turning it back off is a
 keeps a backup:
 
 ```bash
-halyard wire ~/code/my-project     # merges into settings.local.json, backs it up first
+halyard wire ~/code/my-project     # backs up, then merges each runtime's hooks
 halyard unwire ~/code/my-project   # removes only Halyard's hooks, leaves the rest alone
 ```
 
@@ -103,6 +103,8 @@ These are out of scope, and will not be added in later phases without a stated r
 | [Session I/O](docs/session-io-notes.md) | Writing into a live session, and what forks it |
 | [Design document](docs/mobile-agent-control-plane.md) | The full plan this is built from |
 | [Codex brief](docs/codex-adapter-brief.md) | Open question: what a second runtime would need |
+| [Codex routing postmortem](docs/postmortem/2026-07-23-codex-telegram-routing.md) | Permission escalation and multi-runtime routing regressions |
+| [Claude Desktop postmortem](docs/postmortem/2026-07-23-claude-desktop-live-session-sync.md) | Live session synchronization and model inheritance regression |
 
 ## Quick start
 
