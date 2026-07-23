@@ -131,6 +131,12 @@ class ClaudeCodeRunner:
         """
         return {"model": (self._known_models, False), "effort": (EFFORT_LEVELS, True)}
 
+    def resolve(self, name: str):
+        """Find a session by its name in the app, or by its id."""
+        from halyard.agents.claude_code.sessions import find_session
+
+        return find_session(name)
+
     def preferences(self, session_id: str) -> tuple[str | None, str | None]:
         """The model and effort this runner will use for that session.
 

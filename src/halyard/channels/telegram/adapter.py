@@ -21,7 +21,6 @@ import logging
 from collections.abc import Callable
 from datetime import UTC, datetime
 
-from halyard.agents.claude_code import find_session
 from halyard.channels.telegram import cards
 from halyard.channels.telegram.api import TelegramApi
 from halyard.core.approvals import (
@@ -44,6 +43,7 @@ from halyard.core.audit import (
 from halyard.core.events import Role
 from halyard.core.gate import Gate
 from halyard.core.registry import SessionRegistry
+from halyard.core.seats import Seat, for_chat
 
 logger = logging.getLogger(__name__)
 
@@ -99,6 +99,8 @@ class TelegramChannel:
         driver_chat_id: str | None = None,
         registry: SessionRegistry | None = None,
         runner=None,
+        runners: dict[str, object] | None = None,
+        seats: list[Seat] | None = None,
         session_names: dict[Role, str] | None = None,
     ) -> None:
         self._api = api
@@ -114,8 +116,17 @@ class TelegramChannel:
             Role.NAVIGATOR: parse_destination(navigator_chat_id),
             Role.DRIVER: parse_destination(driver_chat_id),
         }
+        # Four groups where there used to be two: a navigator and a driver for
+        # each runtime. Which one a card belongs to is (role, runtime), and
+        # both halves already travel with the request — the hook says what the
+        # session is called and `agent_id` says what ran it. Nothing is chosen
+        # at the moment of sending; the configuration decides, as it did
+        # before, and there is simply more of it.
+        self._seats = list(seats or [])
         self._registry = registry
-        self._runner = runner
+        # One runner per runtime, shared by every seat that uses it.
+        self._runners = dict(runners or {})
+        self._runner = runner or next(iter(self._runners.values()), None)
         self._session_names = session_names or {}
         self._sending: set[asyncio.Task] = set()
         self._authorized = authorized_user_ids
@@ -149,8 +160,20 @@ class TelegramChannel:
 
     # --- sending ------------------------------------------------------------
 
-    def _route(self, role: Role | None) -> tuple[str, int | None]:
-        """Where this role's traffic goes."""
+    def _route(self, role: Role | None, agent_id: str | None = None) -> tuple[str, int | None]:
+        """Where this seat's traffic goes.
+
+        A role alone stopped being enough the moment a second runtime arrived:
+        there are two drivers now, and a card from the Codex one belongs in the
+        Codex group. `agent_id` comes from the hook that raised the request, so
+        the pairing needs nothing decided here.
+
+        Falls back to the role alone, and then to the default chat, so a setup
+        with two seats keeps behaving exactly as it did.
+        """
+        for seat in self._seats:
+            if seat.role is role and seat.chat and (agent_id is None or seat.runtime == agent_id):
+                return parse_destination(seat.chat) or (self._chat_id, None)
         return (role and self._routes.get(role)) or (self._chat_id, None)
 
     async def send_approval_request(self, request: ApprovalRequest) -> str:
@@ -165,7 +188,7 @@ class TelegramChannel:
         markup = cards.keyboard(
             request, include_full=request.command_full != request.command_summary
         )
-        chat_id, thread_id = self._route(request.role)
+        chat_id, thread_id = self._route(request.role, request.agent_id)
         message = await self._api.send_message(
             chat_id, text, reply_markup=markup, message_thread_id=thread_id
         )
@@ -416,13 +439,20 @@ class TelegramChannel:
         came up. Telling somebody to go run a command somewhere before they can
         send a message is not an answer.
         """
-        role = self._role_for_chat(chat_id)
+        # The seat that owns this group, if one does. That is the whole
+        # routing rule in this direction: a group is a seat, a seat knows its
+        # runtime and its session, and nothing has to be worked out per message.
+        seat = self._seat_for_chat(chat_id)
+        role = seat.role if seat else self._role_for_chat(chat_id)
 
-        if role is not None and (name := self._session_names.get(role)):
-            found = await asyncio.to_thread(find_session, name)
+        name = seat.session if seat else (role and self._session_names.get(role))
+        if name:
+            found = await self._resolve(seat, name)
             if found:
                 return found.session_id, self._project, found.cwd
-            logger.warning("No session found named %r for the %s seat", name, role.value)
+            logger.warning(
+                "No session named %r for the %s seat", name, seat.label if seat else role
+            )
 
         session = (
             await self._registry.latest_for_role(role)
@@ -430,6 +460,25 @@ class TelegramChannel:
             else await self._registry.latest()
         )
         return (session.session_id, session.project, session.cwd) if session else None
+
+    def _seat_for_chat(self, chat_id: str) -> Seat | None:
+        return for_chat(self._seats, chat_id) if self._seats else None
+
+    def _runner_for(self, seat: Seat | None):
+        """The runtime a seat is, falling back to the only one there is."""
+        return (seat and self._runners.get(seat.runtime)) or self._runner
+
+    async def _resolve(self, seat: Seat | None, name: str):
+        """Ask that seat's runtime what the name means.
+
+        The channel used to import Claude Code's lookup directly, which made a
+        second runtime impossible to add without editing this file — and would
+        have gone looking for a Codex thread in `~/.claude`.
+        """
+        runner = self._runner_for(seat)
+        if runner is None:
+            return None
+        return await asyncio.to_thread(runner.resolve, name)
 
     def _role_for_chat(self, chat_id: str) -> Role | None:
         for role, destination in self._routes.items():
@@ -557,10 +606,10 @@ class TelegramChannel:
 
         model, effort = self._runner.preferences(session_id)
         chosen = model if what == "model" else effort
-        ref = await asyncio.to_thread(
-            find_session,
-            self._session_names.get(self._role_for_chat(chat_id or "") or Role.NAVIGATOR, ""),
-        )
+        seat = self._seat_for_chat(chat_id or "")
+        role = seat.role if seat else self._role_for_chat(chat_id or "")
+        wanted = seat.session if seat else self._session_names.get(role or Role.NAVIGATOR, "")
+        ref = await self._resolve(seat, wanted or "")
         in_use = (ref.model if what == "model" else ref.effort) if ref else None
         lines = [f"<b>{what}</b>", f"  in the session: {html.escape(str(in_use or 'unknown'))}"]
         if chosen:
@@ -601,23 +650,34 @@ class TelegramChannel:
         thinking one and a cheap one. Worth being able to check before sending
         an expensive instruction to the wrong one.
         """
+        # Every seat, not every role: there are two drivers now, and telling
+        # them apart is the point of listing them at all.
+        configured = self._seats or [
+            Seat(label=role.value, runtime="claude-code", session=name, role=role)
+            for role, name in self._session_names.items()
+        ]
+
         lines: list[str] = []
-        for role, name in self._session_names.items():
-            ref = await asyncio.to_thread(find_session, name)
-            label = f"{role.value}: <b>{html.escape(name)}</b>"
+        for seat in configured:
+            name = seat.session
+            if not name:
+                continue
+            ref = await self._resolve(seat, name)
+            label = f"{seat.label} ({seat.runtime}): <b>{html.escape(name)}</b>"
             if ref is None:
                 lines.append(f"  {label} — not found")
                 continue
             details = " · ".join(filter(None, [ref.model, ref.effort and f"effort {ref.effort}"]))
-            busy = " · ⏳ working" if self._runner and self._runner.busy(ref.session_id) else ""
+            seat_runner = self._runner_for(seat)
+            busy = " · ⏳ working" if seat_runner and seat_runner.busy(ref.session_id) else ""
             lines.append(f"  {label}\n     at the desk: {html.escape(details) or 'unknown'}{busy}")
-            if self._runner is not None:
+            if seat_runner is not None:
                 # Not the same thing as the line above, and the two are easy to
                 # confuse into a wrong conclusion. What the app is set to says
                 # nothing about what a message typed here will run on: a session
                 # sitting on opus still answers a phone with whatever this
                 # control plane sends, which is its own default until told.
-                model, effort = self._runner.preferences(ref.session_id)
+                model, effort = seat_runner.preferences(ref.session_id)
                 mine = " · ".join(filter(None, [model, effort and f"effort {effort}"]))
                 lines.append(f"     from here: {html.escape(mine) or 'the CLI default'}")
         return lines

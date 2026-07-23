@@ -8,6 +8,8 @@ somebody else's uninstall.
 from __future__ import annotations
 
 import json
+import os
+import time
 from pathlib import Path
 
 from halyard import wiring
@@ -160,3 +162,125 @@ def test_a_broken_settings_file_is_refused_rather_than_replaced(tmp_path: Path) 
         raise AssertionError("wiring should refuse a file it cannot parse")
 
     assert broken.read_text() == "{ this is not json"
+
+
+# --- a second runtime -------------------------------------------------------
+
+
+CODEX = next(r for r in wiring.RUNTIMES if r.name == "codex")
+
+
+def test_codex_hooks_go_in_their_own_file(tmp_path: Path) -> None:
+    project = repo(tmp_path)
+
+    wiring.wire(project, runtimes=(CODEX,))
+
+    written = json.loads((project / ".codex" / "hooks.json").read_text())
+    assert written["hooks"]["PreToolUse"]
+    assert not (project / ".claude").exists()
+
+
+def test_codex_gets_its_own_matcher_dialect(tmp_path: Path) -> None:
+    """`^Bash$` rather than the bare `Bash` Claude Code takes."""
+    project = repo(tmp_path)
+
+    wiring.wire(project, runtimes=(CODEX,))
+
+    written = json.loads((project / ".codex" / "hooks.json").read_text())
+    assert written["hooks"]["PreToolUse"][0]["matcher"] == "^Bash$"
+
+
+def test_the_command_is_absolute_because_codex_expands_nothing(tmp_path: Path) -> None:
+    """Codex has no project-directory variable — only $CODEX_HOME.
+
+    A file carrying `$CLAUDE_PROJECT_DIR` does not fail to load under Codex.
+    The hook runs and dies looking for a directory by that literal name, which
+    is what this repository's own `hook: Stop Failed` turned out to be.
+    """
+    project = repo(tmp_path)
+
+    wiring.wire(project, runtimes=(CODEX,))
+
+    written = json.loads((project / ".codex" / "hooks.json").read_text())
+    command = written["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
+    assert command.startswith("/")
+    assert "$" not in command
+
+
+def test_unwiring_covers_a_runtime_whose_cli_is_gone(tmp_path: Path) -> None:
+    """Removal is attempted everywhere, not only where a CLI is installed.
+
+    A hook left behind after a CLI is uninstalled still points at a bridge, and
+    the next person to install that CLI inherits a gate they never asked for.
+    """
+    project = repo(tmp_path)
+    wiring.wire(project, runtimes=wiring.RUNTIMES)
+
+    wiring.unwire(project)
+
+    assert json.loads((project / ".codex" / "hooks.json").read_text()) == {}
+    assert json.loads((project / ".claude" / "settings.local.json").read_text()) == {}
+
+
+def test_a_hook_with_no_trust_record_is_reported(tmp_path: Path) -> None:
+    """Codex skips an untrusted hook in silence — measured.
+
+    The turn completes, nothing is printed, and a PreToolUse gate that is not
+    trusted is not a gate. Absence of a record is the one thing that can be
+    stated for certain, so it is the thing reported.
+    """
+    project = repo(tmp_path)
+    wiring.wire(project, runtimes=(CODEX,))
+    hooks_file = project / ".codex" / "hooks.json"
+    empty = tmp_path / "config.toml"
+    empty.write_text("")
+
+    pending = wiring.codex_untrusted(hooks_file, empty)
+
+    assert len(pending) == 2
+    assert all(str(hooks_file) in key for key in pending)
+    assert any(key.endswith(":pretooluse:0:0") for key in pending)
+
+
+def test_a_recorded_hook_is_not_reported_as_untrusted(tmp_path: Path) -> None:
+    project = repo(tmp_path)
+    wiring.wire(project, runtimes=(CODEX,))
+    hooks_file = project / ".codex" / "hooks.json"
+    config = tmp_path / "config.toml"
+    config.write_text(
+        "".join(
+            f'[hooks.state."{key}"]\ntrusted_hash = "sha256:x"\n'
+            for key in wiring.codex_trust_keys(hooks_file)
+        )
+    )
+
+    assert wiring.codex_untrusted(hooks_file, config) == []
+
+
+def test_editing_the_hooks_file_makes_trust_stale(tmp_path: Path) -> None:
+    """The dangerous reading is the other one.
+
+    A trust key that still exists with an outdated hash looks exactly like a
+    trusted hook. Codex disagrees and says nothing about it.
+    """
+    project = repo(tmp_path)
+    config = tmp_path / "config.toml"
+    config.write_text("")
+    wiring.wire(project, runtimes=(CODEX,))
+    hooks_file = project / ".codex" / "hooks.json"
+    os.utime(hooks_file, (time.time() + 10, time.time() + 10))
+
+    assert wiring.codex_trust_is_stale(hooks_file, config) is True
+
+
+def test_trust_is_not_claimed_to_be_fresh(tmp_path: Path) -> None:
+    """The inference only runs one way: a newer config proves nothing, because
+    Codex rewrites it for unrelated reasons."""
+    project = repo(tmp_path)
+    wiring.wire(project, runtimes=(CODEX,))
+    hooks_file = project / ".codex" / "hooks.json"
+    config = tmp_path / "config.toml"
+    config.write_text("")
+    os.utime(config, (time.time() + 10, time.time() + 10))
+
+    assert wiring.codex_trust_is_stale(hooks_file, config) is False

@@ -10,6 +10,10 @@ audit.jsonl
 
 # Local Claude Code settings (may contain machine-specific hook wiring)
 .claude/settings.local.json
+# Same reason: an absolute path to this machine's Halyard checkout.
+.codex/hooks.json
+.claude/settings.local.json.*.bak
+.codex/hooks.json.*.bak
 
 # Python
 __pycache__/

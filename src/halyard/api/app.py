@@ -21,6 +21,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
 
 from halyard.agents.claude_code import ClaudeCodeRunner
+from halyard.agents.codex import CodexRunner
 from halyard.channels.stub import StubChannel
 from halyard.channels.telegram import TelegramApi, TelegramChannel
 from halyard.config import ChannelKind, Settings
@@ -37,6 +38,7 @@ from halyard.core.gate import Gate
 from halyard.core.policy import Policy
 from halyard.core.redaction import Redactor
 from halyard.core.registry import SessionRegistry
+from halyard.core.seats import from_environment
 from halyard.core.service import ApprovalService, BridgeDecision, MessageRelay
 
 logger = logging.getLogger(__name__)
@@ -113,6 +115,8 @@ class HealthResponse(BaseModel):
     #: False when this control plane cannot send messages into a session —
     #: it has no claude CLI, which is what a container looks like.
     can_send_messages: bool = False
+    #: Which runtime each seat is, so a Codex seat is visible from outside.
+    seats: dict[str, str] = Field(default_factory=dict)
     #: True while approvals are not being relayed — Halyard has stepped aside
     #: and Claude Code is deciding on its own. Visible from outside for the same
     #: reason as the field below.
@@ -129,6 +133,8 @@ def _build_channel(
     gate: Gate,
     registry: SessionRegistry,
     runner,
+    runners: dict | None = None,
+    seats: list | None = None,
 ):
     if settings.channel is ChannelKind.STUB_ALLOW:
         return StubChannel(store, Decision.ALLOW)
@@ -147,6 +153,8 @@ def _build_channel(
         driver_chat_id=settings.telegram_driver_chat_id,
         registry=registry,
         runner=runner,
+        runners=runners,
+        seats=seats,
         session_names={
             role: name
             for name, role in (
@@ -178,16 +186,29 @@ def create_app(settings: Settings, *, channel=None) -> FastAPI:
         )
         if name
     }
-    runner = ClaudeCodeRunner(
-        models=tuple(m.strip() for m in settings.claude_models.split(",") if m.strip())
-        if settings.claude_models
-        else None,
-        default_model=settings.claude_default_model.strip() or None,
-    )
+    # One runner per runtime, built once and shared by whichever seats use it.
+    # A seat is a name plus the thing that knows what the name means: the same
+    # `alpha-engine-driver` is a Claude Code session or a Codex thread
+    # depending on HALYARD_DRIVER_RUNTIME, and the two keep their sessions in
+    # entirely different places.
+    by_runtime = {
+        "claude-code": ClaudeCodeRunner(
+            models=tuple(m.strip() for m in settings.claude_models.split(",") if m.strip())
+            if settings.claude_models
+            else None,
+            default_model=settings.claude_default_model.strip() or None,
+        ),
+        "codex": CodexRunner(),
+    }
+    configured_seats = from_environment()
+    # What `/health` and anything else with one question in mind should ask.
+    runner = by_runtime["claude-code"]
     resolved_channel = (
         channel
         if channel is not None
-        else _build_channel(settings, store, audit, gate, registry, runner)
+        else _build_channel(
+            settings, store, audit, gate, registry, runner, by_runtime, configured_seats
+        )
     )
     relay = MessageRelay(
         redactor=Redactor(),
@@ -346,6 +367,7 @@ def create_app(settings: Settings, *, channel=None) -> FastAPI:
             open_approvals=len(await store.list_open()),
             paused=gate.paused,
             can_send_messages=runner.available,
+            seats={seat.label: seat.runtime for seat in configured_seats},
             decides_without_a_human=settings.channel.decides_without_a_human,
         )
 
