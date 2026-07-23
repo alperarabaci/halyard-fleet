@@ -143,7 +143,7 @@ choice.
 
 - The selected executable resolves to Claude Desktop's bundled Claude Code
   `2.1.217` engine on the affected machine.
-- The full automated suite passes: **496 tests**.
+- The full automated suite passes: **497 tests**.
 - Ruff lint and formatting checks pass.
 - `git diff --check` passes.
 - A live `halyard doctor` run reports all configured seats, hooks, Codex trust

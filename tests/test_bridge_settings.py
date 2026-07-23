@@ -289,8 +289,36 @@ def a_seat(runtime: str = "claude-code"):
     return Seat(label="nav", runtime=runtime, session="a-session", chat="-1001")
 
 
+@pytest.fixture
+def _claude_available(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep hook diagnostics independent of the machine running the tests.
+
+    These tests exercise settings and hook paths after the runtime preflight.
+    A developer machine usually has Claude installed; a Linux CI runner does
+    not. Relying on either host state makes the test stop at the wrong boundary.
+    """
+    monkeypatch.setattr(
+        "halyard.agents.claude_code.runner.find_claude_binary",
+        lambda configured=None: configured or "/usr/bin/claude",
+    )
+
+
+def test_a_missing_claude_binary_is_reported(monkeypatch: pytest.MonkeyPatch) -> None:
+    from halyard import doctor
+
+    monkeypatch.setattr(
+        "halyard.agents.claude_code.runner.find_claude_binary",
+        lambda configured=None: None,
+    )
+
+    lines, problems = doctor._check_seat(a_seat())
+
+    assert problems == 1
+    assert any("claude CLI is not on this machine" in line for line in lines)
+
+
 def test_a_hook_path_from_another_machine_is_reported(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, _claude_available: None
 ) -> None:
     from halyard import doctor
 
@@ -308,7 +336,7 @@ def test_a_hook_path_from_another_machine_is_reported(
 
 
 def test_a_project_with_no_settings_is_reported(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, _claude_available: None
 ) -> None:
     from halyard import doctor
 
@@ -323,7 +351,7 @@ def test_a_project_with_no_settings_is_reported(
 
 
 def test_a_project_without_a_pretooluse_hook_is_reported(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, _claude_available: None
 ) -> None:
     from halyard import doctor
 
@@ -337,7 +365,7 @@ def test_a_project_without_a_pretooluse_hook_is_reported(
 
 
 def test_conversation_age_is_not_mistaken_for_process_age(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, _claude_available: None
 ) -> None:
     from halyard import doctor
 
@@ -356,7 +384,9 @@ def test_conversation_age_is_not_mistaken_for_process_age(
     assert not any("restart it" in line for line in lines)
 
 
-def test_a_correctly_wired_project_passes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_a_correctly_wired_project_passes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, _claude_available: None
+) -> None:
     from halyard import doctor
 
     project = gated_project(
