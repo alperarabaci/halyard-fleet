@@ -122,32 +122,6 @@ class Settings(BaseSettings):
     )
     driver_session: str | None = Field(default=None, validation_alias="HALYARD_DRIVER_SESSION")
 
-    #: Which runtime each seat is. A seat is a name plus the thing that knows
-    #: what that name means: `alpha-engine-driver` is a Claude Code session or
-    #: a Codex thread depending on this, and the two keep their sessions in
-    #: entirely different places. Left unset, both seats are Claude Code, which
-    #: is what every existing configuration means.
-    navigator_runtime: str = Field(
-        default="claude-code", validation_alias="HALYARD_NAVIGATOR_RUNTIME"
-    )
-    driver_runtime: str = Field(default="claude-code", validation_alias="HALYARD_DRIVER_RUNTIME")
-
-    @field_validator("navigator_runtime", "driver_runtime", mode="before")
-    @classmethod
-    def _known_runtime(cls, value: object) -> object:
-        """Refuse a runtime that does not exist rather than falling back.
-
-        Falling back would mean a seat configured as Codex quietly looking for
-        a Claude Code session, finding none, and reporting that the session is
-        missing — sending you to look for a naming mistake that is not there.
-        """
-        if isinstance(value, str):
-            name = value.strip().lower()
-            if name not in ("claude-code", "codex"):
-                raise ValueError(f"Unknown runtime {value!r}. Use 'claude-code' or 'codex'.")
-            return name
-        return value
-
     #: Model names offered by /options, comma separated. Only a suggestion —
     #: anything is passed through to the CLI — but worth being able to update
     #: without waiting for a release, because models ship faster than this does.
