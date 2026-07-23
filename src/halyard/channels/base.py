@@ -40,16 +40,33 @@ class ChannelAdapter(Protocol):
         """
         ...
 
-    async def send_message(self, session_id: str, text: str, role: Role | None = None) -> str:
+    async def send_message(
+        self,
+        session_id: str,
+        text: str,
+        role: Role | None = None,
+        *,
+        agent_id: str | None = None,
+        session_name: str | None = None,
+    ) -> str:
         """Send plain text. Returns a channel-side message id.
 
         `role` is where the message belongs, for a channel that keeps a
         navigator and a driver apart. A channel with one destination ignores it.
+        `agent_id` and `session_name` disambiguate seats when more than one
+        runtime has the same role.
         """
         ...
 
     async def send_long_content(
-        self, session_id: str, content: str, title: str, role: Role | None = None
+        self,
+        session_id: str,
+        content: str,
+        title: str,
+        role: Role | None = None,
+        *,
+        agent_id: str | None = None,
+        session_name: str | None = None,
     ) -> str:
         """Send something too large for one message, however the channel prefers."""
         ...

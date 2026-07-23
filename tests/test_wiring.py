@@ -38,7 +38,7 @@ def test_wiring_keeps_the_permission_list(tmp_path: Path) -> None:
     """
     project = repo(tmp_path, {"permissions": {"allow": ["Bash(uv run *)", "WebSearch"]}})
 
-    wiring.wire(project)
+    wiring.wire(project, runtimes=wiring.RUNTIMES[:1])
 
     assert read(project)["permissions"]["allow"] == ["Bash(uv run *)", "WebSearch"]
     assert read(project)["hooks"]["PreToolUse"]
@@ -52,6 +52,60 @@ def test_wiring_keeps_a_backup(tmp_path: Path) -> None:
     backups = list((project / ".claude").glob("settings.local.json.*.bak"))
     assert len(backups) == 1
     assert json.loads(backups[0].read_text())["permissions"]["allow"] == ["WebSearch"]
+
+
+def test_backup_exists_before_settings_are_written(tmp_path: Path, monkeypatch) -> None:
+    project = repo(tmp_path, {"permissions": {"allow": ["WebSearch"]}})
+    settings = project / ".claude" / "settings.local.json"
+    original = settings.read_bytes()
+    write = wiring._write
+
+    def observe_write(path: Path, config: dict) -> None:
+        backups = list(path.parent.glob(f"{path.name}.*.bak"))
+        assert len(backups) == 1
+        assert backups[0].read_bytes() == original
+        write(path, config)
+
+    monkeypatch.setattr(wiring, "_write", observe_write)
+
+    wiring.wire(project, runtimes=wiring.RUNTIMES[:1])
+
+
+def test_wiring_preserves_the_complete_claude_document(tmp_path: Path) -> None:
+    original = {
+        "permissions": {
+            "allow": ["Bash(uv run *)", "WebSearch"],
+            "deny": ["Read(./secrets/**)"],
+            "ask": ["Bash(git push *)"],
+        },
+        "hooks": {
+            "PreToolUse": [
+                {
+                    "matcher": "Write",
+                    "hooks": [{"type": "command", "command": "/other/write-check.sh"}],
+                }
+            ],
+            "SessionStart": [
+                {"hooks": [{"type": "command", "command": "/other/session-start.sh"}]}
+            ],
+        },
+        "enabledPlugins": {"example@marketplace": True},
+        "env": {"EXAMPLE_MODE": "careful"},
+    }
+    project = repo(tmp_path, original)
+    settings = project / ".claude" / "settings.local.json"
+    before = settings.read_bytes()
+
+    wiring.wire(project)
+
+    written = read(project)
+    assert written["permissions"] == original["permissions"]
+    assert written["enabledPlugins"] == original["enabledPlugins"]
+    assert written["env"] == original["env"]
+    assert written["hooks"]["SessionStart"] == original["hooks"]["SessionStart"]
+    assert original["hooks"]["PreToolUse"][0] in written["hooks"]["PreToolUse"]
+    backup = next(settings.parent.glob(f"{settings.name}.*.bak"))
+    assert backup.read_bytes() == before
 
 
 def test_wiring_an_untouched_project_creates_the_file(tmp_path: Path) -> None:
@@ -177,7 +231,52 @@ def test_codex_hooks_go_in_their_own_file(tmp_path: Path) -> None:
 
     written = json.loads((project / ".codex" / "hooks.json").read_text())
     assert written["hooks"]["PreToolUse"]
+    assert written["hooks"]["PermissionRequest"]
     assert not (project / ".claude").exists()
+
+
+def test_wiring_preserves_and_backs_up_the_complete_codex_document(tmp_path: Path) -> None:
+    project = repo(tmp_path)
+    codex_dir = project / ".codex"
+    codex_dir.mkdir()
+    hooks_file = codex_dir / "hooks.json"
+    original = {
+        "hooks": {
+            "SessionStart": [
+                {"hooks": [{"type": "command", "command": "/other/codex-session-start.sh"}]}
+            ],
+            "PreToolUse": [
+                {
+                    "matcher": "^apply_patch$",
+                    "hooks": [{"type": "command", "command": "/other/patch-check.sh"}],
+                }
+            ],
+        },
+        "futureCodexField": {"must": ["survive", "unchanged"]},
+    }
+    hooks_file.write_text(json.dumps(original, indent=4) + "\n", encoding="utf-8")
+    before = hooks_file.read_bytes()
+
+    wiring.wire(project, runtimes=(CODEX,))
+
+    written = json.loads(hooks_file.read_text())
+    assert written["futureCodexField"] == original["futureCodexField"]
+    assert written["hooks"]["SessionStart"] == original["hooks"]["SessionStart"]
+    assert original["hooks"]["PreToolUse"][0] in written["hooks"]["PreToolUse"]
+    assert written["hooks"]["PermissionRequest"]
+    backup = next(codex_dir.glob(f"{hooks_file.name}.*.bak"))
+    assert backup.read_bytes() == before
+
+
+def test_permission_request_is_codex_only(tmp_path: Path) -> None:
+    project = repo(tmp_path)
+
+    wiring.wire(project, runtimes=wiring.RUNTIMES)
+
+    claude = json.loads((project / ".claude" / "settings.local.json").read_text())
+    codex = json.loads((project / ".codex" / "hooks.json").read_text())
+    assert "PermissionRequest" not in claude["hooks"]
+    assert codex["hooks"]["PermissionRequest"]
 
 
 def test_codex_matches_the_app_as_well_as_the_cli(tmp_path: Path) -> None:
@@ -261,7 +360,7 @@ def test_a_hook_with_no_trust_record_is_reported(tmp_path: Path) -> None:
 
     pending = wiring.codex_untrusted(hooks_file, empty)
 
-    assert len(pending) == 2
+    assert len(pending) == 3
     assert all(str(hooks_file) in key for key in pending)
     # Codex writes the event in snake case; matching `pretooluse` finds
     # nothing and reports a trusted hook as never trusted.

@@ -37,6 +37,20 @@ async def client_for(app):
     return httpx.AsyncClient(transport=transport, base_url="http://control-plane")
 
 
+async def test_configured_claude_binary_reaches_the_runtime_runner(tmp_path: Path) -> None:
+    from halyard.api.app import create_app
+
+    binary = tmp_path / "claude"
+    binary.touch()
+    settings = make_settings(tmp_path, ChannelKind.STUB_ALLOW).model_copy(
+        update={"claude_binary": str(binary)}
+    )
+
+    app = create_app(settings)
+
+    assert app.state.runner._binary == str(binary)
+
+
 @pytest.fixture
 async def allowing(tmp_path: Path):
     from halyard.api.app import create_app

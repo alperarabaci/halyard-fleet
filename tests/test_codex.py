@@ -103,6 +103,47 @@ def test_the_newest_turn_wins_over_the_first(tmp_path: Path) -> None:
     assert find_session("seat", root=root).model == "gpt-5.6-sol"
 
 
+def test_context_is_found_beyond_a_fixed_size_tail(tmp_path: Path) -> None:
+    """Tool output after a context can be much larger than a tail window.
+
+    The production failure was a 283 MB task with 350 records after the newest
+    context. The rollout existed and recorded the right directory, but the
+    resolver looked at only its final 256 KiB and reported `cwd=None`.
+    """
+    root = codex_home(
+        tmp_path,
+        sessions=[{"id": "abc", "thread_name": "driver"}],
+        rollouts={
+            "abc": {
+                "cwd": "/the/session/repo",
+                "model": "gpt-5.6-terra",
+                "effort": "medium",
+            }
+        },
+    )
+    rollout = next((root / "sessions").glob("*/*/*/rollout-*-abc.jsonl"))
+    with rollout.open("a", encoding="utf-8") as handle:
+        for index in range(400):
+            handle.write(
+                json.dumps(
+                    {
+                        "type": "response_item",
+                        "payload": {"index": index, "output": "x" * 2048},
+                    }
+                )
+                + "\n"
+            )
+
+    ref = find_session("driver", root=root)
+
+    assert ref is not None
+    assert (ref.cwd, ref.model, ref.effort) == (
+        "/the/session/repo",
+        "gpt-5.6-terra",
+        "medium",
+    )
+
+
 def test_an_unknown_name_is_none_rather_than_a_guess(tmp_path: Path) -> None:
     root = codex_home(tmp_path, sessions=[{"id": "abc", "thread_name": "driver"}], rollouts={})
 

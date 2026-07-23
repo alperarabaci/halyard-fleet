@@ -183,7 +183,13 @@ class MessageRelay:
                 role=role,
                 cwd=cwd,
             )
-            delivered = await self._deliver(session_id, masked.text, role)
+            delivered = await self._deliver(
+                session_id,
+                masked.text,
+                role,
+                agent_id=agent_id,
+                session_name=session_name,
+            )
         except Exception:
             logger.exception("Could not relay a message from %s", session_id)
             return False
@@ -205,12 +211,26 @@ class MessageRelay:
             logger.warning("Could not record a relayed message", exc_info=True)
         return delivered
 
-    async def _deliver(self, session_id: str, text: str, role: Role | None) -> bool:
+    async def _deliver(
+        self,
+        session_id: str,
+        text: str,
+        role: Role | None,
+        *,
+        agent_id: str,
+        session_name: str | None,
+    ) -> bool:
         try:
             # Always as messages, however long. A reply arriving as a file has
             # to be tapped, downloaded and opened, and reading it where it
             # lands is the entire point. The channel splits if it must.
-            await self._channel.send_message(session_id, text, role)
+            await self._channel.send_message(
+                session_id,
+                text,
+                role,
+                agent_id=agent_id,
+                session_name=session_name,
+            )
         except Exception:
             logger.exception("Channel refused a relayed message from %s", session_id)
             return False

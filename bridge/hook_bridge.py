@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Relay a Claude Code permission request to the Halyard control plane.
+"""Relay an agent permission request to the Halyard control plane.
 
 Standard library only, no package imports, no configuration file. This script
 runs inside somebody else's process tree on every tool call, so it has to work
@@ -47,29 +47,34 @@ DEFAULT_TIMEOUT_SECONDS = 330.0
 DEFER_EXIT_CODE = 64
 
 
-def emit(decision: str, reason: str) -> None:
+def emit(event: str, decision: str, reason: str) -> None:
     """Print a hook decision and nothing else.
 
-    The wrapper form rather than the legacy `{"decision": "block"}` one. Both
-    were observed to work; only this one is documented, which makes the other
-    the one that disappears in a future release.
+    PreToolUse and PermissionRequest look similar on input but deliberately use
+    different decision schemas. The former gates every tool call. The latter is
+    Codex's separate answer to a native sandbox-escalation prompt.
     """
+    if event == "PermissionRequest":
+        specific = {
+            "hookEventName": "PermissionRequest",
+            "decision": {"behavior": decision, "message": reason},
+        }
+    else:
+        specific = {
+            "hookEventName": "PreToolUse",
+            "permissionDecision": decision,
+            "permissionDecisionReason": reason,
+        }
     json.dump(
-        {
-            "hookSpecificOutput": {
-                "hookEventName": "PreToolUse",
-                "permissionDecision": decision,
-                "permissionDecisionReason": reason,
-            }
-        },
+        {"hookSpecificOutput": specific},
         sys.stdout,
     )
     sys.stdout.write("\n")
     sys.stdout.flush()
 
 
-def deny(reason: str) -> None:
-    emit("deny", f"Denied by Halyard: {reason}")
+def deny(reason: str, event: str = "PreToolUse") -> None:
+    emit(event, "deny", f"Denied by Halyard: {reason}")
 
 
 def build_body(payload: dict) -> dict:
@@ -116,6 +121,9 @@ def build_body(payload: dict) -> dict:
         # no shell to put HALYARD_ROLE in. Stable across restarts, unlike
         # session_id.
         "session_name": name,
+        "reason": tool_input.get("justification")
+        if isinstance(tool_input.get("justification"), str)
+        else None,
     }
 
 
@@ -133,12 +141,15 @@ def ask(url: str, body: dict, timeout: float) -> dict:
 
 
 def main() -> int:
+    event = "PreToolUse"
     try:
         payload = json.loads(sys.stdin.read() or "{}")
         if not isinstance(payload, dict):
             raise ValueError("payload was not an object")
+        if payload.get("hook_event_name") == "PermissionRequest":
+            event = "PermissionRequest"
     except Exception as exc:
-        deny(f"the hook payload could not be read ({exc}).")
+        deny(f"the hook payload could not be read ({exc}).", event)
         return 0
 
     url = control_plane_url()
@@ -156,14 +167,20 @@ def main() -> int:
         answer = ask(url, body, timeout)
     except urllib.error.URLError as exc:
         note(f"unreachable: {exc.reason}")
-        deny(f"the control plane at {url} could not be reached ({exc.reason}). Failing closed.")
+        deny(
+            f"the control plane at {url} could not be reached ({exc.reason}). Failing closed.",
+            event,
+        )
         return 0
     except TimeoutError:
         note(f"no answer within {timeout:g}s")
-        deny(f"the control plane at {url} did not answer within {timeout:g}s. Failing closed.")
+        deny(
+            f"the control plane at {url} did not answer within {timeout:g}s. Failing closed.",
+            event,
+        )
         return 0
     except Exception as exc:
-        deny(f"the control plane at {url} failed ({exc}). Failing closed.")
+        deny(f"the control plane at {url} failed ({exc}). Failing closed.", event)
         return 0
 
     decision = answer.get("decision")
@@ -172,7 +189,7 @@ def main() -> int:
     # Only an exact allow allows. A missing field, a typo, a null, a decision
     # this bridge has never heard of — all of them mean deny.
     if decision == "allow":
-        emit("allow", reason)
+        emit(event, "allow", reason)
     elif decision == "defer":
         # Halyard is paused: no opinion, so Claude Code decides on its own the
         # way it would if this hook were not installed. Held to the same
@@ -185,7 +202,7 @@ def main() -> int:
         # turned into denying everything. It did, once.
         return DEFER_EXIT_CODE
     else:
-        emit("deny", reason)
+        emit(event, "deny", reason)
     return 0
 
 

@@ -30,6 +30,11 @@ WIRING = (
     ("Stop", None, BRIDGE_DIR / "relay.py", 15),
 )
 
+# Codex asks a separate native question when a tool requests sandbox
+# escalation. A PreToolUse allow does not answer it. This stays Codex-only:
+# Claude Code's PreToolUse decision already replaces its permission prompt.
+CODEX_WIRING = (("PermissionRequest", "Bash", BRIDGE_DIR / "permission_hook.sh", 600),)
+
 
 @dataclass(frozen=True)
 class Runtime:
@@ -201,7 +206,12 @@ def codex_trust_is_stale(hooks_file: Path, config_toml: Path | None = None) -> b
     # the reason given above. Watching the scripts as well as the file costs a
     # warning that is sometimes unnecessary, against missing one that means a
     # gate has disappeared.
-    watched = [hooks_file, BRIDGE_DIR / "hook.sh", BRIDGE_DIR / "relay.py"]
+    watched = [
+        hooks_file,
+        BRIDGE_DIR / "hook.sh",
+        BRIDGE_DIR / "permission_hook.sh",
+        BRIDGE_DIR / "relay.py",
+    ]
     try:
         recorded = toml.stat().st_mtime
         return any(path.stat().st_mtime > recorded for path in watched if path.exists())
@@ -230,7 +240,10 @@ def _back_up(path: Path) -> Path | None:
     """
     if not path.exists():
         return None
-    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    # Microseconds keep two material rewrites in the same second from reusing
+    # one path. A backup operation must never overwrite an earlier backup:
+    # that earlier copy may be the only version containing a lost allowlist.
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
     backup = path.with_name(f"{path.name}.{stamp}.bak")
     shutil.copy2(path, backup)
     return backup
@@ -258,7 +271,8 @@ def _wire_one(directory: Path, runtime: Runtime) -> int:
     hooks = config.setdefault("hooks", {})
 
     added = []
-    for event, matcher, script, timeout in WIRING:
+    runtime_wiring = WIRING + (CODEX_WIRING if runtime.name == "codex" else ())
+    for event, matcher, script, timeout in runtime_wiring:
         if not script.exists():
             print(f"halyard: {script} is missing from this install")
             return 1

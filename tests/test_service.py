@@ -42,9 +42,18 @@ class ExplodingChannel:
     async def send_approval_request(self, request: ApprovalRequest) -> str:
         raise ConnectionError("telegram unreachable")
 
-    async def send_message(self, session_id: str, text: str, role=None) -> str: ...
+    async def send_message(
+        self, session_id: str, text: str, role=None, *, agent_id=None, session_name=None
+    ) -> str: ...
     async def send_long_content(
-        self, session_id: str, content: str, title: str, role=None
+        self,
+        session_id: str,
+        content: str,
+        title: str,
+        role=None,
+        *,
+        agent_id=None,
+        session_name=None,
     ) -> str: ...
 
 
@@ -60,9 +69,18 @@ class SilentChannel:
         self.last_request = request
         return "sent"
 
-    async def send_message(self, session_id: str, text: str, role=None) -> str: ...
+    async def send_message(
+        self, session_id: str, text: str, role=None, *, agent_id=None, session_name=None
+    ) -> str: ...
     async def send_long_content(
-        self, session_id: str, content: str, title: str, role=None
+        self,
+        session_id: str,
+        content: str,
+        title: str,
+        role=None,
+        *,
+        agent_id=None,
+        session_name=None,
     ) -> str: ...
 
 

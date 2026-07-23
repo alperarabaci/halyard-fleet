@@ -193,6 +193,7 @@ def create_app(settings: Settings, *, channel=None) -> FastAPI:
     # entirely different places.
     by_runtime = {
         "claude-code": ClaudeCodeRunner(
+            binary=settings.claude_binary,
             models=tuple(m.strip() for m in settings.claude_models.split(",") if m.strip())
             if settings.claude_models
             else None,

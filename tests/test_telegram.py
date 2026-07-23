@@ -72,10 +72,18 @@ class FakeTelegramApi:
     async def answer_callback_query(self, callback_query_id, *, text=None):
         self.answers.append({"id": callback_query_id, "text": text})
 
-    async def send_document(self, chat_id, filename, content, *, caption=None) -> dict:
+    async def send_document(
+        self, chat_id, filename, content, *, caption=None, message_thread_id=None
+    ) -> dict:
         self._next_message_id += 1
         self.documents.append(
-            {"chat_id": chat_id, "filename": filename, "content": content, "caption": caption}
+            {
+                "chat_id": chat_id,
+                "filename": filename,
+                "content": content,
+                "caption": caption,
+                "message_thread_id": message_thread_id,
+            }
         )
         return {"message_id": self._next_message_id}
 
@@ -697,12 +705,41 @@ async def test_replies_follow_the_same_route(tmp_path: Path) -> None:
     assert api.sent[0]["chat_id"] == DRV_CHAT
 
 
+async def test_replies_choose_runtime_specific_seat_when_roles_match(tmp_path: Path) -> None:
+    from halyard.core.seats import Seat
+
+    channel, api, _ = await routed(tmp_path)
+    channel._seats = [
+        Seat("drv", "claude-code", "claude-session", DRV_CHAT, Role.DRIVER),
+        Seat("xdrv", "codex", "codex-session", "-1003333333333", Role.DRIVER),
+    ]
+
+    await channel.send_message(
+        "codex-session",
+        "done",
+        Role.DRIVER,
+        agent_id="codex",
+        session_name="alpha-engine-xdriver",
+    )
+
+    assert api.sent[0]["chat_id"] == "-1003333333333"
+
+
 async def test_a_long_reply_follows_the_route_too(tmp_path: Path) -> None:
     channel, api, _ = await routed(tmp_path)
 
     await channel.send_long_content("session-1", "x" * 5000, "Agent reply", Role.NAVIGATOR)
 
     assert api.documents[0]["chat_id"] == NAV_CHAT
+
+
+async def test_a_long_reply_stays_in_its_forum_topic(tmp_path: Path) -> None:
+    channel, api, _ = await routed(tmp_path, navigator=f"{NAV_CHAT}:12")
+
+    await channel.send_long_content("session-1", "x" * 5000, "Agent reply", Role.NAVIGATOR)
+
+    assert api.documents[0]["chat_id"] == NAV_CHAT
+    assert api.documents[0]["message_thread_id"] == 12
 
 
 # --- an existing single-chat setup must not notice any of this ----------------
@@ -803,7 +840,7 @@ class FakeRunner:
     id = "claude-code"
     available = True
 
-    def __init__(self, *, works: bool = True, default_model: str | None = "sonnet") -> None:
+    def __init__(self, *, works: bool = True, default_model: str | None = None) -> None:
         self.default_model = default_model
         # The channel asks its seat's runtime what a name means, rather than
         # importing one runtime's lookup. A double has to answer that too.
@@ -919,6 +956,74 @@ async def test_each_seat_reaches_its_own_session(tmp_path: Path) -> None:
     await drain()
 
     assert runner.sent == [("session-nav", "navigator work"), ("session-drv", "driver work")]
+
+
+async def multi_runtime_wired(tmp_path: Path):
+    """A Claude default plus a Codex seat, matching the production shape."""
+    from halyard.agents.base import SessionRef
+    from halyard.core.gate import Gate
+    from halyard.core.registry import SessionRegistry
+    from halyard.core.seats import Seat
+
+    sink = JsonlAuditSink(tmp_path / "multi-runtime-audit.jsonl")
+    audit = AuditLog([sink])
+    await audit.open()
+    api = FakeTelegramApi()
+    claude = FakeRunner()
+    codex = FakeRunner(default_model="gpt-5.6-codex")
+    codex.id = "codex"
+    codex.sessions["alpha-engine-xdriver"] = SessionRef(
+        "codex-session", "alpha-engine-xdriver", "/repo", "gpt-5.6-codex", "high"
+    )
+    chat = "-100444"
+    channel = TelegramChannel(
+        api=api,
+        store=ApprovalStore(),
+        audit=audit,
+        chat_id=CHAT,
+        authorized_user_ids=frozenset({APPROVER}),
+        gate=Gate(),
+        project="alpha-engine",
+        registry=SessionRegistry(),
+        runner=claude,
+        runners={"claude-code": claude, "codex": codex},
+        seats=[
+            Seat(
+                label="xdrv",
+                runtime="codex",
+                session="alpha-engine-xdriver",
+                chat=chat,
+                role=Role.DRIVER,
+            )
+        ],
+    )
+    return channel, api, claude, codex, chat
+
+
+async def test_a_codex_seat_delivers_with_the_codex_runner(tmp_path: Path) -> None:
+    channel, _, claude, codex, chat = await multi_runtime_wired(tmp_path)
+
+    await channel._handle_message(typed_in("continue from Telegram", chat))
+    await drain()
+
+    assert claude.sent == []
+    assert codex.sent == [("codex-session", "continue from Telegram")]
+
+
+async def test_a_codex_seat_uses_codex_for_options_and_preferences(tmp_path: Path) -> None:
+    channel, api, claude, codex, chat = await multi_runtime_wired(tmp_path)
+    codex.options = lambda session_id=None: {
+        "model": (("gpt-5.6-codex",), False),
+        "effort": (("low", "high", "ultra"), True),
+    }
+
+    await channel._handle_message(typed_in("/options", chat))
+    assert "codex" in api.sent[-1]["text"]
+    assert "ultra" in api.sent[-1]["text"]
+
+    await channel._handle_message(typed_in("/effort ultra", chat))
+    assert codex.efforts["codex-session"] == "ultra"
+    assert claude.efforts == {}
 
 
 async def test_delivery_does_not_block_the_caller(tmp_path: Path) -> None:
@@ -1344,30 +1449,19 @@ async def test_options_comes_from_the_runtime_not_from_this_module(tmp_path: Pat
     assert "passed through" not in text
 
 
-async def test_clearing_a_model_names_what_it_fell_back_to(tmp_path: Path) -> None:
-    """ "Cleared" alone leaves the real answer to be guessed.
-
-    And the guess people make — that it went back to whatever the app is set
-    to — is wrong. Nothing here can reach that. It went to this control plane's
-    own default, and a model nobody chose could otherwise answer for days.
-    """
+async def test_clearing_a_model_restores_session_inheritance(tmp_path: Path) -> None:
     channel, api, _, _ = await wired(tmp_path)
 
     await channel._handle_message(typed_in("/model opus", NAV_CHAT))
     await channel._handle_message(typed_in("/model default", NAV_CHAT))
 
     text = api.sent[-1]["text"]
-    assert "sonnet" in text
-    assert "the session's own" not in text
+    assert "resumed session/runtime" in text
 
 
-async def test_status_separates_the_desk_from_the_phone(tmp_path: Path, monkeypatch) -> None:
-    """Two different settings that are easy to read as one.
-
-    A session on opus at the desk still answers a message from here with
-    whatever this control plane sends. Printing one number invites the wrong
-    conclusion right before an expensive instruction is sent.
-    """
+async def test_status_says_when_phone_turns_inherit_the_session(
+    tmp_path: Path, monkeypatch
+) -> None:
     from halyard.agents.claude_code import SessionRef
 
     channel, api, _runner, _ = await wired(tmp_path)
@@ -1379,11 +1473,10 @@ async def test_status_separates_the_desk_from_the_phone(tmp_path: Path, monkeypa
     await channel._handle_message(typed_in("/status", NAV_CHAT))
 
     text = api.sent[-1]["text"]
-    # The app is on opus; a message from here is not.
     assert "claude-opus-4-8" in text
     assert "at the desk" in text
     assert "from here" in text
-    assert "sonnet" in text
+    assert "inherits the session/runtime" in text
 
 
 async def test_effort_is_validated_against_the_runtime_not_a_hardcoded_list(tmp_path) -> None:

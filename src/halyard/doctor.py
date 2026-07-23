@@ -104,7 +104,7 @@ def _hook_commands(settings_file: Path, project_dir: Path) -> list[tuple[str, st
     return found
 
 
-def _check_seat(seat) -> tuple[list[str], int]:
+def _check_seat(seat, claude_binary: str | None = None) -> tuple[list[str], int]:
     """Everything one seat needs, checked against the runtime it actually is.
 
     Four seats and two runtimes means a name that resolves perfectly for one is
@@ -127,8 +127,10 @@ def _check_seat(seat) -> tuple[list[str], int]:
         from halyard.agents.claude_code import find_session as look_up
         from halyard.agents.claude_code.runner import find_claude_binary
 
-        if find_claude_binary() is None:
+        selected_binary = find_claude_binary(claude_binary)
+        if selected_binary is None:
             return [f"{FAIL}{label}: the claude CLI is not on this machine"], 1
+        lines.append(f"{OK}{label}: messages use {selected_binary}")
 
     ref = look_up(seat.session)
     if ref is None:
@@ -189,7 +191,6 @@ def _check_gated_project(label: str, ref, seat) -> tuple[list[str], int]:
         return lines, 1
 
     problems = 0
-    newest_settings = max(f.stat().st_mtime for f in present)
     seen_events: set[str] = set()
     for settings_file in present:
         for event, command in _hook_commands(settings_file, project_dir):
@@ -231,7 +232,9 @@ def _check_gated_project(label: str, ref, seat) -> tuple[list[str], int]:
             problems += 1
             lines.append(f"{FAIL}        hooks.json has field(s) Codex rejects: {', '.join(stray)}")
             lines.append("                it refuses the whole file over one, so nothing is gated")
-        if codex_untrusted(hooks_file):
+        untrusted = codex_untrusted(hooks_file)
+        stale = codex_trust_is_stale(hooks_file)
+        if untrusted:
             problems += 1
             lines.append(f"{FAIL}        hooks here have never been trusted")
             lines.append("                Codex skips an untrusted hook without a word, so this")
@@ -239,19 +242,27 @@ def _check_gated_project(label: str, ref, seat) -> tuple[list[str], int]:
             lines.append(f"                    cd {project_dir} && codex")
             lines.append("                A hook review appears at startup. Prefer `Review hooks`")
             lines.append("                over `Trust all` — these run from outside the project.")
-        elif codex_trust_is_stale(hooks_file):
+        elif stale:
             lines.append(f"{WARN}        hooks or bridge scripts changed since trust was recorded")
             lines.append("                Codex hashes the handler, so updating this checkout may")
             lines.append("                have revoked it — and a revoked hook is skipped in")
             lines.append(f"                silence. Re-review with: cd {project_dir} && codex")
+        else:
+            # Existence is all we can prove without reimplementing Codex's
+            # private hash canonicalisation. Say exactly that: this confirms
+            # why no review prompt appeared without claiming more than the
+            # persisted state establishes.
+            lines.append(f"{OK}        trust records exist for every Codex hook")
 
-    if ref.started_at and ref.started_at.timestamp() < newest_settings:
-        # With the date, because the two are often a day apart and bare
-        # clock times then read as though the warning had it backwards.
-        changed = datetime.fromtimestamp(newest_settings).strftime("%b %d %H:%M")
-        began = ref.started_at.astimezone().strftime("%b %d %H:%M")
-        lines.append(f"{WARN}        settings changed at {changed}, session started at {began}")
-        lines.append("                hooks are read at startup — restart it to pick them up")
+    # Do not compare ref.started_at with the settings mtime. `started_at` is
+    # when the *conversation was created*, not when the desktop/CLI process
+    # most recently resumed it. A week-old conversation can have been reopened
+    # after wiring five seconds ago. The old comparison therefore told people
+    # to restart forever, including immediately after they had done so.
+    #
+    # Wire itself prints the necessary restart instruction at the only moment
+    # we know settings changed. Doctor has no supported cross-runtime API for
+    # observing the process that currently owns a desktop session.
     return lines, problems
 
 
@@ -323,14 +334,19 @@ def run() -> int:
         print(f"{WARN}no seats configured — nothing is being routed anywhere")
         print("        set HALYARD_SEATS, or the navigator/driver pair, in .env")
     for seat in configured:
-        lines, found = _check_seat(seat)
+        lines, found = _check_seat(seat, settings.claude_binary)
         problems += found
         for line in lines:
             print(line)
     if configured:
         print()
 
-    for name, required in (("hook.sh", True), ("hook_bridge.py", True), ("relay.py", False)):
+    for name, required in (
+        ("hook.sh", True),
+        ("permission_hook.sh", True),
+        ("hook_bridge.py", True),
+        ("relay.py", False),
+    ):
         path = BRIDGE_DIR / name
         if not path.exists():
             problems += required
