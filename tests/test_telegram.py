@@ -1513,3 +1513,104 @@ async def test_an_unenforced_choice_is_passed_through(tmp_path) -> None:
     await channel._handle_message(typed_in("/model something-brand-new", NAV_CHAT))
 
     assert runner.models["session-nav"] == "something-brand-new"
+
+
+# --- the bot-self regression ------------------------------------------------
+#
+# Adding Codex sent every message to the bot's own chat instead of the seat's
+# group, twice over: routing went by role, which no longer identifies a seat
+# once two drivers exist, and the session name that does identify it was not
+# passed down the relay. Both were fixed by hand and neither had a test, so the
+# next refactor would have quietly done it again. These are that test.
+
+
+FOUR_SEATS_ENV = {
+    "HALYARD_SEATS": "nav,drv,xnav,xdrv",
+    "HALYARD_SEAT_NAV": "runtime=claude-code session=claude-nav chat=-2001 role=navigator",
+    "HALYARD_SEAT_DRV": "runtime=claude-code session=claude-drv chat=-2002 role=driver",
+    "HALYARD_SEAT_XNAV": "runtime=codex session=codex-nav chat=-2003 role=navigator",
+    "HALYARD_SEAT_XDRV": "runtime=codex session=codex-drv chat=-2004 role=driver",
+}
+
+
+async def four_seats(tmp_path: Path):
+    from halyard.core.seats import from_environment
+
+    store = ApprovalStore(ttl=timedelta(minutes=5))
+    audit = AuditLog([JsonlAuditSink(tmp_path / "audit.jsonl")])
+    await audit.open()
+    api = FakeTelegramApi()
+    channel = TelegramChannel(
+        api=api,
+        store=store,
+        audit=audit,
+        # A distinct default, so "landed in the default chat" is unmistakable:
+        # it is the one destination none of the four seats owns.
+        chat_id="-9999-DEFAULT",
+        authorized_user_ids=frozenset({APPROVER}),
+        seats=from_environment(FOUR_SEATS_ENV),
+    )
+    return channel, api, store
+
+
+SEAT_CASES = [
+    ("claude-nav", "claude-code", Role.NAVIGATOR, "-2001"),
+    ("claude-drv", "claude-code", Role.DRIVER, "-2002"),
+    ("codex-nav", "codex", Role.NAVIGATOR, "-2003"),
+    ("codex-drv", "codex", Role.DRIVER, "-2004"),
+]
+
+
+@pytest.mark.parametrize(("session_name", "agent_id", "role", "chat"), SEAT_CASES)
+async def test_a_card_never_lands_in_the_bots_own_chat(
+    tmp_path: Path, session_name: str, agent_id: str, role: Role, chat: str
+) -> None:
+    """The regression, from the approval-card side.
+
+    Two seats share the role `driver`; only the session name and the runtime
+    tell a Claude card from a Codex one. A card that cannot be placed falls to
+    the default chat, which is the bot talking to itself — the exact symptom.
+    """
+    channel, api, store = await four_seats(tmp_path)
+    request = await an_approval(store, agent_id=agent_id, role=role, session_name=session_name)
+
+    await channel.send_approval_request(request)
+
+    assert api.sent[0]["chat_id"] == chat
+    assert api.sent[0]["chat_id"] != "-9999-DEFAULT"
+
+
+@pytest.mark.parametrize(("session_name", "agent_id", "role", "chat"), SEAT_CASES)
+async def test_a_reply_never_lands_in_the_bots_own_chat(
+    tmp_path: Path, session_name: str, agent_id: str, role: Role, chat: str
+) -> None:
+    """The same regression from the relay side, which is where it actually bit.
+
+    The relay has to carry the session name all the way to the channel; the bug
+    was that it passed only the role, so every reply from either driver went to
+    the default chat.
+    """
+    channel, api, _ = await four_seats(tmp_path)
+
+    await channel.send_message(
+        session_name, "done", None, agent_id=agent_id, session_name=session_name
+    )
+
+    assert api.sent[0]["chat_id"] == chat
+    assert api.sent[0]["chat_id"] != "-9999-DEFAULT"
+
+
+async def test_the_two_codex_seats_do_not_collapse_into_one(tmp_path: Path) -> None:
+    """A Codex navigator and a Codex driver share a runtime and differ only by
+    session. If routing ignored the session they would both answer to whichever
+    seat it checked first."""
+    channel, api, _ = await four_seats(tmp_path)
+
+    await channel.send_message(
+        "codex-nav", "a", Role.NAVIGATOR, agent_id="codex", session_name="codex-nav"
+    )
+    await channel.send_message(
+        "codex-drv", "b", Role.DRIVER, agent_id="codex", session_name="codex-drv"
+    )
+
+    assert [m["chat_id"] for m in api.sent] == ["-2003", "-2004"]

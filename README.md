@@ -53,6 +53,13 @@ Every line below was measured rather than read, usually after it caused a proble
   run commands is behind the gate that is stuck shut, the repair is behind it too.
 - **Do not type into a session Halyard is writing to.** Two overlapping resumes of one session do
   not fail — they fork silently, and one side's history simply disappears.
+- **The desktop app shows an injected turn late, not never.** A message you send from the phone is
+  delivered into the session, processed, and written to the transcript — it is a real part of the
+  conversation, and the reply comes back to your chat. But the desktop app does not live-refresh an
+  open session while an external process appends to it; it catches up when the window is focused
+  again, and a restart always shows everything. This is not a problem for what Halyard is *for* —
+  you are away from the machine, driving from the phone — and it costs nothing there. It only shows
+  as a lag when you happen to be watching the desktop at the same time.
 
 Found something in this category that is not on the list? It belongs here, or it belongs fixed.
 Open an issue either way.
