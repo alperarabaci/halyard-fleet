@@ -277,6 +277,18 @@ def hook_entry(command: str) -> list[dict]:
     return [{"hooks": [{"type": "command", "command": command}]}]
 
 
+def a_seat(runtime: str = "claude-code"):
+    """A seat pointing at the fixture session.
+
+    The check runs per seat now, because which file holds the hooks depends on
+    the runtime: looking in `.claude/` for a Codex seat would report a gate
+    missing on a project that has one.
+    """
+    from halyard.core.seats import Seat
+
+    return Seat(label="nav", runtime=runtime, session="a-session", chat="-1001")
+
+
 def test_a_hook_path_from_another_machine_is_reported(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -289,7 +301,7 @@ def test_a_hook_path_from_another_machine_is_reported(
     monkeypatch.setattr(doctor, "find_session", lambda name: a_session(project), raising=False)
     monkeypatch.setattr("halyard.agents.claude_code.find_session", lambda name: a_session(project))
 
-    lines, problems = doctor._check_gated_project("navigator", "a-session")
+    lines, problems = doctor._check_seat(a_seat())
 
     assert problems >= 1
     assert any("does not exist on this machine" in line for line in lines)
@@ -304,7 +316,7 @@ def test_a_project_with_no_settings_is_reported(
     project.mkdir()
     monkeypatch.setattr("halyard.agents.claude_code.find_session", lambda name: a_session(project))
 
-    lines, problems = doctor._check_gated_project("navigator", "a-session")
+    lines, problems = doctor._check_seat(a_seat())
 
     assert problems == 1
     assert any("nothing is gating this project" in line for line in lines)
@@ -318,7 +330,7 @@ def test_a_project_without_a_pretooluse_hook_is_reported(
     project = gated_project(tmp_path, {"Stop": hook_entry(str(BRIDGE_DIR / "relay.py"))})
     monkeypatch.setattr("halyard.agents.claude_code.find_session", lambda name: a_session(project))
 
-    lines, problems = doctor._check_gated_project("navigator", "a-session")
+    lines, problems = doctor._check_seat(a_seat())
 
     assert problems >= 1
     assert any("approvals will never be asked for" in line for line in lines)
@@ -335,7 +347,7 @@ def test_a_session_older_than_its_settings_is_flagged(
         "halyard.agents.claude_code.find_session", lambda name: a_session(project, started=stale)
     )
 
-    lines, problems = doctor._check_gated_project("navigator", "a-session")
+    lines, problems = doctor._check_seat(a_seat())
 
     # Hooks are snapshotted at startup, so a session older than the settings is
     # running with the previous ones and nothing says so anywhere else.
@@ -360,7 +372,7 @@ def test_a_correctly_wired_project_passes(tmp_path: Path, monkeypatch: pytest.Mo
     wrapper.chmod(0o755)
     monkeypatch.setattr("halyard.agents.claude_code.find_session", lambda name: a_session(project))
 
-    lines, problems = doctor._check_gated_project("navigator", "a-session")
+    lines, problems = doctor._check_seat(a_seat())
 
     assert problems == 0
     assert any("PreToolUse" in line for line in lines)

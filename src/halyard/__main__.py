@@ -77,6 +77,7 @@ USAGE = """usage: halyard [command]
   serve         run the control plane
   doctor        check the configuration and say what is wrong with it
   sessions      list the session names this machine can see
+  verify [rt]   prove the gate stops things, by running into it (costs turns)
   wire [dir]    put the gate on a project (merges; keeps a backup)
   unwire [dir]  take it off again, leaving everything else in place
 """
@@ -102,6 +103,17 @@ def main() -> None:
         from halyard.doctor import sessions
 
         raise SystemExit(sessions())
+
+    if command == "verify":
+        from halyard.verify import RUNTIMES, verify
+
+        wanted = args[1] if len(args) > 1 else None
+        chosen = tuple(r for r in RUNTIMES if not wanted or r.name == wanted)
+        if wanted and not chosen:
+            names = ", ".join(r.name for r in RUNTIMES)
+            print(f"halyard: unknown runtime {wanted!r}. Try one of: {names}", file=sys.stderr)
+            raise SystemExit(2)
+        raise SystemExit(verify(runtimes=chosen or None))
 
     if command in ("wire", "unwire"):
         from halyard import wiring

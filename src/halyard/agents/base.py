@@ -8,7 +8,36 @@ describes the first one wearing a disguise.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+from datetime import datetime
 from typing import Protocol, runtime_checkable
+
+
+@dataclass(frozen=True)
+class SessionRef:
+    """Where a session is, and what it is called.
+
+    One shape for every runtime. The two that exist keep these facts in
+    different places — Claude Code puts the name and the directory in one
+    transcript, Codex splits the name into an index and the directory into a
+    rollout — but what a channel needs to know is the same either way, and a
+    channel that had to tell them apart would be a channel that knows about
+    runtimes.
+    """
+
+    session_id: str
+    name: str
+    #: The directory the session belongs to. Both runtimes need it, for
+    #: different reasons: Claude Code cannot find a conversation from anywhere
+    #: else, and Codex applies the hooks of wherever it is run from.
+    cwd: str | None
+    model: str | None = None
+    effort: str | None = None
+    #: Whether a person chose the name. False means the runtime generated it,
+    #: and a generated name is rewritten as the conversation moves — so a seat
+    #: pointed at one works until it silently stops.
+    named_by_a_person: bool = True
+    started_at: datetime | None = None
 
 
 @runtime_checkable
@@ -38,6 +67,17 @@ class AgentRunner(Protocol):
         An unenforced list is a hint: values outside it are still passed
         through. Say a set is enforced only when the runtime genuinely rejects
         everything else.
+        """
+        ...
+
+    def resolve(self, name: str) -> SessionRef | None:
+        """Find a session by the name a person gave it, or by its id.
+
+        On the protocol because there are two implementations now and they
+        disagree about where the answer lives. Before Codex this was a module
+        function the channel imported directly from Claude Code, which is the
+        arrangement that makes a second runtime impossible to add without
+        editing the channel.
         """
         ...
 

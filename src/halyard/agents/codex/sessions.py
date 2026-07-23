@@ -22,29 +22,15 @@ from __future__ import annotations
 
 import json
 import logging
-from dataclasses import dataclass
 from pathlib import Path
+
+from halyard.agents.base import SessionRef
 
 logger = logging.getLogger(__name__)
 
 #: Enough of a rollout to find the newest `turn_context` without reading a
 #: conversation that may be megabytes of tool output.
 TRANSCRIPT_TAIL_BYTES = 256 * 1024
-
-
-@dataclass(frozen=True)
-class CodexSessionRef:
-    """Where a Codex session is, and what it is called."""
-
-    session_id: str
-    name: str
-    cwd: str | None
-    model: str | None = None
-    effort: str | None = None
-    #: Codex thread names are always set by a person — there is no generated
-    #: title in the index — so unlike Claude Code there is nothing to warn
-    #: about here. Kept so both runtimes answer the same question.
-    named_by_a_person: bool = True
 
 
 def codex_home(root: Path | None = None) -> Path:
@@ -126,14 +112,14 @@ def _context_of(transcript: Path) -> tuple[str | None, str | None, str | None]:
     return cwd, model, effort
 
 
-def describe(session_id: str, name: str, *, root: Path | None = None) -> CodexSessionRef:
+def describe(session_id: str, name: str, *, root: Path | None = None) -> SessionRef:
     """Everything known about one session, with whatever is missing left None."""
     transcript = _rollout_for(session_id, root)
     cwd, model, effort = _context_of(transcript) if transcript else (None, None, None)
-    return CodexSessionRef(session_id=session_id, name=name, cwd=cwd, model=model, effort=effort)
+    return SessionRef(session_id=session_id, name=name, cwd=cwd, model=model, effort=effort)
 
 
-def find_session(name: str, *, root: Path | None = None) -> CodexSessionRef | None:
+def find_session(name: str, *, root: Path | None = None) -> SessionRef | None:
     """Resolve a thread name — or a raw session id — to a session.
 
     Both are accepted because `codex exec resume` accepts both, and somebody

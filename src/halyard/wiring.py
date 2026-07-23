@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import shutil
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
@@ -27,6 +28,51 @@ BRIDGE_DIR = Path(__file__).resolve().parent.parent.parent / "bridge"
 WIRING = (
     ("PreToolUse", "Bash", BRIDGE_DIR / "hook.sh", 600),
     ("Stop", None, BRIDGE_DIR / "relay.py", 15),
+)
+
+
+@dataclass(frozen=True)
+class Runtime:
+    """One runtime's idea of where hooks live and how a tool is matched.
+
+    The shape of a hook entry is the same in both — an event, a list of groups,
+    a `command` and a `timeout` — which is why one merge routine serves both.
+    What differs is the file and the matcher dialect.
+    """
+
+    name: str
+    #: Relative to the repository root.
+    settings: str
+    matcher: str
+    #: The CLI whose presence means this runtime is worth wiring at all.
+    binary: str
+
+
+RUNTIMES = (
+    Runtime(
+        name="claude-code",
+        settings=".claude/settings.local.json",
+        matcher="Bash",
+        binary="claude",
+    ),
+    # Codex matches with a regular expression, and with more than one name.
+    #
+    # `codex exec` runs a shell command as a tool the hook payload calls
+    # `Bash`. The desktop app does not: it calls a tool named `exec` whose
+    # input is JavaScript, and the shell call happens inside that —
+    # `tools.exec_command({"cmd": "git reset", ...})`. A matcher of `^Bash$`
+    # therefore gates the CLI and silently ignores the app, which is a gate
+    # that looks installed, reports itself installed, and never fires.
+    #
+    # Measured from a real transcript: the same session, driven both ways, made
+    # a `function_call` named `exec_command` from the CLI and a
+    # `custom_tool_call` named `exec` from the app.
+    Runtime(
+        name="codex",
+        settings=".codex/hooks.json",
+        matcher="^(Bash|exec|exec_command|shell)$",
+        binary="codex",
+    ),
 )
 
 RULES = """\
@@ -58,8 +104,109 @@ def project_root(directory: Path) -> Path:
     return directory
 
 
-def settings_path(directory: Path) -> Path:
-    return project_root(directory) / ".claude" / "settings.local.json"
+def settings_path(directory: Path, runtime: Runtime | None = None) -> Path:
+    return project_root(directory) / (runtime or RUNTIMES[0]).settings
+
+
+def installed(runtimes: tuple[Runtime, ...] = RUNTIMES) -> tuple[Runtime, ...]:
+    """The runtimes whose CLI is on this machine.
+
+    Wiring is offered for these and removal is attempted for all of them. The
+    asymmetry is deliberate: adding a gate for a runtime nobody has is clutter,
+    while leaving one behind after a CLI is uninstalled is a hook pointing at a
+    bridge nothing will ever call.
+    """
+    return tuple(r for r in runtimes if shutil.which(r.binary))
+
+
+def _snake(event: str) -> str:
+    """`PreToolUse` as Codex writes it in a trust key: `pre_tool_use`.
+
+    Lowercasing alone gives `pretooluse`, which matches nothing — so every hook
+    read as never trusted, and doctor reported no gate on a project that had
+    one. A checker that is confidently wrong is worse than no checker: the
+    obvious response to its FAIL is to go and re-grant trust that was never
+    missing.
+    """
+    out = []
+    for index, character in enumerate(event):
+        if character.isupper() and index:
+            out.append("_")
+        out.append(character.lower())
+    return "".join(out)
+
+
+def codex_trust_keys(hooks_file: Path) -> list[str]:
+    """The trust keys Codex would look for, one per hook entry in that file.
+
+    Codex will not run a hook it has not been told to trust, and — measured —
+    it does not say so. An untrusted hook is skipped in silence: the turn
+    completes normally, no warning is printed, and for a `PreToolUse` gate that
+    means there is no gate at all while everything looks wired.
+
+    Trust is recorded in `~/.codex/config.toml` under
+    `[hooks.state."<file>:<event>:<group>:<hook>"]`, each with a
+    `trusted_hash`. The hash covers the entry, so editing a command invalidates
+    it — which is how this repository's own relay stopped firing the moment its
+    path was corrected.
+    """
+    try:
+        config = json.loads(hooks_file.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    keys = []
+    for event, groups in (config.get("hooks") or {}).items():
+        for group_index, group in enumerate(groups if isinstance(groups, list) else []):
+            for hook_index, _ in enumerate((group or {}).get("hooks") or []):
+                keys.append(f"{hooks_file}:{_snake(event)}:{group_index}:{hook_index}")
+    return keys
+
+
+def codex_untrusted(hooks_file: Path, config_toml: Path | None = None) -> list[str]:
+    """Hook entries with no trust record at all — Codex will skip these.
+
+    Only absence is reported. Whether a record that *does* exist still matches
+    is a question about Codex's own hashing, which is not reimplemented here:
+    guessing at somebody else's canonicalisation would produce a checker that
+    is confidently wrong, which is worse than one that states its limit.
+    """
+    toml = config_toml or Path.home() / ".codex" / "config.toml"
+    try:
+        recorded = toml.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        recorded = ""
+    return [key for key in codex_trust_keys(hooks_file) if f'"{key}"' not in recorded]
+
+
+def codex_trust_is_stale(hooks_file: Path, config_toml: Path | None = None) -> bool:
+    """Whether anything trust covers has changed since it was last recorded.
+
+    A one-directional inference, and sound in the direction it is made: Codex
+    writes trust into `config.toml`, so a hooks file modified *after* that file
+    means no trust has been recorded since the edit, and the entry's hash
+    cannot still match. The reverse says nothing — `config.toml` is rewritten
+    for unrelated reasons — so this reports staleness and never freshness.
+
+    Worth having because the alternative reading is the dangerous one. A trust
+    key that still exists with an outdated hash looks exactly like a trusted
+    hook, and Codex skips it in silence.
+    """
+    toml = config_toml or Path.home() / ".codex" / "config.toml"
+    # The scripts as well as the file that names them. Codex records a SHA-256
+    # of the handler, so updating this checkout — a `git pull` that touches
+    # `hook.sh` — plausibly revokes trust on every project it is wired into,
+    # silently, in the way everything about Codex hook trust is silent.
+    #
+    # Unverified: the exact input to that hash is not reimplemented here, for
+    # the reason given above. Watching the scripts as well as the file costs a
+    # warning that is sometimes unnecessary, against missing one that means a
+    # gate has disappeared.
+    watched = [hooks_file, BRIDGE_DIR / "hook.sh", BRIDGE_DIR / "relay.py"]
+    try:
+        recorded = toml.stat().st_mtime
+        return any(path.stat().st_mtime > recorded for path in watched if path.exists())
+    except OSError:
+        return False
 
 
 def _load(path: Path) -> dict:
@@ -104,9 +251,9 @@ def _is_ours(command: object) -> bool:
     return isinstance(command, str) and str(BRIDGE_DIR.resolve()) in command
 
 
-def wire(directory: Path) -> int:
-    """Add the hooks, keeping everything already in the file."""
-    path = settings_path(directory)
+def _wire_one(directory: Path, runtime: Runtime) -> int:
+    """Add one runtime's hooks, keeping everything already in its file."""
+    path = settings_path(directory, runtime)
     config = _load(path)
     hooks = config.setdefault("hooks", {})
 
@@ -116,42 +263,95 @@ def wire(directory: Path) -> int:
             print(f"halyard: {script} is missing from this install")
             return 1
         groups = hooks.setdefault(event, [])
-        if any(
-            _is_ours(hook.get("command"))
+        mine = [
+            group
             for group in groups
             for hook in (group or {}).get("hooks") or []
-        ):
+            if _is_ours(hook.get("command"))
+        ]
+        if mine:
+            # Already wired, but possibly with a matcher from an older release.
+            # Leaving a stale one in place is the quiet kind of wrong: the file
+            # is present, `doctor` is happy, and half the tool calls are not
+            # gated. Correcting it costs a re-review of the hook, which is the
+            # honest price of the matcher having been incomplete.
+            wanted = runtime.matcher if matcher == "Bash" else matcher
+            for group in mine:
+                if wanted and group.get("matcher") != wanted:
+                    group["matcher"] = wanted
+                    added.append(f"{event} (matcher corrected)")
             continue
+        # An absolute path, always. Claude Code expands `$CLAUDE_PROJECT_DIR`
+        # and Codex expands nothing of the kind — it has no project variable at
+        # all, only `$CODEX_HOME`. A hooks file written with the Claude
+        # variable in it does not fail to load under Codex; the hook runs and
+        # dies looking for a directory called `$CLAUDE_PROJECT_DIR`, which is
+        # what "hook: Stop Failed" meant when this repository's own file had it.
         entry: dict = {"hooks": [{"type": "command", "command": str(script), "timeout": timeout}]}
         if matcher:
-            entry["matcher"] = matcher
+            entry["matcher"] = runtime.matcher if matcher == "Bash" else matcher
         groups.append(entry)
         added.append(event)
 
     if not added:
-        print(f"Already wired: {path}")
-    else:
-        backup = _back_up(path)
-        _write(path, config)
-        print(f"Wired {', '.join(added)} into {path}")
-        if backup:
-            print(f"Previous version kept at {backup}")
-        kept = sorted(k for k in config if k != "hooks")
-        if kept:
-            # Say it out loud. Losing this silently is the failure this whole
-            # module exists to prevent, and "nothing was reported" is not the
-            # same reassurance as "your permissions are still there".
-            print(f"Left untouched in that file: {', '.join(kept)}")
+        print(f"  {runtime.name}: already wired ({path})")
+        return 0
+
+    backup = _back_up(path)
+    _write(path, config)
+    print(f"  {runtime.name}: wired {', '.join(added)} into {path}")
+    if backup:
+        print(f"    previous version kept at {backup}")
+    kept = sorted(k for k in config if k != "hooks")
+    if kept:
+        # Say it out loud. Losing this silently is the failure this whole
+        # module exists to prevent, and "nothing was reported" is not the
+        # same reassurance as "your permissions are still there".
+        print(f"    left untouched in that file: {', '.join(kept)}")
+    return 0
+
+
+def wire(directory: Path, runtimes: tuple[Runtime, ...] | None = None) -> int:
+    """Put the gate on a project, for every runtime this machine has.
+
+    Wiring a runtime the machine does not have would be clutter, so the default
+    is what is installed — falling back to the first entry when nothing is
+    found, because a PATH that hides the CLI is a likelier explanation than a
+    machine with no agent on it at all.
+    """
+    chosen = runtimes if runtimes is not None else installed() or RUNTIMES[:1]
+    print(f"Wiring {project_root(directory)}")
+    for runtime in chosen:
+        if _wire_one(directory, runtime):
+            return 1
+
+    for runtime in chosen:
+        if runtime.name != "codex":
+            continue
+        hooks_file = settings_path(directory, runtime)
+        pending = codex_untrusted(hooks_file) or (
+            codex_trust_keys(hooks_file) if codex_trust_is_stale(hooks_file) else []
+        )
+        if pending:
+            # Loud, because the failure it prevents is silent. Codex skips an
+            # untrusted hook without a word, so a Codex project can look wired,
+            # report wired, and have no gate on it at all.
+            print(
+                f"\n⚠ {len(pending)} Codex hook(s) here are not trusted yet, and Codex "
+                "SKIPS\n"
+                "  an untrusted hook without saying so — a gate that is not trusted is\n"
+                "  not a gate. Open this project in Codex once and approve them, then\n"
+                "  check with `halyard doctor`."
+            )
 
     print(f"\nRestart the session — hooks are read at startup.\n\n{RULES}")
     return 0
 
 
-def unwire(directory: Path) -> int:
+def _unwire_one(directory: Path, runtime: Runtime) -> int:
     """Remove only this install's hooks, and nothing else."""
-    path = settings_path(directory)
+    path = settings_path(directory, runtime)
     if not path.exists():
-        print(f"Nothing to remove: {path} does not exist")
         return 0
 
     config = _load(path)
@@ -175,17 +375,31 @@ def unwire(directory: Path) -> int:
         config.pop("hooks", None)
 
     if not removed:
-        print(f"Nothing of this Halyard install is wired into {path}")
         return 0
 
     backup = _back_up(path)
     _write(path, config)
-    print(f"Removed {', '.join(sorted(set(removed)))} from {path}")
+    print(f"  {runtime.name}: removed {', '.join(sorted(set(removed)))} from {path}")
     if backup:
-        print(f"Previous version kept at {backup}")
+        print(f"    previous version kept at {backup}")
     kept = sorted(k for k in config if k != "hooks")
     if kept:
-        print(f"Left untouched in that file: {', '.join(kept)}")
+        print(f"    left untouched in that file: {', '.join(kept)}")
+    return 1
+
+
+def unwire(directory: Path, runtimes: tuple[Runtime, ...] | None = None) -> int:
+    """Take the gate off, wherever it was put.
+
+    Every runtime by default, not just the installed ones: a hook left behind
+    after a CLI was removed still points at a bridge, and the next person to
+    install that CLI inherits a gate they never asked for.
+    """
+    chosen = runtimes if runtimes is not None else RUNTIMES
+    touched = sum(_unwire_one(directory, runtime) for runtime in chosen)
+    if not touched:
+        print(f"Nothing of this Halyard install is wired into {project_root(directory)}")
+        return 0
     print("\nRestart the session — hooks are read at startup.")
     print("Bash no longer goes through Halyard in this project.")
     return 0

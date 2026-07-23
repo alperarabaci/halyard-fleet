@@ -37,7 +37,7 @@ import sys
 import urllib.error
 import urllib.request
 
-from _settings import control_plane_url, session_name
+from _settings import codex_thread_name, control_plane_url, note, runtime_of, session_name
 from _settings import timeout as lookup_timeout
 
 DEFAULT_TIMEOUT_SECONDS = 330.0
@@ -78,6 +78,18 @@ def build_body(payload: dict) -> dict:
     Kept as close to a copy as possible. Anything clever here is logic that
     lives outside the tested part of the system.
     """
+    # Which runtime raised this, and what its session is called. Both are
+    # needed before anything can be routed: a Claude driver and a Codex driver
+    # are both `driver`, and a card that cannot say which one it came from
+    # belongs to neither and lands in the default chat.
+    transcript = payload.get("transcript_path")
+    runtime = runtime_of(transcript)
+    name = (
+        codex_thread_name(payload.get("session_id"))
+        if runtime == "codex"
+        else session_name(transcript)
+    )
+
     tool_input = payload.get("tool_input") or {}
     command = tool_input.get("command")
     if not isinstance(command, str):
@@ -86,7 +98,7 @@ def build_body(payload: dict) -> dict:
         command = json.dumps(tool_input, ensure_ascii=False)
     return {
         "session_id": payload.get("session_id") or "unknown",
-        "agent_id": "claude-code",
+        "agent_id": runtime,
         "tool": payload.get("tool_name") or "unknown",
         "command": command,
         "tool_use_id": payload.get("tool_use_id"),
@@ -103,7 +115,7 @@ def build_body(payload: dict) -> dict:
         # The name the session carries in the desktop app, where there is
         # no shell to put HALYARD_ROLE in. Stable across restarts, unlike
         # session_id.
-        "session_name": session_name(payload.get("transcript_path")),
+        "session_name": name,
     }
 
 
@@ -131,13 +143,23 @@ def main() -> int:
 
     url = control_plane_url()
     timeout = lookup_timeout("HALYARD_BRIDGE_TIMEOUT_SECONDS", DEFAULT_TIMEOUT_SECONDS)
+    body = build_body(payload)
+    # Written before the call, not after, so a bridge that hangs or is killed
+    # still leaves evidence that it ran. "Did the hook fire at all" had no
+    # answer anywhere until this line existed.
+    note(
+        f"{body['agent_id']} {body['tool']} session={body['session_name'] or body['session_id']} "
+        f"-> {url}"
+    )
 
     try:
-        answer = ask(url, build_body(payload), timeout)
+        answer = ask(url, body, timeout)
     except urllib.error.URLError as exc:
+        note(f"unreachable: {exc.reason}")
         deny(f"the control plane at {url} could not be reached ({exc.reason}). Failing closed.")
         return 0
     except TimeoutError:
+        note(f"no answer within {timeout:g}s")
         deny(f"the control plane at {url} did not answer within {timeout:g}s. Failing closed.")
         return 0
     except Exception as exc:

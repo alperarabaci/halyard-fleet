@@ -29,7 +29,7 @@ import os
 import sys
 import urllib.request
 
-from _settings import control_plane_url, session_name
+from _settings import codex_thread_name, control_plane_url, note, runtime_of, session_name
 from _settings import timeout as lookup_timeout
 
 #: Short on purpose. The agent's turn is waiting on this, and a slow relay is
@@ -43,20 +43,45 @@ def main() -> int:
         if not isinstance(payload, dict):
             return 0
 
-        text = payload.get("last_assistant_message")
-        if not isinstance(text, str) or not text.strip():
+        transcript = payload.get("transcript_path")
+        runtime = runtime_of(transcript)
+
+        # Claude Code hands the turn's final message straight to the hook.
+        # Whether Codex uses the same field is not known, so the alternatives
+        # it might plausibly use are tried and the payload's *keys* are written
+        # down when none of them match. Keys, never values: learning the shape
+        # of a payload must not mean copying somebody's conversation to disk.
+        text = None
+        for field in ("last_assistant_message", "last_agent_message", "message", "text"):
+            candidate = payload.get(field)
+            if isinstance(candidate, str) and candidate.strip():
+                text = candidate
+                break
+        if text is None:
+            if runtime != "claude-code":
+                note(f"{runtime} Stop: no message field. keys={sorted(payload)}")
             # Nothing was said — a turn that only ran tools, for instance.
             return 0
 
         body = {
             "session_id": payload.get("session_id") or "unknown",
-            "agent_id": "claude-code",
+            "agent_id": runtime,
             "text": text,
             "cwd": payload.get("cwd"),
-            "project_dir": os.environ.get("CLAUDE_PROJECT_DIR"),
+            # Codex sets no project variable of its own, so for it the
+            # session's directory is the only thing that says where this came
+            # from. Left alone for Claude Code, where core already falls back
+            # to `cwd` itself and passing it here would erase the difference
+            # between "no project directory" and "it is the working directory".
+            "project_dir": os.environ.get("CLAUDE_PROJECT_DIR")
+            or (payload.get("cwd") if runtime != "claude-code" else None),
             # Which seat this session is sitting in — see hook_bridge.py.
             "role": os.environ.get("HALYARD_ROLE") or None,
-            "session_name": session_name(payload.get("transcript_path")),
+            "session_name": (
+                codex_thread_name(payload.get("session_id"))
+                if runtime == "codex"
+                else session_name(transcript)
+            ),
         }
 
         url = control_plane_url()

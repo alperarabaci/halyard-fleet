@@ -18,9 +18,20 @@ from __future__ import annotations
 
 import json
 import os
+from datetime import datetime
 from pathlib import Path
 
 DEFAULT_URL = "http://127.0.0.1:8787"
+
+#: Where the bridge writes down that it ran. Beside the control plane's own log
+#: rather than inside it, because these are the lines the control plane never
+#: sees: a hook that could not reach it, a hook that denied before asking, a
+#: hook nobody is sure fired at all.
+#:
+#: That last one is why this exists. Whether a runtime actually invoked the
+#: hook was, until now, unanswerable — the control plane records what arrives
+#: and can say nothing about what never left.
+BRIDGE_LOG = Path(__file__).resolve().parent.parent / "bridge.log"
 
 #: Searched in order, first hit wins. The repo's own `.env` comes first because
 #: it is the file the control plane is already configured from; the home
@@ -103,6 +114,51 @@ def timeout(key: str, default: float) -> float:
 TRANSCRIPT_TAIL_BYTES = 256 * 1024
 
 
+def runtime_of(transcript_path: str | None) -> str:
+    """Which agent produced this payload, from where it keeps its transcript.
+
+    Codex files rollouts under `~/.codex/sessions/`, Claude Code under
+    `~/.claude/projects/`. Nothing in either payload names its own runtime, and
+    the control plane needs to know: with a Claude driver and a Codex driver
+    both configured, a card that cannot say which one it came from goes to
+    neither and lands in the default chat.
+    """
+    if transcript_path and "/.codex/" in str(transcript_path):
+        return "codex"
+    return "claude-code"
+
+
+def codex_thread_name(session_id: str | None, home: Path | None = None) -> str | None:
+    """A Codex session's name, which is not in its transcript.
+
+    Claude Code writes the title into the conversation; Codex keeps it in
+    `~/.codex/session_index.jsonl`, appended, so the last line for an id wins.
+    Reading it here rather than in core keeps the bridge able to answer the
+    only question routing asks — which seat is this — with the stdlib alone.
+
+    Fails quietly. No name simply means no seat, and everything lands in the
+    default chat exactly as it would have anyway.
+    """
+    if not session_id:
+        return None
+    index = (home or Path.home() / ".codex") / "session_index.jsonl"
+    found = None
+    try:
+        with index.open("r", encoding="utf-8", errors="replace") as handle:
+            for line in handle:
+                if session_id not in line:
+                    continue
+                try:
+                    record = json.loads(line)
+                except Exception:
+                    continue
+                if record.get("id") == session_id and record.get("thread_name"):
+                    found = str(record["thread_name"])
+    except OSError:
+        return None
+    return found
+
+
 def session_name(transcript_path: str | None) -> str | None:
     """The name shown on a session in the desktop app, if it can be found.
 
@@ -144,3 +200,16 @@ def session_name(transcript_path: str | None) -> str | None:
         elif record.get("type") == "ai-title" and record.get("aiTitle"):
             generated = str(record["aiTitle"])
     return custom or generated
+
+
+def note(message: str) -> None:
+    """Append one line to the bridge log, and never fail because of it.
+
+    Wrapped completely: a gate that stops working because its log file is
+    unwritable would be a worse failure than the one this is here to diagnose.
+    """
+    try:
+        with BRIDGE_LOG.open("a", encoding="utf-8") as handle:
+            handle.write(f"{datetime.now().isoformat(timespec='seconds')} {message}\n")
+    except Exception:
+        pass

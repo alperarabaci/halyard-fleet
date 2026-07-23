@@ -170,6 +170,10 @@ class CodexRunner:
 
     # --- the AgentRunner surface ---------------------------------------------
 
+    def resolve(self, name: str):
+        """Find a session by its thread name, or by its id."""
+        return find_session(name)
+
     def preferences(self, session_id: str) -> tuple[str | None, str | None]:
         return self._models.get(session_id) or self._default_model, self._efforts.get(session_id)
 

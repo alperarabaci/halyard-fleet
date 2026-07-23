@@ -10,6 +10,10 @@ audit.jsonl
 
 # Local Claude Code settings (may contain machine-specific hook wiring)
 .claude/settings.local.json
+# Same reason: an absolute path to this machine's Halyard checkout.
+.codex/hooks.json
+.claude/settings.local.json.*.bak
+.codex/hooks.json.*.bak
 
 # Python
 __pycache__/
@@ -39,3 +43,6 @@ docs/mobile-agent-control-plane.md
 # Running log
 halyard.log
 halyard.log.*
+
+# What the bridge writes down about its own runs
+bridge.log

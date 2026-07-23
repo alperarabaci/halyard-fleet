@@ -805,6 +805,9 @@ class FakeRunner:
 
     def __init__(self, *, works: bool = True, default_model: str | None = "sonnet") -> None:
         self.default_model = default_model
+        # The channel asks its seat's runtime what a name means, rather than
+        # importing one runtime's lookup. A double has to answer that too.
+        self.sessions: dict[str, object] = {}
         self.sent: list[tuple[str, str]] = []
         self.directories: list[str | None] = []
         self.working: set[str] = set()
@@ -819,6 +822,9 @@ class FakeRunner:
             "model": (("opus", "sonnet", "haiku", "fable"), False),
             "effort": (("low", "medium", "high", "xhigh", "max"), True),
         }
+
+    def resolve(self, name: str):
+        return self.sessions.get(name)
 
     def busy(self, session_id: str) -> bool:
         return session_id in self.working
@@ -1028,6 +1034,13 @@ async def test_a_configured_name_finds_the_session_without_any_hook(
     await audit.open()
     api = FakeTelegramApi()
     runner = FakeRunner()
+    # The real lookup, because that is what this test is about: a name is
+    # addressable from a standing start, out of a transcript on disk. The
+    # channel asks its seat's runtime, so the double has to hand that question
+    # to the runtime rather than answer it itself.
+    from halyard.agents.claude_code import find_session as real_lookup
+
+    runner.resolve = real_lookup
     channel = TelegramChannel(
         api=api,
         store=ApprovalStore(),
@@ -1090,9 +1103,7 @@ async def test_status_shows_what_each_seat_is_running(
         "nav": SessionRef("id-nav", "nav", "/repo", "claude-opus-4-8", "xhigh"),
         "drv": SessionRef("id-drv", "drv", "/repo", "claude-opus-4-8", "low"),
     }
-    monkeypatch.setattr(
-        "halyard.channels.telegram.adapter.find_session", lambda name: refs.get(name)
-    )
+    _runner.sessions = refs
 
     await channel._handle_message(typed("/status"))
 
@@ -1111,10 +1122,7 @@ async def test_status_says_when_a_seat_is_mid_turn(
 
     channel, api, runner, _ = await wired(tmp_path)
     channel._session_names = {Role.NAVIGATOR: "nav"}
-    monkeypatch.setattr(
-        "halyard.channels.telegram.adapter.find_session",
-        lambda name: SessionRef("id-nav", "nav", "/repo", "claude-opus-4-8", "xhigh"),
-    )
+    runner.sessions = {"nav": SessionRef("id-nav", "nav", "/repo", "claude-opus-4-8", "xhigh")}
     runner.working.add("id-nav")
 
     await channel._handle_message(typed("/status"))
@@ -1141,9 +1149,9 @@ async def test_a_message_sent_while_a_turn_is_running_says_it_is_queued(
 async def test_a_missing_seat_is_reported_rather_than_hidden(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    channel, api, _, _ = await wired(tmp_path)
+    channel, api, runner, _ = await wired(tmp_path)
     channel._session_names = {Role.NAVIGATOR: "a name that is not there"}
-    monkeypatch.setattr("halyard.channels.telegram.adapter.find_session", lambda name: None)
+    runner.sessions = {}
 
     await channel._handle_message(typed("/status"))
 
@@ -1364,10 +1372,9 @@ async def test_status_separates_the_desk_from_the_phone(tmp_path: Path, monkeypa
 
     channel, api, _runner, _ = await wired(tmp_path)
     channel._session_names = {Role.NAVIGATOR: "nav"}
-    monkeypatch.setattr(
-        "halyard.channels.telegram.adapter.find_session",
-        lambda name: SessionRef("session-nav", "nav", "/repo", "claude-opus-4-8", "xhigh"),
-    )
+    _runner.sessions = {
+        "nav": SessionRef("session-nav", "nav", "/repo", "claude-opus-4-8", "xhigh")
+    }
 
     await channel._handle_message(typed_in("/status", NAV_CHAT))
 

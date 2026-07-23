@@ -8,6 +8,8 @@ somebody else's uninstall.
 from __future__ import annotations
 
 import json
+import os
+import time
 from pathlib import Path
 
 from halyard import wiring
@@ -160,3 +162,151 @@ def test_a_broken_settings_file_is_refused_rather_than_replaced(tmp_path: Path) 
         raise AssertionError("wiring should refuse a file it cannot parse")
 
     assert broken.read_text() == "{ this is not json"
+
+
+# --- a second runtime -------------------------------------------------------
+
+
+CODEX = next(r for r in wiring.RUNTIMES if r.name == "codex")
+
+
+def test_codex_hooks_go_in_their_own_file(tmp_path: Path) -> None:
+    project = repo(tmp_path)
+
+    wiring.wire(project, runtimes=(CODEX,))
+
+    written = json.loads((project / ".codex" / "hooks.json").read_text())
+    assert written["hooks"]["PreToolUse"]
+    assert not (project / ".claude").exists()
+
+
+def test_codex_matches_the_app_as_well_as_the_cli(tmp_path: Path) -> None:
+    """`codex exec` calls the shell tool `Bash`. The desktop app does not.
+
+    It calls a tool named `exec` whose input is JavaScript, with the shell call
+    inside it. A matcher of `^Bash$` gates the CLI and ignores the app — a gate
+    that is installed, reports itself installed, and never fires for the way
+    the work is actually done.
+    """
+    project = repo(tmp_path)
+
+    wiring.wire(project, runtimes=(CODEX,))
+
+    written = json.loads((project / ".codex" / "hooks.json").read_text())
+    matcher = written["hooks"]["PreToolUse"][0]["matcher"]
+    assert "Bash" in matcher
+    assert "exec" in matcher
+
+
+def test_a_matcher_from_an_older_release_is_corrected(tmp_path: Path) -> None:
+    """Leaving a stale one is the quiet kind of wrong: the file is there,
+    doctor is happy, and half the tool calls are not gated."""
+    project = repo(tmp_path)
+    wiring.wire(project, runtimes=(CODEX,))
+    hooks_file = project / ".codex" / "hooks.json"
+    written = json.loads(hooks_file.read_text())
+    written["hooks"]["PreToolUse"][0]["matcher"] = "^Bash$"
+    hooks_file.write_text(json.dumps(written))
+
+    wiring.wire(project, runtimes=(CODEX,))
+
+    corrected = json.loads(hooks_file.read_text())
+    assert "exec" in corrected["hooks"]["PreToolUse"][0]["matcher"]
+
+
+def test_the_command_is_absolute_because_codex_expands_nothing(tmp_path: Path) -> None:
+    """Codex has no project-directory variable — only $CODEX_HOME.
+
+    A file carrying `$CLAUDE_PROJECT_DIR` does not fail to load under Codex.
+    The hook runs and dies looking for a directory by that literal name, which
+    is what this repository's own `hook: Stop Failed` turned out to be.
+    """
+    project = repo(tmp_path)
+
+    wiring.wire(project, runtimes=(CODEX,))
+
+    written = json.loads((project / ".codex" / "hooks.json").read_text())
+    command = written["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
+    assert command.startswith("/")
+    assert "$" not in command
+
+
+def test_unwiring_covers_a_runtime_whose_cli_is_gone(tmp_path: Path) -> None:
+    """Removal is attempted everywhere, not only where a CLI is installed.
+
+    A hook left behind after a CLI is uninstalled still points at a bridge, and
+    the next person to install that CLI inherits a gate they never asked for.
+    """
+    project = repo(tmp_path)
+    wiring.wire(project, runtimes=wiring.RUNTIMES)
+
+    wiring.unwire(project)
+
+    assert json.loads((project / ".codex" / "hooks.json").read_text()) == {}
+    assert json.loads((project / ".claude" / "settings.local.json").read_text()) == {}
+
+
+def test_a_hook_with_no_trust_record_is_reported(tmp_path: Path) -> None:
+    """Codex skips an untrusted hook in silence — measured.
+
+    The turn completes, nothing is printed, and a PreToolUse gate that is not
+    trusted is not a gate. Absence of a record is the one thing that can be
+    stated for certain, so it is the thing reported.
+    """
+    project = repo(tmp_path)
+    wiring.wire(project, runtimes=(CODEX,))
+    hooks_file = project / ".codex" / "hooks.json"
+    empty = tmp_path / "config.toml"
+    empty.write_text("")
+
+    pending = wiring.codex_untrusted(hooks_file, empty)
+
+    assert len(pending) == 2
+    assert all(str(hooks_file) in key for key in pending)
+    # Codex writes the event in snake case; matching `pretooluse` finds
+    # nothing and reports a trusted hook as never trusted.
+    assert any(key.endswith(":pre_tool_use:0:0") for key in pending)
+
+
+def test_a_recorded_hook_is_not_reported_as_untrusted(tmp_path: Path) -> None:
+    project = repo(tmp_path)
+    wiring.wire(project, runtimes=(CODEX,))
+    hooks_file = project / ".codex" / "hooks.json"
+    config = tmp_path / "config.toml"
+    config.write_text(
+        "".join(
+            f'[hooks.state."{key}"]\ntrusted_hash = "sha256:x"\n'
+            for key in wiring.codex_trust_keys(hooks_file)
+        )
+    )
+
+    assert wiring.codex_untrusted(hooks_file, config) == []
+
+
+def test_editing_the_hooks_file_makes_trust_stale(tmp_path: Path) -> None:
+    """The dangerous reading is the other one.
+
+    A trust key that still exists with an outdated hash looks exactly like a
+    trusted hook. Codex disagrees and says nothing about it.
+    """
+    project = repo(tmp_path)
+    config = tmp_path / "config.toml"
+    config.write_text("")
+    wiring.wire(project, runtimes=(CODEX,))
+    hooks_file = project / ".codex" / "hooks.json"
+    os.utime(hooks_file, (time.time() + 10, time.time() + 10))
+
+    assert wiring.codex_trust_is_stale(hooks_file, config) is True
+
+
+def test_trust_is_not_claimed_to_be_fresh(tmp_path: Path) -> None:
+    """The inference only runs one way: a newer config proves nothing, because
+    Codex rewrites it for unrelated reasons."""
+    project = repo(tmp_path)
+    wiring.wire(project, runtimes=(CODEX,))
+    hooks_file = project / ".codex" / "hooks.json"
+    config = tmp_path / "config.toml"
+    config.write_text("")
+    os.utime(config, (time.time() + 10, time.time() + 10))
+
+    assert wiring.codex_trust_is_stale(hooks_file, config) is False
