@@ -234,12 +234,16 @@ def _check_gated_project(label: str, ref, seat) -> tuple[list[str], int]:
         if codex_untrusted(hooks_file):
             problems += 1
             lines.append(f"{FAIL}        hooks here have never been trusted")
-            lines.append("                Codex skips an untrusted hook without a word, so")
-            lines.append("                this project has no gate. Open it in Codex and approve.")
+            lines.append("                Codex skips an untrusted hook without a word, so this")
+            lines.append("                project has no gate at all. Review and trust them:")
+            lines.append(f"                    cd {project_dir} && codex")
+            lines.append("                A hook review appears at startup. Prefer `Review hooks`")
+            lines.append("                over `Trust all` — these run from outside the project.")
         elif codex_trust_is_stale(hooks_file):
-            lines.append(f"{WARN}        hooks edited since trust was last recorded")
-            lines.append("                Codex skips a hook whose hash no longer matches,")
-            lines.append("                silently. Open it in Codex and approve again.")
+            lines.append(f"{WARN}        hooks or bridge scripts changed since trust was recorded")
+            lines.append("                Codex hashes the handler, so updating this checkout may")
+            lines.append("                have revoked it — and a revoked hook is skipped in")
+            lines.append(f"                silence. Re-review with: cd {project_dir} && codex")
 
     if ref.started_at and ref.started_at.timestamp() < newest_settings:
         # With the date, because the two are often a day apart and bare

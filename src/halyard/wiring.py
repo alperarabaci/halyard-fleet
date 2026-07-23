@@ -55,9 +55,24 @@ RUNTIMES = (
         matcher="Bash",
         binary="claude",
     ),
-    # Codex matches with a regular expression, measured from the CLI's own
-    # examples: `^Bash$` rather than the bare `Bash` Claude Code takes.
-    Runtime(name="codex", settings=".codex/hooks.json", matcher="^Bash$", binary="codex"),
+    # Codex matches with a regular expression, and with more than one name.
+    #
+    # `codex exec` runs a shell command as a tool the hook payload calls
+    # `Bash`. The desktop app does not: it calls a tool named `exec` whose
+    # input is JavaScript, and the shell call happens inside that —
+    # `tools.exec_command({"cmd": "git reset", ...})`. A matcher of `^Bash$`
+    # therefore gates the CLI and silently ignores the app, which is a gate
+    # that looks installed, reports itself installed, and never fires.
+    #
+    # Measured from a real transcript: the same session, driven both ways, made
+    # a `function_call` named `exec_command` from the CLI and a
+    # `custom_tool_call` named `exec` from the app.
+    Runtime(
+        name="codex",
+        settings=".codex/hooks.json",
+        matcher="^(Bash|exec|exec_command|shell)$",
+        binary="codex",
+    ),
 )
 
 RULES = """\
@@ -104,6 +119,23 @@ def installed(runtimes: tuple[Runtime, ...] = RUNTIMES) -> tuple[Runtime, ...]:
     return tuple(r for r in runtimes if shutil.which(r.binary))
 
 
+def _snake(event: str) -> str:
+    """`PreToolUse` as Codex writes it in a trust key: `pre_tool_use`.
+
+    Lowercasing alone gives `pretooluse`, which matches nothing — so every hook
+    read as never trusted, and doctor reported no gate on a project that had
+    one. A checker that is confidently wrong is worse than no checker: the
+    obvious response to its FAIL is to go and re-grant trust that was never
+    missing.
+    """
+    out = []
+    for index, character in enumerate(event):
+        if character.isupper() and index:
+            out.append("_")
+        out.append(character.lower())
+    return "".join(out)
+
+
 def codex_trust_keys(hooks_file: Path) -> list[str]:
     """The trust keys Codex would look for, one per hook entry in that file.
 
@@ -126,7 +158,7 @@ def codex_trust_keys(hooks_file: Path) -> list[str]:
     for event, groups in (config.get("hooks") or {}).items():
         for group_index, group in enumerate(groups if isinstance(groups, list) else []):
             for hook_index, _ in enumerate((group or {}).get("hooks") or []):
-                keys.append(f"{hooks_file}:{event.lower()}:{group_index}:{hook_index}")
+                keys.append(f"{hooks_file}:{_snake(event)}:{group_index}:{hook_index}")
     return keys
 
 
@@ -147,7 +179,7 @@ def codex_untrusted(hooks_file: Path, config_toml: Path | None = None) -> list[s
 
 
 def codex_trust_is_stale(hooks_file: Path, config_toml: Path | None = None) -> bool:
-    """Whether the hooks file has been edited since trust was last recorded.
+    """Whether anything trust covers has changed since it was last recorded.
 
     A one-directional inference, and sound in the direction it is made: Codex
     writes trust into `config.toml`, so a hooks file modified *after* that file
@@ -160,8 +192,19 @@ def codex_trust_is_stale(hooks_file: Path, config_toml: Path | None = None) -> b
     hook, and Codex skips it in silence.
     """
     toml = config_toml or Path.home() / ".codex" / "config.toml"
+    # The scripts as well as the file that names them. Codex records a SHA-256
+    # of the handler, so updating this checkout — a `git pull` that touches
+    # `hook.sh` — plausibly revokes trust on every project it is wired into,
+    # silently, in the way everything about Codex hook trust is silent.
+    #
+    # Unverified: the exact input to that hash is not reimplemented here, for
+    # the reason given above. Watching the scripts as well as the file costs a
+    # warning that is sometimes unnecessary, against missing one that means a
+    # gate has disappeared.
+    watched = [hooks_file, BRIDGE_DIR / "hook.sh", BRIDGE_DIR / "relay.py"]
     try:
-        return hooks_file.stat().st_mtime > toml.stat().st_mtime
+        recorded = toml.stat().st_mtime
+        return any(path.stat().st_mtime > recorded for path in watched if path.exists())
     except OSError:
         return False
 
@@ -220,11 +263,23 @@ def _wire_one(directory: Path, runtime: Runtime) -> int:
             print(f"halyard: {script} is missing from this install")
             return 1
         groups = hooks.setdefault(event, [])
-        if any(
-            _is_ours(hook.get("command"))
+        mine = [
+            group
             for group in groups
             for hook in (group or {}).get("hooks") or []
-        ):
+            if _is_ours(hook.get("command"))
+        ]
+        if mine:
+            # Already wired, but possibly with a matcher from an older release.
+            # Leaving a stale one in place is the quiet kind of wrong: the file
+            # is present, `doctor` is happy, and half the tool calls are not
+            # gated. Correcting it costs a re-review of the hook, which is the
+            # honest price of the matcher having been incomplete.
+            wanted = runtime.matcher if matcher == "Bash" else matcher
+            for group in mine:
+                if wanted and group.get("matcher") != wanted:
+                    group["matcher"] = wanted
+                    added.append(f"{event} (matcher corrected)")
             continue
         # An absolute path, always. Claude Code expands `$CLAUDE_PROJECT_DIR`
         # and Codex expands nothing of the kind — it has no project variable at

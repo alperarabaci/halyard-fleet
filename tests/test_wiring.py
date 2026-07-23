@@ -180,14 +180,38 @@ def test_codex_hooks_go_in_their_own_file(tmp_path: Path) -> None:
     assert not (project / ".claude").exists()
 
 
-def test_codex_gets_its_own_matcher_dialect(tmp_path: Path) -> None:
-    """`^Bash$` rather than the bare `Bash` Claude Code takes."""
+def test_codex_matches_the_app_as_well_as_the_cli(tmp_path: Path) -> None:
+    """`codex exec` calls the shell tool `Bash`. The desktop app does not.
+
+    It calls a tool named `exec` whose input is JavaScript, with the shell call
+    inside it. A matcher of `^Bash$` gates the CLI and ignores the app — a gate
+    that is installed, reports itself installed, and never fires for the way
+    the work is actually done.
+    """
     project = repo(tmp_path)
 
     wiring.wire(project, runtimes=(CODEX,))
 
     written = json.loads((project / ".codex" / "hooks.json").read_text())
-    assert written["hooks"]["PreToolUse"][0]["matcher"] == "^Bash$"
+    matcher = written["hooks"]["PreToolUse"][0]["matcher"]
+    assert "Bash" in matcher
+    assert "exec" in matcher
+
+
+def test_a_matcher_from_an_older_release_is_corrected(tmp_path: Path) -> None:
+    """Leaving a stale one is the quiet kind of wrong: the file is there,
+    doctor is happy, and half the tool calls are not gated."""
+    project = repo(tmp_path)
+    wiring.wire(project, runtimes=(CODEX,))
+    hooks_file = project / ".codex" / "hooks.json"
+    written = json.loads(hooks_file.read_text())
+    written["hooks"]["PreToolUse"][0]["matcher"] = "^Bash$"
+    hooks_file.write_text(json.dumps(written))
+
+    wiring.wire(project, runtimes=(CODEX,))
+
+    corrected = json.loads(hooks_file.read_text())
+    assert "exec" in corrected["hooks"]["PreToolUse"][0]["matcher"]
 
 
 def test_the_command_is_absolute_because_codex_expands_nothing(tmp_path: Path) -> None:
@@ -239,7 +263,9 @@ def test_a_hook_with_no_trust_record_is_reported(tmp_path: Path) -> None:
 
     assert len(pending) == 2
     assert all(str(hooks_file) in key for key in pending)
-    assert any(key.endswith(":pretooluse:0:0") for key in pending)
+    # Codex writes the event in snake case; matching `pretooluse` finds
+    # nothing and reports a trusted hook as never trusted.
+    assert any(key.endswith(":pre_tool_use:0:0") for key in pending)
 
 
 def test_a_recorded_hook_is_not_reported_as_untrusted(tmp_path: Path) -> None:

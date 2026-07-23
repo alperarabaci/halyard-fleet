@@ -340,6 +340,7 @@ class ApprovalService:
             risk=classification.risk,
             tool_use_id=tool_use_id,
             role=role,
+            session_name=session_name,
             reason=reason,
         )
 

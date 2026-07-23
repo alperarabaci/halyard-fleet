@@ -43,3 +43,6 @@ docs/mobile-agent-control-plane.md
 # Running log
 halyard.log
 halyard.log.*
+
+# What the bridge writes down about its own runs
+bridge.log

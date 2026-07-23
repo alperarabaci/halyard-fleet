@@ -160,17 +160,34 @@ class TelegramChannel:
 
     # --- sending ------------------------------------------------------------
 
-    def _route(self, role: Role | None, agent_id: str | None = None) -> tuple[str, int | None]:
+    def _route(
+        self,
+        role: Role | None,
+        session_name: str | None = None,
+        agent_id: str | None = None,
+        session_id: str | None = None,
+    ) -> tuple[str, int | None]:
         """Where this seat's traffic goes.
 
-        A role alone stopped being enough the moment a second runtime arrived:
-        there are two drivers now, and a card from the Codex one belongs in the
-        Codex group. `agent_id` comes from the hook that raised the request, so
-        the pairing needs nothing decided here.
+        By whatever the seat was configured with — a name or a session id.
+        A role stopped being enough the moment a second runtime arrived: a
+        Claude driver and a Codex driver are both `driver`, and their cards
+        belong in different groups.
 
-        Falls back to the role alone, and then to the default chat, so a setup
-        with two seats keeps behaving exactly as it did.
+        Both are accepted because they fail differently. A name is readable and
+        is what you would copy out of an app, and it can be changed there
+        without anybody remembering that a seat pointed at it. An id is
+        unreadable and permanent. Matching either means a configuration written
+        with one is not quietly wrong once somebody uses the other.
+
+        Then by role and runtime, then by role alone, then the default chat —
+        so a setup with two seats keeps behaving exactly as it did.
         """
+        identifiers = {value.strip().casefold() for value in (session_name, session_id) if value}
+        if identifiers:
+            for seat in self._seats:
+                if seat.session and seat.session.strip().casefold() in identifiers and seat.chat:
+                    return parse_destination(seat.chat) or (self._chat_id, None)
         for seat in self._seats:
             if seat.role is role and seat.chat and (agent_id is None or seat.runtime == agent_id):
                 return parse_destination(seat.chat) or (self._chat_id, None)
@@ -188,12 +205,24 @@ class TelegramChannel:
         markup = cards.keyboard(
             request, include_full=request.command_full != request.command_summary
         )
-        chat_id, thread_id = self._route(request.role, request.agent_id)
+        chat_id, thread_id = self._route(
+            request.role, request.session_name, request.agent_id, request.session_id
+        )
         message = await self._api.send_message(
             chat_id, text, reply_markup=markup, message_thread_id=thread_id
         )
         message_id = int(message["message_id"])
         self._open[cards.handle_of(request)] = (request, message_id, chat_id)
+        # Where a card went, said once per card. "It arrived in the wrong
+        # group" is otherwise a question only the person holding the phone can
+        # answer, and the answer decays as soon as they scroll.
+        logger.info(
+            "Card for %s (%s, session %r) sent to %s",
+            request.project,
+            request.agent_id,
+            request.session_name or "unnamed",
+            chat_id,
+        )
         return str(message_id)
 
     async def send_message(self, session_id: str, text: str, role: Role | None = None) -> str:

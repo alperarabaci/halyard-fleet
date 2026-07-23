@@ -98,6 +98,11 @@ class ApprovalRequest(BaseModel):
     #: retried request as the same tool call rather than a second one.
     tool_use_id: str | None = None
     role: Role | None = None
+    #: The name the session carries in its app. Travels with the request
+    #: because it is what identifies a *seat*, and a role no longer does: with
+    #: a Claude driver and a Codex driver both configured, the role is the same
+    #: for two seats whose cards belong in different places.
+    session_name: str | None = None
     #: The agent's rationale. Nothing in a Phase 1 hook payload carries one:
     #: `tool_input.description` says what a command does, not why it is needed.
     #: Stays empty until Phase 2 can ask.
@@ -187,6 +192,7 @@ class ApprovalStore:
         risk: RiskLevel,
         tool_use_id: str | None = None,
         role: Role | None = None,
+        session_name: str | None = None,
         reason: str | None = None,
     ) -> ApprovalRequest:
         """Open a new approval, or return the one already open for this tool call.
@@ -222,6 +228,7 @@ class ApprovalStore:
                 risk=risk,
                 tool_use_id=tool_use_id,
                 role=role,
+                session_name=session_name,
                 reason=reason,
                 created_at=now,
                 expires_at=now + self._ttl,

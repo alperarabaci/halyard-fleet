@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
+from pathlib import Path
 
 from halyard.core.events import Role
 
@@ -91,6 +92,37 @@ def _parse_seat(label: str, spec: str) -> Seat:
     )
 
 
+def _dotenv(path: Path) -> dict[str, str]:
+    """Read a `.env` the way the rest of the configuration is read.
+
+    Seats cannot come through pydantic-settings: their keys are not known
+    ahead of time, and a settings class can only declare fields it can name.
+    So they are read from the environment — and the environment, for everything
+    else in this project, includes `.env`.
+
+    Leaving that out was not a small gap. Four seats sat correctly configured
+    in `.env` while both the control plane and `halyard doctor` reported none,
+    and doctor's report of nothing configured was the only sign of it.
+    """
+    values: dict[str, str] = {}
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return values
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        key, sep, value = line.partition("=")
+        if not sep:
+            continue
+        value = value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+            value = value[1:-1]
+        values[key.strip()] = value
+    return values
+
+
 def from_environment(environ: dict[str, str] | None = None) -> list[Seat]:
     """Every configured seat, newest style first, old style as a fallback.
 
@@ -101,7 +133,9 @@ def from_environment(environ: dict[str, str] | None = None) -> list[Seat]:
     A configuration written before any of this existed still works and still
     means the same thing: two seats, both Claude Code, one per role.
     """
-    env = dict(environ if environ is not None else os.environ)
+    # A real environment variable wins over the file, which is how every other
+    # setting in this project behaves.
+    env = dict(environ) if environ is not None else {**_dotenv(Path(".env")), **os.environ}
 
     listed = [label.strip() for label in (env.get("HALYARD_SEATS") or "").split(",")]
     labels = [label for label in listed if label]

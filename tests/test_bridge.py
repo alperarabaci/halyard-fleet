@@ -517,3 +517,108 @@ def test_an_unreadable_transcript_simply_yields_no_name(tmp_path: Path, content:
     # The transcript format is documented as internal and liable to change, so
     # failing to read it must cost nothing: no name means no routing.
     assert received[0]["session_name"] is None
+
+
+# --- telling the runtimes apart ---------------------------------------------
+
+
+@pytest.fixture
+def bridge_module():
+    """The bridge imported rather than run.
+
+    Everything above drives it as a subprocess, which is how Claude Code and
+    Codex use it and therefore what most of these tests should exercise. These
+    four are about one pure function inside it, and a subprocess would only
+    make the failure harder to read.
+    """
+    sys.path.insert(0, str(REPO / "bridge"))
+    try:
+        import hook_bridge
+
+        yield hook_bridge
+    finally:
+        sys.path.remove(str(REPO / "bridge"))
+
+
+def test_a_codex_payload_is_recognised_as_codex(bridge_module) -> None:
+    """Nothing in either payload names its own runtime.
+
+    It has to be inferred, and it matters: a Claude driver and a Codex driver
+    are both `driver`, so a card that cannot say which one raised it belongs to
+    neither seat and lands in the default chat. Which is exactly what happened.
+    """
+    body = bridge_module.build_body(
+        {
+            "session_id": "abc",
+            "transcript_path": "/Users/me/.codex/sessions/2026/07/22/rollout-abc.jsonl",
+            "tool_name": "Bash",
+            "tool_input": {"command": "ls"},
+        }
+    )
+
+    assert body["agent_id"] == "codex"
+
+
+def test_a_claude_payload_is_still_claude(bridge_module) -> None:
+    body = bridge_module.build_body(
+        {
+            "session_id": "abc",
+            "transcript_path": "/Users/me/.claude/projects/-repo/abc.jsonl",
+            "tool_name": "Bash",
+            "tool_input": {"command": "ls"},
+        }
+    )
+
+    assert body["agent_id"] == "claude-code"
+
+
+def test_a_codex_name_comes_from_the_index_not_the_transcript(
+    bridge_module, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Claude Code writes the title into the conversation; Codex does not.
+
+    Reading the transcript for a Codex session finds no name at all, which
+    routes the card nowhere.
+    """
+    index = tmp_path / "session_index.jsonl"
+    index.write_text(
+        json.dumps({"id": "abc", "thread_name": "old-name"})
+        + "\n"
+        + json.dumps({"id": "abc", "thread_name": "alpha-engine-xdriver"})
+        + "\n"
+    )
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path.parent))
+    (tmp_path.parent / ".codex").mkdir(exist_ok=True)
+    (tmp_path.parent / ".codex" / "session_index.jsonl").write_text(index.read_text())
+
+    body = bridge_module.build_body(
+        {
+            "session_id": "abc",
+            "transcript_path": "/Users/me/.codex/sessions/2026/07/22/rollout-abc.jsonl",
+            "tool_name": "Bash",
+            "tool_input": {"command": "ls"},
+        }
+    )
+
+    # Appended, so the last line for an id wins — a renamed thread keeps its
+    # seat rather than answering to a name it no longer has.
+    assert body["session_name"] == "alpha-engine-xdriver"
+
+
+def test_a_missing_codex_index_is_no_name_rather_than_a_crash(
+    bridge_module, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No name means no seat, and the default chat — which is what would have
+    happened anyway. A bridge that raises here denies a command instead."""
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
+
+    body = bridge_module.build_body(
+        {
+            "session_id": "abc",
+            "transcript_path": "/Users/me/.codex/sessions/2026/07/22/rollout-abc.jsonl",
+            "tool_name": "Bash",
+            "tool_input": {"command": "ls"},
+        }
+    )
+
+    assert body["session_name"] is None
