@@ -77,6 +77,7 @@ USAGE = """usage: halyard [command]
   serve         run the control plane
   doctor        check the configuration and say what is wrong with it
   sessions      list the session names this machine can see
+  init          build .env, wire a project, and check it — interactively
   verify [rt]   prove the gate stops things, by running into it (costs turns)
   wire [dir]    put the gate on a project (merges; keeps a backup)
   unwire [dir]  take it off again, leaving everything else in place
@@ -103,6 +104,11 @@ def main() -> None:
         from halyard.doctor import sessions
 
         raise SystemExit(sessions())
+
+    if command == "init":
+        from halyard.setup_cli import run as init_run
+
+        raise SystemExit(init_run())
 
     if command == "verify":
         from halyard.verify import RUNTIMES, verify
