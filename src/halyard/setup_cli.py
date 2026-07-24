@@ -158,6 +158,18 @@ def _default_ask(prompt: str, default: str = "") -> str:
     return answer or default
 
 
+def _existing_seats(existing: dict[str, str]) -> list[Seat]:
+    """The seats already configured, so re-running can default to them."""
+    try:
+        from halyard.core.seats import from_environment
+
+        return from_environment(existing)
+    except Exception:
+        # A configuration this wizard cannot parse is one it should not refuse
+        # to run against; it simply offers no defaults from it.
+        return []
+
+
 def _collect_seats(existing: dict[str, str], ask: Ask, say: Say) -> list[Seat]:
     """Walk through the seats, one runtime at a time.
 
@@ -165,9 +177,17 @@ def _collect_seats(existing: dict[str, str], ask: Ask, say: Say) -> list[Seat]:
     copying a UUID or a thread title by hand — is the step this wizard exists to
     remove. Reading them is best-effort: a missing CLI means you type the name,
     not that the wizard stops.
+
+    **Every answer defaults to what is already configured.** Re-running this to
+    change one thing and pressing Enter through the rest must leave the seats
+    where they were. Defaulting the count to zero instead meant that walking
+    through with Enter deleted every seat — recoverable from the backup, but
+    only by somebody who noticed, and nothing said a word.
     """
+    configured = _existing_seats(existing)
     seats: list[Seat] = []
     for runtime, human in (("claude-code", "Claude Code"), ("codex", "Codex")):
+        current = [seat for seat in configured if seat.runtime == runtime]
         available = _known_sessions(runtime)
         if available:
             # Newest first, and only a handful. The full list runs to dozens of
@@ -178,13 +198,27 @@ def _collect_seats(existing: dict[str, str], ask: Ask, say: Say) -> list[Seat]:
                 say(f"  · {name}")
             if len(available) > _SESSION_LIST_LIMIT:
                 say(f"  … and {len(available) - _SESSION_LIST_LIMIT} more")
-        count = _to_int(ask(f"\nHow many {human} seats?", "0"))
+        count = _to_int(ask(f"\nHow many {human} seats?", str(len(current))))
         for index in range(count):
             say(f"\n  {human} seat {index + 1}:")
-            label = ask("    label (short, typed on a phone)", f"{_short(runtime)}{index + 1}")
-            session = ask("    session name", available[index] if index < len(available) else "")
-            chat = ask("    chat id (blank = reachable by name only)", "")
-            role = ask("    role (navigator / driver / blank)", "")
+            # What this seat already is, if it already is anything. Falling back
+            # to a session the machine can see only when there is nothing to
+            # keep — an existing seat's own values always win over a guess.
+            was = current[index] if index < len(current) else None
+            label = ask(
+                "    label (short, typed on a phone)",
+                was.label if was else f"{_short(runtime)}{index + 1}",
+            )
+            session = ask(
+                "    session name",
+                (was.session if was and was.session else "")
+                or (available[index] if index < len(available) else ""),
+            )
+            chat = ask("    chat id (blank = reachable by name only)", was.chat if was else "")
+            role = ask(
+                "    role (navigator / driver / blank)",
+                was.role.value if was and was.role else "",
+            )
             seats.append(
                 Seat(
                     label=label,

@@ -159,3 +159,51 @@ def _as_env(text: str) -> dict[str, str]:
         for line in text.splitlines()
         if "=" in line and not line.startswith("#")
     }
+
+
+def test_pressing_enter_through_a_re_run_keeps_every_seat(tmp_path: Path) -> None:
+    """The lazy re-run: change one thing, Enter through the rest.
+
+    Every prompt has to default to what is already configured. Defaulting the
+    seat count to zero instead meant walking through with Enter deleted every
+    seat — recoverable from the backup, but only by somebody who noticed, and
+    nothing said a word.
+    """
+    env = tmp_path / ".env"
+    env.write_text(
+        "TELEGRAM_BOT_TOKEN=old\n"
+        "HALYARD_SEATS=nav,xdrv\n"
+        "HALYARD_SEAT_NAV=runtime=claude-code session=alpha-nav chat=-2001 role=navigator\n"
+        "HALYARD_SEAT_XDRV=runtime=codex session=alpha-xdrv chat=-2004 role=driver\n"
+    )
+
+    setup_cli.run(
+        env_path=env,
+        # Enter at every prompt: take whatever default is offered.
+        ask=lambda prompt, default="": "n" if "doctor" in prompt else default,
+        secret=lambda _prompt: "",
+        say=lambda _message: None,
+        now="stamp",
+    )
+
+    seats = from_environment(setup_cli._read_existing(env))
+    assert [(s.label, s.runtime, s.session, s.chat) for s in seats] == [
+        ("nav", "claude-code", "alpha-nav", "-2001"),
+        ("xdrv", "codex", "alpha-xdrv", "-2004"),
+    ]
+
+
+def test_a_blank_token_keeps_the_one_already_there(tmp_path: Path) -> None:
+    """Re-running to change a chat id must not require retyping the credential."""
+    env = tmp_path / ".env"
+    env.write_text("TELEGRAM_BOT_TOKEN=123:already-set\n")
+
+    setup_cli.run(
+        env_path=env,
+        ask=lambda prompt, default="": "n" if "doctor" in prompt else default,
+        secret=lambda _prompt: "",
+        say=lambda _message: None,
+        now="stamp",
+    )
+
+    assert "TELEGRAM_BOT_TOKEN=123:already-set" in env.read_text()
