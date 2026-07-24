@@ -1,153 +1,139 @@
 # Halyard Fleet
 
 [![CI](https://github.com/alperarabaci/halyard-fleet/actions/workflows/ci.yml/badge.svg)](https://github.com/alperarabaci/halyard-fleet/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![Python 3.12+](https://img.shields.io/badge/python-3.12+-blue.svg)](https://www.python.org/downloads/)
 
-> A control plane for orchestrating coding agents remotely. Approve tool calls, steer sessions,
-> route work between agents, and hand off state — from any channel, across any agent runtime.
+Halyard Fleet puts your coding agent's permission prompt on your phone.
 
-## Read this before you wire it into anything
+When Claude Code or Codex wants to run something, you see the command, the project it
+came from, and how risky it is — then you allow or deny from Telegram. You can also
+send new instructions into the running session and read its replies there.
 
-Halyard takes over your agent's permission prompt. That is the point of it, and it has
-consequences that do not announce themselves at the moment they bite: a denied `ls` looks like a
-broken tool, a paused gate looks like a closed one, an expired approval looks like a command that
-hung. Nobody should discover these afterwards.
+It runs on your own machine. No open ports, no exposed API, nothing to log into.
 
-**1. A wired project needs the control plane running.** From the moment the hook is in
-`settings.local.json`, a Bash command with Halyard down is *denied* — every one of them, `ls`
-included — and there is no terminal prompt to approve it with. Wiring is not something you do once
-and forget; it is something the project now depends on. Turning it back off is a command, and it
-keeps a backup:
+Nothing is ever approved automatically: every failure — a crash, a timeout, an
+unreachable control plane — denies.
 
-```bash
-halyard wire ~/code/my-project     # backs up, then merges each runtime's hooks
-halyard unwire ~/code/my-project   # removes only Halyard's hooks, leaves the rest alone
-```
+**Runtimes:** Claude Code, Codex &nbsp;·&nbsp; **Channel:** Telegram
 
-**2. It is live from the first command.** There is no arming step. Once the control plane is up and
-the hook is wired, approvals go to Telegram immediately. `/pause` is what stops that — and pausing
-needs the control plane running too, because the pause switch lives inside it.
+<!-- Demo goes here:
+<p align="center">
+  <img src="assets/demo.gif" width="70%" alt="Approving a command from Telegram" />
+</p>
+-->
 
-**3. An approval expires.** `HALYARD_APPROVAL_TIMEOUT_SECONDS` (300s by default) and then it is
-*denied*, not left waiting. A phone with notifications muted is the same as answering no.
+## Why it exists
 
-### Things that surprised us, kept here so they do not surprise you
-
-Every line below was measured rather than read, usually after it caused a problem.
-
-- **`/pause` does not deny anything — it steps aside.** Claude Code then decides exactly as if the
-  hook were never installed, which means its own `permissions.allow` list runs matching commands
-  with no prompt, no card, and no audit entry. Safe to pause while you are away; worth knowing that
-  a long allow list means more goes through than the word "paused" suggests.
-- **Hooks are read once, at session start.** Editing settings mid-session changes nothing until you
-  restart the session. Script *contents* are re-read every call, so those can change freely.
-- **`settings.local.json` is not yours alone.** Claude Code appends every "don't ask again" to a
-  `permissions.allow` list in the same file, and it is gitignored. Never write that file wholesale —
-  use `halyard wire`, which merges.
-- **The gate covers what the matcher covers.** With `"matcher": "Bash"`, `Write` and `Edit` are not
-  gated at all.
-- **The project root is the git root.** A session opened in a subdirectory is gated by the `.claude/`
-  at the top of its repository — and by nothing, if there is no repository above it.
-- **One bot token per machine.** Telegram's `getUpdates` has a single consumer; two control planes
-  sharing a token will steal each other's messages.
-- **Do not wire the gate into the repository you repair Halyard from.** If the only place you can
-  run commands is behind the gate that is stuck shut, the repair is behind it too.
-- **Do not type into a session Halyard is writing to.** Two overlapping resumes of one session do
-  not fail — they fork silently, and one side's history simply disappears.
-- **The desktop app shows an injected turn late, not never.** A message you send from the phone is
-  delivered into the session, processed, and written to the transcript — it is a real part of the
-  conversation, and the reply comes back to your chat. But the desktop app does not live-refresh an
-  open session while an external process appends to it; it catches up when the window is focused
-  again, and a restart always shows everything. This is not a problem for what Halyard is *for* —
-  you are away from the machine, driving from the phone — and it costs nothing there. It only shows
-  as a lag when you happen to be watching the desktop at the same time.
-
-Found something in this category that is not on the list? It belongs here, or it belongs fixed.
-Open an issue either way.
-
-## The idea
-
-You should not have to operate your computer remotely to stay in control of a coding agent.
-Remote desktops, terminal streaming, and mobile IDEs all try to move *the machine* to your phone.
-Halyard Fleet moves *the decisions* instead.
-
-When an agent wants to run something consequential, that request is relayed to you over a channel
-you already have on your phone. You see what it wants to do, why, and how risky it is — then you
-allow or deny. The agent's judgment stays under human control while you are away from the keyboard.
+Remote desktops, terminal streaming and mobile IDEs all try to move *the machine* to
+your phone. Halyard moves *the decisions* instead.
 
 > The user should not operate the computer remotely.
 > The user should manage the agent's decisions, direction, state, and coordination.
 
-## Status
+You are not typing commands on a phone. You are answering the questions your agent
+would otherwise be blocked on, from wherever you are.
 
-Early development. Phase 1 — **Permission Relay** — is in progress.
+## Quick start
 
-Phase 1 is deliberately narrow: a single user, a single Claude Code session, and one thing that
-works end to end. A real `PreToolUse` permission request is captured, classified, redacted, and
-sent to Telegram as an inline-keyboard card. `Allow once` lets the command run. `Deny`, a timeout,
-an unreachable control plane, or any error at all stops it.
+### 1. Create a Telegram bot
 
-**The relay fails closed.** Every failure mode — network loss, timeout, a 5xx, a malformed
-response — resolves to deny, without exception.
+Message [@BotFather](https://t.me/BotFather), send `/newbot`, and keep the token it
+gives you. Then message [@userinfobot](https://t.me/userinfobot) to get your own user
+id — only ids you list can approve anything.
+
+Create a group for each seat you want to keep separate, and add the bot to each. One
+bot covers every group.
+
+### 2. Install
+
+```bash
+git clone https://github.com/alperarabaci/halyard-fleet.git
+cd halyard-fleet
+uv sync --extra dev
+```
+
+Requires Python 3.12+ and [uv](https://docs.astral.sh/uv/). It runs on the host, not
+in a container — it needs the agent CLIs and their credentials.
+
+### 3. Set it up and run
+
+```bash
+uv run halyard init      # asks what you have, writes .env, wires the project, checks it
+uv run halyard           # keep this running
+```
+
+`init` asks how many Claude and Codex seats you have, offers the session names it can
+already see, and reads the bot token without echoing it. It backs up any `.env` it
+replaces and keeps settings it does not manage.
+
+> **A wired project depends on this process.** With Halyard down, a Bash command in
+> that project is *denied* — all of them — and there is no terminal prompt to approve
+> it with. `halyard unwire <path>` hands the project back.
+> [The rest of what to expect](docs/before-you-wire-it.md) is worth five minutes
+> before you walk away from the machine.
+
+Check it any time with `uv run halyard doctor`, and prove the gate actually stops
+things with `uv run halyard verify` — which runs real commands into it rather than
+reading configuration.
+
+## Commands
+
+| In Telegram | |
+|---|---|
+| *(type anything)* | send it into that group's session |
+| `/options` | every model and effort level the runtime accepts |
+| `/model`, `/effort` | what answers, and how hard it thinks |
+| `/status` | what each seat is, and what is running |
+| `/pause`, `/resume` | step out of the way, and come back |
+
+| On the machine | |
+|---|---|
+| `halyard init` | guided setup: `.env`, wiring, and a check |
+| `halyard doctor` | what is wired, where, and what is broken |
+| `halyard verify` | prove the gate stops things, by running into it |
+| `halyard wire` / `unwire` | put the gate on a project, or take it off |
+| `halyard sessions` | session names this machine can see |
+
+## Known limitations
+
+- **The desktop apps show an injected turn late, not never.** A message from your
+  phone reaches the session and its reply comes back to you; the app catches up when
+  its window is focused again.
+- **Two things can outrun the gate.** A hook that exceeds its timeout, and a wrapper
+  that cannot start at all, both let the command through. `doctor` checks for the
+  second.
+- **One bot token per machine.** Telegram's `getUpdates` has a single consumer.
+- **`/pause` steps aside rather than denying.** The runtime's own permission list
+  then decides, with no card and no audit entry.
+- **The gate covers what the matcher covers** — Bash today, not `Write` or `Edit`.
 
 ## What this is not
 
-These are out of scope, and will not be added in later phases without a stated reason:
-
-- Remote desktop, terminal screen streaming, or a mobile IDE
-- Automatic `allow all`, or letting an LLM decide permissions on your behalf
-- Uncontrolled agent-to-agent messaging
-- Multi-user RBAC
-- More than one agent adapter under development at a time
+Out of scope, and not arriving later without a stated reason: remote desktop or
+terminal streaming, automatic `allow all`, letting a model decide permissions on your
+behalf, uncontrolled agent-to-agent messaging, or multi-user RBAC.
 
 ## Documentation
 
 | | |
 |---|---|
-| [Setup](docs/setup.md) | Installing it, and putting the gate on a project |
-| [Telegram](docs/telegram.md) | The bot, navigator/driver seats, models and effort |
+| [Before you wire it in](docs/before-you-wire-it.md) | What changes, and what surprised us |
+| [Setup](docs/setup.md) | Installing it, and gating a project by hand |
+| [Telegram](docs/telegram.md) | The bot, seats, models and effort |
 | [Architecture](docs/architecture.md) | How the layers fit, and the security posture |
-| [Hook behaviour](docs/hook-payload-notes.md) | What Claude Code's hooks actually do — measured |
+| [Hook behaviour](docs/hook-payload-notes.md) | What the runtimes' hooks actually do — measured |
 | [Session I/O](docs/session-io-notes.md) | Writing into a live session, and what forks it |
 | [Design document](docs/mobile-agent-control-plane.md) | The full plan this is built from |
-| [Codex brief](docs/codex-adapter-brief.md) | Open question: what a second runtime would need |
-| [Codex routing postmortem](docs/postmortem/2026-07-23-codex-telegram-routing.md) | Permission escalation and multi-runtime routing regressions |
-| [Claude Desktop postmortem](docs/postmortem/2026-07-23-claude-desktop-live-session-sync.md) | Live session synchronization and model inheritance regression |
-
-## Quick start
-
-```bash
-uv sync --extra dev
-uv run halyard init          # asks what you have, writes .env, offers to wire and check
-uv run halyard               # keep this running
-```
-
-`halyard init` is the guided path: it asks how many Claude and Codex seats you
-have, offers the session names this machine can see, reads the bot token
-without echoing it, and can wire the project and run `doctor` before it
-finishes. It keeps a timestamped backup of any `.env` it replaces and carries
-over settings it does not manage.
-
-To do it by hand instead, or to see every knob:
-
-```bash
-cp .env.example .env         # then set HALYARD_CHANNEL and the Telegram values
-uv run halyard wire .        # gate this project (merges; keeps a backup)
-uv run halyard doctor        # check what is actually wired, and where
-```
-
-`halyard unwire .` hands the project back. Everything that touches a settings
-file keeps a timestamped copy first — see [Setup](docs/setup.md) for why.
+| [Postmortems](docs/postmortem/) | Regressions, and what they cost |
 
 ## Development
 
-Requires Python 3.12+ and [uv](https://docs.astral.sh/uv/).
-
 ```bash
-uv sync --extra dev
 uv run pytest
 uv run ruff check .
 ```
 
 ## License
 
-MIT
+[MIT](LICENSE) © alper arabaci
