@@ -116,15 +116,27 @@ These are out of scope, and will not be added in later phases without a stated r
 ## Quick start
 
 ```bash
-cp .env.example .env         # then set HALYARD_CHANNEL and the Telegram values
 uv sync --extra dev
+uv run halyard init          # asks what you have, writes .env, offers to wire and check
 uv run halyard               # keep this running
+```
+
+`halyard init` is the guided path: it asks how many Claude and Codex seats you
+have, offers the session names this machine can see, reads the bot token
+without echoing it, and can wire the project and run `doctor` before it
+finishes. It keeps a timestamped backup of any `.env` it replaces and carries
+over settings it does not manage.
+
+To do it by hand instead, or to see every knob:
+
+```bash
+cp .env.example .env         # then set HALYARD_CHANNEL and the Telegram values
 uv run halyard wire .        # gate this project (merges; keeps a backup)
 uv run halyard doctor        # check what is actually wired, and where
 ```
 
-`halyard unwire .` hands the project back. Both keep a timestamped copy of the
-settings file they touch — see [Setup](docs/setup.md) for why that matters.
+`halyard unwire .` hands the project back. Everything that touches a settings
+file keeps a timestamped copy first — see [Setup](docs/setup.md) for why.
 
 ## Development
 
