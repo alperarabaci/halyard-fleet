@@ -38,7 +38,7 @@ from halyard.core.gate import Gate
 from halyard.core.policy import Policy
 from halyard.core.redaction import Redactor
 from halyard.core.registry import SessionRegistry
-from halyard.core.seats import from_environment
+from halyard.core.seats import configured
 from halyard.core.service import ApprovalService, BridgeDecision, MessageRelay
 
 logger = logging.getLogger(__name__)
@@ -201,7 +201,7 @@ def create_app(settings: Settings, *, channel=None) -> FastAPI:
         ),
         "codex": CodexRunner(),
     }
-    configured_seats = from_environment()
+    configured_seats = configured()
     # What `/health` and anything else with one question in mind should ask.
     runner = by_runtime["claude-code"]
     resolved_channel = (

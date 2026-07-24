@@ -317,28 +317,39 @@ def run() -> int:
         print(f"{WARN}the running control plane answers approvals by itself")
 
     print()
-    from halyard.core.seats import from_environment
+    from halyard.core.config_file import find_config
+    from halyard.core.seats import configured
 
+    source = find_config()
     try:
-        configured = from_environment()
+        seats = configured()
     except ValueError as error:
         # A seat that will not parse is a seat you believe you have.
         print(f"{FAIL}seats: {error}")
-        configured = []
+        seats = []
         problems += 1
 
-    if not configured:
+    if not seats:
         # Silence used to mean "checked and fine". It meant "checked nothing":
         # when seats replaced the two role settings this stopped looking at
         # anything and still printed a clean bill of health.
         print(f"{WARN}no seats configured — nothing is being routed anywhere")
-        print("        set HALYARD_SEATS, or the navigator/driver pair, in .env")
-    for seat in configured:
+        print("        run `halyard init`, or set HALYARD_SEATS in .env")
+    else:
+        # Which file the seats came from, because the two dialects do not merge
+        # and a YAML file left behind would otherwise silently outrank the .env
+        # somebody had just edited.
+        print(f"{OK}seats read from {source if source else '.env'}")
+        for project in sorted({seat.project for seat in seats if seat.project}):
+            labels = ", ".join(s.label for s in seats if s.project == project)
+            print(f"        {project}: {labels}")
+
+    for seat in seats:
         lines, found = _check_seat(seat, settings.claude_binary)
         problems += found
         for line in lines:
             print(line)
-    if configured:
+    if seats:
         print()
 
     for name, required in (

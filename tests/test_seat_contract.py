@@ -20,7 +20,9 @@ from __future__ import annotations
 from collections.abc import Callable
 
 import pytest
+import yaml
 
+from halyard.core.config_file import from_yaml
 from halyard.core.events import Role
 from halyard.core.seats import Seat, from_environment
 
@@ -83,24 +85,68 @@ CASES: list[tuple[str, dict, list[Seat]]] = [
     ("nothing configured", {}, []),
 ]
 
-#: Configurations that must be refused rather than half-understood. Silence
-#: here leaves a seat somebody believes in and cannot reach.
+#: Configurations that must be refused rather than half-understood, with the
+#: seat each one is about. Silence here leaves a seat somebody believes in and
+#: cannot reach.
+#:
+#: The message is not compared. Two dialects describe the same broken file in
+#: their own words — one says a seat is undescribed, the other that its body is
+#: empty — and requiring identical wording would test the phrasing rather than
+#: the refusal. What is required is that it raises, and that the message names
+#: the seat, so the person reading it knows where to look.
 REFUSALS: list[tuple[str, dict, str]] = [
     (
         "an unknown runtime",
         {"HALYARD_SEATS": "x", "HALYARD_SEAT_X": "runtime=gpt session=s"},
-        "Use one of",
+        "x",
     ),
-    ("a seat named but never described", {"HALYARD_SEATS": "ghost"}, "is not set"),
+    ("a seat named but never described", {"HALYARD_SEATS": "ghost"}, "ghost"),
     (
         "a mistyped field",
         {"HALYARD_SEATS": "x", "HALYARD_SEAT_X": "runtime=codex sesion=typo"},
-        "unknown field",
+        "x",
     ),
 ]
 
-#: Every producer, by name. Add YAML here and it inherits the whole contract.
-PRODUCERS: dict[str, Producer] = {"env": from_environment}
+
+def _as_yaml(config: dict) -> list[Seat]:
+    """Run an env-dialect case through the YAML producer instead.
+
+    The cases are translated rather than rewritten. Two suites that never
+    compare cannot show that two dialects mean the same thing, and meaning the
+    same thing is the entire claim being made.
+    """
+    labels = [label.strip() for label in (config.get("HALYARD_SEATS") or "").split(",")]
+    document = {"projects": {"a-project": {"seats": {}}}}
+    for label in [name for name in labels if name]:
+        key = f"HALYARD_SEAT_{label.upper().replace('-', '_')}"
+        if key not in config:
+            # The env dialect refuses this; so must the YAML one, in its own
+            # words — an empty seat body is a seat with nothing in it.
+            document["projects"]["a-project"]["seats"][label] = None
+            continue
+        fields = dict(part.split("=", 1) for part in config[key].split() if "=" in part)
+        document["projects"]["a-project"]["seats"][label] = fields
+    # `sort_keys=False` because seat order is the file's, not the alphabet's:
+    # `safe_dump` sorts by default, which reordered the case rather than the
+    # producer and made a translator artefact look like a producer defect.
+    return from_yaml(yaml.safe_dump(document, sort_keys=False))
+
+
+#: Every producer, by name. Each satisfies the same cases in its own dialect.
+PRODUCERS: dict[str, Producer] = {"env": from_environment, "yaml": _as_yaml}
+
+
+def _identity(seats: list[Seat]) -> list[tuple]:
+    """What every producer must agree on, exactly.
+
+    Not the whole `Seat`: the YAML dialect can say which project a seat belongs
+    to and the environment dialect cannot, so comparing every field would fail
+    a producer for being able to express more. These five are the routing
+    identity — the fields a card is placed by — and disagreement on any of them
+    is a defect rather than a difference in dialect.
+    """
+    return [(s.label, s.runtime, s.session, s.chat, s.role) for s in seats]
 
 
 @pytest.mark.parametrize("producer_name", list(PRODUCERS))
@@ -111,13 +157,13 @@ def test_a_producer_yields_the_agreed_seats(
     """Same configuration, same seats, whichever dialect expressed it."""
     produced = PRODUCERS[producer_name](config)
 
-    assert produced == expected, f"{producer_name} disagreed on: {case_name}"
+    assert _identity(produced) == _identity(expected), f"{producer_name} disagreed on: {case_name}"
 
 
 @pytest.mark.parametrize("producer_name", list(PRODUCERS))
-@pytest.mark.parametrize(("case_name", "config", "message"), REFUSALS, ids=[c[0] for c in REFUSALS])
+@pytest.mark.parametrize(("case_name", "config", "seat"), REFUSALS, ids=[c[0] for c in REFUSALS])
 def test_a_producer_refuses_what_it_cannot_honour(
-    producer_name: str, case_name: str, config: dict, message: str
+    producer_name: str, case_name: str, config: dict, seat: str
 ) -> None:
     """A configuration that cannot be honoured must fail loudly.
 
@@ -125,8 +171,10 @@ def test_a_producer_refuses_what_it_cannot_honour(
     believes exists and cannot reach, and a seat silently altered routes work
     somewhere nobody chose.
     """
-    with pytest.raises(ValueError, match=message):
+    with pytest.raises(ValueError) as refused:
         PRODUCERS[producer_name](config)
+
+    assert seat in str(refused.value), "the refusal has to say which seat it is about"
 
 
 @pytest.mark.parametrize("producer_name", list(PRODUCERS))

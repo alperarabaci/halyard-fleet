@@ -1,0 +1,60 @@
+# Seats, arranged by the project they work in.
+#
+# Copy to `halyard.yaml`. When this file exists it is the configuration —
+# `.env` seats are not merged into it, because "which file is this seat from?"
+# should never be answered with "both, partly".
+#
+# `.env` keeps everything else: the bot token, the bind address, logging.
+# Only seats moved here.
+#
+# Once a project has a `path`, wiring takes its name rather than a directory:
+#     halyard wire alpha-engine
+#     halyard unwire alpha-engine
+
+projects:
+  alpha-engine:
+    # Where `halyard wire` puts the gate.
+    path: ~/code/alpha-engine
+    seats:
+      # A label is what you type on a phone. It has to be unique across every
+      # project, because it is also how `doctor` names a seat.
+      nav:
+        runtime: claude-code
+        # The name the runtime knows the session by. `halyard sessions` lists
+        # the ones this machine can see; a Codex thread id works too.
+        session: alpha-engine-navigator
+        # Quoted, because -1001 unquoted is a number to YAML and a string
+        # everywhere else — and the mismatch routes nowhere, silently.
+        # A forum topic inside a group is "-1001:12".
+        chat: "-1001234567890"
+        # Optional. It colours the card and matches a hook that declares one.
+        # Two seats may share a role; that is the point of having four.
+        role: navigator
+
+      drv:
+        runtime: claude-code
+        session: alpha-engine-driver
+        chat: "-1002234567890"
+        role: driver
+
+      xnav:
+        runtime: codex
+        session: alpha-engine-xnavigator
+        chat: "-1003234567890"
+        role: navigator
+
+      xdrv:
+        runtime: codex
+        session: alpha-engine-xdriver
+        chat: "-1004234567890"
+        role: driver
+
+  # A second project is a second block. A seat with no `chat` is reachable by
+  # name and has nowhere of its own to speak, which is enough to hand it work.
+  # hermes:
+  #   path: ~/code/hermes
+  #   seats:
+  #     hnav:
+  #       runtime: codex
+  #       session: hermes-navigator
+  #       chat: "-2001234567890"

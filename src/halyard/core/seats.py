@@ -50,6 +50,11 @@ class Seat:
     #: What the seat is for. Only used to colour a card and to match a hook
     #: payload that declares a role; two seats may share one.
     role: Role | None = None
+    #: Which codebase this seat works in. Set by the YAML configuration, where
+    #: seats are written underneath the project they belong to; the environment
+    #: dialect has no way to say it and leaves it unset, which is honest —
+    #: that dialect only ever described one project.
+    project: str | None = None
 
     def __post_init__(self) -> None:
         if self.runtime not in KNOWN_RUNTIMES:
@@ -181,6 +186,29 @@ def from_environment(environ: dict[str, str] | None = None) -> list[Seat]:
             )
         )
     return legacy
+
+
+def configured(directory: Path | None = None) -> list[Seat]:
+    """Every seat, from whichever dialect describes them.
+
+    One precedence rule, in one place, so the control plane and `doctor` can
+    never disagree about what is configured — a disagreement that already
+    happened once, when seats were read from `os.environ` here and from `.env`
+    everywhere else, and four correct seats produced a control plane holding
+    none.
+
+    **YAML wins outright when the file exists; the two are never merged.**
+    Merging would answer "which of these two files is this seat from?" with
+    "both, partly", and a seat somebody thought they had replaced would still
+    be routing. A file that exists and cannot be read raises rather than
+    falling back, for the same reason: starting with a configuration nobody
+    wrote is worse than not starting.
+    """
+    from halyard.core.config_file import find_config, load
+
+    if find_config(directory) is not None:
+        return load(directory)
+    return from_environment()
 
 
 def find(seats: list[Seat], label: str) -> Seat | None:
