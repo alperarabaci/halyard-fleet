@@ -185,6 +185,64 @@ Two practical habits follow:
 effect; restart the session. The script contents are read on every call, so those can change freely.
 
 
+## Seats in a file, arranged by project
+
+`.env` describes seats as a flat list, which stops being readable at about four
+and cannot say which project a seat belongs to. `halyard.yaml` can:
+
+```yaml
+projects:
+  alpha-engine:
+    path: ~/code/alpha-engine
+    seats:
+      nav:
+        runtime: claude-code
+        session: alpha-navigator
+        chat: "-1001"
+        role: navigator
+      xdrv:
+        runtime: codex
+        session: alpha-xdriver
+        chat: "-1004"
+        role: driver
+
+  hermes:
+    path: ~/code/hermes
+    seats:
+      hnav:
+        runtime: codex
+        session: hermes-nav
+        chat: "-2001"
+        role: navigator
+```
+
+Copy `halyard.yaml.example` and edit it. It is gitignored, like `.env`, because
+chat ids and session names belong to one machine.
+
+**When this file exists it is the configuration.** `.env` seats are not merged
+into it — "which file is this seat from?" should never be answered with "both,
+partly", and a seat you thought you had replaced should never still be routing.
+Everything else stays in `.env`: the bot token, the bind address, logging.
+`halyard doctor` prints which file the seats came from.
+
+Quote chat ids. `-1001` unquoted is a number to YAML and a string everywhere
+else, and the mismatch does not fail — the seat simply routes nowhere.
+
+Labels have to be unique across every project, because a label is also how
+`doctor` names a seat and how one is looked up.
+
+Once a project has a `path`, wiring takes its name:
+
+```bash
+halyard wire alpha-engine      # the file already says where that is
+halyard unwire alpha-engine
+```
+
+A directory still works. What the name buys is not having to retype a path,
+which is tedious and is also a way to gate the wrong tree — a mistake that
+looks like success until a command runs somewhere nobody was watching.
+
+
 ---
 
 Next: [set up the Telegram side](telegram.md) — the bot, and where each seat's

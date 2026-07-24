@@ -46,3 +46,10 @@ halyard.log.*
 
 # What the bridge writes down about its own runs
 bridge.log
+
+# Saved copies of third-party docs, kept locally while researching
+hooks.html
+
+# Your own seats: chat ids and session names, specific to this machine.
+halyard.yaml
+halyard.yml

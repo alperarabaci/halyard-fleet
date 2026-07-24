@@ -119,7 +119,7 @@ behalf, uncontrolled agent-to-agent messaging, or multi-user RBAC.
 | | |
 |---|---|
 | [Before you wire it in](docs/before-you-wire-it.md) | What changes, and what surprised us |
-| [Setup](docs/setup.md) | Installing it, and gating a project by hand |
+| [Setup](docs/setup.md) | Installing it, seats in YAML, gating a project by hand |
 | [Telegram](docs/telegram.md) | The bot, seats, models and effort |
 | [Architecture](docs/architecture.md) | How the layers fit, and the security posture |
 | [Hook behaviour](docs/hook-payload-notes.md) | What the runtimes' hooks actually do — measured |

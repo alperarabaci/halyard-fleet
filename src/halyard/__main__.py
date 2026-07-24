@@ -79,8 +79,8 @@ USAGE = """usage: halyard [command]
   sessions      list the session names this machine can see
   init          build .env, wire a project, and check it — interactively
   verify [rt]   prove the gate stops things, by running into it (costs turns)
-  wire [dir]    put the gate on a project (merges; keeps a backup)
-  unwire [dir]  take it off again, leaving everything else in place
+  wire [what]   put the gate on a project, by name or directory (keeps a backup)
+  unwire [what] take it off again, leaving everything else in place
 """
 
 
@@ -123,11 +123,24 @@ def main() -> None:
 
     if command in ("wire", "unwire"):
         from halyard import wiring
+        from halyard.core.config_file import resolve_project
 
-        where = Path(args[1]).expanduser() if len(args) > 1 else Path.cwd()
-        if not where.is_dir():
-            print(f"halyard: {where} is not a directory", file=sys.stderr)
-            raise SystemExit(2)
+        # A project name or a directory. The configuration already says where
+        # every project is, so retyping the path is both tedious and a way to
+        # gate the wrong tree — which looks like success right up until a
+        # command runs somewhere nobody was watching.
+        given = args[1] if len(args) > 1 else None
+        if given is None:
+            where = Path.cwd()
+        elif (candidate := Path(given).expanduser()).is_dir():
+            where = candidate
+        else:
+            try:
+                where = resolve_project(given)
+            except ValueError as error:
+                print(f"halyard: {error}", file=sys.stderr)
+                raise SystemExit(2) from None
+
         action = wiring.wire if command == "wire" else wiring.unwire
         raise SystemExit(action(where.resolve()))
 
