@@ -156,23 +156,39 @@ send-message [--title=<title>] <recipient_id> <content>
 are addressed by, and `get-conversation-metadata` for everything the transcript
 does not carry. `--model` also gives `options()` its three values.
 
-**It talks to a running application, not to the filesystem.** Called with the
-app closed it answers:
+**It talks to a running application, not to the filesystem** — measured. With
+the app closed it answers `{"error": "ANTIGRAVITY_LS_ADDRESS is not set"}`. With
+it open, two variables are needed and neither is published anywhere on disk:
 
-```json
-{"error": "ANTIGRAVITY_LS_ADDRESS is not set"}
+```
+ANTIGRAVITY_LS_ADDRESS=127.0.0.1:60762
+ANTIGRAVITY_CSRF_TOKEN=<the --csrf_token argument of the running language_server>
 ```
 
-So this is an IPC client, and how the address is published is **not measured** —
-with the app shut, nothing under `~/.gemini` carries a socket, a port, or a
-lock naming one. It is presumably set for processes the app starts, which is
-not what a control plane running beside it is.
+Both come off the running process. The port is one of two the `language_server`
+listens on — the other answers `error reading server preface`, so it is not the
+gRPC one — and the token is an argument on its command line. Discovering a
+service by reading another process's arguments is not a contract; it is what is
+available, and it will break without warning.
 
-That is a real constraint rather than a detail. Claude Code and Codex are both
-driven by a CLI that works whether or not an application is open; Antigravity's
-appears to need one running. If that holds, an Antigravity seat can only be
-written to while its app is up — worth knowing before promising the second half
-of the product.
+**`send-message` genuinely drives a turn.** Measured: the message arrives in the
+transcript as a `SYSTEM_MESSAGE` and the agent acts on it, producing a real
+`RUN_COMMAND` a few seconds later. That is `AgentRunner.send` for this runtime,
+and unlike Claude Code and Codex it needs the application running.
+
+**A sandbox sits between the gate and execution.** The first probe asked for
+`touch /tmp/...` and the transcript recorded:
+
+```
+The command failed with exit code: 1
+touch: /tmp/agy-gate-probe.marker: Operation not permitted
+```
+
+So there are now three separate things that can stop a command here — the gate,
+the runtime's own permission flow, and the sandbox — and a conformance check
+that cannot tell them apart proves nothing. `halyard verify` already learned
+this once against Codex; it will need a writable path inside the workspace and a
+witness file for Antigravity too.
 
 ### The transcript does not identify a session
 
@@ -204,8 +220,13 @@ Nothing found so far provides one.
 ## Open questions, in the order they block work
 
 1. **Does an unrecognised output really fail open?** Everything above rests on
-   it. Measure with a hook that prints Claude-shaped JSON and see whether the
-   command runs.
+   it, and it is **still unmeasured**. A hook printing Claude-shaped JSON was
+   installed at `.agents/hooks.json` and never fired — no witness file, in a
+   conversation that had started a day earlier. The likeliest explanation is
+   the behaviour every other runtime here shares: hooks are read when a session
+   starts, so one that predates the file never sees it. Retry in a conversation
+   opened *after* the hook exists, and keep the witness file — without it, a
+   hook that never ran and a gate that denied are the same observation.
 2. **Does `deny` actually stop a command**, and does a non-zero exit or empty
    stdout run it? The same table that was built for the other two runtimes.
 3. **How does `agentapi` find the running app?** `send-message` is the whole
