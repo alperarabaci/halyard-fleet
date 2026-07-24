@@ -13,32 +13,45 @@ That distinction is the whole reason this file exists before any code. Both
 Codex postmortems end in the same place: an assumption that a boundary was
 shared when it was not.
 
-## The finding that matters
+## The finding that matters — measured, and not what was expected
 
-**`bridge/hook.sh` would fail open under Antigravity.** Its hard-coded denial —
-the one that catches a Python that will not start — is Claude Code's shape:
-
-```json
-{"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny", ...}}
-```
-
-Antigravity's documented output is flat and uses a different key:
+Antigravity's documentation gives a flat output shape:
 
 ```json
 {"decision": "deny", "reason": "..."}
 ```
 
-An unrecognised payload is the case every runtime measured so far treats as *no
-opinion*, and no opinion runs the command. So the wrapper that exists to make a
-crash into a refusal would, under Antigravity, make a crash into an approval.
+Halyard's `bridge/hook.sh` prints Claude Code's shape instead, and the fear was
+that an unrecognised payload would read as *no opinion* — turning the wrapper
+that makes a crash into a refusal into one that makes a crash into an approval.
 
-This has **not** been confirmed against a running Antigravity. It is the first
-thing to measure, and until it is, no Antigravity project should be wired.
+**It does not. Antigravity accepts Claude Code's shape.** Two runs against a
+live conversation, differing only in what the hook printed, each with a witness
+file proving the hook fired:
 
-The bridge has the same problem in the other direction: it reads `tool_name`
+| Hook printed | Command |
+|---|---|
+| `hookSpecificOutput.permissionDecision: "deny"` | **stopped** |
+| `hookSpecificOutput.permissionDecision: "allow"` | **ran** |
+
+Had the output been ignored, both would have ended the same way. They did not,
+so it is being parsed and acted on.
+
+That closes the safety question in the good direction, and the wrapper needs no
+emergency change. The adapter should still emit the documented flat shape —
+what is documented is what will keep working — but a Claude-shaped denial
+arriving from a half-updated install refuses rather than approves.
+
+The bridge still needs its own work in the other direction: it reads `tool_name`
 and `tool_input.command`, and Antigravity sends `toolCall.name` and
 `toolCall.args.CommandLine`. That failure is louder — the command arrives empty
-or as JSON — but it is the same root: one shape assumed to be three runtimes'.
+or as JSON — but it has to be done before anything is wired.
+
+**Hooks are read per call, not snapshotted at session start.** Also measured:
+the hook file was written five minutes *after* the conversation began and fired
+anyway. Claude Code and Codex both read hook configuration once, when a session
+starts, and both need a restart to pick up an edit. Antigravity does not — one
+fewer step in `wire`, and one fewer way for a gate to be configured and inert.
 
 ## PreToolUse — documented
 
@@ -219,16 +232,13 @@ Nothing found so far provides one.
 
 ## Open questions, in the order they block work
 
-1. **Does an unrecognised output really fail open?** Everything above rests on
-   it, and it is **still unmeasured**. A hook printing Claude-shaped JSON was
-   installed at `.agents/hooks.json` and never fired — no witness file, in a
-   conversation that had started a day earlier. The likeliest explanation is
-   the behaviour every other runtime here shares: hooks are read when a session
-   starts, so one that predates the file never sees it. Retry in a conversation
-   opened *after* the hook exists, and keep the witness file — without it, a
-   hook that never ran and a gate that denied are the same observation.
-2. **Does `deny` actually stop a command**, and does a non-zero exit or empty
-   stdout run it? The same table that was built for the other two runtimes.
+1. **What do the failure modes do?** `deny` and `allow` are measured. A
+   non-zero exit, empty stdout, malformed output, a missing interpreter and a
+   hook that outruns its timeout are not — the same table built for the other
+   two runtimes, and the one that decides whether `hook.sh` is enough here.
+   Note that a run took about two and a half minutes end to end, so a check
+   that waits ninety seconds will record a turn that has not happened yet as a
+   blocked command.
 3. **How does `agentapi` find the running app?** `send-message` is the whole
    of delivery and it needs `ANTIGRAVITY_LS_ADDRESS`. Start the app and look:
    the environment of the running process, a socket, or something published
