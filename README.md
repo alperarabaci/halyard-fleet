@@ -124,6 +124,7 @@ behalf, uncontrolled agent-to-agent messaging, or multi-user RBAC.
 | [Architecture](docs/architecture.md) | How the layers fit, and the security posture |
 | [Hook behaviour](docs/hook-payload-notes.md) | What the runtimes' hooks actually do — measured |
 | [Session I/O](docs/session-io-notes.md) | Writing into a live session, and what forks it |
+| [Antigravity notes](docs/antigravity-payload-notes.md) | A third runtime, measured before anything is built |
 | [Design document](docs/mobile-agent-control-plane.md) | The full plan this is built from |
 | [Postmortems](docs/postmortem/) | Regressions, and what they cost |
 
