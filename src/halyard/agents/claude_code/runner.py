@@ -23,10 +23,12 @@ credentials in the user's home directory.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import re
 import shutil
+import subprocess
 from collections import defaultdict
 from pathlib import Path
 
@@ -86,6 +88,38 @@ def _desktop_claude_binary() -> str | None:
     if not candidates:
         return None
     return str(max(candidates, key=version_key))
+
+
+def signed_in(binary: str | None = None) -> bool | None:
+    """Whether the CLI can actually authenticate. `None` when it cannot be told.
+
+    `claude auth status` answers in about a third of a second and costs no
+    turn — measured — so there is no reason for `doctor` not to ask. It prints
+    JSON with a `loggedIn` field.
+
+    This is the gap that let a Mac mini look healthy and deliver nothing. The
+    binary was present, `doctor` reported it, and every message failed with the
+    CLI's own "Not logged in · Please run /login" — which was being written to
+    stdout and thrown away. A binary that exists and cannot sign in is not a
+    runtime you can send to.
+
+    Three states, not two. `None` means the question could not be asked — an
+    old CLI without the subcommand, a timeout — and is reported as unknown
+    rather than as a failure. A checker that is confidently wrong is worse than
+    one that states its limit: the obvious response to a false negative here is
+    to go and re-authenticate something that was never signed out.
+    """
+    found = find_claude_binary(binary)
+    if found is None:
+        return None
+    try:
+        done = subprocess.run([found, "auth", "status"], capture_output=True, text=True, timeout=15)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    try:
+        return bool(json.loads(done.stdout or "{}").get("loggedIn"))
+    except ValueError:
+        return None
 
 
 def find_claude_binary(configured: str | None = None) -> str | None:
