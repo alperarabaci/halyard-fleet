@@ -43,7 +43,7 @@ from typing import Any
 import yaml
 
 from halyard.core.events import Role
-from halyard.core.seats import KNOWN_RUNTIMES, Seat
+from halyard.core.seats import Seat, _default_runtime, known_runtimes
 
 #: Where a project's own settings live, beside its seats.
 _PROJECT_FIELDS = {"path", "seats", "name"}
@@ -90,10 +90,11 @@ def _seat_from(label: str, spec: Any, project: str) -> Seat:
             f"Seat {label!r} in project {project!r}: unknown field(s) {', '.join(sorted(unknown))}"
         )
 
-    runtime = (_as_text(spec.get("runtime")) or "claude-code").lower()
-    if runtime not in KNOWN_RUNTIMES:
+    runtime = (_as_text(spec.get("runtime")) or _default_runtime()).lower()
+    allowed = known_runtimes()
+    if runtime not in allowed:
         raise ValueError(
-            f"Seat {label!r} has runtime {runtime!r}. Use one of: {', '.join(KNOWN_RUNTIMES)}."
+            f"Seat {label!r} has runtime {runtime!r}. Use one of: {', '.join(allowed)}."
         )
     role = _as_text(spec.get("role"))
     return Seat(

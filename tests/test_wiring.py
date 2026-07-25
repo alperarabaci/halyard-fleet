@@ -13,6 +13,10 @@ import time
 from pathlib import Path
 
 from halyard import wiring
+from halyard.agents import registry
+from halyard.agents.codex import trust
+
+CLAUDE = registry.get("claude-code")
 
 
 def repo(tmp_path: Path, settings: dict | None = None) -> Path:
@@ -38,7 +42,7 @@ def test_wiring_keeps_the_permission_list(tmp_path: Path) -> None:
     """
     project = repo(tmp_path, {"permissions": {"allow": ["Bash(uv run *)", "WebSearch"]}})
 
-    wiring.wire(project, runtimes=wiring.RUNTIMES[:1])
+    wiring.wire(project, runtimes=(CLAUDE,))
 
     assert read(project)["permissions"]["allow"] == ["Bash(uv run *)", "WebSearch"]
     assert read(project)["hooks"]["PreToolUse"]
@@ -47,7 +51,7 @@ def test_wiring_keeps_the_permission_list(tmp_path: Path) -> None:
 def test_wiring_keeps_a_backup(tmp_path: Path) -> None:
     project = repo(tmp_path, {"permissions": {"allow": ["WebSearch"]}})
 
-    wiring.wire(project)
+    wiring.wire(project, runtimes=(CLAUDE,))
 
     backups = list((project / ".claude").glob("settings.local.json.*.bak"))
     assert len(backups) == 1
@@ -68,7 +72,7 @@ def test_backup_exists_before_settings_are_written(tmp_path: Path, monkeypatch) 
 
     monkeypatch.setattr(wiring, "_write", observe_write)
 
-    wiring.wire(project, runtimes=wiring.RUNTIMES[:1])
+    wiring.wire(project, runtimes=(CLAUDE,))
 
 
 def test_wiring_preserves_the_complete_claude_document(tmp_path: Path) -> None:
@@ -96,7 +100,7 @@ def test_wiring_preserves_the_complete_claude_document(tmp_path: Path) -> None:
     settings = project / ".claude" / "settings.local.json"
     before = settings.read_bytes()
 
-    wiring.wire(project)
+    wiring.wire(project, runtimes=(CLAUDE,))
 
     written = read(project)
     assert written["permissions"] == original["permissions"]
@@ -111,7 +115,7 @@ def test_wiring_preserves_the_complete_claude_document(tmp_path: Path) -> None:
 def test_wiring_an_untouched_project_creates_the_file(tmp_path: Path) -> None:
     project = repo(tmp_path)
 
-    assert wiring.wire(project) == 0
+    assert wiring.wire(project, runtimes=(CLAUDE,)) == 0
 
     events = read(project)["hooks"]
     assert "PreToolUse" in events
@@ -122,8 +126,8 @@ def test_wiring_twice_does_not_duplicate_the_hook(tmp_path: Path) -> None:
     """A hook listed twice would ask twice for one command."""
     project = repo(tmp_path)
 
-    wiring.wire(project)
-    wiring.wire(project)
+    wiring.wire(project, runtimes=(CLAUDE,))
+    wiring.wire(project, runtimes=(CLAUDE,))
 
     groups = read(project)["hooks"]["PreToolUse"]
     ours = [g for g in groups if any(wiring._is_ours(h["command"]) for h in g["hooks"])]
@@ -145,7 +149,7 @@ def test_unwiring_leaves_somebody_elses_hook_alone(tmp_path: Path) -> None:
             }
         },
     )
-    wiring.wire(project)
+    wiring.wire(project, runtimes=(CLAUDE,))
 
     wiring.unwire(project)
 
@@ -156,7 +160,7 @@ def test_unwiring_leaves_somebody_elses_hook_alone(tmp_path: Path) -> None:
 
 def test_unwiring_keeps_the_permission_list(tmp_path: Path) -> None:
     project = repo(tmp_path, {"permissions": {"allow": ["Bash(uv run *)"]}})
-    wiring.wire(project)
+    wiring.wire(project, runtimes=(CLAUDE,))
 
     wiring.unwire(project)
 
@@ -185,7 +189,7 @@ def test_a_subdirectory_is_wired_at_the_repository_root(tmp_path: Path) -> None:
     inside = project / "web" / "src"
     inside.mkdir(parents=True)
 
-    wiring.wire(inside)
+    wiring.wire(inside, runtimes=(CLAUDE,))
 
     assert (project / ".claude" / "settings.local.json").exists()
     assert not (inside / ".claude").exists()
@@ -196,7 +200,7 @@ def test_a_directory_outside_a_repository_is_wired_where_it_stands(tmp_path: Pat
     loose = tmp_path / "not-a-repo"
     loose.mkdir()
 
-    wiring.wire(loose)
+    wiring.wire(loose, runtimes=(CLAUDE,))
 
     assert (loose / ".claude" / "settings.local.json").exists()
 
@@ -209,7 +213,7 @@ def test_a_broken_settings_file_is_refused_rather_than_replaced(tmp_path: Path) 
     broken.write_text("{ this is not json")
 
     try:
-        wiring.wire(project)
+        wiring.wire(project, runtimes=(CLAUDE,))
     except SystemExit as stop:
         assert "not valid JSON" in str(stop)
     else:
@@ -221,7 +225,7 @@ def test_a_broken_settings_file_is_refused_rather_than_replaced(tmp_path: Path) 
 # --- a second runtime -------------------------------------------------------
 
 
-CODEX = next(r for r in wiring.RUNTIMES if r.name == "codex")
+CODEX = registry.get("codex")
 
 
 def test_codex_hooks_go_in_their_own_file(tmp_path: Path) -> None:
@@ -271,7 +275,7 @@ def test_wiring_preserves_and_backs_up_the_complete_codex_document(tmp_path: Pat
 def test_permission_request_is_codex_only(tmp_path: Path) -> None:
     project = repo(tmp_path)
 
-    wiring.wire(project, runtimes=wiring.RUNTIMES)
+    wiring.wire(project, runtimes=tuple(registry.discover().values()))
 
     claude = json.loads((project / ".claude" / "settings.local.json").read_text())
     codex = json.loads((project / ".codex" / "hooks.json").read_text())
@@ -337,7 +341,7 @@ def test_unwiring_covers_a_runtime_whose_cli_is_gone(tmp_path: Path) -> None:
     the next person to install that CLI inherits a gate they never asked for.
     """
     project = repo(tmp_path)
-    wiring.wire(project, runtimes=wiring.RUNTIMES)
+    wiring.wire(project, runtimes=tuple(registry.discover().values()))
 
     wiring.unwire(project)
 
@@ -358,7 +362,7 @@ def test_a_hook_with_no_trust_record_is_reported(tmp_path: Path) -> None:
     empty = tmp_path / "config.toml"
     empty.write_text("")
 
-    pending = wiring.codex_untrusted(hooks_file, empty)
+    pending = trust.untrusted(hooks_file, empty)
 
     assert len(pending) == 3
     assert all(str(hooks_file) in key for key in pending)
@@ -375,11 +379,11 @@ def test_a_recorded_hook_is_not_reported_as_untrusted(tmp_path: Path) -> None:
     config.write_text(
         "".join(
             f'[hooks.state."{key}"]\ntrusted_hash = "sha256:x"\n'
-            for key in wiring.codex_trust_keys(hooks_file)
+            for key in trust.trust_keys(hooks_file)
         )
     )
 
-    assert wiring.codex_untrusted(hooks_file, config) == []
+    assert trust.untrusted(hooks_file, config) == []
 
 
 def test_editing_the_hooks_file_makes_trust_stale(tmp_path: Path) -> None:
@@ -395,7 +399,7 @@ def test_editing_the_hooks_file_makes_trust_stale(tmp_path: Path) -> None:
     hooks_file = project / ".codex" / "hooks.json"
     os.utime(hooks_file, (time.time() + 10, time.time() + 10))
 
-    assert wiring.codex_trust_is_stale(hooks_file, config) is True
+    assert trust.is_stale(hooks_file, config) is True
 
 
 def test_trust_is_not_claimed_to_be_fresh(tmp_path: Path) -> None:
@@ -408,12 +412,12 @@ def test_trust_is_not_claimed_to_be_fresh(tmp_path: Path) -> None:
     config.write_text("")
     os.utime(config, (time.time() + 10, time.time() + 10))
 
-    assert wiring.codex_trust_is_stale(hooks_file, config) is False
+    assert trust.is_stale(hooks_file, config) is False
 
 
 # --- Antigravity, whose file is a third shape ---------------------------------
 
-ANTIGRAVITY = next(r for r in wiring.RUNTIMES if r.name == "antigravity")
+ANTIGRAVITY = registry.get("antigravity")
 
 
 def antigravity_hooks(project: Path) -> dict:
@@ -530,3 +534,151 @@ def test_unwiring_antigravity_leaves_somebody_elses_hook_alone(tmp_path: Path) -
     written = antigravity_hooks(project)
     assert written["safety-gate"]["PreToolUse"][0]["hooks"][0]["command"] == "/other/check.sh"
     assert "halyard" not in written
+
+
+# --- which runtimes a project actually gets ----------------------------------
+
+
+def configured_project(tmp_path: Path, runtimes: list[str]) -> Path:
+    """A checkout with a `halyard.yaml` describing seats for those runtimes."""
+    root = tmp_path / "alpha-engine"
+    root.mkdir()
+    project = repo(root)
+    seats = "\n".join(
+        f"      s{index}:\n"
+        f"        runtime: {runtime}\n"
+        f"        session: session-{index}\n"
+        f'        chat: "-100{index}"\n'
+        for index, runtime in enumerate(runtimes)
+    )
+    (tmp_path / "halyard.yaml").write_text(
+        f"projects:\n  alpha-engine:\n    path: {project}\n    seats:\n" + (seats or "      {}\n")
+    )
+    return project
+
+
+def test_only_the_runtimes_the_project_is_configured_for_are_wired(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The bug this is a regression for, and it was wrong in both directions.
+
+    A Mac mini whose `halyard.yaml` described two Claude Code seats got
+    Antigravity's hooks written into that project — because Antigravity was
+    installed — and no Claude Code hooks at all, because its binary lives
+    inside an app bundle rather than on PATH. The file said exactly which
+    runtimes that project uses and nothing read it.
+    """
+    project = configured_project(tmp_path, ["claude-code"])
+    monkeypatch.chdir(tmp_path)
+
+    wiring.wire(project)
+
+    assert (project / ".claude" / "settings.local.json").exists()
+    assert not (project / ".agents").exists(), "a runtime nobody configured must not be wired"
+
+
+def test_an_installed_runtime_nobody_configured_is_left_alone(tmp_path: Path, monkeypatch) -> None:
+    """Being on the machine is not a reason to gate a project with it."""
+    project = configured_project(tmp_path, ["codex"])
+    monkeypatch.chdir(tmp_path)
+
+    wiring.wire(project)
+
+    assert (project / ".codex" / "hooks.json").exists()
+    assert not (project / ".claude").exists()
+    assert not (project / ".agents").exists()
+
+
+def test_a_configured_runtime_is_wired_even_when_its_cli_is_missing(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The hooks file is shared; the machine that runs that runtime may not be
+    this one. Silence would be the wrong answer either way — the note says so
+    while the gate still gets written."""
+    project = configured_project(tmp_path, ["antigravity"])
+    monkeypatch.chdir(tmp_path)
+    # Patched at the seam rather than on the spec, which is frozen on purpose:
+    # a descriptor somebody can reach in and edit is a descriptor that stops
+    # describing the package it came from.
+    monkeypatch.setattr("halyard.agents.antigravity.find_antigravity_binary", lambda *a: None)
+    monkeypatch.setattr("shutil.which", lambda name: None)
+
+    wiring.wire(project)
+
+    assert (project / ".agents" / "hooks.json").exists()
+
+
+def test_a_project_the_configuration_does_not_describe_falls_back(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Wiring before writing any seats has nothing better to go on than what is
+    installed, and wiring nothing would leave somebody with no gate and no
+    explanation."""
+    root = tmp_path / "unconfigured"
+    root.mkdir()
+    project = repo(root)
+    monkeypatch.chdir(tmp_path)
+
+    wiring.wire(project, runtimes=(CLAUDE,))
+
+    assert (project / ".claude" / "settings.local.json").exists()
+
+
+def test_with_nothing_given_the_configuration_decides_not_the_directory(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Halyardception, and it is not a joke at anyone's expense.
+
+    Where you are standing when you run `halyard wire` is almost always the
+    Halyard checkout, so a `cwd` default gated Halyard with its own bridge —
+    the control plane's every command then went through the hook it was
+    serving.
+    """
+    project = configured_project(tmp_path, ["claude-code"])
+    standing_in = tmp_path / "halyard-fleet"
+    standing_in.mkdir()
+    monkeypatch.chdir(standing_in)
+    # Read from the working directory, as the real configuration is.
+    monkeypatch.setattr(
+        "halyard.core.config_file.find_config", lambda d=None: tmp_path / "halyard.yaml"
+    )
+
+    assert wiring.targets(None) == [project]
+
+
+def test_a_named_project_still_wins(tmp_path: Path, monkeypatch) -> None:
+    configured_project(tmp_path, ["claude-code"])
+    monkeypatch.chdir(tmp_path)
+    other = tmp_path / "elsewhere"
+    other.mkdir()
+
+    assert wiring.targets(str(other)) == [other]
+
+
+def test_with_no_configuration_at_all_it_is_where_you_are(tmp_path: Path, monkeypatch) -> None:
+    """Then there is genuinely nothing else to go on."""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr("halyard.core.config_file.find_config", lambda d=None: None)
+
+    assert wiring.targets(None) == [Path.cwd()]
+
+
+def test_what_is_installed_does_not_decide_when_the_project_is_described(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The postmortem's rule, pinned.
+
+    On the machine this failed on, `installed()` answered "Antigravity only" —
+    Antigravity publishes a command and Claude Code hides its binary in an app
+    bundle. The project's own file said `claude-code`, twice. Forced here to
+    the same wrong answer, so the assertion is about the code rather than about
+    whichever agents happen to be on the machine running the tests.
+    """
+    project = configured_project(tmp_path, ["claude-code"])
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(registry, "installed", lambda: (ANTIGRAVITY,))
+
+    wiring.wire(project)
+
+    assert (project / ".claude" / "settings.local.json").exists()
+    assert not (project / ".agents").exists()

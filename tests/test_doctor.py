@@ -184,13 +184,13 @@ def test_a_disabled_hook_is_reported(tmp_path: Path) -> None:
         tmp_path, {"halyard": {**ANTIGRAVITY_FILE["halyard"], "enabled": False}}
     )
 
-    assert doctor._disabled_antigravity_hooks(path) == ["halyard"]
+    assert doctor._disabled_hooks(path) == ["halyard"]
 
 
 def test_an_enabled_hook_is_not_reported(tmp_path: Path) -> None:
     """Absent means enabled — the default is `true`, so a file that never
     mentions it must not be read as switched off."""
-    assert doctor._disabled_antigravity_hooks(antigravity_file(tmp_path, ANTIGRAVITY_FILE)) == []
+    assert doctor._disabled_hooks(antigravity_file(tmp_path, ANTIGRAVITY_FILE)) == []
 
 
 def test_another_tools_hooks_are_read_too(tmp_path: Path) -> None:

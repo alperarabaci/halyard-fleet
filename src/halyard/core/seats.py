@@ -30,9 +30,34 @@ from pathlib import Path
 
 from halyard.core.events import Role
 
-#: Runtimes a seat can be. Kept here rather than imported from the agent
-#: packages so that reading a configuration never imports a CLI wrapper.
-KNOWN_RUNTIMES = ("claude-code", "codex", "antigravity")
+
+def _default_runtime() -> str:
+    """What a seat is when its configuration did not say.
+
+    Every dialect this project has had defaulted to Claude Code, and the name
+    lives in the registry so that moving it does not mean finding it in three
+    parsers.
+    """
+    from halyard.agents import registry
+
+    return registry.DEFAULT
+
+
+def known_runtimes() -> tuple[str, ...]:
+    """What a seat's `runtime:` may say — asked, not listed.
+
+    This used to be a tuple written out here, with a note explaining that
+    reading a configuration should not import a CLI wrapper. The note was
+    right about the cost and wrong about the trade: a second list of runtime
+    names is a second place to edit, and the two drifting apart means a seat
+    somebody configured against a runtime the registry has, refused by a
+    validator that has not heard of it.
+
+    Imported inside the function so this module still costs nothing to import.
+    """
+    from halyard.agents import registry
+
+    return registry.names()
 
 
 @dataclass(frozen=True)
@@ -57,10 +82,11 @@ class Seat:
     project: str | None = None
 
     def __post_init__(self) -> None:
-        if self.runtime not in KNOWN_RUNTIMES:
+        allowed = known_runtimes()
+        if self.runtime not in allowed:
             raise ValueError(
                 f"Seat {self.label!r} has runtime {self.runtime!r}. "
-                f"Use one of: {', '.join(KNOWN_RUNTIMES)}."
+                f"Use one of: {', '.join(allowed)}."
             )
 
 
@@ -90,7 +116,7 @@ def _parse_seat(label: str, spec: str) -> Seat:
     role = fields.get("role")
     return Seat(
         label=label,
-        runtime=fields.get("runtime", "claude-code").lower(),
+        runtime=fields.get("runtime", _default_runtime()).lower(),
         session=fields.get("session"),
         chat=fields.get("chat"),
         role=Role(role.lower()) if role else None,
@@ -179,7 +205,7 @@ def from_environment(environ: dict[str, str] | None = None) -> list[Seat]:
         legacy.append(
             Seat(
                 label=label,
-                runtime=(env.get(runtime_key) or "claude-code").strip().lower(),
+                runtime=(env.get(runtime_key) or _default_runtime()).strip().lower(),
                 session=session,
                 chat=chat,
                 role=role,

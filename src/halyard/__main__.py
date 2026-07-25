@@ -111,38 +111,37 @@ def main() -> None:
         raise SystemExit(init_run())
 
     if command == "verify":
-        from halyard.verify import RUNTIMES, verify
+        from halyard.agents import registry
+        from halyard.verify import verify
 
+        # Only runtimes that can be driven non-interactively. Antigravity has
+        # no way to run one turn and exit, so it is not offered rather than
+        # offered and then found to be impossible.
+        drivable = tuple(s for s in registry.discover().values() if s.verify is not None)
         wanted = args[1] if len(args) > 1 else None
-        chosen = tuple(r for r in RUNTIMES if not wanted or r.name == wanted)
+        chosen = tuple(r for r in drivable if not wanted or r.name == wanted)
         if wanted and not chosen:
-            names = ", ".join(r.name for r in RUNTIMES)
+            names = ", ".join(r.name for r in drivable)
             print(f"halyard: unknown runtime {wanted!r}. Try one of: {names}", file=sys.stderr)
             raise SystemExit(2)
         raise SystemExit(verify(runtimes=chosen or None))
 
     if command in ("wire", "unwire"):
         from halyard import wiring
-        from halyard.core.config_file import resolve_project
 
-        # A project name or a directory. The configuration already says where
-        # every project is, so retyping the path is both tedious and a way to
-        # gate the wrong tree — which looks like success right up until a
-        # command runs somewhere nobody was watching.
-        given = args[1] if len(args) > 1 else None
-        if given is None:
-            where = Path.cwd()
-        elif (candidate := Path(given).expanduser()).is_dir():
-            where = candidate
-        else:
-            try:
-                where = resolve_project(given)
-            except ValueError as error:
-                print(f"halyard: {error}", file=sys.stderr)
-                raise SystemExit(2) from None
+        try:
+            chosen = wiring.targets(args[1] if len(args) > 1 else None)
+        except ValueError as error:
+            print(f"halyard: {error}", file=sys.stderr)
+            raise SystemExit(2) from None
 
         action = wiring.wire if command == "wire" else wiring.unwire
-        raise SystemExit(action(where.resolve()))
+        failures = 0
+        for index, target in enumerate(chosen):
+            if index:
+                print()
+            failures |= action(target.resolve())
+        raise SystemExit(failures)
 
     if command not in ("serve",):
         print(f"halyard: unknown command {command!r}\n\n{USAGE}", file=sys.stderr)

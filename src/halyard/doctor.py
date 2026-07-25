@@ -92,12 +92,14 @@ def _read(settings_file: Path) -> dict:
     return loaded if isinstance(loaded, dict) else {}
 
 
-def _disabled_antigravity_hooks(settings_file: Path) -> list[str]:
-    """The hook names in an Antigravity file that are switched off.
+def _disabled_hooks(settings_file: Path) -> list[str]:
+    """The named hooks in a file that are switched off in place.
 
     `"enabled": false` leaves the file looking exactly like a wired one — the
     events are there, the commands are there, the paths are right — and runs
     none of it. That is the shape of failure this whole checker exists for.
+
+    Only asked of runtimes whose spec says a hook can be disabled this way.
     """
     return [
         name
@@ -106,22 +108,23 @@ def _disabled_antigravity_hooks(settings_file: Path) -> list[str]:
     ]
 
 
-def _antigravity_hook_commands(settings_file: Path) -> list[tuple[str, str]]:
-    """Every hook command in an Antigravity file, as (event, path).
+def _named_hook_commands(settings_file: Path, grouped: tuple[str, ...]) -> list[tuple[str, str]]:
+    """Every hook command in a `named`-dialect file, as (event, path).
 
-    A different shape from the other two: top-level keys are hook *names*, and
-    only some events wrap their handlers in a `matcher`/`hooks` group. Reading
-    it with the other parser finds nothing at all and reports an ungated
-    project, whose obvious remedy is to wire a second gate on top of the first.
+    A different shape from the wrapped one: top-level keys are hook *names*,
+    and only some events put their handlers behind a `matcher`/`hooks` group.
+    Reading it with the other parser finds nothing at all and reports an
+    ungated project, whose obvious remedy is to wire a second gate on top of
+    the one already there.
     """
-    from halyard.wiring import antigravity_handlers
+    from halyard.wiring import named_handlers
 
     found: list[tuple[str, str]] = []
-    for spec in _read(settings_file).values():
-        if not isinstance(spec, dict):
+    for document in _read(settings_file).values():
+        if not isinstance(document, dict):
             continue
-        for event in [key for key in spec if key != "enabled"]:
-            for handler in antigravity_handlers(spec, event):
+        for event in [key for key in document if key != "enabled"]:
+            for handler in named_handlers(document, event, grouped):
                 command = handler.get("command")
                 if isinstance(command, str) and command.strip():
                     found.append((event, command.split()[0]))
@@ -129,11 +132,17 @@ def _antigravity_hook_commands(settings_file: Path) -> list[tuple[str, str]]:
 
 
 def _hook_commands(
-    settings_file: Path, project_dir: Path, runtime: str = "claude-code"
+    settings_file: Path, project_dir: Path, runtime: str | None = None
 ) -> list[tuple[str, str]]:
-    """Every hook command in a settings file, as (event, resolved path)."""
-    if runtime == "antigravity":
-        return _antigravity_hook_commands(settings_file)
+    """Every hook command in a settings file, as (event, resolved path).
+
+    Which parser to use is the runtime's own answer, not a name checked here.
+    """
+    from halyard.agents import registry
+
+    spec = registry.get(runtime or registry.DEFAULT)
+    if spec is not None and spec.hooks.dialect == "named":
+        return _named_hook_commands(settings_file, spec.hooks.grouped)
     config = _read(settings_file)
     found: list[tuple[str, str]] = []
     for event, groups in (config.get("hooks") or {}).items():
@@ -149,6 +158,30 @@ def _hook_commands(
     return found
 
 
+def _render(check, label: str, *, indent: bool = False, **context) -> tuple[list[str], bool]:
+    """Turn a runtime's own findings into doctor's lines, and say if it is fatal.
+
+    The runtime answers `(level, text)`; how that looks on a terminal is this
+    module's business and none of its own. A `fail` stops the seat being
+    checked further, because everything after it would be a question asked of
+    something that cannot answer.
+    """
+    if check is None:
+        return [], False
+    prefixes = {"ok": OK, "warn": WARN, "fail": FAIL}
+    lines: list[str] = []
+    fatal = False
+    for level, text in check(**context):
+        fatal = fatal or level == "fail"
+        if not level:
+            # A continuation line, already spoken for by the one above it.
+            lines.append(f"{'':16}{text}")
+            continue
+        head = prefixes[level]
+        lines.append(f"{head}{'        ' if indent else ''}{label}{': ' if label else ''}{text}")
+    return lines, fatal
+
+
 def _check_seat(
     seat, claude_binary: str | None = None, project_path: Path | None = None
 ) -> tuple[list[str], int]:
@@ -158,65 +191,40 @@ def _check_seat(
     absent from the other, and the mistake is easy to make because the names
     look alike. Asking the seat's own runtime is the only way to tell.
     """
+    from halyard.agents import registry
+
     lines: list[str] = []
     label = f"{seat.label} ({seat.runtime})"
 
     if not seat.session:
         return [f"{WARN}{label}: no session name, so nothing can be sent to it"], 0
 
-    if seat.runtime == "antigravity":
-        from halyard.agents.antigravity import (
-            find_antigravity_binary,
-            language_server_endpoints,
-        )
-        from halyard.agents.antigravity import find_session as look_up
+    spec = registry.get(seat.runtime)
+    if spec is None:
+        # A seat naming a runtime this build does not have. Said plainly rather
+        # than skipped: it is a seat somebody believes in and cannot reach.
+        return [f"{FAIL}{label}: no runtime package named {seat.runtime!r} is installed"], 1
 
-        if find_antigravity_binary() is None:
-            return [f"{FAIL}{label}: Antigravity is not installed on this machine"], 1
-        if not language_server_endpoints():
-            # Not a failure: the gate works whether or not the app is open, and
-            # only delivery needs it. Said plainly because this runtime is the
-            # only one where a closed application means messages cannot arrive.
-            lines.append(f"{WARN}{label}: Antigravity is not running, so nothing can be sent")
-    elif seat.runtime == "codex":
-        from halyard.agents.codex import find_codex_binary
-        from halyard.agents.codex import find_session as look_up
+    # Can it be reached at all, before asking it anything. The runtime answers;
+    # this only renders. Each of these checks was a branch here until the
+    # package that knows the answer took it back.
+    reported, fatal = _render(spec.check_available, label, claude_binary=claude_binary)
+    lines += reported
+    if fatal:
+        return lines, 1
 
-        if find_codex_binary() is None:
-            return [f"{FAIL}{label}: the codex CLI is not on this machine"], 1
-    else:
-        from halyard.agents.claude_code import find_session as look_up
-        from halyard.agents.claude_code.runner import find_claude_binary
-
-        selected_binary = find_claude_binary(claude_binary)
-        if selected_binary is None:
-            return [f"{FAIL}{label}: the claude CLI is not on this machine"], 1
-        lines.append(f"{OK}{label}: messages use {selected_binary}")
-
-    ref = look_up(seat.session)
+    ref = spec.find_session(seat.session)
     if ref is None:
         lines.append(f"{FAIL}{label}: no session named {seat.session!r}")
         lines.append(f"        {seat.runtime} does not know that name — check it against")
-        lines.append(
-            "        `halyard sessions`"
-            if seat.runtime == "claude-code"
-            else "        the Codex thread names on this machine"
-        )
+        lines.append(f"        {spec.sessions_hint or 'the names that runtime knows'}")
         return lines, 1
 
     lines.append(f"{OK}{label}: {seat.session}")
-    if seat.runtime == "antigravity":
-        from halyard.agents.antigravity.sessions import is_cli
-
-        if is_cli(ref.session_id):
-            # Findable and unreachable, which is the combination worth saying
-            # out loud: the name resolves, so everything looks configured, and
-            # every message to it would be refused.
-            lines.append(f"{FAIL}        that conversation belongs to the agy CLI, not the app,")
-            lines.append("                and the CLI keeps a separate store the application")
-            lines.append("                cannot see. Nothing can be sent to it — reopen the")
-            lines.append("                work in the Antigravity application and name that.")
-            return lines, 1
+    reported, fatal = _render(spec.check_session, "", ref=ref, indent=True)
+    lines += reported
+    if fatal:
+        return lines, 1
     if not ref.named_by_a_person:
         lines.append(f"{WARN}        that name was generated, and generated names are rewritten")
     if not seat.chat:
@@ -255,22 +263,20 @@ def _check_gated_project(label: str, ref, seat, directory: str) -> tuple[list[st
     if project_dir != session_dir:
         lines.append(f"        gated from the repository root: {project_dir}")
 
-    settings_files = {
-        "codex": [project_dir / ".codex" / "hooks.json"],
-        "antigravity": [project_dir / ".agents" / "hooks.json"],
-    }.get(
-        seat.runtime,
-        [
-            project_dir / ".claude" / "settings.json",
-            project_dir / ".claude" / "settings.local.json",
-        ],
+    from halyard.agents import registry
+
+    spec = registry.get(seat.runtime)
+    # The runtime says where its hooks live. Claude Code is the one with two
+    # candidates: a shared `settings.json` that is committed and a
+    # `settings.local.json` that is not, and a gate may be written into either.
+    settings_files = (
+        [project_dir / name for name in spec.hooks.also] + [project_dir / spec.hooks.settings]
+        if spec
+        else []
     )
     present = [f for f in settings_files if f.exists()]
     if not present:
-        where = {
-            "codex": ".codex/hooks.json",
-            "antigravity": ".agents/hooks.json",
-        }.get(seat.runtime, ".claude/settings.json")
+        where = spec.hooks.settings if spec else "a hooks file"
         lines.append(f"{FAIL}        no {where} — nothing is gating this project")
         lines.append(f"                halyard wire {project_dir}")
         return lines, 1
@@ -278,9 +284,7 @@ def _check_gated_project(label: str, ref, seat, directory: str) -> tuple[list[st
     problems = 0
     seen_events: set[str] = set()
     for settings_file in present:
-        switched_off = (
-            _disabled_antigravity_hooks(settings_file) if seat.runtime == "antigravity" else []
-        )
+        switched_off = _disabled_hooks(settings_file) if spec and spec.hooks.disableable else []
         for name in switched_off:
             problems += 1
             lines.append(f'{FAIL}        "{name}" has "enabled": false, so none of it runs')
@@ -306,45 +310,18 @@ def _check_gated_project(label: str, ref, seat, directory: str) -> tuple[list[st
     if "Stop" not in seen_events:
         lines.append(f"{WARN}        no Stop hook — replies will not reach the channel")
 
-    if seat.runtime == "codex":
-        from halyard.wiring import codex_trust_is_stale, codex_untrusted
-
-        hooks_file = project_dir / ".codex" / "hooks.json"
-        # Codex accepts `description` and `hooks` and refuses a file containing
-        # anything else — the whole file, not the field. It says so in a
-        # warning on stderr and then behaves as though no hooks existed, which
-        # is a gate that has silently ceased to exist on a project that looks
-        # correctly wired. Measured: one stray key cost an evening.
-        try:
-            keys = set(json.loads(hooks_file.read_text(encoding="utf-8")))
-        except (OSError, ValueError):
-            keys = set()
-        stray = sorted(keys - {"description", "hooks"})
-        if stray:
-            problems += 1
-            lines.append(f"{FAIL}        hooks.json has field(s) Codex rejects: {', '.join(stray)}")
-            lines.append("                it refuses the whole file over one, so nothing is gated")
-        untrusted = codex_untrusted(hooks_file)
-        stale = codex_trust_is_stale(hooks_file)
-        if untrusted:
-            problems += 1
-            lines.append(f"{FAIL}        hooks here have never been trusted")
-            lines.append("                Codex skips an untrusted hook without a word, so this")
-            lines.append("                project has no gate at all. Review and trust them:")
-            lines.append(f"                    cd {project_dir} && codex")
-            lines.append("                A hook review appears at startup. Prefer `Review hooks`")
-            lines.append("                over `Trust all` — these run from outside the project.")
-        elif stale:
-            lines.append(f"{WARN}        hooks or bridge scripts changed since trust was recorded")
-            lines.append("                Codex hashes the handler, so updating this checkout may")
-            lines.append("                have revoked it — and a revoked hook is skipped in")
-            lines.append(f"                silence. Re-review with: cd {project_dir} && codex")
-        else:
-            # Existence is all we can prove without reimplementing Codex's
-            # private hash canonicalisation. Say exactly that: this confirms
-            # why no review prompt appeared without claiming more than the
-            # persisted state establishes.
-            lines.append(f"{OK}        trust records exist for every Codex hook")
+    if spec is not None and spec.check_wired is not None:
+        # Whether these hooks will actually run is the runtime's own question.
+        # Codex is the one that can be wired perfectly and still have no gate.
+        reported, fatal = _render(
+            spec.check_wired,
+            "",
+            indent=True,
+            hooks_file=project_dir / spec.hooks.settings,
+            project_dir=project_dir,
+        )
+        lines += reported
+        problems += 1 if fatal else 0
 
     # Do not compare ref.started_at with the settings mtime. `started_at` is
     # when the *conversation was created*, not when the desktop/CLI process

@@ -18,118 +18,34 @@ from __future__ import annotations
 
 import json
 import shutil
-from collections.abc import Callable
-from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
+
+from halyard.agents import registry
+from halyard.agents.spec import RuntimeSpec
 
 BRIDGE_DIR = Path(__file__).resolve().parent.parent.parent / "bridge"
 
 #: `PreToolUse` is the gate. `Stop` is the relay that sends replies to a phone.
+#: Every runtime gets both; anything else it needs is in its own `hooks.extra`.
+#:
+#: Scripts by name, matching the spec, so a runtime package never has to know
+#: where this checkout keeps its bridge.
 WIRING = (
-    ("PreToolUse", "Bash", BRIDGE_DIR / "hook.sh", 600),
-    ("Stop", None, BRIDGE_DIR / "relay.py", 15),
+    ("PreToolUse", "Bash", "hook.sh", 600),
+    ("Stop", None, "relay.py", 15),
 )
 
-# Codex asks a separate native question when a tool requests sandbox
-# escalation. A PreToolUse allow does not answer it. This stays Codex-only:
-# Claude Code's PreToolUse decision already replaces its permission prompt.
-CODEX_WIRING = (("PermissionRequest", "Bash", BRIDGE_DIR / "permission_hook.sh", 600),)
-
-# Antigravity-only, and it is how a message gets in at all. `PreInvocation` is
-# the one hook that can answer with `injectSteps`, and a `{"userMessage": ...}`
-# step is the only way text enters a conversation as a turn the person typed —
-# `agentapi send-message` can file a SYSTEM_MESSAGE and nothing else. The other
-# two runtimes have a CLI that resumes a session and need none of this.
-ANTIGRAVITY_WIRING = (("PreInvocation", None, BRIDGE_DIR / "inject.py", 15),)
-
-
-@dataclass(frozen=True)
-class Runtime:
-    """One runtime's idea of where hooks live and how a tool is matched.
-
-    The shape of a hook entry is the same in both — an event, a list of groups,
-    a `command` and a `timeout` — which is why one merge routine serves both.
-    What differs is the file and the matcher dialect.
-    """
-
-    name: str
-    #: Relative to the repository root.
-    settings: str
-    matcher: str
-    #: The CLI whose presence means this runtime is worth wiring at all.
-    binary: str
-    #: Whether this runtime is on the machine, for when a PATH lookup is not
-    #: the answer. Antigravity's application bundles its binaries inside the
-    #: `.app` and puts nothing on PATH, so `which` reports it missing on a
-    #: machine where it is certainly installed — and the gate would then be
-    #: skipped on the only runtime that cannot be reached any other way.
-    present: Callable[[], bool] | None = None
-
-    def on_this_machine(self) -> bool:
-        return self.present() if self.present else bool(shutil.which(self.binary))
-
-
-RUNTIMES = (
-    Runtime(
-        name="claude-code",
-        settings=".claude/settings.local.json",
-        matcher="Bash",
-        binary="claude",
-    ),
-    # Codex matches with a regular expression, and with more than one name.
-    #
-    # `codex exec` runs a shell command as a tool the hook payload calls
-    # `Bash`. The desktop app does not: it calls a tool named `exec` whose
-    # input is JavaScript, and the shell call happens inside that —
-    # `tools.exec_command({"cmd": "git reset", ...})`. A matcher of `^Bash$`
-    # therefore gates the CLI and silently ignores the app, which is a gate
-    # that looks installed, reports itself installed, and never fires.
-    #
-    # Measured from a real transcript: the same session, driven both ways, made
-    # a `function_call` named `exec_command` from the CLI and a
-    # `custom_tool_call` named `exec` from the app.
-    Runtime(
-        name="codex",
-        settings=".codex/hooks.json",
-        matcher="^(Bash|exec|exec_command|shell)$",
-        binary="codex",
-    ),
-    # Antigravity names its shell tool `run_command`, and its matcher is a
-    # regex over tool names derived by "lowercasing the step type and removing
-    # the CORTEX_STEP_TYPE_ prefix".
-    Runtime(
-        name="antigravity",
-        settings=".agents/hooks.json",
-        matcher="run_command",
-        binary="agy",
-        present=lambda: _antigravity_present(),
-    ),
-)
-
-#: The top-level key this install writes its hooks under.
+#: The top-level key a `named`-dialect file gets its hooks under.
 #:
-#: Antigravity's file is not `{"hooks": {...}}` like the other two. Each
+#: Antigravity's document is not `{"hooks": {...}}` like the other two: each
 #: top-level key is a *hook name* whose value holds that hook's events, and
-#: every name contributing to an event is merged and run in turn. So this is a
-#: namespace rather than a wrapper, and two tools can gate the same project
-#: without either one having to know about the other.
-ANTIGRAVITY_NAME = "halyard"
-
-#: The events Antigravity wraps in a `matcher`/`hooks` group. Every other event
-#: — `Stop` among them — is a *flat* list of handler objects.
-#:
-#: Not cosmetic. A `Stop` handler written in the grouped shape has no `command`
-#: where Antigravity looks for one, so the relay is not run and no reply ever
-#: reaches a phone — with the file present, and everything reporting wired.
-ANTIGRAVITY_GROUPED = ("PreToolUse", "PostToolUse")
-
-
-def _antigravity_present() -> bool:
-    """The application or its CLI, either of which means this is worth wiring."""
-    from halyard.agents.antigravity import find_antigravity_binary
-
-    return find_antigravity_binary() is not None or bool(shutil.which("agy"))
+#: every name contributing to an event is merged and run in turn. So it is a
+#: namespace rather than a wrapper, and two tools can gate one project without
+#: either having to know about the other. This is what Halyard calls itself
+#: there — a wiring concern, not something a runtime package should have an
+#: opinion about.
+HOOK_NAME = "halyard"
 
 
 RULES = """\
@@ -161,11 +77,12 @@ def project_root(directory: Path) -> Path:
     return directory
 
 
-def settings_path(directory: Path, runtime: Runtime | None = None) -> Path:
-    return project_root(directory) / (runtime or RUNTIMES[0]).settings
+def settings_path(directory: Path, runtime: RuntimeSpec | None = None) -> Path:
+    spec = runtime or next(iter(registry.discover().values()))
+    return spec.settings_path(project_root(directory))
 
 
-def installed(runtimes: tuple[Runtime, ...] = RUNTIMES) -> tuple[Runtime, ...]:
+def installed(runtimes: tuple[RuntimeSpec, ...] | None = None) -> tuple[RuntimeSpec, ...]:
     """The runtimes whose CLI is on this machine.
 
     Wiring is offered for these and removal is attempted for all of them. The
@@ -173,102 +90,78 @@ def installed(runtimes: tuple[Runtime, ...] = RUNTIMES) -> tuple[Runtime, ...]:
     while leaving one behind after a CLI is uninstalled is a hook pointing at a
     bridge nothing will ever call.
     """
-    return tuple(r for r in runtimes if r.on_this_machine())
+    candidates = runtimes if runtimes is not None else tuple(registry.discover().values())
+    return tuple(r for r in candidates if r.on_this_machine())
 
 
-def _snake(event: str) -> str:
-    """`PreToolUse` as Codex writes it in a trust key: `pre_tool_use`.
+def targets(given: str | None) -> list[Path]:
+    """Which projects a wire or unwire is about.
 
-    Lowercasing alone gives `pretooluse`, which matches nothing — so every hook
-    read as never trusted, and doctor reported no gate on a project that had
-    one. A checker that is confidently wrong is worse than no checker: the
-    obvious response to its FAIL is to go and re-grant trust that was never
-    missing.
+    **With nothing given, the configuration is the answer — not `cwd`.** Where
+    you are standing when you run `halyard wire` is almost always the Halyard
+    checkout, so defaulting to the working directory gated Halyard with its own
+    bridge: the control plane's every command then went through the hook it was
+    serving. Nobody asks for that, and nothing about it is obvious afterwards.
+
+    An explicit argument still wins, as a project name or a directory. Only a
+    machine with no configuration at all falls back to where you are, because
+    then there is nothing else to go on.
     """
-    out = []
-    for index, character in enumerate(event):
-        if character.isupper() and index:
-            out.append("_")
-        out.append(character.lower())
-    return "".join(out)
+    from halyard.core.config_file import projects, resolve_project
+
+    if given is not None:
+        candidate = Path(given).expanduser()
+        return [candidate if candidate.is_dir() else resolve_project(given)]
+
+    described = [project.path.expanduser() for project in projects() if project.path]
+    return described or [Path.cwd()]
 
 
-def codex_trust_keys(hooks_file: Path) -> list[str]:
-    """The trust keys Codex would look for, one per hook entry in that file.
+def configured_for(directory: Path) -> tuple[RuntimeSpec, ...] | None:
+    """The runtimes this project's seats are written for, or None if it has none.
 
-    Codex will not run a hook it has not been told to trust, and — measured —
-    it does not say so. An untrusted hook is skipped in silence: the turn
-    completes normally, no warning is printed, and for a `PreToolUse` gate that
-    means there is no gate at all while everything looks wired.
+    **The configuration decides what gets wired, not the machine.** Asking what
+    is installed answers a different question and answers it wrongly in both
+    directions: a project whose seats are all Claude Code had Antigravity's
+    hooks written into it because Antigravity happened to be on that Mac, and
+    Claude Code's own hooks were skipped because its binary lives inside an app
+    bundle and was not on `PATH`. The file said exactly which runtimes that
+    project uses, and nothing read it.
 
-    Trust is recorded in `~/.codex/config.toml` under
-    `[hooks.state."<file>:<event>:<group>:<hook>"]`, each with a
-    `trusted_hash`. The hash covers the entry, so editing a command invalidates
-    it — which is how this repository's own relay stopped firing the moment its
-    path was corrected.
+    `None` means the configuration does not describe this directory at all —
+    somebody wiring a project before writing seats for it — and only then is
+    "what is installed" the best guess available.
     """
+    from halyard.core.config_file import projects
+
     try:
-        config = json.loads(hooks_file.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return []
-    keys = []
-    for event, groups in (config.get("hooks") or {}).items():
-        for group_index, group in enumerate(groups if isinstance(groups, list) else []):
-            for hook_index, _ in enumerate((group or {}).get("hooks") or []):
-                keys.append(f"{hooks_file}:{_snake(event)}:{group_index}:{hook_index}")
-    return keys
+        described = projects()
+    except ValueError:
+        # A configuration that cannot be read is not a configuration that says
+        # nothing. Refusing to guess is the whole point of this function.
+        return None
+    if not described:
+        return None
+
+    root = project_root(directory).resolve()
+    for project in described:
+        if project.path is None or project.path.expanduser().resolve() != root:
+            continue
+        wanted = {seat.runtime for seat in project.seats}
+        found = registry.discover()
+        return tuple(found[name] for name in found if name in wanted)
+    return None
 
 
-def codex_untrusted(hooks_file: Path, config_toml: Path | None = None) -> list[str]:
-    """Hook entries with no trust record at all — Codex will skip these.
+def _fallback() -> tuple[RuntimeSpec, ...]:
+    """What to wire when nothing looks installed.
 
-    Only absence is reported. Whether a record that *does* exist still matches
-    is a question about Codex's own hashing, which is not reimplemented here:
-    guessing at somebody else's canonicalisation would produce a checker that
-    is confidently wrong, which is worse than one that states its limit.
+    A PATH that hides the CLI is a likelier explanation than a machine with no
+    agent on it at all, so one runtime is wired rather than none — and it is
+    the first the registry found, which is stable across machines.
     """
-    toml = config_toml or Path.home() / ".codex" / "config.toml"
-    try:
-        recorded = toml.read_text(encoding="utf-8", errors="replace")
-    except OSError:
-        recorded = ""
-    return [key for key in codex_trust_keys(hooks_file) if f'"{key}"' not in recorded]
-
-
-def codex_trust_is_stale(hooks_file: Path, config_toml: Path | None = None) -> bool:
-    """Whether anything trust covers has changed since it was last recorded.
-
-    A one-directional inference, and sound in the direction it is made: Codex
-    writes trust into `config.toml`, so a hooks file modified *after* that file
-    means no trust has been recorded since the edit, and the entry's hash
-    cannot still match. The reverse says nothing — `config.toml` is rewritten
-    for unrelated reasons — so this reports staleness and never freshness.
-
-    Worth having because the alternative reading is the dangerous one. A trust
-    key that still exists with an outdated hash looks exactly like a trusted
-    hook, and Codex skips it in silence.
-    """
-    toml = config_toml or Path.home() / ".codex" / "config.toml"
-    # The scripts as well as the file that names them. Codex records a SHA-256
-    # of the handler, so updating this checkout — a `git pull` that touches
-    # `hook.sh` — plausibly revokes trust on every project it is wired into,
-    # silently, in the way everything about Codex hook trust is silent.
-    #
-    # Unverified: the exact input to that hash is not reimplemented here, for
-    # the reason given above. Watching the scripts as well as the file costs a
-    # warning that is sometimes unnecessary, against missing one that means a
-    # gate has disappeared.
-    watched = [
-        hooks_file,
-        BRIDGE_DIR / "hook.sh",
-        BRIDGE_DIR / "permission_hook.sh",
-        BRIDGE_DIR / "relay.py",
-    ]
-    try:
-        recorded = toml.stat().st_mtime
-        return any(path.stat().st_mtime > recorded for path in watched if path.exists())
-    except OSError:
-        return False
+    found = tuple(registry.discover().values())
+    return found[:1]
 
 
 def _load(path: Path) -> dict:
@@ -316,41 +209,47 @@ def _is_ours(command: object) -> bool:
     return isinstance(command, str) and str(BRIDGE_DIR.resolve()) in command
 
 
-def antigravity_handlers(spec: dict, event: str) -> list[dict]:
-    """Every handler an Antigravity hook spec has for one event.
+def named_handlers(document: dict, event: str, grouped: tuple[str, ...]) -> list[dict]:
+    """Every handler one named hook has for one event, whichever shape it is in.
 
-    Flattens the two shapes so callers can ask one question. Reading a grouped
-    event as flat yields the group — an object with a `matcher` and no
-    `command` — which looks like a hook pointing nowhere.
+    Flattens the two so callers can ask one question. Reading a grouped event
+    as flat yields the group itself — an object with a `matcher` and no
+    `command` — which reads as a hook pointing nowhere.
+
+    `grouped` is passed rather than looked up: this is the shape routine, and a
+    module that decides for itself which events a runtime groups is the module
+    that has to be edited when a fourth runtime groups different ones.
     """
-    entries = spec.get(event) or []
+    entries = document.get(event) or []
     if not isinstance(entries, list):
         return []
-    if event in ANTIGRAVITY_GROUPED:
+    if event in grouped:
         return [h for group in entries for h in (group or {}).get("hooks") or []]
     return [entry for entry in entries if isinstance(entry, dict)]
 
 
-def _wire_antigravity(directory: Path, runtime: Runtime) -> int:
+def _wire_antigravity(directory: Path, runtime: RuntimeSpec) -> int:
     """Add the gate to `.agents/hooks.json`, in Antigravity's own shape."""
     path = settings_path(directory, runtime)
     config = _load(path)
-    spec = config.setdefault(ANTIGRAVITY_NAME, {})
-    if not isinstance(spec, dict):
-        raise SystemExit(f"halyard: {path} has a {ANTIGRAVITY_NAME!r} that is not an object.")
+    document = config.setdefault(HOOK_NAME, {})
+    if not isinstance(document, dict):
+        raise SystemExit(f"halyard: {path} has a {HOOK_NAME!r} that is not an object.")
 
     added = []
-    for event, _matcher, script, timeout in WIRING + ANTIGRAVITY_WIRING:
+    for event, _matcher, script_name, timeout in WIRING + runtime.hooks.extra:
+        script = BRIDGE_DIR / script_name
         if not script.exists():
             print(f"halyard: {script} is missing from this install")
             return 1
-        if any(_is_ours(h.get("command")) for h in antigravity_handlers(spec, event)):
+        already = named_handlers(document, event, runtime.hooks.grouped)
+        if any(_is_ours(h.get("command")) for h in already):
             continue
         handler = {"type": "command", "command": str(script), "timeout": timeout}
-        entries = spec.setdefault(event, [])
+        entries = document.setdefault(event, [])
         entries.append(
-            {"matcher": runtime.matcher, "hooks": [handler]}
-            if event in ANTIGRAVITY_GROUPED
+            {"matcher": runtime.hooks.matcher, "hooks": [handler]}
+            if event in runtime.hooks.grouped
             else handler
         )
         added.append(event)
@@ -359,9 +258,9 @@ def _wire_antigravity(directory: Path, runtime: Runtime) -> int:
     # the file looking exactly like a wired one. Wiring means the gate works,
     # so it is turned back on — and said out loud, because somebody put it
     # there on purpose and deserves to know it was undone.
-    re_enabled = spec.get("enabled") is False
+    re_enabled = document.get("enabled") is False
     if re_enabled:
-        spec["enabled"] = True
+        document["enabled"] = True
 
     if not added and not re_enabled:
         print(f"  {runtime.name}: already wired ({path})")
@@ -375,25 +274,25 @@ def _wire_antigravity(directory: Path, runtime: Runtime) -> int:
         print(f'  {runtime.name}: "enabled": false was turned back on — it disabled the gate')
     if backup:
         print(f"    previous version kept at {backup}")
-    kept = sorted(k for k in config if k != ANTIGRAVITY_NAME)
+    kept = sorted(k for k in config if k != HOOK_NAME)
     if kept:
         print(f"    left untouched in that file: {', '.join(kept)}")
     return 0
 
 
-def _unwire_antigravity(directory: Path, runtime: Runtime) -> int:
+def _unwire_antigravity(directory: Path, runtime: RuntimeSpec) -> int:
     path = settings_path(directory, runtime)
     if not path.exists():
         return 0
     config = _load(path)
-    spec = config.get(ANTIGRAVITY_NAME)
-    if not isinstance(spec, dict):
+    document = config.get(HOOK_NAME)
+    if not isinstance(document, dict):
         return 0
 
     removed = []
-    for event in [key for key in spec if key != "enabled"]:
-        entries = spec.get(event) or []
-        if event in ANTIGRAVITY_GROUPED:
+    for event in [key for key in document if key != "enabled"]:
+        entries = document.get(event) or []
+        if event in runtime.hooks.grouped:
             kept = []
             for group in entries:
                 before = (group or {}).get("hooks") or []
@@ -407,39 +306,40 @@ def _unwire_antigravity(directory: Path, runtime: Runtime) -> int:
             if len(kept) != len(entries):
                 removed.append(event)
         if kept:
-            spec[event] = kept
+            document[event] = kept
         else:
-            del spec[event]
+            del document[event]
 
     if not removed:
         return 0
     # A name holding nothing but `enabled` is not a hook, so the whole key goes
     # rather than being left as a husk somebody has to work out the meaning of.
-    if not [key for key in spec if key != "enabled"]:
-        config.pop(ANTIGRAVITY_NAME, None)
+    if not [key for key in document if key != "enabled"]:
+        config.pop(HOOK_NAME, None)
 
     backup = _back_up(path)
     _write(path, config)
     print(f"  {runtime.name}: removed {', '.join(sorted(set(removed)))} from {path}")
     if backup:
         print(f"    previous version kept at {backup}")
-    kept_keys = sorted(k for k in config if k != ANTIGRAVITY_NAME)
+    kept_keys = sorted(k for k in config if k != HOOK_NAME)
     if kept_keys:
         print(f"    left untouched in that file: {', '.join(kept_keys)}")
     return 1
 
 
-def _wire_one(directory: Path, runtime: Runtime) -> int:
+def _wire_one(directory: Path, runtime: RuntimeSpec) -> int:
     """Add one runtime's hooks, keeping everything already in its file."""
-    if runtime.name == "antigravity":
+    if runtime.hooks.dialect == "named":
         return _wire_antigravity(directory, runtime)
     path = settings_path(directory, runtime)
     config = _load(path)
     hooks = config.setdefault("hooks", {})
 
     added = []
-    runtime_wiring = WIRING + (CODEX_WIRING if runtime.name == "codex" else ())
-    for event, matcher, script, timeout in runtime_wiring:
+    runtime_wiring = WIRING + runtime.hooks.extra
+    for event, matcher, script_name, timeout in runtime_wiring:
+        script = BRIDGE_DIR / script_name
         if not script.exists():
             print(f"halyard: {script} is missing from this install")
             return 1
@@ -456,7 +356,7 @@ def _wire_one(directory: Path, runtime: Runtime) -> int:
             # is present, `doctor` is happy, and half the tool calls are not
             # gated. Correcting it costs a re-review of the hook, which is the
             # honest price of the matcher having been incomplete.
-            wanted = runtime.matcher if matcher == "Bash" else matcher
+            wanted = runtime.hooks.matcher if matcher == "Bash" else matcher
             for group in mine:
                 if wanted and group.get("matcher") != wanted:
                     group["matcher"] = wanted
@@ -470,7 +370,7 @@ def _wire_one(directory: Path, runtime: Runtime) -> int:
         # what "hook: Stop Failed" meant when this repository's own file had it.
         entry: dict = {"hooks": [{"type": "command", "command": str(script), "timeout": timeout}]}
         if matcher:
-            entry["matcher"] = runtime.matcher if matcher == "Bash" else matcher
+            entry["matcher"] = runtime.hooks.matcher if matcher == "Bash" else matcher
         groups.append(entry)
         added.append(event)
 
@@ -492,46 +392,58 @@ def _wire_one(directory: Path, runtime: Runtime) -> int:
     return 0
 
 
-def wire(directory: Path, runtimes: tuple[Runtime, ...] | None = None) -> int:
-    """Put the gate on a project, for every runtime this machine has.
+def wire(directory: Path, runtimes: tuple[RuntimeSpec, ...] | None = None) -> int:
+    """Put the gate on a project, for the runtimes its seats are written for.
 
-    Wiring a runtime the machine does not have would be clutter, so the default
-    is what is installed — falling back to the first entry when nothing is
-    found, because a PATH that hides the CLI is a likelier explanation than a
-    machine with no agent on it at all.
+    **The configuration decides.** It says which runtimes work in this project,
+    which is the actual question — and asking the machine instead got it wrong
+    both ways at once: a project configured with two Claude Code seats had
+    Antigravity's hooks written into it, because Antigravity was installed, and
+    Claude Code's own were skipped, because its binary lives inside an app
+    bundle rather than on `PATH`.
+
+    Only a project the configuration does not describe falls back to what is
+    installed — there is nothing better to go on, and wiring nothing at all
+    would leave somebody with no gate and no explanation.
     """
-    chosen = runtimes if runtimes is not None else installed() or RUNTIMES[:1]
+    described = configured_for(directory) if runtimes is None else None
+    chosen = runtimes if runtimes is not None else described
+    if chosen is None:
+        chosen = registry.installed() or _fallback()
     print(f"Wiring {project_root(directory)}")
+    if described is not None and not described:
+        # Described and empty is a real answer: the project exists in the
+        # configuration with no seats. Saying so beats wiring by guesswork.
+        print("  no seats are configured for this project, so nothing to wire")
+        return 0
     for runtime in chosen:
         if _wire_one(directory, runtime):
             return 1
+        if not runtime.on_this_machine():
+            # Configured but not here. The hooks are written anyway — this is
+            # a shared file and the machine that runs that runtime may be
+            # another one — but silence would read as "all set".
+            print(f"    note: no {runtime.human} CLI found on this machine")
 
     for runtime in chosen:
-        if runtime.name != "codex":
+        if runtime.check_wired is None:
             continue
-        hooks_file = settings_path(directory, runtime)
-        pending = codex_untrusted(hooks_file) or (
-            codex_trust_keys(hooks_file) if codex_trust_is_stale(hooks_file) else []
-        )
-        if pending:
-            # Loud, because the failure it prevents is silent. Codex skips an
-            # untrusted hook without a word, so a Codex project can look wired,
-            # report wired, and have no gate on it at all.
-            print(
-                f"\n⚠ {len(pending)} Codex hook(s) here are not trusted yet, and Codex "
-                "SKIPS\n"
-                "  an untrusted hook without saying so — a gate that is not trusted is\n"
-                "  not a gate. Open this project in Codex once and approve them, then\n"
-                "  check with `halyard doctor`."
-            )
+        root = project_root(directory)
+        # Loud, because the failure it prevents is silent: a runtime can be
+        # wired correctly and still run none of it.
+        for level, text in runtime.check_wired(settings_path(directory, runtime), root):
+            if level == "fail":
+                print(f"\n⚠ {runtime.human}: {text}")
+            elif level == "warn":
+                print(f"\n  {runtime.human}: {text}")
 
     print(f"\nRestart the session — hooks are read at startup.\n\n{RULES}")
     return 0
 
 
-def _unwire_one(directory: Path, runtime: Runtime) -> int:
+def _unwire_one(directory: Path, runtime: RuntimeSpec) -> int:
     """Remove only this install's hooks, and nothing else."""
-    if runtime.name == "antigravity":
+    if runtime.hooks.dialect == "named":
         return _unwire_antigravity(directory, runtime)
     path = settings_path(directory, runtime)
     if not path.exists():
@@ -571,14 +483,14 @@ def _unwire_one(directory: Path, runtime: Runtime) -> int:
     return 1
 
 
-def unwire(directory: Path, runtimes: tuple[Runtime, ...] | None = None) -> int:
+def unwire(directory: Path, runtimes: tuple[RuntimeSpec, ...] | None = None) -> int:
     """Take the gate off, wherever it was put.
 
     Every runtime by default, not just the installed ones: a hook left behind
     after a CLI was removed still points at a bridge, and the next person to
     install that CLI inherits a gate they never asked for.
     """
-    chosen = runtimes if runtimes is not None else RUNTIMES
+    chosen = runtimes if runtimes is not None else tuple(registry.discover().values())
     touched = sum(_unwire_one(directory, runtime) for runtime in chosen)
     if not touched:
         print(f"Nothing of this Halyard install is wired into {project_root(directory)}")

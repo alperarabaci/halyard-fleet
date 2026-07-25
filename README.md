@@ -6,8 +6,7 @@
 
 Halyard Fleet puts your coding agent's permission prompt on your phone.
 
-When Claude Code, Codex or Antigravity wants to run something, you see the command, the
-project it
+When Claude Code or Codex wants to run something, you see the command, the project it
 came from, and how risky it is — then you allow or deny from Telegram. You can also
 send new instructions into the running session and read its replies there.
 
@@ -16,7 +15,7 @@ It runs on your own machine. No open ports, no exposed API, nothing to log into.
 Nothing is ever approved automatically: every failure — a crash, a timeout, an
 unreachable control plane — denies.
 
-**Runtimes:** Claude Code, Codex, Antigravity &nbsp;·&nbsp; **Channel:** Telegram
+**Runtimes:** Claude Code, Codex &nbsp;·&nbsp; **Channel:** Telegram
 
 <!-- Demo goes here:
 <p align="center">
@@ -108,6 +107,13 @@ reading configuration.
 - **`/pause` steps aside rather than denying.** The runtime's own permission list
   then decides, with no card and no audit entry.
 - **The gate covers what the matcher covers** — Bash today, not `Write` or `Edit`.
+- **Antigravity is not shipped.** The adapter works — it gates, it delivers, it
+  brings replies back — but a command approved from your phone is still approved a
+  second time in the desktop app whenever the agent asks to leave the sandbox.
+  Antigravity ignores a hook that tries to grant that, deliberately: honouring it
+  would let whoever controls the hook run unsandboxed code on the machine. That is
+  the right call, so the runtime waits rather than shipping with a second prompt.
+  Everything found along the way is written down in the notes below.
 
 ## What this is not
 
@@ -125,7 +131,7 @@ behalf, uncontrolled agent-to-agent messaging, or multi-user RBAC.
 | [Architecture](docs/architecture.md) | How the layers fit, and the security posture |
 | [Hook behaviour](docs/hook-payload-notes.md) | What the runtimes' hooks actually do — measured |
 | [Session I/O](docs/session-io-notes.md) | Writing into a live session, and what forks it |
-| [Antigravity notes](docs/antigravity-payload-notes.md) | The third runtime: its three hook dialects, its two stores, and what it will not let you do |
+| [Antigravity notes](docs/antigravity-payload-notes.md) | A third runtime, measured in full and not shipped — and why |
 | [Design document](docs/mobile-agent-control-plane.md) | The full plan this is built from |
 | [Postmortems](docs/postmortem/) | Regressions, and what they cost |
 

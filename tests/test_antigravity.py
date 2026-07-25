@@ -383,3 +383,110 @@ async def test_a_message_that_could_not_wake_anything_is_dropped(monkeypatch) ->
 
     assert await runner.send("abc", "carry on") is False
     assert runner.take_pending("abc") == []
+
+
+# --- an approval that actually approves --------------------------------------
+
+
+def emitted(bridge_module, decision: str, runtime: str, grant: str | None = None) -> dict:
+    buffer = io.StringIO()
+    with contextlib.redirect_stdout(buffer):
+        bridge_module.emit("PreToolUse", decision, "approved from Telegram", runtime, grant=grant)
+    return json.loads(buffer.getvalue())
+
+
+def test_an_approved_command_is_granted_not_merely_unopposed(bridge_module) -> None:
+    """`allow` alone means this hook does not object.
+
+    It is not the same as the tool being permitted: Antigravity's own
+    permission layer still stops and asks, so somebody who has already answered
+    on their phone gets asked again at the desk — which is the thing Halyard
+    exists to remove. `permissionOverrides` is documented as the way to
+    override default tool permissions, and it is what closes that gap.
+    """
+    answer = emitted(bridge_module, "allow", "antigravity", grant="git push")
+
+    assert answer["permissionOverrides"], "an allow with no grant is a second prompt"
+
+
+def test_the_grant_names_the_command_exactly_as_it_is(bridge_module) -> None:
+    """A literal, not a pattern. Four live runs, one success.
+
+    `command(echo halyard-override-1)` was granted; the same shape with an
+    escaped full stop was not, an absence was not, and `command(*)` was not.
+    Every failure was a string that differed from the command.
+    """
+    answer = emitted(bridge_module, "allow", "antigravity", grant="echo halyard-override-1")
+
+    assert "command(echo halyard-override-1)" in answer["permissionOverrides"]
+
+
+def test_nothing_about_the_command_is_rewritten(bridge_module) -> None:
+    """Brackets, quotes, full stops and non-ASCII all go through untouched.
+
+    Escaping them, and then replacing them with a wildcard, were both attempts
+    to be clever about a field that wants the command as it is — and each cost
+    a live run and a second prompt for somebody who had already answered.
+    """
+    command = 'echo "a (b). ç"'
+
+    answer = emitted(bridge_module, "allow", "antigravity", grant=command)
+
+    assert f"command({command})" in answer["permissionOverrides"]
+    assert f"unsandboxed({command})" in answer["permissionOverrides"]
+
+
+def test_the_sandbox_form_is_still_sent_though_it_is_ignored(bridge_module) -> None:
+    """Kept deliberately, and pinned so it is not tidied away.
+
+    Antigravity ignores an `unsandboxed` override from a hook by design —
+    honouring one would let whoever controls the hook run unsandboxed code on
+    the machine. The shape is right and only the policy refuses it, so this is
+    the line that starts working if that policy ever gains a way to say yes.
+    Establishing the spelling took six live runs; rediscovering it should not
+    be the price of a cleanup.
+    """
+    granted = emitted(bridge_module, "allow", "antigravity", grant="whoami")["permissionOverrides"]
+
+    assert granted == ["command(whoami)", "unsandboxed(whoami)"]
+
+
+def test_a_denial_grants_nothing(bridge_module) -> None:
+    """Obvious, and worth a test precisely because it is: a deny that also
+    handed out a permission would read as a refusal and act as consent."""
+    answer = emitted(bridge_module, "deny", "antigravity", grant="git push")
+
+    assert "permissionOverrides" not in answer
+
+
+def test_no_grant_is_offered_when_there_is_no_command(bridge_module) -> None:
+    """An empty override is still an override, and what it would grant is
+    unknowable from here."""
+    answer = emitted(bridge_module, "allow", "antigravity", grant=None)
+
+    assert "permissionOverrides" not in answer
+
+
+@pytest.mark.parametrize("runtime", ["claude-code", "codex"])
+def test_the_other_runtimes_never_see_that_field(bridge_module, runtime: str) -> None:
+    """The measured rule, again: a payload that tries to serve every runtime
+    serves none. An unrecognised key here does not get ignored — it stopped the
+    whole answer being understood, and an unreadable answer is an approval."""
+    answer = emitted(bridge_module, "allow", runtime, grant="git push")
+
+    assert "permissionOverrides" not in answer
+    assert "hookSpecificOutput" in answer
+
+
+def test_the_grant_is_never_persisted_by_us(bridge_module) -> None:
+    """Stated here because the whole scoping argument rests on it.
+
+    The grant is only momentary because Antigravity forgets it after the call.
+    Measured: a command granted this way never reached
+    `~/.gemini/config/projects/<id>.json`, where the permissions somebody
+    actually gave it are kept. Nothing in Halyard writes there, and nothing
+    should start.
+    """
+    answer = emitted(bridge_module, "allow", "antigravity", grant="echo hello")
+
+    assert set(answer) == {"decision", "reason", "permissionOverrides"}

@@ -20,9 +20,7 @@ from fastapi import FastAPI, Request, Response
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
 
-from halyard.agents.antigravity import AntigravityRunner
-from halyard.agents.claude_code import ClaudeCodeRunner
-from halyard.agents.codex import CodexRunner
+from halyard.agents import registry as runtimes
 from halyard.channels.stub import StubChannel
 from halyard.channels.telegram import TelegramApi, TelegramChannel
 from halyard.config import ChannelKind, Settings
@@ -57,7 +55,7 @@ class ApprovalRequestBody(BaseModel):
     session_id: str
     tool: str
     command: str
-    agent_id: str = "claude-code"
+    agent_id: str = runtimes.DEFAULT
     tool_use_id: str | None = None
     cwd: str | None = None
     #: The session's project root, so a card can name the codebase a command
@@ -95,7 +93,7 @@ class MessageBody(BaseModel):
 
     session_id: str
     text: str
-    agent_id: str = "claude-code"
+    agent_id: str = runtimes.DEFAULT
     cwd: str | None = None
     project_dir: str | None = None
     role: Role | None = None
@@ -212,20 +210,10 @@ def create_app(settings: Settings, *, channel=None) -> FastAPI:
     # `alpha-engine-driver` is a Claude Code session or a Codex thread
     # depending on HALYARD_DRIVER_RUNTIME, and the two keep their sessions in
     # entirely different places.
-    by_runtime = {
-        "claude-code": ClaudeCodeRunner(
-            binary=settings.claude_binary,
-            models=tuple(m.strip() for m in settings.claude_models.split(",") if m.strip())
-            if settings.claude_models
-            else None,
-            default_model=settings.claude_default_model.strip() or None,
-        ),
-        "codex": CodexRunner(),
-        "antigravity": AntigravityRunner(),
-    }
+    by_runtime = {name: spec.runner(settings) for name, spec in runtimes.discover().items()}
     configured_seats = configured()
     # What `/health` and anything else with one question in mind should ask.
-    runner = by_runtime["claude-code"]
+    runner = by_runtime[runtimes.DEFAULT]
     resolved_channel = (
         channel
         if channel is not None
@@ -290,7 +278,7 @@ def create_app(settings: Settings, *, channel=None) -> FastAPI:
     app = FastAPI(
         title="Halyard Fleet",
         description="A control plane for orchestrating coding agents remotely.",
-        version="0.4.0",
+        version="0.4.1",
         lifespan=lifespan,
     )
     app.state.settings = settings

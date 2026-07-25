@@ -34,6 +34,8 @@ from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
 
+from halyard.agents import registry
+from halyard.agents.spec import RuntimeSpec
 from halyard.core.events import Role
 from halyard.core.seats import Seat
 
@@ -186,13 +188,10 @@ def _collect_seats(existing: dict[str, str], ask: Ask, say: Say) -> list[Seat]:
     """
     configured = _existing_seats(existing)
     seats: list[Seat] = []
-    for runtime, human in (
-        ("claude-code", "Claude Code"),
-        ("codex", "Codex"),
-        ("antigravity", "Antigravity"),
-    ):
+    for spec in registry.discover().values():
+        runtime, human = spec.name, spec.human
         current = [seat for seat in configured if seat.runtime == runtime]
-        available = _known_sessions(runtime)
+        available = _known_sessions(spec)
         if available:
             # Newest first, and only a handful. The full list runs to dozens of
             # auto-titled scratch sessions, which buries the named seats it is
@@ -211,7 +210,7 @@ def _collect_seats(existing: dict[str, str], ask: Ask, say: Say) -> list[Seat]:
             was = current[index] if index < len(current) else None
             label = ask(
                 "    label (short, typed on a phone)",
-                was.label if was else f"{_short(runtime)}{index + 1}",
+                was.label if was else f"{spec.prefix}{index + 1}",
             )
             session = ask(
                 "    session name",
@@ -235,30 +234,20 @@ def _collect_seats(existing: dict[str, str], ask: Ask, say: Say) -> list[Seat]:
     return seats
 
 
-def _known_sessions(runtime: str) -> list[str]:
-    try:
-        if runtime == "codex":
-            from halyard.agents.codex import list_named_sessions
-        elif runtime == "antigravity":
-            # Only conversations somebody renamed. Antigravity leaves the rest
-            # without a `title:` at all, and a seat cannot be pointed at one.
-            from halyard.agents.antigravity import list_named_sessions
-        else:
-            from halyard.agents.claude_code.sessions import list_named_sessions
+def _known_sessions(spec: RuntimeSpec) -> list[str]:
+    """The names this runtime can see, offered as suggestions.
 
-        return [name for name, _, _ in list_named_sessions()]
+    Only sessions somebody named. A generated title gets rewritten by the agent
+    without warning, so a seat pointed at one stops routing on a day nobody
+    touched the configuration.
+
+    Failure is silence: a runtime whose store cannot be read costs you its
+    suggestions, and a name can always be typed by hand.
+    """
+    try:
+        return [name for name, _, _ in spec.list_sessions()]
     except Exception:
         return []
-
-
-#: The letter a generated label starts with, so three runtimes' default seats
-#: do not all propose `drv1`. Matches the shape people were already writing by
-#: hand: `nav`/`drv`, `xnav`/`xdrv`, `gnav`/`gdrv`.
-_PREFIXES = {"codex": "x", "antigravity": "g"}
-
-
-def _short(runtime: str) -> str:
-    return _PREFIXES.get(runtime, "")
 
 
 def _to_int(value: str) -> int:

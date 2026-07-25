@@ -211,6 +211,87 @@ gRPC one — and the token is an argument on its command line. Discovering a
 service by reading another process's arguments is not a contract; it is what is
 available, and it will break without warning.
 
+## Why this runtime is not shipped
+
+Everything in this file works: the gate fires and denies, a person's words
+arrive as a real user turn, the reply comes back to a phone. One thing does
+not, and it is the one that matters most.
+
+A `run_command` carrying `BypassSandbox: true` is approved twice — once on the
+phone, once at the desk. Antigravity ignores a hook that tries to grant that,
+**by design**: honouring an `unsandboxed` or `escalate_admin` override would
+let whoever controls the hook run unsandboxed code on the machine. That is the
+correct decision and Halyard does not work around it.
+
+So the adapter stays in the tree, tested, and out of the README. The way
+forward is not a cleverer override; it is an agent that does not ask to leave
+the sandbox, a standing permission a person grants in the application
+themselves, or a change on Antigravity's side.
+
+## `allow` is not permission, and a sandbox bypass is a third gate
+
+Answering `{"decision": "allow"}` means *this hook does not object*. It is not
+the same as the tool being permitted: Antigravity's own permission layer still
+stops and asks, so a command approved from Telegram is approved a second time
+at the desk.
+
+`permissionOverrides` addresses that layer, and the resource string is a
+**literal** — not a regex, not a wildcard. Six live runs on one conversation
+settle both halves, read from the `step_payload` column of
+`conversations/<id>.db`, which records the hook's answer and the application's
+own requirement side by side:
+
+```
+idx 2226  done       required  command(echo halyard-override-1)   ← granted, no prompt
+idx 2233  awaiting   required  unsandboxed(*)
+idx 2240  awaiting   required  unsandboxed(*)
+idx 2253  awaiting   required  unsandboxed(*)     and we sent exactly that
+idx 2260  awaiting   required  unsandboxed(*)
+```
+
+`unsandboxed(*)` appears in steps where the bridge sent no override at all, so
+it is the application's requirement rather than an echo of ours.
+
+**Sending it did not satisfy it.** A `run_command` carrying `BypassSandbox` is
+gated by something an override does not reach — the same shape as Codex's
+separate `PermissionRequest` for sandbox escalation, and unanswerable from
+`PreToolUse`. `autoExecutionPolicy: CASCADE_COMMANDS_AUTO_EXECUTION_AUTO` on
+the project does not change it either; that was measured too.
+
+So the override is sent, narrow, for the case it does cover, and the second
+prompt remains for sandbox-bypassing calls. **This is the open question to put
+to Antigravity**, and it is not something more spellings will answer:
+
+> A `PreToolUse` hook returns `{"decision": "allow"}` for a `run_command` whose
+> args carry `BypassSandbox: true`. The project's `autoExecutionPolicy` is
+> `AUTO`. The step still waits on a desktop prompt, and its record names
+> `unsandboxed(*)` as the required resource — which the hook also returned in
+> `permissionOverrides`, without effect. What authorises a sandbox bypass from
+> a hook?
+
+### What five spellings cost
+
+Each of these was one live run and one person waiting at a prompt:
+
+```
+command(echo halyard-override-1)          granted
+command(echo "… a full stop\. …")          asked again — escaped, so not the command
+nothing sent, the command had a bracket   asked again
+command(*), unsandboxed(*)                asked again
+command(<cmd>), unsandboxed(<cmd>)        asked again
+```
+
+The lesson is not about the format. It is that the application's own record
+answered the question in one read, and it was consulted fifth rather than
+first. Where a runtime keeps its state, this project can always ask it what it
+thinks — and guessing at a string is what happens when nobody does.
+
+**Never persisted by us.** A grant sent this way never reached
+`~/.gemini/config/projects/<id>.json`, where standing permissions live — 38
+entries before, 38 after, the file rewritten in between. Nothing in Halyard
+writes to that store, and a change that made it do so would turn a momentary
+grant into a standing one.
+
 ## A delivered message cannot be made to look like a user's
 
 `agentapi send-message` is an agent-to-agent notification channel — its own

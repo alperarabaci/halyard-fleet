@@ -46,6 +46,7 @@ from halyard.core.events import Role
 from halyard.core.gate import Gate
 from halyard.core.registry import SessionRegistry
 from halyard.core.seats import Seat, for_chat, for_session
+from halyard.core.seats import _default_runtime as default_runtime
 
 logger = logging.getLogger(__name__)
 
@@ -610,8 +611,18 @@ class TelegramChannel:
                 )
             )
         if not delivered:
+            # Name what was tried. "Check the log" is the message this project
+            # keeps having to replace: the person reading it is on a phone,
+            # away from the machine, and the one fact they cannot recover from
+            # there is which session this went to and under which runtime.
+            # Two runtimes can hold one name, so neither half is enough alone.
+            runtime = getattr(session.runner, "id", "?")
             await self._say(
-                "⚠️ That did not reach the session. Check the control plane's log.",
+                f"⚠️ That did not reach <b>{html.escape(str(session_id))}</b> "
+                f"({html.escape(str(runtime))}).\n\n"
+                "The session was found and the delivery failed, so the name is "
+                "right and something else is wrong — the app not running, or the "
+                "CLI missing. <code>halyard doctor</code> checks both.",
                 chat_id,
                 thread_id,
             )
@@ -754,7 +765,7 @@ class TelegramChannel:
         # Every seat, not every role: there are two drivers now, and telling
         # them apart is the point of listing them at all.
         configured = self._seats or [
-            Seat(label=role.value, runtime="claude-code", session=name, role=role)
+            Seat(label=role.value, runtime=default_runtime(), session=name, role=role)
             for role, name in self._session_names.items()
         ]
 

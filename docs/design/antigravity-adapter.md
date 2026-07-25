@@ -32,11 +32,39 @@ The agent passes context such as `toolCall` (which contains `name` and `args`), 
 The bridge script must answer with:
 ```json
 {
-  "decision": "allow", // Can be "allow", "deny", "ask", or "force_ask"
-  "reason": "Approved by user via Telegram"
+  "decision": "allow", 
+  "reason": "Approved by user via Telegram",
+  "permissionOverrides": ["command(npm test)"]
 }
 ```
-*Note:* This maps perfectly to Halyard's existing approval semantics.
+*Critical Note on Permissions:* 
+Unlike Claude Code where allowing a hook might inherently allow the action, Antigravity has a robust, independent core permissions system. If your hook returns `"decision": "allow"`, it only means the *hook* didn't block it. Antigravity will still pop up a permission prompt in the Desktop App if the command isn't pre-approved!
+To make your Telegram approval completely bypass the Desktop App prompt, you **must** include the `permissionOverrides` array in your response, explicitly granting the resource. 
+
+### How to Map Tools to Permissions (Birebir Eşleşme)
+There is no hidden API tool to magically format these; Halyard must parse the `toolCall.name` and its arguments, and construct the correct permission string to achieve an exact match:
+
+| Tool Name | Arguments to Read | Required Override String |
+|---|---|---|
+| `run_command` | `CommandLine`, `BypassSandbox` | If `BypassSandbox` is true: `unsandboxed(CommandLine)` <br> Else: `command(CommandLine)` |
+| `write_to_file` / `replace_file_content` | `TargetFile` | `write_file(TargetFile)` |
+| `view_file` | `AbsolutePath` | `read_file(AbsolutePath)` |
+| `read_url_content` | `Url` | `read_url(Url domain)` or `read_url(*)` |
+
+*Pro Tip for Commands:* Antigravity matches commands by prefix. Since `permissionOverrides` only applies momentarily to the current execution, Halyard can safely return `["command(*)"]` (or `["unsandboxed(*)"]`) for any `run_command` tool call to guarantee it bypasses the prompt without worrying about exact string formatting or escaping issues!
+
+### ⚠️ Project Auto-Execution Policy (Critical)
+Even if your hook perfectly returns `permissionOverrides: ["command(*)"]`, Antigravity has a project-level safety switch that can force a manual Desktop App prompt. 
+In your project's configuration file (e.g., `~/.gemini/config/projects/<project-id>.json`), the `settings.autoExecutionPolicy` **must** be set to `"CASCADE_COMMANDS_AUTO_EXECUTION_AUTO"` (or equivalent UI setting for automated execution). 
+If this is set to `"CASCADE_COMMANDS_AUTO_EXECUTION_OFF"`, Antigravity's core safety boundaries will override the hook and mandate explicit user approval in the GUI for every command. Halyard users must ensure this policy is enabled for fully remote Telegram workflows.
+
+### 🚫 The Sandbox Bypass Limitation (Security Boundary)
+By architectural design, Antigravity **forbids hooks from auto-approving Sandbox Escapes (`unsandboxed` commands)**. 
+Because bypassing the sandbox grants OS-level access, allowing a remote hook to approve `unsandboxed(*)` would create a severe Remote Code Execution (RCE) vulnerability. 
+Even if your hook returns `permissionOverrides: ["unsandboxed(*)"]` and `autoExecutionPolicy` is `AUTO`, the Antigravity core engine will deliberately ignore the override and force a manual Desktop UI prompt.
+**Workaround for Headless (Telegram) execution:** 
+1. Avoid using `BypassSandbox: true` in your agent prompts/tools. Sandboxed commands (`command(*)`) can be auto-approved by hooks flawlessly.
+2. If you absolutely must use `BypassSandbox: true`, the specific command (or `unsandboxed(*)`) must be manually added to the user's global "Always Allow" list in the Antigravity Desktop App settings beforehand. Hooks cannot dynamically grant this.
 
 ## 2. Integration Points
 

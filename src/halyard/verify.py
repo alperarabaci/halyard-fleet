@@ -38,6 +38,8 @@ import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
+from halyard.agents import registry
+
 BRIDGE_DIR = Path(__file__).resolve().parent.parent.parent / "bridge"
 
 OK = "  ok    "
@@ -195,86 +197,26 @@ BASELINE = Case(
 )
 
 
-@dataclass(frozen=True)
-class Runtime:
-    name: str
-    binary: str
-    settings: str
-    matcher: str
-    #: Argument list for one non-interactive turn, given a prompt.
-    command: tuple[str, ...]
-    hook_timeout: int
-
-
-RUNTIMES = (
-    Runtime(
-        name="claude-code",
-        binary="claude",
-        settings=".claude/settings.local.json",
-        matcher="Bash",
-        command=("-p", "--model", "haiku", PROMPT),
-        hook_timeout=5,
-    ),
-    Runtime(
-        name="codex",
-        binary="codex",
-        settings=".codex/hooks.json",
-        matcher="^Bash$",
-        # Sandbox, approvals and hook trust are all opened deliberately, and
-        # only inside a throwaway directory this process just created.
-        #
-        # The harness has to remove every blocker except the gate: a command
-        # stopped by Codex's own approval flow looks exactly like one the gate
-        # stopped, and reading that as a pass is how a project with no gate at
-        # all gets a clean bill of health.
-        #
-        # Trust is the same problem in a form that cannot be worked around.
-        # These hooks are written here, seconds ago, in a directory that will
-        # not exist afterwards — so they have never been trusted and never can
-        # be, and without the bypass every case is inconclusive forever.
-        # Approving the hooks in a real project does nothing for them.
-        #
-        # That is not a hole: what trust protects against is a hook somebody
-        # else wrote, and this one is written by the check itself. Whether the
-        # hooks on a *real* project are trusted is a different question, and
-        # `halyard doctor` is what answers it.
-        command=(
-            "exec",
-            "-m",
-            "gpt-5.4-mini",
-            "--skip-git-repo-check",
-            "-s",
-            "danger-full-access",
-            "-c",
-            'approval_policy="never"',
-            "--dangerously-bypass-hook-trust",
-            PROMPT,
-        ),
-        hook_timeout=5,
-    ),
-)
-
-
-def _write_settings(project: Path, runtime: Runtime, hook: Path) -> None:
-    path = project / runtime.settings
+def _write_settings(project: Path, runtime, hook: Path) -> None:
+    path = project / runtime.hooks.settings
     path.parent.mkdir(parents=True, exist_ok=True)
     config: dict = {
         "hooks": {
             "PreToolUse": [
                 {
-                    "matcher": runtime.matcher,
+                    "matcher": runtime.verify.matcher,
                     "hooks": [
                         {
                             "type": "command",
                             "command": str(hook),
-                            "timeout": runtime.hook_timeout,
+                            "timeout": runtime.verify.hook_timeout,
                         }
                     ],
                 }
             ]
         }
     }
-    if runtime.name == "claude-code":
+    if runtime.verify.settings_extra is not None:
         # Allow-listed on purpose: without it, Claude Code's own permission
         # flow stops the command in headless mode and every case looks like a
         # pass. Measured, after an earlier version of this check was wrong for
@@ -284,11 +226,11 @@ def _write_settings(project: Path, runtime: Runtime, hook: Path) -> None:
         # it does not recognise — the whole file, not the field — and says so
         # in a warning on stderr while the gate quietly ceases to exist. That
         # is how this check spent an evening reporting that no hook ever ran.
-        config["permissions"] = {"allow": [f"Bash(touch {MARKER})"]}
+        config.update(runtime.verify.settings_extra(MARKER))
     path.write_text(json.dumps(config, indent=2))
 
 
-def _run_case(project: Path, runtime: Runtime, case: Case, binary: str) -> tuple[bool, bool, str]:
+def _run_case(project: Path, runtime, case: Case, binary: str) -> tuple[bool, bool, str]:
     """Returns (did the command run, did the hook run, any note worth printing)."""
     marker = project / MARKER
     marker.unlink(missing_ok=True)
@@ -307,7 +249,7 @@ def _run_case(project: Path, runtime: Runtime, case: Case, binary: str) -> tuple
 
     try:
         done = subprocess.run(
-            [binary, *runtime.command],
+            [binary, *(PROMPT if a == "{prompt}" else a for a in runtime.verify.command)],
             cwd=project,
             capture_output=True,
             text=True,
@@ -324,16 +266,23 @@ def _run_case(project: Path, runtime: Runtime, case: Case, binary: str) -> tuple
         return marker.exists(), witness.exists(), "the turn itself timed out"
 
     note = ""
-    if runtime.name == "codex" and "hook:" not in (done.stdout + done.stderr):
+    if runtime.verify.expects_hook_mention and "hook:" not in (done.stdout + done.stderr):
         # With trust bypassed this should not happen; if it does, something
         # else is stopping the hook and saying which is more use than a guess.
         note = "no hook was mentioned at all by the run"
     return marker.exists(), witness.exists(), note
 
 
-def verify(directory: Path | None = None, runtimes: tuple[Runtime, ...] | None = None) -> int:
+def verify(directory: Path | None = None, runtimes: tuple | None = None) -> int:
     """Run every case against every installed runtime. Returns an exit code."""
-    chosen = runtimes or tuple(r for r in RUNTIMES if shutil.which(r.binary))
+    # Only runtimes that can be driven at all. Antigravity has no way to run
+    # one turn and exit, and says so on its own spec rather than being skipped
+    # by a name checked here.
+    chosen = runtimes or tuple(
+        spec
+        for spec in registry.discover().values()
+        if spec.verify is not None and shutil.which(spec.binary)
+    )
     if not chosen:
         print("halyard: no agent CLI found, so there is nothing to verify against.")
         return 1

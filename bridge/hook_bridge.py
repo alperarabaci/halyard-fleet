@@ -54,7 +54,41 @@ DEFAULT_TIMEOUT_SECONDS = 330.0
 DEFER_EXIT_CODE = 64
 
 
-def emit(event: str, decision: str, reason: str, runtime: str = "claude-code") -> None:
+def _resources(command: str) -> list[str]:
+    """The resource strings that name exactly this call.
+
+    A literal, not a pattern and not a wildcard — read from Antigravity's own
+    record, the `step_payload` of a step in `conversations/<id>.db`, which
+    holds the hook's answer and the application's requirement side by side.
+
+    `command(...)` works: measured across six live runs on one conversation,
+    the single call whose record wanted a `command` resource was granted with
+    no second prompt.
+
+    **`unsandboxed(...)` does not, and is kept anyway.** Every call whose
+    record required `unsandboxed(*)` asked again, including the run that
+    returned exactly that string — and Antigravity confirms this is by design:
+    an `unsandboxed` or `escalate_admin` override from a hook is ignored,
+    because honouring one would let whoever controls the hook run unsandboxed
+    code on the machine. That is the right call, and Halyard does not try to
+    get around it.
+
+    It stays because the shape is correct and only the policy refuses it. If
+    that policy ever gains a way to say yes — a signed hook, a per-project
+    opt-in — this is the line that starts working, and deleting it would mean
+    rediscovering the spelling that took six runs to establish. A
+    `run_command` carrying `BypassSandbox: true` asks at the desk until then.
+    """
+    return [f"command({command})", f"unsandboxed({command})"]
+
+
+def emit(
+    event: str,
+    decision: str,
+    reason: str,
+    runtime: str = "claude-code",
+    grant: str | None = None,
+) -> None:
     """Print a hook decision and nothing else.
 
     PreToolUse and PermissionRequest look similar on input but deliberately use
@@ -88,7 +122,27 @@ def emit(event: str, decision: str, reason: str, runtime: str = "claude-code") -
         if runtime == "antigravity"
         else {"hookSpecificOutput": specific}
     )
-    json.dump(answer, sys.stdout)
+    # Antigravity asks twice otherwise. `allow` from a hook means this hook
+    # does not object; it is not the same as the tool being permitted, and its
+    # own permission layer still stops to ask — so somebody who has already
+    # answered on their phone is asked again at the desk, which is the thing
+    # Halyard exists to remove.
+    #
+    # `permissionOverrides` is what grants it — see `_resources`. Sent only
+    # alongside an allow, so a refusal can never hand out a permission, and
+    # only when there was a command to name.
+    if grant and runtime == "antigravity" and decision == "allow":
+        answer["permissionOverrides"] = _resources(grant)
+    # Recorded before it goes out. Every question about this path so far has
+    # started with "what did we actually send?", and answering it from the
+    # source rather than from the wire has been wrong twice.
+    if runtime == "antigravity":
+        note(f"PreToolUse -> {json.dumps(answer)}")
+
+    # `ensure_ascii=False`: the reason carries text a person wrote, and it
+    # reaches the agent. Escaping it to `\u00e7` sequences is valid JSON and
+    # unreadable to anybody reading the transcript afterwards.
+    json.dump(answer, sys.stdout, ensure_ascii=False)
     sys.stdout.write("\n")
     sys.stdout.flush()
 
@@ -246,7 +300,7 @@ def main() -> int:
     # Only an exact allow allows. A missing field, a typo, a null, a decision
     # this bridge has never heard of — all of them mean deny.
     if decision == "allow":
-        emit(event, "allow", reason, runtime)
+        emit(event, "allow", reason, runtime, grant=body.get("command"))
     elif decision == "defer":
         # Halyard is paused: no opinion, so Claude Code decides on its own the
         # way it would if this hook were not installed. Held to the same
