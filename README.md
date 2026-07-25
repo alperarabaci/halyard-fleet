@@ -59,13 +59,17 @@ in a container — it needs the agent CLIs and their credentials.
 ### 3. Set it up and run
 
 ```bash
-uv run halyard init      # asks what you have, writes .env, wires the project, checks it
+uv run halyard init      # asks what you have, writes halyard.yaml, wires it, checks it
 uv run halyard           # keep this running
 ```
 
 `init` asks how many seats you have of each runtime, offers the session names it can
-already see, and reads the bot token without echoing it. It backs up any `.env` it
+already see, and reads the bot token without echoing it. It backs up any file it
 replaces and keeps settings it does not manage.
+
+One file describes a machine: the settings and the seats of every project it
+gates. `halyard.yaml` is gitignored, and a real environment variable still
+overrides it — so a container can pass a token in without writing it to disk.
 
 > **A wired project depends on this process.** With Halyard down, a Bash command in
 > that project is *denied* — all of them — and there is no terminal prompt to approve
@@ -89,7 +93,7 @@ reading configuration.
 
 | On the machine | |
 |---|---|
-| `halyard init` | guided setup: `.env`, wiring, and a check |
+| `halyard init` | guided setup: `halyard.yaml`, wiring, and a check |
 | `halyard doctor` | what is wired, where, and what is broken |
 | `halyard verify` | prove the gate stops things, by running into it |
 | `halyard wire` / `unwire` | put the gate on a project, or take it off |

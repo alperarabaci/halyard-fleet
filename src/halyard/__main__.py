@@ -9,6 +9,7 @@ from pathlib import Path
 
 import uvicorn
 
+from halyard import awake
 from halyard.api.app import create_app
 from halyard.config import Settings
 from halyard.core.redaction import SecretRedactingFilter
@@ -212,7 +213,17 @@ def serve() -> None:
             "Channel %s answers every approval by itself. Nobody is being asked.",
             settings.channel.value,
         )
-    uvicorn.run(create_app(settings), host=settings.host, port=settings.port)
+    with awake.held(settings.keep_awake) as awake_held:
+        if awake_held:
+            logger.info("Holding this machine awake while serving (idle sleep only)")
+        elif settings.keep_awake:
+            # Asked for and not obtained. Said once, because the failure it
+            # leads to arrives hours later looking like something else.
+            logger.warning(
+                "This machine may sleep while serving; a sleeping control plane "
+                "denies every command on it."
+            )
+        uvicorn.run(create_app(settings), host=settings.host, port=settings.port)
 
 
 if __name__ == "__main__":

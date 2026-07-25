@@ -277,9 +277,7 @@ class CodexRunner:
             return False
 
         try:
-            stdout, stderr = await asyncio.wait_for(
-                process.communicate(), timeout=self._timeout
-            )
+            stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=self._timeout)
         except TimeoutError:
             logger.error("A turn in %s ran past %.0fs; giving up on it", session_id, self._timeout)
             process.kill()

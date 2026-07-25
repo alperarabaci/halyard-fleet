@@ -7,8 +7,8 @@ helpful error. It produces a denied command, because the approval bridge fails
 closed on a control plane it cannot reach.
 
 So the bridges look it up instead. The address is a fact about the machine, and
-it is already written down in the `.env` the control plane reads. Nothing needs
-to be configured twice.
+it is already written down in the `halyard.yaml` the control plane reads.
+Nothing needs to be configured twice.
 
 Standard library only, and it never raises: a bridge that crashes reading its
 own configuration is worse than one that falls back to the default.
@@ -34,27 +34,54 @@ DEFAULT_URL = "http://127.0.0.1:8787"
 #: and can say nothing about what never left.
 BRIDGE_LOG = Path(__file__).resolve().parent.parent / "bridge.log"
 
-#: Searched in order, first hit wins. The repo's own `.env` comes first because
-#: it is the file the control plane is already configured from; the home
-#: location exists for installs where the bridges are referenced from elsewhere.
+#: Searched in order, first hit wins. `halyard.yaml` is the file the control
+#: plane is configured from; the home location exists for installs where the
+#: bridges are referenced from somewhere else.
 _CONFIG_FILES = (
-    Path(__file__).resolve().parent.parent / ".env",
+    Path(__file__).resolve().parent.parent / "halyard.yaml",
+    Path(__file__).resolve().parent.parent / "halyard.yml",
     Path.home() / ".halyard" / "config",
 )
 
 
 def _read_key(path: Path, key: str) -> str | None:
+    """One scalar out of a `settings:` block, without a YAML parser.
+
+    These scripts import nothing outside the standard library, on purpose —
+    they run from a hook, in somebody else's process tree, with no virtualenv
+    on the path. There is no `yaml` here and there will not be one.
+
+    What is read is deliberately tiny: `KEY: value` lines, indented, under a
+    top-level `settings:`. That covers what a bridge needs — an address —
+    and nothing else. Anchors, nested maps, multi-line scalars and flow style
+    are not understood, and a file using them for these two keys simply looks
+    unset, which falls back to the default rather than to a wrong address.
+
+    `KEY=value` is still accepted so an old `.halyard/config` keeps working.
+    """
     try:
-        with path.open(encoding="utf-8") as handle:
-            for raw in handle:
-                line = raw.strip()
-                if not line or line.startswith("#") or "=" not in line:
-                    continue
-                name, _, value = line.partition("=")
-                if name.strip() == key:
-                    return value.strip().strip("\"'") or None
+        text = path.read_text(encoding="utf-8")
     except OSError:
         return None
+
+    inside = False
+    for raw in text.splitlines():
+        if not raw.strip() or raw.lstrip().startswith("#"):
+            continue
+        indented = raw[:1].isspace()
+        if not indented:
+            # A new top-level key ends the block this cares about.
+            inside = raw.split(":", 1)[0].strip() == "settings"
+            if "=" in raw:
+                name, _, value = raw.partition("=")
+                if name.strip() == key:
+                    return value.strip().strip("\"'") or None
+            continue
+        if not inside:
+            continue
+        name, sep, value = raw.partition(":")
+        if sep and name.strip() == key:
+            return value.strip().strip("\"'") or None
     return None
 
 

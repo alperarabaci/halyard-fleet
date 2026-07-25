@@ -77,7 +77,7 @@ halyard-fleet/
   For remote access, put it behind Tailscale or WireGuard.
 - Every approval request carries a single-use nonce and an expiry. A second press of the same
   button is rejected as already resolved.
-- Only the Telegram user IDs listed in `.env` can resolve an approval. Callbacks from anyone else
+- Only the Telegram user IDs listed in `halyard.yaml` can resolve an approval. Callbacks from anyone else
   are recorded as `unauthorized_callback` and silently ignored.
 - Secrets are masked before anything reaches the channel layer. The unmasked command is never
   stored — not in the database, not in the audit log.

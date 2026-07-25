@@ -2,6 +2,15 @@
 .env
 .env.local
 
+# Every backup any Halyard command takes, whatever it was backing up.
+#
+# A pattern per file was one pattern short: `halyard.yaml` was ignored and
+# `halyard.yaml.20260725-181153.bak` was not, and that file holds the bot
+# token — `halyard init` copies the old document aside before writing, so a
+# secret this repository is careful never to log was one `git add -A` from
+# being published. Nothing was committed; the rule is here so nothing can be.
+*.bak
+
 # Runtime state (never committed)
 halyard.db
 halyard.db-shm
@@ -50,6 +59,7 @@ bridge.log
 # Saved copies of third-party docs, kept locally while researching
 hooks.html
 
-# Your own seats: chat ids and session names, specific to this machine.
+# Your own machine: the bot token, chat ids, session names, and the seats of
+# every project it gates. One file describes all of it.
 halyard.yaml
 halyard.yml
