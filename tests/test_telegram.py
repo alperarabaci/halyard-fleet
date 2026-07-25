@@ -14,7 +14,7 @@ from pathlib import Path
 
 import pytest
 
-from halyard.channels.telegram import cards
+from halyard.channels.telegram import adapter, cards
 from halyard.channels.telegram.adapter import TelegramChannel, _SessionTarget
 from halyard.core.approvals import ApprovalStore, Decision, ResolutionReason
 from halyard.core.audit import AuditAction, AuditLog, JsonlAuditSink
@@ -35,6 +35,7 @@ class FakeTelegramApi:
         self.answers: list[dict] = []
         self.documents: list[dict] = []
         self.updates: list[list[dict]] = []
+        self.commands: tuple[tuple[str, str], ...] = ()
         self.opened = False
         self._next_message_id = 100
 
@@ -43,6 +44,9 @@ class FakeTelegramApi:
 
     async def close(self) -> None:
         self.opened = False
+
+    async def set_my_commands(self, commands) -> None:
+        self.commands = tuple(commands)
 
     async def send_message(
         self, chat_id, text, *, reply_markup=None, message_thread_id=None, **kwargs
@@ -1717,3 +1721,48 @@ async def test_a_failure_with_no_output_says_that_instead(tmp_path: Path, monkey
     )
 
     assert "Nothing was printed" in api.sent[-1]["text"]
+
+
+# --- the command list Telegram shows ------------------------------------------
+
+
+async def test_the_commands_are_registered_on_start(tmp_path: Path) -> None:
+    """Without this the bot still answers everything — Telegram does not need
+    telling what a bot understands. What it changes is that typing `/` produces
+    a menu instead of nothing, which on a phone is the difference between
+    picking a command and remembering it."""
+    channel, api, _ = await routed(tmp_path)
+    await channel.start()
+    await channel.stop()
+
+    assert api.commands, "nothing was published"
+    assert {name for name, _ in api.commands} == {name for name, _ in adapter.COMMANDS}
+
+
+async def test_the_help_text_lists_exactly_those(tmp_path: Path) -> None:
+    """One list, because there were two: a hand-written `/help` and nothing
+    registered at all. Two lists drift, and the one that drifts is the one
+    nobody re-reads."""
+    channel, api, _ = await routed(tmp_path)
+
+    await channel._handle_message(typed_in("/help", DRV_CHAT))
+
+    said = api.sent[-1]["text"]
+    for name, description in adapter.COMMANDS:
+        assert f"/{name} — {description}" in said
+
+
+async def test_a_refused_registration_does_not_stop_the_gate(tmp_path: Path) -> None:
+    """Trading the thing for the label on it. The bot answers every command
+    whether Telegram knows about them or not."""
+    channel, api, _ = await routed(tmp_path)
+
+    async def refuse(_commands):
+        raise RuntimeError("Bad Request: too many commands")
+
+    api.set_my_commands = refuse
+
+    await channel.start()
+    await channel.stop()
+
+    assert channel._poller is None, "started and stopped cleanly"

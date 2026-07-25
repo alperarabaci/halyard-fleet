@@ -137,6 +137,19 @@ class TelegramApi:
             raise TelegramError(f"sendDocument failed: {answer.get('description')}")
         return answer["result"]
 
+    async def set_my_commands(self, commands: tuple[tuple[str, str], ...]) -> None:
+        """Publish the command list, so a client can offer it.
+
+        Without this the bot still answers everything — Telegram does not need
+        to be told what a bot understands. What it changes is that typing `/`
+        produces a menu instead of nothing, which on a phone is the difference
+        between picking a command and remembering it.
+        """
+        await self._call(
+            "setMyCommands",
+            commands=[{"command": name, "description": text} for name, text in commands],
+        )
+
     async def get_updates(self, *, offset: int | None = None, timeout: int = 30) -> list[dict]:
         return await self._call(
             "getUpdates",

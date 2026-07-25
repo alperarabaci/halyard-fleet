@@ -64,6 +64,29 @@ POLL_RETRY_SECONDS = 3.0
 POLL_RETRY_MAX_SECONDS = 30.0
 
 
+#: What this bot answers, in the order a person meets them.
+#:
+#: One list, because there were two: a `/help` message written by hand, and
+#: nothing at all registered with Telegram. A command the client has never
+#: heard of does not appear when you type `/`, so every one of these had to be
+#: remembered and typed in full — on a phone, which is the only place this is
+#: ever used.
+#:
+#: Telegram's own limits, worth knowing before adding one: the name is
+#: lowercase letters, digits and underscores, at most 32 characters, and the
+#: description at most 256. Anything else is rejected for the whole list.
+COMMANDS: tuple[tuple[str, str], ...] = (
+    ("chat", "Send a message into this seat's session"),
+    ("status", "What is happening right now"),
+    ("options", "Models and effort levels this seat accepts"),
+    ("model", "Choose what answers, for turns sent from here"),
+    ("effort", "Choose how hard it thinks"),
+    ("pause", "Step aside — the runtime decides on its own"),
+    ("resume", "Take the gate back"),
+    ("help", "This list"),
+)
+
+
 def _default_clock() -> datetime:
     return datetime.now(UTC)
 
@@ -164,6 +187,14 @@ class TelegramChannel:
 
     async def start(self) -> None:
         await self._api.open()
+        # Registered so they appear when somebody types `/`. Best-effort: the
+        # bot answers every one of these whether Telegram knows about them or
+        # not, and a control plane that would not start because a menu could
+        # not be published would be trading the thing for the label on it.
+        try:
+            await self._api.set_my_commands(COMMANDS)
+        except Exception:
+            logger.warning("Could not register the command list with Telegram", exc_info=True)
         self._poller = asyncio.create_task(self._poll_forever(), name="telegram-poll")
 
     async def stop(self) -> None:
@@ -448,16 +479,9 @@ class TelegramChannel:
         elif command == "status":
             await self._say(await self._status(), here, thread)
         elif command in ("start", "help"):
+            listed = "\n".join(f"/{name} — {description}" for name, description in COMMANDS)
             await self._say(
-                "<b>Halyard</b>\n\n"
-                "Type anything to send it into the session.\n\n"
-                "/chat &lt;message&gt; — the same, said explicitly\n"
-                "/model &lt;name&gt; — what answers, for turns sent from here\n"
-                "/effort &lt;level&gt; — how hard it thinks\n"
-                "/options — everything those two accept\n"
-                "/status — what is happening right now\n"
-                "/pause — step out of the way; Claude Code decides on its own\n"
-                "/resume — start again",
+                "<b>Halyard</b>\n\nType anything to send it into the session.\n\n" + listed,
                 here,
                 thread,
             )
