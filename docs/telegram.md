@@ -6,7 +6,7 @@ choosing which model replies to a message sent from your phone.
 ## Setting up Telegram
 
 Four values, three of which come from Telegram itself. None of them belong in the repository —
-they go in `.env`, which is gitignored.
+they go in the `settings:` block of `halyard.yaml`, which is gitignored.
 
 ### 1. Create a bot
 
@@ -157,7 +157,7 @@ separate conversations means separate **groups**, not separate bots.
        if c: print(c.get('id'), '→', c.get('title') or c.get('username'))"
    ```
 
-4. Put them in `.env` and start again:
+4. Put them in `halyard.yaml` under `settings:` and start again:
 
    ```bash
    TELEGRAM_NAVIGATOR_CHAT_ID=-1001111111111

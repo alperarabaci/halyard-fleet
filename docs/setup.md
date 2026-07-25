@@ -8,7 +8,7 @@ Getting the control plane running, and putting the gate on a project.
 ## Running it
 
 ```bash
-cp .env.example .env       # then set HALYARD_CHANNEL
+cp halyard.yaml.example halyard.yaml    # then put your bot token in it
 uv sync --extra dev
 uv run halyard
 ```
@@ -185,10 +185,22 @@ Two practical habits follow:
 effect; restart the session. The script contents are read on every call, so those can change freely.
 
 
-## Seats in a file, arranged by project
+## One file, arranged by project
 
-`.env` describes seats as a flat list, which stops being readable at about four
-and cannot say which project a seat belongs to. `halyard.yaml` can:
+`halyard.yaml` is the configuration: what Halyard talks to, and who it talks
+for. `halyard init` writes it; editing it by hand is the same thing more
+slowly.
+
+```yaml
+settings:
+  HALYARD_CHANNEL: telegram
+  TELEGRAM_BOT_TOKEN: "123456:from-botfather"
+  TELEGRAM_CHAT_ID: "-1001234567890"
+  TELEGRAM_AUTHORIZED_USER_IDS: "11111111"
+```
+
+Seats go underneath the project they work in. A flat list stops being readable
+at about four, and cannot say which codebase a seat belongs to:
 
 ```yaml
 projects:
@@ -216,14 +228,16 @@ projects:
         role: navigator
 ```
 
-Copy `halyard.yaml.example` and edit it. It is gitignored, like `.env`, because
-chat ids and session names belong to one machine.
+Copy `halyard.yaml.example` and edit it. It is gitignored — along with every
+backup Halyard takes of it — because the bot token is in it, and the chat ids
+and session names belong to one machine.
 
-**When this file exists it is the configuration.** `.env` seats are not merged
-into it — "which file is this seat from?" should never be answered with "both,
-partly", and a seat you thought you had replaced should never still be routing.
-Everything else stays in `.env`: the bot token, the bind address, logging.
-`halyard doctor` prints which file the seats came from.
+**There is no second file.** Settings lived in `.env` and seats here for a
+while, which meant two files describing one machine and nothing written down
+about which of them won. A real environment variable still overrides the file,
+so a container can pass a token in without writing it to disk; that is an
+override, not another place to look. `halyard doctor` prints where the seats
+came from.
 
 Quote chat ids. `-1001` unquoted is a number to YAML and a string everywhere
 else, and the mismatch does not fail — the seat simply routes nowhere.

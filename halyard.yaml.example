@@ -1,11 +1,48 @@
+# Everything Halyard needs on this machine: what it talks to, and who it
+# talks for.
+#
+# Copy to `halyard.yaml` and edit. It is gitignored, along with every backup
+# Halyard takes of it, because the bot token lives here.
+#
+# `halyard init` writes this file for you and can wire a project afterwards.
+# Editing it by hand is the same thing more slowly.
+#
+# A real environment variable still wins over anything below — that is how a
+# container passes a token in without writing it to disk. There is no second
+# file: `.env` used to hold the settings while this held the seats, which meant
+# two files describing one machine and no rule for which of them won.
+
+settings:
+  # Where approvals go. `telegram` is the only one that asks a person.
+  HALYARD_CHANNEL: telegram
+
+  # From @BotFather. Secret — this is the line the gitignore is for.
+  TELEGRAM_BOT_TOKEN: "123456:replace-me"
+  # Where anything unrouted lands.
+  TELEGRAM_CHAT_ID: "-1001234567890"
+  # Only these Telegram users can answer an approval. Everyone else is
+  # refused and the attempt is written to the audit log.
+  TELEGRAM_AUTHORIZED_USER_IDS: "11111111"
+
+  # What a card calls this codebase.
+  CLAUDE_PROJECT_NAME: alpha-engine
+
+  # The address the control plane binds, and the one every hook derives from.
+  HALYARD_BIND: 127.0.0.1:8787
+
+  # An approval nobody answers in this many seconds is DENIED, not left
+  # waiting. These three have to stay in this order — the control plane
+  # refuses to start otherwise — so a hook cannot give up before the person
+  # it is waiting for has had their time.
+  HALYARD_APPROVAL_TIMEOUT_SECONDS: 300
+  HALYARD_BRIDGE_TIMEOUT_SECONDS: 330
+  HALYARD_HOOK_TIMEOUT_SECONDS: 600
+
+  # Serving holds an idle-sleep assertion on macOS, because a control plane
+  # that sleeps denies every command on the machine and says nothing.
+  # HALYARD_KEEP_AWAKE: false
+
 # Seats, arranged by the project they work in.
-#
-# Copy to `halyard.yaml`. When this file exists it is the configuration —
-# `.env` seats are not merged into it, because "which file is this seat from?"
-# should never be answered with "both, partly".
-#
-# `.env` keeps everything else: the bot token, the bind address, logging.
-# Only seats moved here.
 #
 # Once a project has a `path`, wiring takes its name rather than a directory:
 #     halyard wire alpha-engine
