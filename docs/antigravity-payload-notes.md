@@ -231,10 +231,38 @@ always is:
 is no other way in. The other two runtimes deliver a genuine user turn; this
 one has no interface that can.
 
-What is ours is the content, so the sender is named there — short and factual,
-not an instruction to the model. It arrives at `MESSAGE_PRIORITY_HIGH` and is
-acted on normally; the label is cosmetic, and it is Antigravity's, not
-Halyard's.
+### But `PreInvocation` can inject one — measured
+
+`PreInvocation` is the one hook that answers with `injectSteps`, and
+`{"userMessage": "..."}` is a supported step. Measured with a one-shot probe
+wired beside the gate under its own hook name:
+
+```
+probe received: artifactDirectoryPath conversationId initialNumSteps
+                invocationNum modelName transcriptPath workspacePaths
+probe answered: {"injectSteps": [{"userMessage": "...tek kelimeyle onayla."}]}
+the model said: "Onaylandı."
+```
+
+One word, because the instruction to answer in one word existed **only** in the
+injected step. So the injection reaches the model, and it arrives as a turn the
+person typed rather than as a system notice.
+
+Two things follow, and both shape the adapter:
+
+**It is written to neither transcript file.** Not `transcript.jsonl`, not
+`transcript_full.jsonl` — grepped for the probe text in both, zero hits. The
+message reaches the model and the screen and leaves nothing on disk, so
+delivery cannot be confirmed by reading afterwards. The queue is therefore
+emptied by the reader: `PreInvocation` fires before *every* model call, and a
+queue nothing cleared would put one sentence into every step of the turn.
+
+**An idle conversation still has to be woken.** `Stop` fires when a turn ends,
+not while nothing is happening — measured across a thirteen-minute silence with
+no records at all. A hook that is not being invoked cannot be answered, so
+"return `continue` from `Stop` when a message arrives" has nothing to return
+from. Waking still goes through `agentapi send-message`, which is why one short
+system line per message remains: it is a doorbell, not the message.
 
 ## There are two Antigravities, and they share nothing
 

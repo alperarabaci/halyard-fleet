@@ -56,8 +56,25 @@ You correctly assumed hooks would help retrieve the agent's responses! Antigravi
 **2. Telegram -> Antigravity (Input from User)**
 Sending messages from Telegram into Antigravity requires injecting them into the active `conversationId`. Since Antigravity sessions can run via IDE or standalone, Halyard can achieve this by:
 - Using the **Antigravity Python SDK** (`agent.chat()`) if leasing programmatically.
-- Using **Hooks** (`PreInvocation` / `PostInvocation`), which support an `injectSteps` schema allowing `{"userMessage": "A message from the user"}` to be pushed into the agent's thought loop.
-- Or, manually tailing transcripts and triggering a CLI command if Antigravity has a resume equivalent (`agy --resume <session_id>`). 
+- Using **Hooks** (`PreInvocation` / `PostInvocation`), which support an `injectSteps` schema allowing `{"userMessage": "A message from the user"}` to be pushed into the agent's thought loop. 
+  *Note:* The `Stop` hook's `reason` field is strictly processed as a system message.
+
+  **Corrected by measurement.** The two-step "wake it from `Stop`" plan does not
+  work: `Stop` fires when a turn *ends*, not while the agent is idle — measured
+  across a thirteen-minute silence, with no hook records at all — so when a
+  message arrives at an idle conversation there is no invocation of `Stop`
+  pending to answer with `{"decision": "continue"}`. A hook that is not being
+  called cannot return anything.
+
+  What was measured to work: hold the text in the control plane, wake the
+  conversation with a short `agentapi send-message` doorbell, and answer the
+  resulting `PreInvocation` with
+  `{"injectSteps": [{"userMessage": "..."}]}`. The model obeyed an instruction
+  present only in the injected step, and the step appears in neither
+  `transcript.jsonl` nor `transcript_full.jsonl`. One short system line per
+  message remains — the doorbell — and the person's own words arrive as a real
+  user turn.
+- Or, manually tailing transcripts and triggering a CLI command if Antigravity has a resume equivalent (`agy --resume <session_id>`).
 
 ### AgentRunner (The Adapter)
 Halyard uses the `AgentRunner` protocol (`src/halyard/agents/base.py`) to inject messages back into live sessions and retrieve session metadata.

@@ -70,28 +70,22 @@ _SHIM = Path.home() / ".gemini" / "antigravity" / "bin" / "agentapi"
 APP_MODELS = ("flash_lite", "flash", "pro")
 
 
-#: What a delivered message is labelled as, and it cannot be changed.
+#: What goes out to start a turn, and all that goes out.
 #:
 #: `agentapi send-message` is an agent-to-agent notification channel — "Send
 #: messages to another conversation or yourself" — so Antigravity files every
-#: one of them as a `SYSTEM_MESSAGE`, prefixed with its own sentence saying the
-#: user did not send it. Measured: `--title`, the only flag it takes, changes
-#: nothing in the envelope, which arrives as
+#: one of them as a `SYSTEM_MESSAGE` under a "Message from System" header, with
+#: its own sentence saying the user did not send it. Measured: `--title`, the
+#: only flag it takes, changes nothing in that envelope, and `sender=system` is
+#: fixed.
 #:
-#:     [Message] timestamp=... sender=system priority=MESSAGE_PRIORITY_HIGH content=...
-#:
-#: `sender=system` is fixed. The other two runtimes deliver a genuine user turn
-#: and this one has no interface that can, so the identity goes in the one
-#: field that *is* ours — the content. Short and factual on purpose: it says
-#: where the message came from without instructing the model what to do about
-#: it, because a person typing on a phone did not ask for their sentence to be
-#: argued with before it arrives.
-SENT_BY = "[Telegram]"
-
-
-def as_a_person(text: str) -> str:
-    """Mark a message as having come from a person rather than the system."""
-    return f"{SENT_BY} {text}"
+#: So the person's words are not sent this way. This is a doorbell: it exists
+#: because an idle conversation has no hook running that could be answered, and
+#: nothing else in `agentapi` starts a turn. It is deliberately short and says
+#: what it is, because it is the one line of ours that shows up as a system
+#: message — and if the control plane cannot be reached afterwards, it is the
+#: only thing the agent will have been told.
+WAKE = "[Halyard] A message is waiting."
 
 
 def find_antigravity_binary(configured: str | None = None) -> str | None:
@@ -158,6 +152,10 @@ class AntigravityRunner:
         self._timeout = timeout_seconds
         self._locks: dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
         self._models: dict[str, str] = {}
+        # What a conversation is owed but has not been given yet. See `send`:
+        # the text does not travel with the wake, it waits here until the hook
+        # comes and asks for it.
+        self._pending: dict[str, list[str]] = defaultdict(list)
         # The endpoint that last worked. Ports move when the application
         # restarts, so this is a shortcut rather than a fact: it is tried
         # first and discarded the moment it fails.
@@ -215,8 +213,32 @@ class AntigravityRunner:
         lock = self._locks.get(session_id)
         return lock is not None and lock.locked()
 
+    def take_pending(self, session_id: str) -> list[str]:
+        """Everything waiting for that conversation, handed over once.
+
+        Emptied as it is read, because `PreInvocation` fires before *every*
+        model call and a queue that was not cleared would inject the same
+        sentence into every step of the turn.
+        """
+        waiting = self._pending.pop(session_id, [])
+        return list(waiting)
+
     async def send(self, session_id: str, text: str, cwd: str | None = None) -> bool:
         """Put `text` into the conversation. Returns whether it was accepted.
+
+        **The text does not travel with the call.** `agentapi send-message` can
+        only file a `SYSTEM_MESSAGE`, so anything sent that way arrives under a
+        "Message from System" header with Antigravity's own sentence saying the
+        user did not send it. What goes out here is a wake, and the words wait
+        in `_pending` for the `PreInvocation` hook to come and collect them —
+        that hook can answer with `injectSteps`, and a `{"userMessage": ...}`
+        step arrives as a turn the person typed.
+
+        Measured, with a one-shot probe hook wired beside the gate: the model
+        obeyed an instruction that existed only in the injected step, and the
+        step is written to neither transcript file. So this is delivery that
+        leaves no record on disk — which is why the queue is emptied by the
+        reader rather than acknowledged by the runtime.
 
         `cwd` is unused: `send-message` addresses a conversation directly and
         the application already knows where that conversation lives. Kept in the
@@ -261,12 +283,18 @@ class AntigravityRunner:
         if self._endpoint in endpoints:
             ordered = [self._endpoint] + [e for e in endpoints if e != self._endpoint]
 
+        self._pending[session_id].append(text)
         async with self._locks[session_id]:
             for endpoint in ordered:
-                if await self._run(session_id, text, endpoint):
+                if await self._run(session_id, WAKE, endpoint):
                     self._endpoint = endpoint
                     return True
             self._endpoint = None
+            # Nothing woke, so nothing will come and collect it. Dropped rather
+            # than left waiting: a queue that outlives its delivery would put
+            # this sentence into whatever turn happens next, which could be
+            # hours later and about something else entirely.
+            self._pending.pop(session_id, None)
             logger.error(
                 "No Antigravity endpoint accepted a message for %s; tried %s",
                 session_id,
@@ -277,7 +305,7 @@ class AntigravityRunner:
     async def _run(self, session_id: str, text: str, endpoint: tuple[str, str]) -> bool:
         address, token = endpoint
         arguments = [self._binary, "agentapi", "send-message"]
-        arguments += [session_id, as_a_person(text)]
+        arguments += [session_id, text]
 
         try:
             process = await asyncio.create_subprocess_exec(

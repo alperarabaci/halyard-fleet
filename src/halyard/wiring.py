@@ -36,6 +36,13 @@ WIRING = (
 # Claude Code's PreToolUse decision already replaces its permission prompt.
 CODEX_WIRING = (("PermissionRequest", "Bash", BRIDGE_DIR / "permission_hook.sh", 600),)
 
+# Antigravity-only, and it is how a message gets in at all. `PreInvocation` is
+# the one hook that can answer with `injectSteps`, and a `{"userMessage": ...}`
+# step is the only way text enters a conversation as a turn the person typed —
+# `agentapi send-message` can file a SYSTEM_MESSAGE and nothing else. The other
+# two runtimes have a CLI that resumes a session and need none of this.
+ANTIGRAVITY_WIRING = (("PreInvocation", None, BRIDGE_DIR / "inject.py", 15),)
+
 
 @dataclass(frozen=True)
 class Runtime:
@@ -333,7 +340,7 @@ def _wire_antigravity(directory: Path, runtime: Runtime) -> int:
         raise SystemExit(f"halyard: {path} has a {ANTIGRAVITY_NAME!r} that is not an object.")
 
     added = []
-    for event, _matcher, script, timeout in WIRING:
+    for event, _matcher, script, timeout in WIRING + ANTIGRAVITY_WIRING:
         if not script.exists():
             print(f"halyard: {script} is missing from this install")
             return 1

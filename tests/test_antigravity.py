@@ -141,7 +141,14 @@ def runner_with_endpoint(monkeypatch, endpoints=(("127.0.0.1:60762", "tok"),)):
     return made
 
 
-async def test_a_message_goes_through_send_message(monkeypatch) -> None:
+async def test_what_goes_out_is_a_wake_and_not_the_message(monkeypatch) -> None:
+    """`agentapi send-message` can only file a SYSTEM_MESSAGE.
+
+    Measured: `--title`, its one flag, leaves `sender=system` untouched, so
+    anything sent this way arrives under a "Message from System" header with
+    Antigravity's own sentence saying the user did not send it. The person's
+    words go by `injectSteps` instead; this call only starts a turn.
+    """
     calls = spying(monkeypatch)
 
     assert await runner_with_endpoint(monkeypatch).send("abc", "carry on") is True
@@ -149,7 +156,7 @@ async def test_a_message_goes_through_send_message(monkeypatch) -> None:
     argv = calls[0]["argv"]
     assert argv[1:3] == ["agentapi", "send-message"]
     assert argv[-2] == "abc"
-    assert argv[-1].endswith("carry on")
+    assert "carry on" not in argv[-1], "the message must not go out as a system message"
 
 
 async def test_the_address_and_token_are_passed_as_environment(monkeypatch) -> None:
@@ -332,26 +339,47 @@ def test_each_runtime_gets_its_own_dialect_and_only_its_own(
 # --- who a message looks like it came from ------------------------------------
 
 
-async def test_a_delivered_message_says_it_came_from_a_person(monkeypatch) -> None:
-    """Antigravity files every delivered message as a SYSTEM_MESSAGE.
+async def test_the_message_waits_to_be_collected(monkeypatch) -> None:
+    """It is held for the `PreInvocation` hook, which can inject a user turn."""
+    spying(monkeypatch)
+    runner = runner_with_endpoint(monkeypatch)
 
-    `agentapi send-message` is an agent-to-agent notification channel, so the
-    envelope reads `sender=system` and carries Antigravity's own sentence
-    saying the user did not send it. Measured: `--title`, the only flag it
-    takes, changes nothing there. The content is the one field that is ours.
+    await runner.send("abc", "uyudun mu?")
+
+    assert runner.take_pending("abc") == ["uyudun mu?"]
+
+
+async def test_a_collected_message_is_not_handed_over_twice(monkeypatch) -> None:
+    """`PreInvocation` fires before *every* model call, so a queue that was not
+    emptied by the reader would put one sentence into every step of the turn."""
+    spying(monkeypatch)
+    runner = runner_with_endpoint(monkeypatch)
+    await runner.send("abc", "uyudun mu?")
+
+    runner.take_pending("abc")
+
+    assert runner.take_pending("abc") == []
+
+
+async def test_messages_are_collected_in_the_order_they_were_sent(monkeypatch) -> None:
+    """Two sent while the agent was busy are one turn's worth of context, and
+    read backwards they are a different conversation."""
+    spying(monkeypatch)
+    runner = runner_with_endpoint(monkeypatch)
+
+    await runner.send("abc", "first")
+    await runner.send("abc", "second")
+
+    assert runner.take_pending("abc") == ["first", "second"]
+
+
+async def test_a_message_that_could_not_wake_anything_is_dropped(monkeypatch) -> None:
+    """Nothing woke, so nothing will come and collect it.
+
+    Left queued, it would be injected into whatever turn happened next —
+    possibly hours later, about something else entirely.
     """
-    calls = spying(monkeypatch)
+    runner = runner_with_endpoint(monkeypatch, endpoints=())
 
-    await runner_with_endpoint(monkeypatch).send("abc", "uyudun mu?")
-
-    assert calls[0]["argv"][-1] == "[Telegram] uyudun mu?"
-
-
-async def test_the_message_itself_is_not_otherwise_rewritten(monkeypatch) -> None:
-    """A person typing on a phone did not ask for their sentence to be argued
-    with before it arrives."""
-    calls = spying(monkeypatch)
-
-    await runner_with_endpoint(monkeypatch).send("abc", "run the tests")
-
-    assert calls[0]["argv"][-1].endswith("run the tests")
+    assert await runner.send("abc", "carry on") is False
+    assert runner.take_pending("abc") == []

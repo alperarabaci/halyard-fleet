@@ -434,7 +434,7 @@ def test_antigravity_hooks_are_keyed_by_name_not_wrapped(tmp_path: Path) -> None
     written = antigravity_hooks(project)
     assert list(written) == ["halyard"]
     assert "hooks" not in written
-    assert set(written["halyard"]) == {"PreToolUse", "Stop"}
+    assert set(written["halyard"]) == {"PreToolUse", "Stop", "PreInvocation"}
 
 
 def test_pretooluse_is_grouped_and_stop_is_flat(tmp_path: Path) -> None:
