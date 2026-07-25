@@ -201,3 +201,60 @@ def test_another_tools_hooks_are_read_too(tmp_path: Path) -> None:
     )
 
     assert ("PreToolUse", "/o/check.sh") in doctor._hook_commands(path, tmp_path, "antigravity")
+
+
+# --- a CLI that is present and cannot sign in ---------------------------------
+
+
+def _claude_check(monkeypatch, *, found: str | None, signed: bool | None):
+    """The Claude Code spec's own availability check, with both answers forced."""
+    from halyard.agents import registry
+
+    monkeypatch.setattr("halyard.agents.claude_code.runner.find_claude_binary", lambda *_a: found)
+    monkeypatch.setattr("halyard.agents.claude_code.runner.signed_in", lambda *_a: signed)
+    return registry.get("claude-code").check_available()
+
+
+def test_a_cli_that_cannot_sign_in_is_a_failure(monkeypatch) -> None:
+    """The gap that let a Mac mini look healthy and deliver nothing.
+
+    The binary was there and `doctor` reported it, while every message failed
+    with the CLI's own "Not logged in · Please run /login" — a line that was
+    being written to stdout and thrown away. Present is not the same as usable.
+    """
+    found = _claude_check(monkeypatch, found="/bin/claude", signed=False)
+
+    assert [level for level, _ in found] == ["ok", "fail", ""]
+    assert "not signed in" in found[1][1]
+    assert "auth login" in found[2][1], "say the command, not just the problem"
+
+
+def test_the_command_it_prints_can_be_pasted(monkeypatch) -> None:
+    """The path is almost always `~/Library/Application Support/...`.
+
+    An instruction with an unquoted space in it is not an instruction — and
+    this is the path people need, because `claude` is frequently absent from
+    PATH on a machine that has it: the binary lives inside the desktop app's
+    bundle, which is how Halyard finds it and why the shell does not.
+    """
+    found = _claude_check(
+        monkeypatch, found="/Users/x/Library/Application Support/Claude/claude", signed=False
+    )
+
+    assert '"/Users/x/Library/Application Support/Claude/claude" auth login' in found[2][1]
+
+
+def test_a_signed_in_cli_says_nothing_extra(monkeypatch) -> None:
+    """A clean check should be one line, not a paragraph about what is fine."""
+    found = _claude_check(monkeypatch, found="/bin/claude", signed=True)
+
+    assert [level for level, _ in found] == ["ok"]
+
+
+def test_not_being_able_to_tell_is_not_a_failure(monkeypatch) -> None:
+    """`None` means the question could not be asked — an old CLI without the
+    subcommand, a timeout. Reporting that as a failure would send somebody to
+    re-authenticate something that was never signed out."""
+    found = _claude_check(monkeypatch, found="/bin/claude", signed=None)
+
+    assert [level for level, _ in found] == ["ok", "warn"]

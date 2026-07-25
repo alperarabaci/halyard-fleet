@@ -37,13 +37,34 @@ def _runner(settings=None) -> ClaudeCodeRunner:
 
 
 def _check_available(claude_binary=None, **_) -> list[tuple[str, str]]:
-    """The CLI, and which one — a wrong path denies every command silently."""
-    from halyard.agents.claude_code.runner import find_claude_binary
+    """The CLI, which one, and whether it can sign in.
+
+    The last of those is what a Mac mini was missing while looking healthy:
+    the binary was there, doctor said so, and every delivery failed with the
+    CLI's own "Not logged in · Please run /login".
+    """
+    from halyard.agents.claude_code.runner import find_claude_binary, signed_in
 
     found = find_claude_binary(claude_binary)
     if found is None:
         return [("fail", "the claude CLI is not on this machine")]
-    return [("ok", f"messages use {found}")]
+
+    lines = [("ok", f"messages use {found}")]
+    match signed_in(claude_binary):
+        case False:
+            lines.append(("fail", "that CLI is not signed in, so nothing can be delivered"))
+            # Quoted, because the path that gets printed here is usually
+            # `~/Library/Application Support/...` — an instruction with a
+            # space in it that cannot be pasted is not an instruction. And
+            # `claude` is often absent from PATH even where it is installed:
+            # the binary lives inside the desktop app's bundle, which is how
+            # Halyard finds it and why the shell does not.
+            lines.append(("", f'run this once on this machine:  "{found}" auth login'))
+        case None:
+            # Asked and not answered. Said quietly rather than as a failure —
+            # an old CLI without `auth status` is not a broken installation.
+            lines.append(("warn", "could not tell whether that CLI is signed in"))
+    return lines
 
 
 #: What the registry finds. See `halyard.agents.spec`.
