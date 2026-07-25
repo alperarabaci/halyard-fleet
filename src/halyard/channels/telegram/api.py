@@ -71,6 +71,7 @@ class TelegramApi:
         reply_markup: dict | None = None,
         parse_mode: str | None = "HTML",
         message_thread_id: int | None = None,
+        reply_to_message_id: int | None = None,
     ) -> dict:
         return await self._call(
             "sendMessage",
@@ -79,6 +80,7 @@ class TelegramApi:
             parse_mode=parse_mode,
             reply_markup=reply_markup,
             message_thread_id=message_thread_id,
+            reply_to_message_id=reply_to_message_id,
         )
 
     async def edit_message_text(

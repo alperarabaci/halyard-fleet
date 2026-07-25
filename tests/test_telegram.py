@@ -49,7 +49,14 @@ class FakeTelegramApi:
         self.commands = tuple(commands)
 
     async def send_message(
-        self, chat_id, text, *, reply_markup=None, message_thread_id=None, **kwargs
+        self,
+        chat_id,
+        text,
+        *,
+        reply_markup=None,
+        message_thread_id=None,
+        reply_to_message_id=None,
+        **kwargs,
     ) -> dict:
         self._next_message_id += 1
         self.sent.append(
@@ -58,6 +65,7 @@ class FakeTelegramApi:
                 "text": text,
                 "reply_markup": reply_markup,
                 "message_thread_id": message_thread_id,
+                "reply_to_message_id": reply_to_message_id,
             }
         )
         return {"message_id": self._next_message_id}
@@ -1950,3 +1958,95 @@ async def test_an_approval_button_is_not_read_as_a_choice(tmp_path: Path) -> Non
 
     assert cards.parse_choice_data("hf:handle:nonce:allow") is None
     assert cards.parse_callback_data("hc:model:pro") is None
+
+
+# --- handing a message over without retyping it -------------------------------
+
+
+def replying(text: str, to: str, chat: str, *, message_id: int = 7) -> dict:
+    """A `/to …` sent as a reply to a message somebody wants handed over."""
+    return {
+        "message_id": 9,
+        "from": {"id": int(APPROVER)},
+        "chat": {"id": chat},
+        "text": text,
+        "reply_to_message": {"message_id": message_id, "text": to},
+    }
+
+
+async def test_replying_to_a_message_sends_that_message(tmp_path: Path) -> None:
+    """The natural gesture for "this one, over there", and the text never has
+    to be retyped — Telegram already carries it."""
+    channel, api = await with_two_seats(tmp_path)
+
+    await channel._handle_message(
+        replying("/to xnav", "the failing test is in test_wiring", DRV_CHAT)
+    )
+
+    there = [sent for sent in api.sent if sent["chat_id"] == "-1003333333333"]
+    assert any("the failing test is in test_wiring" in sent["text"] for sent in there)
+
+
+async def test_what_was_typed_beats_what_was_replied_to(tmp_path: Path) -> None:
+    """Somebody who wrote out a message meant that one. Sending the other
+    instead would be the worst kind of helpful."""
+    channel, api = await with_two_seats(tmp_path)
+
+    await channel._handle_message(
+        replying("/to xnav actually look at this", "the old thing", DRV_CHAT)
+    )
+
+    there = [sent for sent in api.sent if sent["chat_id"] == "-1003333333333"]
+    assert any("actually look at this" in sent["text"] for sent in there)
+    assert not any("the old thing" in sent["text"] for sent in there)
+
+
+async def test_a_reply_without_a_seat_offers_the_buttons(tmp_path: Path) -> None:
+    """The text is known and the seat is not — the one case a button can
+    finish on its own, because nothing has to be remembered between the press
+    and the message."""
+    channel, api = await with_two_seats(tmp_path)
+
+    await channel._handle_message(replying("/to", "hand this over", DRV_CHAT, message_id=42))
+
+    last = api.sent[-1]
+    assert [b["text"] for b in last["reply_markup"]["inline_keyboard"][0]] == ["drv", "xnav"]
+    # Attached to the message that holds the text, so the press can read it
+    # back exactly rather than from the shortened preview.
+    assert last["reply_to_message_id"] == 42
+
+
+async def test_pressing_a_seat_sends_the_message_it_hangs_off(tmp_path: Path) -> None:
+    channel, api = await with_two_seats(tmp_path)
+
+    await channel._handle_callback(
+        {
+            "id": "q1",
+            "from": {"id": int(APPROVER)},
+            "message": {
+                "chat": {"id": DRV_CHAT},
+                "reply_to_message": {"text": "hand this over"},
+            },
+            "data": "hc:to:xnav",
+        }
+    )
+
+    there = [sent for sent in api.sent if sent["chat_id"] == "-1003333333333"]
+    assert any("hand this over" in sent["text"] for sent in there)
+
+
+async def test_a_press_with_nothing_left_to_send_says_so(tmp_path: Path) -> None:
+    """A deleted message is not a reason to send something else."""
+    channel, api = await with_two_seats(tmp_path)
+
+    await channel._handle_callback(
+        {
+            "id": "q1",
+            "from": {"id": int(APPROVER)},
+            "message": {"chat": {"id": DRV_CHAT}},
+            "data": "hc:to:xnav",
+        }
+    )
+
+    assert "nothing to send" in api.sent[-1]["text"]
+    assert not any(sent["chat_id"] == "-1003333333333" for sent in api.sent)

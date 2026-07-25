@@ -449,7 +449,16 @@ class TelegramChannel:
             await self._forward_to_session(argument, actor, here or "", thread)
             return
         if command == "to":
-            await self._forward_to_seat(argument, actor, here or "", thread)
+            # What is being handed over: the message this replies to, or the
+            # rest of the line. Replying is the natural gesture for "this one,
+            # over there", and it means the text never has to be retyped.
+            reply_to = message.get("reply_to_message") or {}
+            replied = (reply_to.get("text") or "").strip()
+            # Whichever message holds the text is what the buttons hang off.
+            anchor = reply_to.get("message_id") if replied else message.get("message_id")
+            await self._forward_to_seat(
+                argument, actor, here or "", thread, replied=replied, anchor_id=anchor
+            )
             return
         if command == "pause":
             _, changed = await self._gate.pause(actor)
@@ -514,7 +523,13 @@ class TelegramChannel:
         return "Seats you can send to:\n" + "\n".join(lines)
 
     async def _forward_to_seat(
-        self, argument: str, actor: str, chat_id: str, thread_id: int | None = None
+        self,
+        argument: str,
+        actor: str,
+        chat_id: str,
+        thread_id: int | None = None,
+        replied: str = "",
+        anchor_id: int | None = None,
     ) -> None:
         """Send a message to a seat by name, from anywhere.
 
@@ -534,15 +549,28 @@ class TelegramChannel:
         group somebody happened to be standing in.
         """
         self._here = chat_id
-        label, _, text = argument.partition(" ")
-        label, text = label.strip(), text.strip()
+        label, _, typed = argument.partition(" ")
+        label, typed = label.strip(), typed.strip()
+        # What was typed wins over what was replied to: somebody who wrote out
+        # a message meant that one, and silently sending the other instead
+        # would be the worst kind of helpful.
+        text = typed or replied
 
-        if not label or not text:
+        if not text:
             await self._say(
-                "Usage: <code>/to &lt;seat&gt; &lt;message&gt;</code>\n\n" + self._seat_list(),
+                "Usage: <code>/to &lt;seat&gt; &lt;message&gt;</code>, or reply to a "
+                "message with <code>/to &lt;seat&gt;</code>.\n\n" + self._seat_list(),
                 chat_id,
                 thread_id,
             )
+            return
+
+        if not label:
+            # The text is known and the seat is not, which is the one case a
+            # button can finish on its own — pressing it needs nothing
+            # remembered, because the message it applies to is the one the
+            # buttons are attached to.
+            await self._offer_seats(text, chat_id, thread_id, anchor_id)
             return
 
         seat = find(self._seats, label)
@@ -570,6 +598,30 @@ class TelegramChannel:
                 destination_thread,
             )
         await self._forward_to_session(text, actor, destination, destination_thread)
+
+    async def _offer_seats(
+        self, text: str, chat_id: str, thread_id: int | None, anchor_id: int | None
+    ) -> None:
+        """Ask which seat, attached to the message that holds the text.
+
+        Sent as a reply on purpose. Pressing a button then reads the exact
+        message back out of the callback rather than out of the preview above
+        it, which is shortened for reading — and a button that sends a
+        *truncated* version of what it is shown next to would be worse than no
+        button.
+        """
+        keyboard = cards.seat_choices(tuple(seat.label for seat in self._seats))
+        if keyboard is None:
+            await self._say(self._seat_list(), chat_id, thread_id)
+            return
+        preview = text if len(text) <= 200 else text[:200] + "…"
+        await self._say(
+            f"Send this to which seat?\n\n<blockquote>{html.escape(preview)}</blockquote>",
+            chat_id,
+            thread_id,
+            reply_markup=keyboard,
+            reply_to_message_id=anchor_id,
+        )
 
     async def _forward_to_session(
         self, text: str, actor: str, chat_id: str, thread_id: int | None = None
@@ -918,6 +970,7 @@ class TelegramChannel:
         chat_id: str | None = None,
         thread_id: int | None = None,
         reply_markup: dict | None = None,
+        reply_to_message_id: int | None = None,
     ) -> None:
         """Answer in the conversation that asked.
 
@@ -931,6 +984,7 @@ class TelegramChannel:
                 text,
                 message_thread_id=thread_id,
                 reply_markup=reply_markup,
+                reply_to_message_id=reply_to_message_id,
             )
         except Exception:
             logger.warning("Could not answer a command", exc_info=True)
@@ -952,6 +1006,26 @@ class TelegramChannel:
             here = str((message.get("chat") or {}).get("id") or "") or None
             what, value = chosen
             await self._dismiss(query_id)
+            if what == "to":
+                carried = ((message.get("reply_to_message") or {}).get("text") or "").strip()
+                # The anchor may be the command itself, in which case the text
+                # is everything after `/to`.
+                if carried.startswith("/to"):
+                    carried = carried.partition(" ")[2].strip()
+                if not carried:
+                    await self._say(
+                        "That message is gone, so there is nothing to send.",
+                        here,
+                        message.get("message_thread_id"),
+                    )
+                    return
+                await self._forward_to_seat(
+                    f"{value} {carried}",
+                    f"tg:{user_id}",
+                    here or "",
+                    message.get("message_thread_id"),
+                )
+                return
             await self._choose(what, value, here, message.get("message_thread_id"))
             return
 
