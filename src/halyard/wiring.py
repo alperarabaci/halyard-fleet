@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import shutil
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -51,6 +52,15 @@ class Runtime:
     matcher: str
     #: The CLI whose presence means this runtime is worth wiring at all.
     binary: str
+    #: Whether this runtime is on the machine, for when a PATH lookup is not
+    #: the answer. Antigravity's application bundles its binaries inside the
+    #: `.app` and puts nothing on PATH, so `which` reports it missing on a
+    #: machine where it is certainly installed — and the gate would then be
+    #: skipped on the only runtime that cannot be reached any other way.
+    present: Callable[[], bool] | None = None
+
+    def on_this_machine(self) -> bool:
+        return self.present() if self.present else bool(shutil.which(self.binary))
 
 
 RUNTIMES = (
@@ -78,7 +88,42 @@ RUNTIMES = (
         matcher="^(Bash|exec|exec_command|shell)$",
         binary="codex",
     ),
+    # Antigravity names its shell tool `run_command`, and its matcher is a
+    # regex over tool names derived by "lowercasing the step type and removing
+    # the CORTEX_STEP_TYPE_ prefix".
+    Runtime(
+        name="antigravity",
+        settings=".agents/hooks.json",
+        matcher="run_command",
+        binary="agy",
+        present=lambda: _antigravity_present(),
+    ),
 )
+
+#: The top-level key this install writes its hooks under.
+#:
+#: Antigravity's file is not `{"hooks": {...}}` like the other two. Each
+#: top-level key is a *hook name* whose value holds that hook's events, and
+#: every name contributing to an event is merged and run in turn. So this is a
+#: namespace rather than a wrapper, and two tools can gate the same project
+#: without either one having to know about the other.
+ANTIGRAVITY_NAME = "halyard"
+
+#: The events Antigravity wraps in a `matcher`/`hooks` group. Every other event
+#: — `Stop` among them — is a *flat* list of handler objects.
+#:
+#: Not cosmetic. A `Stop` handler written in the grouped shape has no `command`
+#: where Antigravity looks for one, so the relay is not run and no reply ever
+#: reaches a phone — with the file present, and everything reporting wired.
+ANTIGRAVITY_GROUPED = ("PreToolUse", "PostToolUse")
+
+
+def _antigravity_present() -> bool:
+    """The application or its CLI, either of which means this is worth wiring."""
+    from halyard.agents.antigravity import find_antigravity_binary
+
+    return find_antigravity_binary() is not None or bool(shutil.which("agy"))
+
 
 RULES = """\
 Three things to know before you walk away from this machine:
@@ -121,7 +166,7 @@ def installed(runtimes: tuple[Runtime, ...] = RUNTIMES) -> tuple[Runtime, ...]:
     while leaving one behind after a CLI is uninstalled is a hook pointing at a
     bridge nothing will ever call.
     """
-    return tuple(r for r in runtimes if shutil.which(r.binary))
+    return tuple(r for r in runtimes if r.on_this_machine())
 
 
 def _snake(event: str) -> str:
@@ -264,8 +309,123 @@ def _is_ours(command: object) -> bool:
     return isinstance(command, str) and str(BRIDGE_DIR.resolve()) in command
 
 
+def antigravity_handlers(spec: dict, event: str) -> list[dict]:
+    """Every handler an Antigravity hook spec has for one event.
+
+    Flattens the two shapes so callers can ask one question. Reading a grouped
+    event as flat yields the group — an object with a `matcher` and no
+    `command` — which looks like a hook pointing nowhere.
+    """
+    entries = spec.get(event) or []
+    if not isinstance(entries, list):
+        return []
+    if event in ANTIGRAVITY_GROUPED:
+        return [h for group in entries for h in (group or {}).get("hooks") or []]
+    return [entry for entry in entries if isinstance(entry, dict)]
+
+
+def _wire_antigravity(directory: Path, runtime: Runtime) -> int:
+    """Add the gate to `.agents/hooks.json`, in Antigravity's own shape."""
+    path = settings_path(directory, runtime)
+    config = _load(path)
+    spec = config.setdefault(ANTIGRAVITY_NAME, {})
+    if not isinstance(spec, dict):
+        raise SystemExit(f"halyard: {path} has a {ANTIGRAVITY_NAME!r} that is not an object.")
+
+    added = []
+    for event, _matcher, script, timeout in WIRING:
+        if not script.exists():
+            print(f"halyard: {script} is missing from this install")
+            return 1
+        if any(_is_ours(h.get("command")) for h in antigravity_handlers(spec, event)):
+            continue
+        handler = {"type": "command", "command": str(script), "timeout": timeout}
+        entries = spec.setdefault(event, [])
+        entries.append(
+            {"matcher": runtime.matcher, "hooks": [handler]}
+            if event in ANTIGRAVITY_GROUPED
+            else handler
+        )
+        added.append(event)
+
+    # `enabled: false` turns off every handler under this name while leaving
+    # the file looking exactly like a wired one. Wiring means the gate works,
+    # so it is turned back on — and said out loud, because somebody put it
+    # there on purpose and deserves to know it was undone.
+    re_enabled = spec.get("enabled") is False
+    if re_enabled:
+        spec["enabled"] = True
+
+    if not added and not re_enabled:
+        print(f"  {runtime.name}: already wired ({path})")
+        return 0
+
+    backup = _back_up(path)
+    _write(path, config)
+    if added:
+        print(f"  {runtime.name}: wired {', '.join(added)} into {path}")
+    if re_enabled:
+        print(f'  {runtime.name}: "enabled": false was turned back on — it disabled the gate')
+    if backup:
+        print(f"    previous version kept at {backup}")
+    kept = sorted(k for k in config if k != ANTIGRAVITY_NAME)
+    if kept:
+        print(f"    left untouched in that file: {', '.join(kept)}")
+    return 0
+
+
+def _unwire_antigravity(directory: Path, runtime: Runtime) -> int:
+    path = settings_path(directory, runtime)
+    if not path.exists():
+        return 0
+    config = _load(path)
+    spec = config.get(ANTIGRAVITY_NAME)
+    if not isinstance(spec, dict):
+        return 0
+
+    removed = []
+    for event in [key for key in spec if key != "enabled"]:
+        entries = spec.get(event) or []
+        if event in ANTIGRAVITY_GROUPED:
+            kept = []
+            for group in entries:
+                before = (group or {}).get("hooks") or []
+                mine = [h for h in before if not _is_ours(h.get("command"))]
+                if len(mine) != len(before):
+                    removed.append(event)
+                if mine:
+                    kept.append({**group, "hooks": mine})
+        else:
+            kept = [h for h in entries if not _is_ours((h or {}).get("command"))]
+            if len(kept) != len(entries):
+                removed.append(event)
+        if kept:
+            spec[event] = kept
+        else:
+            del spec[event]
+
+    if not removed:
+        return 0
+    # A name holding nothing but `enabled` is not a hook, so the whole key goes
+    # rather than being left as a husk somebody has to work out the meaning of.
+    if not [key for key in spec if key != "enabled"]:
+        config.pop(ANTIGRAVITY_NAME, None)
+
+    backup = _back_up(path)
+    _write(path, config)
+    print(f"  {runtime.name}: removed {', '.join(sorted(set(removed)))} from {path}")
+    if backup:
+        print(f"    previous version kept at {backup}")
+    kept_keys = sorted(k for k in config if k != ANTIGRAVITY_NAME)
+    if kept_keys:
+        print(f"    left untouched in that file: {', '.join(kept_keys)}")
+    return 1
+
+
 def _wire_one(directory: Path, runtime: Runtime) -> int:
     """Add one runtime's hooks, keeping everything already in its file."""
+    if runtime.name == "antigravity":
+        return _wire_antigravity(directory, runtime)
     path = settings_path(directory, runtime)
     config = _load(path)
     hooks = config.setdefault("hooks", {})
@@ -364,6 +524,8 @@ def wire(directory: Path, runtimes: tuple[Runtime, ...] | None = None) -> int:
 
 def _unwire_one(directory: Path, runtime: Runtime) -> int:
     """Remove only this install's hooks, and nothing else."""
+    if runtime.name == "antigravity":
+        return _unwire_antigravity(directory, runtime)
     path = settings_path(directory, runtime)
     if not path.exists():
         return 0

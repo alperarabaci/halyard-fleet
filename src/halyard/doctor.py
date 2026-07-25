@@ -84,12 +84,57 @@ def project_root(directory: Path) -> Path:
     return directory
 
 
-def _hook_commands(settings_file: Path, project_dir: Path) -> list[tuple[str, str]]:
-    """Every hook command in a settings file, as (event, resolved path)."""
+def _read(settings_file: Path) -> dict:
     try:
-        config = json.loads(settings_file.read_text(encoding="utf-8"))
+        loaded = json.loads(settings_file.read_text(encoding="utf-8"))
     except (OSError, ValueError):
-        return []
+        return {}
+    return loaded if isinstance(loaded, dict) else {}
+
+
+def _disabled_antigravity_hooks(settings_file: Path) -> list[str]:
+    """The hook names in an Antigravity file that are switched off.
+
+    `"enabled": false` leaves the file looking exactly like a wired one — the
+    events are there, the commands are there, the paths are right — and runs
+    none of it. That is the shape of failure this whole checker exists for.
+    """
+    return [
+        name
+        for name, spec in _read(settings_file).items()
+        if isinstance(spec, dict) and spec.get("enabled") is False
+    ]
+
+
+def _antigravity_hook_commands(settings_file: Path) -> list[tuple[str, str]]:
+    """Every hook command in an Antigravity file, as (event, path).
+
+    A different shape from the other two: top-level keys are hook *names*, and
+    only some events wrap their handlers in a `matcher`/`hooks` group. Reading
+    it with the other parser finds nothing at all and reports an ungated
+    project, whose obvious remedy is to wire a second gate on top of the first.
+    """
+    from halyard.wiring import antigravity_handlers
+
+    found: list[tuple[str, str]] = []
+    for spec in _read(settings_file).values():
+        if not isinstance(spec, dict):
+            continue
+        for event in [key for key in spec if key != "enabled"]:
+            for handler in antigravity_handlers(spec, event):
+                command = handler.get("command")
+                if isinstance(command, str) and command.strip():
+                    found.append((event, command.split()[0]))
+    return found
+
+
+def _hook_commands(
+    settings_file: Path, project_dir: Path, runtime: str = "claude-code"
+) -> list[tuple[str, str]]:
+    """Every hook command in a settings file, as (event, resolved path)."""
+    if runtime == "antigravity":
+        return _antigravity_hook_commands(settings_file)
+    config = _read(settings_file)
     found: list[tuple[str, str]] = []
     for event, groups in (config.get("hooks") or {}).items():
         for group in groups if isinstance(groups, list) else []:
@@ -104,7 +149,9 @@ def _hook_commands(settings_file: Path, project_dir: Path) -> list[tuple[str, st
     return found
 
 
-def _check_seat(seat, claude_binary: str | None = None) -> tuple[list[str], int]:
+def _check_seat(
+    seat, claude_binary: str | None = None, project_path: Path | None = None
+) -> tuple[list[str], int]:
     """Everything one seat needs, checked against the runtime it actually is.
 
     Four seats and two runtimes means a name that resolves perfectly for one is
@@ -117,7 +164,21 @@ def _check_seat(seat, claude_binary: str | None = None) -> tuple[list[str], int]
     if not seat.session:
         return [f"{WARN}{label}: no session name, so nothing can be sent to it"], 0
 
-    if seat.runtime == "codex":
+    if seat.runtime == "antigravity":
+        from halyard.agents.antigravity import (
+            find_antigravity_binary,
+            language_server_endpoints,
+        )
+        from halyard.agents.antigravity import find_session as look_up
+
+        if find_antigravity_binary() is None:
+            return [f"{FAIL}{label}: Antigravity is not installed on this machine"], 1
+        if not language_server_endpoints():
+            # Not a failure: the gate works whether or not the app is open, and
+            # only delivery needs it. Said plainly because this runtime is the
+            # only one where a closed application means messages cannot arrive.
+            lines.append(f"{WARN}{label}: Antigravity is not running, so nothing can be sent")
+    elif seat.runtime == "codex":
         from halyard.agents.codex import find_codex_binary
         from halyard.agents.codex import find_session as look_up
 
@@ -144,19 +205,38 @@ def _check_seat(seat, claude_binary: str | None = None) -> tuple[list[str], int]
         return lines, 1
 
     lines.append(f"{OK}{label}: {seat.session}")
+    if seat.runtime == "antigravity":
+        from halyard.agents.antigravity.sessions import is_cli
+
+        if is_cli(ref.session_id):
+            # Findable and unreachable, which is the combination worth saying
+            # out loud: the name resolves, so everything looks configured, and
+            # every message to it would be refused.
+            lines.append(f"{FAIL}        that conversation belongs to the agy CLI, not the app,")
+            lines.append("                and the CLI keeps a separate store the application")
+            lines.append("                cannot see. Nothing can be sent to it — reopen the")
+            lines.append("                work in the Antigravity application and name that.")
+            return lines, 1
     if not ref.named_by_a_person:
         lines.append(f"{WARN}        that name was generated, and generated names are rewritten")
     if not seat.chat:
         lines.append(f"{WARN}        no chat, so it has nowhere of its own to speak")
-    if not ref.cwd:
-        lines.append(f"{WARN}        no directory recorded, so nothing can be gated")
+    # Where the work happens. A session usually records it; an Antigravity one
+    # never does — that lives in the running application, and the gate does not
+    # need it because `workspacePaths` arrives with every hook call. So the
+    # project's own `path:` stands in, which is the thing YAML added and the
+    # reason a seat knows which project it belongs to.
+    directory = ref.cwd or (str(project_path) if project_path else None)
+    if not directory:
+        lines.append(f"{WARN}        no directory recorded and the project has no `path:`,")
+        lines.append("                so there is nothing to check the gate against")
         return lines, 0
 
-    gate_lines, gate_problems = _check_gated_project(label, ref, seat)
+    gate_lines, gate_problems = _check_gated_project(label, ref, seat, directory)
     return lines + gate_lines, gate_problems
 
 
-def _check_gated_project(label: str, ref, seat) -> tuple[list[str], int]:
+def _check_gated_project(label: str, ref, seat, directory: str) -> tuple[list[str], int]:
     """Check the hooks wired into the project this seat's session works in.
 
     This is the check that would have caught an afternoon: settings copied from
@@ -169,23 +249,28 @@ def _check_gated_project(label: str, ref, seat) -> tuple[list[str], int]:
     the obvious response to that is to go and wire a second.
     """
     lines: list[str] = []
-    session_dir = Path(ref.cwd)
+    session_dir = Path(directory)
     project_dir = project_root(session_dir)
     lines.append(f"        {session_dir}")
     if project_dir != session_dir:
         lines.append(f"        gated from the repository root: {project_dir}")
 
-    settings_files = (
-        [project_dir / ".codex" / "hooks.json"]
-        if seat.runtime == "codex"
-        else [
+    settings_files = {
+        "codex": [project_dir / ".codex" / "hooks.json"],
+        "antigravity": [project_dir / ".agents" / "hooks.json"],
+    }.get(
+        seat.runtime,
+        [
             project_dir / ".claude" / "settings.json",
             project_dir / ".claude" / "settings.local.json",
-        ]
+        ],
     )
     present = [f for f in settings_files if f.exists()]
     if not present:
-        where = ".codex/hooks.json" if seat.runtime == "codex" else ".claude/settings.json"
+        where = {
+            "codex": ".codex/hooks.json",
+            "antigravity": ".agents/hooks.json",
+        }.get(seat.runtime, ".claude/settings.json")
         lines.append(f"{FAIL}        no {where} — nothing is gating this project")
         lines.append(f"                halyard wire {project_dir}")
         return lines, 1
@@ -193,7 +278,14 @@ def _check_gated_project(label: str, ref, seat) -> tuple[list[str], int]:
     problems = 0
     seen_events: set[str] = set()
     for settings_file in present:
-        for event, command in _hook_commands(settings_file, project_dir):
+        switched_off = (
+            _disabled_antigravity_hooks(settings_file) if seat.runtime == "antigravity" else []
+        )
+        for name in switched_off:
+            problems += 1
+            lines.append(f'{FAIL}        "{name}" has "enabled": false, so none of it runs')
+            lines.append("                the file below is wired and switched off")
+        for event, command in _hook_commands(settings_file, project_dir, seat.runtime):
             seen_events.add(event)
             path = Path(command)
             if not path.exists():
@@ -344,8 +436,15 @@ def run() -> int:
             labels = ", ".join(s.label for s in seats if s.project == project)
             print(f"        {project}: {labels}")
 
+    from halyard.core.config_file import projects as described_projects
+
+    try:
+        where = {p.name: p.path for p in described_projects()}
+    except ValueError:
+        where = {}
+
     for seat in seats:
-        lines, found = _check_seat(seat, settings.claude_binary)
+        lines, found = _check_seat(seat, settings.claude_binary, where.get(seat.project))
         problems += found
         for line in lines:
             print(line)
@@ -421,9 +520,15 @@ def sessions() -> int:
         print(f"  {when}  {name}{'' if chosen else '   ⚠ auto-titled'}")
         print(f"{'':20}{project}")
     print(
-        "\nPut the two you want routed into .env, exactly as printed:\n"
-        "  HALYARD_NAVIGATOR_SESSION=...\n"
-        "  HALYARD_DRIVER_SESSION=..."
+        "\nGive one to a seat, exactly as printed above:\n"
+        "\n"
+        "  seats:\n"
+        "    drv:\n"
+        "      runtime: claude-code\n"
+        "      session: <one of the names above>\n"
+        '      chat: "-100..."      # the group this seat speaks in\n'
+        "\n"
+        "Seats are read at startup, so restart the control plane afterwards."
     )
     if generated:
         # Worth interrupting for. A generated title routes correctly the day it

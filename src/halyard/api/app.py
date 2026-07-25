@@ -20,6 +20,7 @@ from fastapi import FastAPI, Request, Response
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
 
+from halyard.agents.antigravity import AntigravityRunner
 from halyard.agents.claude_code import ClaudeCodeRunner
 from halyard.agents.codex import CodexRunner
 from halyard.channels.stub import StubChannel
@@ -200,6 +201,7 @@ def create_app(settings: Settings, *, channel=None) -> FastAPI:
             default_model=settings.claude_default_model.strip() or None,
         ),
         "codex": CodexRunner(),
+        "antigravity": AntigravityRunner(),
     }
     configured_seats = configured()
     # What `/health` and anything else with one question in mind should ask.
