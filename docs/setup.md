@@ -34,19 +34,36 @@ or absolute path only when you need to override that choice.
 
 ### Wiring the hooks
 
-One command, from anywhere inside the project:
+One command, and it takes no argument in the ordinary case:
 
 ```bash
-halyard wire .        # or: halyard wire ~/code/my-project
-halyard unwire .      # take it back off
+make wire             # every project in halyard.yaml
+make wire p=alpha     # one of them, by name
+make unwire           # take it back off
 ```
 
-For every installed runtime, it loads the existing project configuration,
-copies the exact file aside first with a timestamp, and then merges Halyard's
-hook entries without replacing the document:
+**The configuration decides which runtimes a project is gated for**, not what
+happens to be installed on the machine. A project whose seats are all Claude
+Code gets Claude Code's hooks and nothing else — asking the machine instead
+once wrote Antigravity's hooks into such a project and skipped Claude Code's,
+because one publishes a command and the other hides its binary inside an app
+bundle.
+
+With no argument it reads `halyard.yaml` rather than the working directory,
+which is almost always the Halyard checkout — gating that means the control
+plane's own commands go through the hook it is serving.
+
+For each runtime it loads the existing project configuration, copies the exact
+file aside with a timestamp, and merges Halyard's entries without replacing the
+document:
 
 - Claude Code: `.claude/settings.local.json`
 - Codex: `.codex/hooks.json`
+- Antigravity: `.agents/hooks.json`
+
+**Add those to the project's `.gitignore`.** They name absolute paths, so a
+committed one arrives on the next machine pointing at a home directory that
+does not exist there. `halyard doctor` says so if you forget.
 
 A session opened in a subdirectory is gated from the top of its repository, so
 wiring next to the session would gate nothing while looking like it had.

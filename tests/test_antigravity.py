@@ -134,7 +134,7 @@ def spying(monkeypatch, stdout: bytes = b"{}") -> list[dict]:
 
 def runner_with_endpoint(monkeypatch, endpoints=(("127.0.0.1:60762", "tok"),)):
     made = AntigravityRunner()
-    made._binary = "/Applications/Antigravity.app/Contents/Resources/bin/language_server"
+    made._configured = "/Applications/Antigravity.app/Contents/Resources/bin/language_server"
     monkeypatch.setattr(
         "halyard.agents.antigravity.runner.language_server_endpoints", lambda: list(endpoints)
     )

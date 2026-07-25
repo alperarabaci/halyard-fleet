@@ -84,7 +84,14 @@ class CodexRunner:
         timeout_seconds: float = DEFAULT_TURN_TIMEOUT_SECONDS,
         default_model: str | None = DEFAULT_MODEL,
     ) -> None:
-        self._binary = find_codex_binary(binary)
+        # The path is *not* resolved here. A control plane runs for days, and
+        # what it can reach changes underneath it: a CLI installed after
+        # startup stayed invisible until a restart, and Claude Code's binary
+        # lives under a version number, so an upgrade moves it and leaves a
+        # long-running process pointing at a path that no longer exists.
+        # Measured: `doctor` found codex and the runner did not, in the same
+        # minute, because one had asked at startup and the other just now.
+        self._configured = binary
         self._timeout = timeout_seconds
         self._default_model = default_model or None
         self._locks: dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
@@ -96,6 +103,11 @@ class CodexRunner:
     @property
     def id(self) -> str:
         return "codex"
+
+    @property
+    def _binary(self) -> str | None:
+        """Where the CLI is, asked now rather than remembered."""
+        return find_codex_binary(self._configured)
 
     @property
     def available(self) -> bool:

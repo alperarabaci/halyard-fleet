@@ -130,6 +130,7 @@ behalf, uncontrolled agent-to-agent messaging, or multi-user RBAC.
 | | |
 |---|---|
 | [Before you wire it in](docs/before-you-wire-it.md) | What changes, and what surprised us |
+| [When it does not work](docs/when-it-does-not-work.md) | Every way setup has gone wrong so far, and the fix |
 | [Setup](docs/setup.md) | Installing it, seats in YAML, gating a project by hand |
 | [Telegram](docs/telegram.md) | The bot, seats, models and effort |
 | [Architecture](docs/architecture.md) | How the layers fit, and the security posture |
@@ -137,7 +138,6 @@ behalf, uncontrolled agent-to-agent messaging, or multi-user RBAC.
 | [Session I/O](docs/session-io-notes.md) | Writing into a live session, and what forks it |
 | [Antigravity notes](docs/antigravity-payload-notes.md) | A third runtime, measured in full and not shipped — and why |
 | [Design document](docs/mobile-agent-control-plane.md) | The full plan this is built from |
-| [Postmortems](docs/postmortem/) | Regressions, and what they cost |
 
 ## Development
 
