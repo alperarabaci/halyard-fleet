@@ -134,7 +134,10 @@ def spying(monkeypatch, stdout: bytes = b"{}") -> list[dict]:
 
 def runner_with_endpoint(monkeypatch, endpoints=(("127.0.0.1:60762", "tok"),)):
     made = AntigravityRunner()
-    made._configured = "/Applications/Antigravity.app/Contents/Resources/bin/language_server"
+    # A real executable, because the runner resolves its path when it needs
+    # it and a configured path that is not there is correctly no path at all.
+    # The macOS bundle path this used to name does not exist on CI.
+    made._configured = "/bin/sh"
     monkeypatch.setattr(
         "halyard.agents.antigravity.runner.language_server_endpoints", lambda: list(endpoints)
     )
