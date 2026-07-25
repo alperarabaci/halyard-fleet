@@ -15,6 +15,23 @@ make doctor
 
 ---
 
+## You are not on macOS
+
+Everything below was found on macOS, and that is the only platform this has
+been run on. Nothing is deliberately macOS-only, but three things look there
+first and have not been tried elsewhere:
+
+- **Finding a CLI.** Claude Code is looked for inside `claude.app` and then on
+  `PATH`; Codex under `~/.codex`; Antigravity inside `/Applications`. The
+  `PATH` lookup is the portable one and should work anywhere.
+- **Keeping the machine awake** uses `caffeinate`, and does nothing at all off
+  macOS — including saying so, beyond one line in the log. A Linux box that
+  suspends will take the gate down the same way a Mac did.
+- **Nothing has been run on Windows.** The hooks are shell scripts.
+
+`halyard doctor` is the first thing to run, and the place a wrong assumption
+about where something lives will show up.
+
 ## A message never arrives, and the log says nothing useful
 
 **`Delivering a message to … failed (exit 1):` with nothing after the colon.**

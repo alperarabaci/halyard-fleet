@@ -71,6 +71,7 @@ class TelegramApi:
         reply_markup: dict | None = None,
         parse_mode: str | None = "HTML",
         message_thread_id: int | None = None,
+        reply_to_message_id: int | None = None,
     ) -> dict:
         return await self._call(
             "sendMessage",
@@ -79,6 +80,7 @@ class TelegramApi:
             parse_mode=parse_mode,
             reply_markup=reply_markup,
             message_thread_id=message_thread_id,
+            reply_to_message_id=reply_to_message_id,
         )
 
     async def edit_message_text(
@@ -137,6 +139,29 @@ class TelegramApi:
             raise TelegramError(f"sendDocument failed: {answer.get('description')}")
         return answer["result"]
 
+    #: Where a command list has to be written for it to be seen.
+    #:
+    #: Telegram keeps one list per *scope* and shows the narrowest that has
+    #: one. For somebody in a group that resolves
+    #: `all_chat_administrators` → `all_group_chats` → default, and the first
+    #: of those is easy to forget: a person is almost always an administrator
+    #: of the groups they made.
+    #:
+    #: Measured on a live bot, twice. Each of these held a six-command list
+    #: from an earlier release, so a newly added command answered when typed
+    #: and never appeared in the menu. Writing the default fixed nothing;
+    #: writing two of the three fixed nothing either, because the one left out
+    #: was the narrowest.
+    #:
+    #: Written rather than deleted, so nothing anybody set by hand disappears;
+    #: each scope simply ends up holding the current list.
+    COMMAND_SCOPES = (
+        None,
+        {"type": "all_private_chats"},
+        {"type": "all_group_chats"},
+        {"type": "all_chat_administrators"},
+    )
+
     async def set_my_commands(self, commands: tuple[tuple[str, str], ...]) -> None:
         """Publish the command list, so a client can offer it.
 
@@ -145,10 +170,12 @@ class TelegramApi:
         produces a menu instead of nothing, which on a phone is the difference
         between picking a command and remembering it.
         """
-        await self._call(
-            "setMyCommands",
-            commands=[{"command": name, "description": text} for name, text in commands],
-        )
+        listed = [{"command": name, "description": text} for name, text in commands]
+        for scope in self.COMMAND_SCOPES:
+            payload = {"commands": listed}
+            if scope is not None:
+                payload["scope"] = scope
+            await self._call("setMyCommands", **payload)
 
     async def get_updates(self, *, offset: int | None = None, timeout: int = 30) -> list[dict]:
         return await self._call(

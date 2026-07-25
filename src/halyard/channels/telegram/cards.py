@@ -100,7 +100,7 @@ def parse_choice_data(data: str) -> tuple[str, str] | None:
     if len(parts) != 3 or parts[0] != CHOICE_PREFIX:
         return None
     _, what, value = parts
-    if what not in {"model", "effort"} or not value:
+    if what not in {"model", "effort", "to"} or not value:
         return None
     return what, value
 
@@ -130,6 +130,26 @@ def choices(what: str, values: tuple[str, ...]) -> dict | None:
     rows = [buttons[index : index + 3] for index in range(0, len(buttons), 3)]
     rows.append([{"text": "default", "callback_data": choice_data(what, "default")}])
     return {"inline_keyboard": rows}
+
+
+def seat_choices(labels: tuple[str, ...]) -> dict | None:
+    """Buttons for `/to`, one per seat.
+
+    Offered only when the text to send is already known — a seat button that
+    still needed a message would have to remember which seat was pressed until
+    one arrived, and a remembered choice that nobody can see is how a message
+    reaches the wrong agent. Telegram's reply already carries the text, so
+    there is nothing to hold.
+    """
+    buttons = []
+    for label in labels:
+        try:
+            buttons.append({"text": label, "callback_data": choice_data("to", label)})
+        except ValueError:
+            continue
+    if not buttons:
+        return None
+    return {"inline_keyboard": [buttons[i : i + 3] for i in range(0, len(buttons), 3)]}
 
 
 def format_remaining(expires_at: datetime, now: datetime) -> str:

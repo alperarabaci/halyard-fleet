@@ -15,7 +15,7 @@ It runs on your own machine. No open ports, no exposed API, nothing to log into.
 Nothing is ever approved automatically: every failure — a crash, a timeout, an
 unreachable control plane — denies.
 
-**Runtimes:** Claude Code, Codex &nbsp;·&nbsp; **Channel:** Telegram
+**Runtimes:** Claude Code, Codex &nbsp;·&nbsp; **Channel:** Telegram &nbsp;·&nbsp; **Tested on:** macOS
 
 <!-- Demo goes here:
 <p align="center">
@@ -111,6 +111,12 @@ reading configuration.
 - **`/pause` steps aside rather than denying.** The runtime's own permission list
   then decides, with no card and no audit entry.
 - **The gate covers what the matcher covers** — Bash today, not `Write` or `Edit`.
+- **Only macOS has been run.** Nothing here is deliberately macOS-only and the
+  Linux paths exist, but they have not been exercised: the CLIs are found by
+  looking in places a Mac keeps them, and holding the machine awake uses
+  `caffeinate`, which simply does nothing elsewhere. Windows is untried
+  entirely. If you run it somewhere else, `halyard doctor` is the first thing
+  to read and the place a wrong assumption will show up.
 - **Antigravity is not shipped.** The adapter works — it gates, it delivers, it
   brings replies back — but a command approved from your phone is still approved a
   second time in the desktop app whenever the agent asks to leave the sandbox.
