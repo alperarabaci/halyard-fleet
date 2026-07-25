@@ -75,6 +75,63 @@ def parse_callback_data(data: str) -> tuple[str, str, str] | None:
     return handle, nonce, action
 
 
+#: Its own prefix, kept apart from the approval buttons above.
+#:
+#: An approval carries a nonce because it answers a question that is open
+#: exactly once and must not be answerable twice. A preference is not that: it
+#: has no pending state, pressing it again sets the same thing again, and
+#: giving it a nonce would mean holding a table of live choices to no purpose.
+#: What they do share is that both are actions, so both are checked against the
+#: authorised users before anything happens.
+CHOICE_PREFIX = "hc"
+
+
+def choice_data(what: str, value: str) -> str:
+    """`hc:model:opus` — what is being set, and to what."""
+    data = f"{CHOICE_PREFIX}:{what}:{value}"
+    if len(data.encode("utf-8")) > CALLBACK_DATA_LIMIT:
+        raise ValueError(f"choice callback exceeds the {CALLBACK_DATA_LIMIT}-byte limit: {data}")
+    return data
+
+
+def parse_choice_data(data: str) -> tuple[str, str] | None:
+    """Decode a preference button into (what, value), or None if it is not ours."""
+    parts = data.split(":", 2)
+    if len(parts) != 3 or parts[0] != CHOICE_PREFIX:
+        return None
+    _, what, value = parts
+    if what not in {"model", "effort"} or not value:
+        return None
+    return what, value
+
+
+def choices(what: str, values: tuple[str, ...]) -> dict | None:
+    """A row of buttons for the values a runtime accepts.
+
+    `None` when there is nothing to offer — an empty set is a real answer here:
+    Antigravity has no notion of reasoning effort, and a keyboard with no keys
+    would suggest the question simply failed.
+
+    Anything too long for Telegram's 64-byte callback is dropped rather than
+    truncated. A button that sets a *different* model from the one it is
+    labelled with is worse than a button that is missing, and the command still
+    takes the name typed out in full.
+    """
+    buttons = []
+    for value in values:
+        try:
+            buttons.append({"text": value, "callback_data": choice_data(what, value)})
+        except ValueError:
+            continue
+    if not buttons:
+        return None
+    # Three to a row: long enough names exist that two would wrap and four
+    # would truncate on a phone.
+    rows = [buttons[index : index + 3] for index in range(0, len(buttons), 3)]
+    rows.append([{"text": "default", "callback_data": choice_data(what, "default")}])
+    return {"inline_keyboard": rows}
+
+
 def format_remaining(expires_at: datetime, now: datetime) -> str:
     seconds = int((expires_at - now).total_seconds())
     if seconds <= 0:
