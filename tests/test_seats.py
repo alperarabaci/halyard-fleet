@@ -13,6 +13,7 @@ import pytest
 
 from halyard.core import seats
 from halyard.core.events import Role
+from halyard.core.seats import Seat, for_session
 
 FOUR = {
     "HALYARD_SEATS": "nav,drv,xnav,xdrv",
@@ -132,3 +133,41 @@ def test_a_seat_needs_no_destination_to_be_addressable() -> None:
     )
 
     assert seats.find(configured, "spare").chat is None
+
+
+# --- addressing a seat --------------------------------------------------------
+
+
+TWINS = [
+    Seat("drv", "claude-code", "alpha-engine-driver", "-1", Role.DRIVER),
+    Seat("gdrv", "antigravity", "alpha-engine-driver", "-2", Role.DRIVER),
+]
+
+
+def test_a_session_is_addressed_by_runtime_and_name_together() -> None:
+    """Two runtimes holding one name is the ordinary case, not a contrived one:
+    somebody naming two seats for the same job names them the same thing."""
+    assert for_session(TWINS, "claude-code", "alpha-engine-driver").label == "drv"
+    assert for_session(TWINS, "antigravity", "alpha-engine-driver").label == "gdrv"
+
+
+def test_a_name_belonging_to_another_runtime_is_not_a_match() -> None:
+    """The failure that made this function exist was a *wrong* destination
+    rather than a missing one, which is the harder kind to notice."""
+    assert for_session(TWINS, "codex", "alpha-engine-driver") is None
+
+
+def test_either_the_name_or_the_id_identifies_a_seat() -> None:
+    """They fail differently — a name can be changed in the app, an id cannot
+    be read by a person — so a configuration written with one is not quietly
+    wrong once somebody uses the other."""
+    seats = [Seat("drv", "codex", "01998ba2-0e1b", "-1", Role.DRIVER)]
+
+    assert for_session(seats, "codex", None, "01998ba2-0e1b").label == "drv"
+
+
+def test_nothing_to_match_on_matches_nothing() -> None:
+    """A seat with no identifier must not become the destination for every
+    message that arrives without one."""
+    assert for_session(TWINS, "claude-code", None, None) is None
+    assert for_session(TWINS, "claude-code", "  ") is None

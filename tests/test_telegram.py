@@ -1614,3 +1614,57 @@ async def test_the_two_codex_seats_do_not_collapse_into_one(tmp_path: Path) -> N
     )
 
     assert [m["chat_id"] for m in api.sent] == ["-2003", "-2004"]
+
+
+async def test_one_name_in_two_runtimes_routes_by_runtime(tmp_path: Path) -> None:
+    """The defect this is a regression for, and it is the ordinary case.
+
+    A person who names two seats for one job names them the same thing:
+    `alpha-engine-driver` was a Claude Code session *and* an Antigravity
+    conversation at once. Routing matched the bare name, took the first seat
+    listed, and delivered Antigravity's reply into the Claude driver's group —
+    with nothing in the message saying it had gone to the wrong runtime.
+
+    A session address is `(runtime, session_id)`, never a bare id. That rule was
+    already written down in this repository, from the Codex postmortem, and this
+    is the path that did not follow it.
+    """
+    from halyard.core.seats import Seat
+
+    channel, api, _ = await routed(tmp_path)
+    channel._seats = [
+        Seat("drv", "claude-code", "alpha-engine-driver", DRV_CHAT, Role.DRIVER),
+        Seat("gdrv", "antigravity", "alpha-engine-driver", "-1004444444444", Role.DRIVER),
+    ]
+
+    await channel.send_message(
+        "conv-1",
+        "done",
+        Role.DRIVER,
+        agent_id="antigravity",
+        session_name="alpha-engine-driver",
+    )
+
+    assert api.sent[0]["chat_id"] == "-1004444444444"
+
+
+async def test_the_claude_seat_of_that_pair_still_routes_to_its_own_group(tmp_path: Path) -> None:
+    """Asserted beside it: a fix that sent everything to the *other* runtime
+    would satisfy the test above perfectly well."""
+    from halyard.core.seats import Seat
+
+    channel, api, _ = await routed(tmp_path)
+    channel._seats = [
+        Seat("drv", "claude-code", "alpha-engine-driver", DRV_CHAT, Role.DRIVER),
+        Seat("gdrv", "antigravity", "alpha-engine-driver", "-1004444444444", Role.DRIVER),
+    ]
+
+    await channel.send_message(
+        "session-1",
+        "done",
+        Role.DRIVER,
+        agent_id="claude-code",
+        session_name="alpha-engine-driver",
+    )
+
+    assert api.sent[0]["chat_id"] == DRV_CHAT

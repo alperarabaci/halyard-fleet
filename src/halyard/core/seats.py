@@ -32,7 +32,7 @@ from halyard.core.events import Role
 
 #: Runtimes a seat can be. Kept here rather than imported from the agent
 #: packages so that reading a configuration never imports a CLI wrapper.
-KNOWN_RUNTIMES = ("claude-code", "codex")
+KNOWN_RUNTIMES = ("claude-code", "codex", "antigravity")
 
 
 @dataclass(frozen=True)
@@ -216,6 +216,36 @@ def find(seats: list[Seat], label: str) -> Seat | None:
     wanted = label.strip().casefold()
     for seat in seats:
         if seat.label.casefold() == wanted:
+            return seat
+    return None
+
+
+def for_session(seats: list[Seat], runtime: str | None, *identifiers: str | None) -> Seat | None:
+    """The seat that owns a session, addressed as `(runtime, session)`.
+
+    **Never by name alone.** Two runtimes can hold the same name at once —
+    `alpha-engine-driver` is a Claude Code session *and* an Antigravity
+    conversation on this machine, which is the ordinary case rather than a
+    contrived one, because a person naming two seats for one job names them the
+    same thing. Matching on the name and taking the first hit routes by seat
+    order: Antigravity's reply was delivered into the Claude driver's group,
+    and nothing about the message said it had gone to the wrong runtime.
+
+    Either identifier is accepted — the readable name or the session id —
+    because they fail differently. A name is what you copy out of an app and
+    can be changed there without anybody remembering a seat pointed at it; an
+    id is unreadable and permanent. What is *not* optional is the runtime.
+
+    `runtime=None` matches on identifier alone, and is only for a caller that
+    genuinely cannot know — which is not the same as one that did not ask.
+    """
+    wanted = {value.strip().casefold() for value in identifiers if value and value.strip()}
+    if not wanted:
+        return None
+    for seat in seats:
+        if runtime is not None and seat.runtime != runtime:
+            continue
+        if seat.session and seat.session.strip().casefold() in wanted:
             return seat
     return None
 

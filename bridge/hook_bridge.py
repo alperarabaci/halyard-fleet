@@ -37,7 +37,14 @@ import sys
 import urllib.error
 import urllib.request
 
-from _settings import codex_thread_name, control_plane_url, note, runtime_of, session_name
+from _settings import (
+    antigravity_title,
+    codex_thread_name,
+    control_plane_url,
+    note,
+    runtime_of,
+    session_name,
+)
 from _settings import timeout as lookup_timeout
 
 DEFAULT_TIMEOUT_SECONDS = 330.0
@@ -47,7 +54,7 @@ DEFAULT_TIMEOUT_SECONDS = 330.0
 DEFER_EXIT_CODE = 64
 
 
-def emit(event: str, decision: str, reason: str) -> None:
+def emit(event: str, decision: str, reason: str, runtime: str = "claude-code") -> None:
     """Print a hook decision and nothing else.
 
     PreToolUse and PermissionRequest look similar on input but deliberately use
@@ -65,16 +72,29 @@ def emit(event: str, decision: str, reason: str) -> None:
             "permissionDecision": decision,
             "permissionDecisionReason": reason,
         }
-    json.dump(
-        {"hookSpecificOutput": specific},
-        sys.stdout,
+    # One shape per runtime, never a merge. Antigravity reads a flat
+    # `decision`; Claude Code and Codex read `hookSpecificOutput`. Measured, in
+    # three runs against a live conversation with a hook proven to have fired:
+    #
+    #   hookSpecificOutput only          command ran
+    #   both keys in one object          command ran
+    #   flat `decision` only             command blocked, no prompt at all
+    #
+    # So the extra key is not ignored — it stops the answer being understood at
+    # all, and an unreadable answer is an approval. A payload that tries to
+    # serve every runtime serves none.
+    answer: dict = (
+        {"decision": decision, "reason": reason}
+        if runtime == "antigravity"
+        else {"hookSpecificOutput": specific}
     )
+    json.dump(answer, sys.stdout)
     sys.stdout.write("\n")
     sys.stdout.flush()
 
 
-def deny(reason: str, event: str = "PreToolUse") -> None:
-    emit(event, "deny", f"Denied by Halyard: {reason}")
+def deny(reason: str, event: str = "PreToolUse", runtime: str = "claude-code") -> None:
+    emit(event, "deny", f"Denied by Halyard: {reason}", runtime)
 
 
 def build_body(payload: dict) -> dict:
@@ -87,8 +107,39 @@ def build_body(payload: dict) -> dict:
     # needed before anything can be routed: a Claude driver and a Codex driver
     # are both `driver`, and a card that cannot say which one it came from
     # belongs to neither and lands in the default chat.
-    transcript = payload.get("transcript_path")
+    # Antigravity spells every field differently: `transcriptPath` rather than
+    # `transcript_path`, `conversationId` rather than `session_id`, and the
+    # tool under `toolCall` rather than `tool_name`/`tool_input`. Measured from
+    # its own documentation and confirmed against a live hook.
+    transcript = payload.get("transcript_path") or payload.get("transcriptPath")
     runtime = runtime_of(transcript)
+
+    if runtime == "antigravity":
+        conversation = payload.get("conversationId") or "unknown"
+        call = payload.get("toolCall") or {}
+        arguments = call.get("args") or {}
+        tool = call.get("name") or "unknown"
+        command = arguments.get("CommandLine")
+        # `workspacePaths` arrives with every call, so where the work is
+        # happening never has to be looked up — which matters, because nothing
+        # in an Antigravity transcript records it.
+        workspaces = payload.get("workspacePaths") or []
+        return {
+            "session_id": conversation,
+            "agent_id": runtime,
+            "tool": tool,
+            "command": command
+            if isinstance(command, str)
+            else json.dumps(arguments, ensure_ascii=False),
+            "tool_use_id": (
+                str(payload["stepIdx"]) if payload.get("stepIdx") is not None else None
+            ),
+            "cwd": arguments.get("Cwd") or (workspaces[0] if workspaces else None),
+            "project_dir": workspaces[0] if workspaces else None,
+            "role": os.environ.get("HALYARD_ROLE") or None,
+            "session_name": antigravity_title(conversation),
+        }
+
     name = (
         codex_thread_name(payload.get("session_id"))
         if runtime == "codex"
@@ -142,6 +193,9 @@ def ask(url: str, body: dict, timeout: float) -> dict:
 
 def main() -> int:
     event = "PreToolUse"
+    # Assumed until the payload says otherwise, so that a payload which cannot
+    # even be parsed still produces a denial in *some* dialect rather than none.
+    runtime = "claude-code"
     try:
         payload = json.loads(sys.stdin.read() or "{}")
         if not isinstance(payload, dict):
@@ -149,12 +203,13 @@ def main() -> int:
         if payload.get("hook_event_name") == "PermissionRequest":
             event = "PermissionRequest"
     except Exception as exc:
-        deny(f"the hook payload could not be read ({exc}).", event)
+        deny(f"the hook payload could not be read ({exc}).", event, runtime)
         return 0
 
     url = control_plane_url()
     timeout = lookup_timeout("HALYARD_BRIDGE_TIMEOUT_SECONDS", DEFAULT_TIMEOUT_SECONDS)
     body = build_body(payload)
+    runtime = body["agent_id"]
     # Written before the call, not after, so a bridge that hangs or is killed
     # still leaves evidence that it ran. "Did the hook fire at all" had no
     # answer anywhere until this line existed.
@@ -170,6 +225,7 @@ def main() -> int:
         deny(
             f"the control plane at {url} could not be reached ({exc.reason}). Failing closed.",
             event,
+            runtime,
         )
         return 0
     except TimeoutError:
@@ -177,10 +233,11 @@ def main() -> int:
         deny(
             f"the control plane at {url} did not answer within {timeout:g}s. Failing closed.",
             event,
+            runtime,
         )
         return 0
     except Exception as exc:
-        deny(f"the control plane at {url} failed ({exc}). Failing closed.", event)
+        deny(f"the control plane at {url} failed ({exc}). Failing closed.", event, runtime)
         return 0
 
     decision = answer.get("decision")
@@ -189,7 +246,7 @@ def main() -> int:
     # Only an exact allow allows. A missing field, a typo, a null, a decision
     # this bridge has never heard of — all of them mean deny.
     if decision == "allow":
-        emit(event, "allow", reason)
+        emit(event, "allow", reason, runtime)
     elif decision == "defer":
         # Halyard is paused: no opinion, so Claude Code decides on its own the
         # way it would if this hook were not installed. Held to the same
@@ -202,7 +259,7 @@ def main() -> int:
         # turned into denying everything. It did, once.
         return DEFER_EXIT_CODE
     else:
-        emit(event, "deny", reason)
+        emit(event, "deny", reason, runtime)
     return 0
 
 

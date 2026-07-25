@@ -78,6 +78,14 @@ CASES: list[tuple[str, dict, list[Seat]]] = [
         ],
     ),
     (
+        "a third runtime",
+        {
+            "HALYARD_SEATS": "gdrv",
+            "HALYARD_SEAT_GDRV": "runtime=antigravity session=alpha-test chat=-1 role=driver",
+        },
+        [Seat("gdrv", "antigravity", "alpha-test", "-1", Role.DRIVER)],
+    ),
+    (
         "a label with a dash",
         {"HALYARD_SEATS": "codex-drv", "HALYARD_SEAT_CODEX_DRV": "runtime=codex session=s"},
         [Seat("codex-drv", "codex", "s", None, None)],

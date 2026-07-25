@@ -186,7 +186,11 @@ def _collect_seats(existing: dict[str, str], ask: Ask, say: Say) -> list[Seat]:
     """
     configured = _existing_seats(existing)
     seats: list[Seat] = []
-    for runtime, human in (("claude-code", "Claude Code"), ("codex", "Codex")):
+    for runtime, human in (
+        ("claude-code", "Claude Code"),
+        ("codex", "Codex"),
+        ("antigravity", "Antigravity"),
+    ):
         current = [seat for seat in configured if seat.runtime == runtime]
         available = _known_sessions(runtime)
         if available:
@@ -235,17 +239,26 @@ def _known_sessions(runtime: str) -> list[str]:
     try:
         if runtime == "codex":
             from halyard.agents.codex import list_named_sessions
-
-            return [name for name, _, _ in list_named_sessions()]
-        from halyard.agents.claude_code.sessions import list_named_sessions
+        elif runtime == "antigravity":
+            # Only conversations somebody renamed. Antigravity leaves the rest
+            # without a `title:` at all, and a seat cannot be pointed at one.
+            from halyard.agents.antigravity import list_named_sessions
+        else:
+            from halyard.agents.claude_code.sessions import list_named_sessions
 
         return [name for name, _, _ in list_named_sessions()]
     except Exception:
         return []
 
 
+#: The letter a generated label starts with, so three runtimes' default seats
+#: do not all propose `drv1`. Matches the shape people were already writing by
+#: hand: `nav`/`drv`, `xnav`/`xdrv`, `gnav`/`gdrv`.
+_PREFIXES = {"codex": "x", "antigravity": "g"}
+
+
 def _short(runtime: str) -> str:
-    return "x" if runtime == "codex" else ""
+    return _PREFIXES.get(runtime, "")
 
 
 def _to_int(value: str) -> int:

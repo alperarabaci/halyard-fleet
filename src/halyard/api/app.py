@@ -20,6 +20,7 @@ from fastapi import FastAPI, Request, Response
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
 
+from halyard.agents.antigravity import AntigravityRunner
 from halyard.agents.claude_code import ClaudeCodeRunner
 from halyard.agents.codex import CodexRunner
 from halyard.channels.stub import StubChannel
@@ -105,6 +106,26 @@ class MessageResponse(BaseModel):
     #: Whether the channel accepted it. The relay does not act on this — it is
     #: here so a failure is visible to anything that does look.
     delivered: bool
+
+
+class InjectBody(BaseModel):
+    """What the `PreInvocation` hook asks: is anything owed to this session?"""
+
+    model_config = ConfigDict(extra="ignore")
+
+    session_id: str
+    agent_id: str = "antigravity"
+
+
+class InjectResponse(BaseModel):
+    """Antigravity's own shape, passed through by the bridge untouched.
+
+    `injectSteps` with `{"userMessage": ...}` is the only way a message enters
+    a conversation as a turn the person typed. `agentapi send-message` can file
+    a `SYSTEM_MESSAGE` and nothing else.
+    """
+
+    injectSteps: list[dict] = Field(default_factory=list)  # noqa: N815 — their spelling
 
 
 class HealthResponse(BaseModel):
@@ -200,6 +221,7 @@ def create_app(settings: Settings, *, channel=None) -> FastAPI:
             default_model=settings.claude_default_model.strip() or None,
         ),
         "codex": CodexRunner(),
+        "antigravity": AntigravityRunner(),
     }
     configured_seats = configured()
     # What `/health` and anything else with one question in mind should ask.
@@ -268,7 +290,7 @@ def create_app(settings: Settings, *, channel=None) -> FastAPI:
     app = FastAPI(
         title="Halyard Fleet",
         description="A control plane for orchestrating coding agents remotely.",
-        version="0.3.2",
+        version="0.4.0",
         lifespan=lifespan,
     )
     app.state.settings = settings
@@ -280,6 +302,10 @@ def create_app(settings: Settings, *, channel=None) -> FastAPI:
     app.state.relay = relay
     app.state.gate = gate
     app.state.runner = runner
+    # Every runtime, by name. `runner` above is the Claude Code one, kept for
+    # callers with a single question in mind; anything that has to reach a
+    # particular runtime — `/v1/inject` does — needs the whole set.
+    app.state.runners = by_runtime
 
     @app.middleware("http")
     async def deny_on_unhandled_error(request: Request, call_next) -> Response:
@@ -359,6 +385,24 @@ def create_app(settings: Settings, *, channel=None) -> FastAPI:
             session_name=body.session_name,
         )
         return MessageResponse(delivered=delivered)
+
+    @app.post("/v1/inject", response_model=InjectResponse)
+    async def inject(body: InjectBody) -> InjectResponse:
+        """Hand over whatever a session is owed, once.
+
+        Answers immediately. A model call is blocked behind this, and every
+        invocation in every Antigravity session pays the round trip — so it
+        does no work beyond emptying a list.
+
+        Only a runtime that has somewhere to put messages is asked. The other
+        two deliver a real user turn directly and never queue anything, so a
+        request naming one of them is answered with nothing rather than with
+        an error: a hook that gets an error is a hook that logs a failure on
+        every turn for a runtime that was never involved.
+        """
+        runner = by_runtime.get(body.agent_id)
+        waiting = runner.take_pending(body.session_id) if hasattr(runner, "take_pending") else []
+        return InjectResponse(injectSteps=[{"userMessage": text} for text in waiting])
 
     @app.get("/health", response_model=HealthResponse)
     async def health() -> HealthResponse:

@@ -234,3 +234,59 @@ async def test_a_paused_gate_answers_defer(allowing) -> None:
 
     assert body["decision"] == "defer"
     assert body["request_id"] is None
+
+
+# --- handing a queued message to the PreInvocation hook -----------------------
+
+
+async def test_a_queued_message_is_handed_over_as_a_user_turn(tmp_path: Path) -> None:
+    """The only way text enters an Antigravity conversation as a turn the
+    person typed. `agentapi send-message` can file a SYSTEM_MESSAGE and
+    nothing else, and the hook that fires before each model call is the one
+    that can answer with `injectSteps`.
+    """
+    from halyard.api.app import create_app
+
+    app = create_app(make_settings(tmp_path, ChannelKind.STUB_ALLOW))
+    runner = app.state.runners["antigravity"]
+    runner._pending["conv-1"].append("uyudun mu?")
+
+    async with await client_for(app) as client:
+        answer = await client.post(
+            "/v1/inject", json={"session_id": "conv-1", "agent_id": "antigravity"}
+        )
+
+    assert answer.json()["injectSteps"] == [{"userMessage": "uyudun mu?"}]
+
+
+async def test_nothing_queued_is_answered_with_nothing(tmp_path: Path) -> None:
+    """Every invocation in every Antigravity session pays this round trip, so
+    the empty answer is the common one and has to be cheap and quiet."""
+    from halyard.api.app import create_app
+
+    app = create_app(make_settings(tmp_path, ChannelKind.STUB_ALLOW))
+
+    async with await client_for(app) as client:
+        answer = await client.post(
+            "/v1/inject", json={"session_id": "conv-1", "agent_id": "antigravity"}
+        )
+
+    assert answer.status_code == 200
+    assert answer.json()["injectSteps"] == []
+
+
+async def test_a_runtime_with_no_queue_is_answered_rather_than_refused(tmp_path: Path) -> None:
+    """Claude Code and Codex deliver a real user turn directly and queue
+    nothing. An error here would be a failure logged on every turn for a
+    runtime that was never involved."""
+    from halyard.api.app import create_app
+
+    app = create_app(make_settings(tmp_path, ChannelKind.STUB_ALLOW))
+
+    async with await client_for(app) as client:
+        answer = await client.post(
+            "/v1/inject", json={"session_id": "s", "agent_id": "claude-code"}
+        )
+
+    assert answer.status_code == 200
+    assert answer.json()["injectSteps"] == []

@@ -409,3 +409,124 @@ def test_trust_is_not_claimed_to_be_fresh(tmp_path: Path) -> None:
     os.utime(config, (time.time() + 10, time.time() + 10))
 
     assert wiring.codex_trust_is_stale(hooks_file, config) is False
+
+
+# --- Antigravity, whose file is a third shape ---------------------------------
+
+ANTIGRAVITY = next(r for r in wiring.RUNTIMES if r.name == "antigravity")
+
+
+def antigravity_hooks(project: Path) -> dict:
+    return json.loads((project / ".agents" / "hooks.json").read_text())
+
+
+def test_antigravity_hooks_are_keyed_by_name_not_wrapped(tmp_path: Path) -> None:
+    """A third spelling of the same idea, and it is not `{"hooks": {...}}`.
+
+    Every top-level key is a hook *name*; all the names contributing to an
+    event are merged and run in turn. Writing the other two runtimes' wrapper
+    here would produce a hook called "hooks" and no gate.
+    """
+    project = repo(tmp_path)
+
+    wiring.wire(project, runtimes=(ANTIGRAVITY,))
+
+    written = antigravity_hooks(project)
+    assert list(written) == ["halyard"]
+    assert "hooks" not in written
+    assert set(written["halyard"]) == {"PreToolUse", "Stop", "PreInvocation"}
+
+
+def test_pretooluse_is_grouped_and_stop_is_flat(tmp_path: Path) -> None:
+    """The difference that would otherwise cost the relay silently.
+
+    Antigravity groups the tool events behind a `matcher` and takes every other
+    event as a flat list of handlers. A `Stop` written in the grouped shape has
+    no `command` where Antigravity looks for one, so no reply ever reaches a
+    phone — with the file present and everything reporting wired.
+    """
+    project = repo(tmp_path)
+
+    wiring.wire(project, runtimes=(ANTIGRAVITY,))
+    spec = antigravity_hooks(project)["halyard"]
+
+    assert spec["PreToolUse"][0]["matcher"] == "run_command"
+    assert spec["PreToolUse"][0]["hooks"][0]["command"].endswith("hook.sh")
+    assert "hooks" not in spec["Stop"][0], "Stop takes handlers directly"
+    assert spec["Stop"][0]["command"].endswith("relay.py")
+
+
+def test_another_tools_hooks_in_that_file_survive(tmp_path: Path) -> None:
+    """The name-keyed shape exists so two tools can gate one project. Wiring
+    must behave like the second of the two, not the only one."""
+    project = repo(tmp_path)
+    (project / ".agents").mkdir()
+    (project / ".agents" / "hooks.json").write_text(
+        json.dumps(
+            {
+                "lint-checker": {
+                    "PostToolUse": [{"matcher": "run_command", "hooks": [{"command": "./lint.sh"}]}]
+                }
+            }
+        )
+    )
+
+    wiring.wire(project, runtimes=(ANTIGRAVITY,))
+
+    written = antigravity_hooks(project)
+    assert written["lint-checker"]["PostToolUse"][0]["hooks"][0]["command"] == "./lint.sh"
+    assert "halyard" in written
+
+
+def test_a_disabled_gate_is_turned_back_on(tmp_path: Path) -> None:
+    """`"enabled": false` leaves a file that looks exactly like a wired one and
+    runs none of it. Wiring means the gate works."""
+    project = repo(tmp_path)
+    wiring.wire(project, runtimes=(ANTIGRAVITY,))
+    path = project / ".agents" / "hooks.json"
+    config = json.loads(path.read_text())
+    config["halyard"]["enabled"] = False
+    path.write_text(json.dumps(config))
+
+    wiring.wire(project, runtimes=(ANTIGRAVITY,))
+
+    assert antigravity_hooks(project)["halyard"]["enabled"] is True
+
+
+def test_wiring_antigravity_twice_does_not_duplicate_the_hook(tmp_path: Path) -> None:
+    project = repo(tmp_path)
+
+    wiring.wire(project, runtimes=(ANTIGRAVITY,))
+    wiring.wire(project, runtimes=(ANTIGRAVITY,))
+
+    spec = antigravity_hooks(project)["halyard"]
+    assert len(spec["PreToolUse"]) == 1
+    assert len(spec["Stop"]) == 1
+
+
+def test_unwiring_antigravity_removes_the_whole_name(tmp_path: Path) -> None:
+    """A name left holding nothing but `enabled` is a husk somebody has to work
+    out the meaning of."""
+    project = repo(tmp_path)
+    wiring.wire(project, runtimes=(ANTIGRAVITY,))
+
+    wiring.unwire(project, runtimes=(ANTIGRAVITY,))
+
+    assert "halyard" not in antigravity_hooks(project)
+
+
+def test_unwiring_antigravity_leaves_somebody_elses_hook_alone(tmp_path: Path) -> None:
+    project = repo(tmp_path)
+    wiring.wire(project, runtimes=(ANTIGRAVITY,))
+    path = project / ".agents" / "hooks.json"
+    config = json.loads(path.read_text())
+    config["safety-gate"] = {
+        "PreToolUse": [{"matcher": "run_command", "hooks": [{"command": "/other/check.sh"}]}]
+    }
+    path.write_text(json.dumps(config))
+
+    wiring.unwire(project, runtimes=(ANTIGRAVITY,))
+
+    written = antigravity_hooks(project)
+    assert written["safety-gate"]["PreToolUse"][0]["hooks"][0]["command"] == "/other/check.sh"
+    assert "halyard" not in written

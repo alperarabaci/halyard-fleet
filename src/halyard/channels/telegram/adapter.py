@@ -45,7 +45,7 @@ from halyard.core.audit import (
 from halyard.core.events import Role
 from halyard.core.gate import Gate
 from halyard.core.registry import SessionRegistry
-from halyard.core.seats import Seat, for_chat
+from halyard.core.seats import Seat, for_chat, for_session
 
 logger = logging.getLogger(__name__)
 
@@ -197,14 +197,17 @@ class TelegramChannel:
         unreadable and permanent. Matching either means a configuration written
         with one is not quietly wrong once somebody uses the other.
 
+        **Always with the runtime.** The address is `(runtime, session)`, and
+        `for_session` is where that is enforced — matching a bare name sent
+        Antigravity's reply into the Claude driver's group, because both seats
+        are named `alpha-engine-driver` and the Claude one is listed first.
+
         Then by role and runtime, then by role alone, then the default chat —
         so a setup with two seats keeps behaving exactly as it did.
         """
-        identifiers = {value.strip().casefold() for value in (session_name, session_id) if value}
-        if identifiers:
-            for seat in self._seats:
-                if seat.session and seat.session.strip().casefold() in identifiers and seat.chat:
-                    return parse_destination(seat.chat) or (self._chat_id, None)
+        owner = for_session(self._seats, agent_id, session_name, session_id)
+        if owner is not None and owner.chat:
+            return parse_destination(owner.chat) or (self._chat_id, None)
         # Only when a role was actually declared. Falling back on `None`
         # matches any seat that also has no role, so a seat with nowhere of its
         # own to speak would borrow the group of an unrelated one — measured
@@ -491,11 +494,24 @@ class TelegramChannel:
                 thread_id,
             )
         if found is None:
+            # Name the chat. Without it this says a seat is missing without
+            # saying which one to add, and the id it wants is the one piece of
+            # information nobody can look up from where they are standing — it
+            # is not shown anywhere in Telegram's own interface.
+            seat = self._seat_for_chat(chat_id)
             await self._say(
-                "No session to send that to. Name the one you mean in .env — "
-                "<code>HALYARD_NAVIGATOR_SESSION</code> or "
-                "<code>HALYARD_DRIVER_SESSION</code> — using a name from "
-                "<code>halyard sessions</code>.",
+                (
+                    f"No seat owns this chat (<code>{chat_id}</code>). Add it to a "
+                    "seat's <code>chat:</code> in your seat configuration, then "
+                    "restart — seats are read at startup."
+                )
+                if seat is None
+                else (
+                    f"The <b>{seat.label}</b> seat owns this chat, but "
+                    f"{seat.runtime} has no session named "
+                    f"<code>{seat.session}</code>. Check it with "
+                    "<code>halyard doctor</code>."
+                ),
                 chat_id,
                 thread_id,
             )

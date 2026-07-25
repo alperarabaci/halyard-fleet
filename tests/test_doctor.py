@@ -144,3 +144,60 @@ def test_no_warning_when_every_name_was_chosen(tmp_path, monkeypatch, capsys) ->
     doctor.sessions()
 
     assert "auto-titled" not in capsys.readouterr().out
+
+
+# --- reading Antigravity's hooks file -----------------------------------------
+
+ANTIGRAVITY_FILE = {
+    "halyard": {
+        "PreToolUse": [{"matcher": "run_command", "hooks": [{"command": "/b/hook.sh"}]}],
+        "Stop": [{"command": "/b/relay.py"}],
+    }
+}
+
+
+def antigravity_file(tmp_path: Path, config: dict) -> Path:
+    path = tmp_path / "hooks.json"
+    path.write_text(json.dumps(config))
+    return path
+
+
+def test_antigravitys_own_shape_is_read(tmp_path: Path) -> None:
+    """Both shapes at once, which is the part worth asserting.
+
+    `PreToolUse` is wrapped in a `matcher`/`hooks` group and `Stop` is a flat
+    handler. A parser that assumes either one finds half the file, and finding
+    none of it reports an ungated project — whose obvious remedy is to go and
+    wire a second gate on top of the one already there.
+    """
+    path = antigravity_file(tmp_path, ANTIGRAVITY_FILE)
+
+    found = doctor._hook_commands(path, tmp_path, "antigravity")
+
+    assert sorted(found) == [("PreToolUse", "/b/hook.sh"), ("Stop", "/b/relay.py")]
+
+
+def test_a_disabled_hook_is_reported(tmp_path: Path) -> None:
+    """`"enabled": false` runs nothing while the file still reads as wired:
+    the events are there, the commands are there, the paths are right."""
+    path = antigravity_file(
+        tmp_path, {"halyard": {**ANTIGRAVITY_FILE["halyard"], "enabled": False}}
+    )
+
+    assert doctor._disabled_antigravity_hooks(path) == ["halyard"]
+
+
+def test_an_enabled_hook_is_not_reported(tmp_path: Path) -> None:
+    """Absent means enabled — the default is `true`, so a file that never
+    mentions it must not be read as switched off."""
+    assert doctor._disabled_antigravity_hooks(antigravity_file(tmp_path, ANTIGRAVITY_FILE)) == []
+
+
+def test_another_tools_hooks_are_read_too(tmp_path: Path) -> None:
+    """Every name in the file gates the project, not just this install's."""
+    path = antigravity_file(
+        tmp_path,
+        {**ANTIGRAVITY_FILE, "safety": {"PreToolUse": [{"hooks": [{"command": "/o/check.sh"}]}]}},
+    )
+
+    assert ("PreToolUse", "/o/check.sh") in doctor._hook_commands(path, tmp_path, "antigravity")

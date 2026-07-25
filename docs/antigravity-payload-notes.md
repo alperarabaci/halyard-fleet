@@ -13,32 +13,59 @@ That distinction is the whole reason this file exists before any code. Both
 Codex postmortems end in the same place: an assumption that a boundary was
 shared when it was not.
 
-## The finding that matters
+## The finding that matters — measured
 
-**`bridge/hook.sh` would fail open under Antigravity.** Its hard-coded denial —
-the one that catches a Python that will not start — is Claude Code's shape:
-
-```json
-{"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny", ...}}
-```
-
-Antigravity's documented output is flat and uses a different key:
+Antigravity's documented output is flat:
 
 ```json
 {"decision": "deny", "reason": "..."}
 ```
 
-An unrecognised payload is the case every runtime measured so far treats as *no
-opinion*, and no opinion runs the command. So the wrapper that exists to make a
-crash into a refusal would, under Antigravity, make a crash into an approval.
+Halyard's `bridge/hook.sh` prints Claude Code's nested shape instead. **It is
+not understood.** A hook that printed a Claude-shaped denial did not stop the
+command: Antigravity fell through to its own permission prompt, and once that
+was answered the command ran and completed successfully.
 
-This has **not** been confirmed against a running Antigravity. It is the first
-thing to measure, and until it is, no Antigravity project should be wired.
+```
+hook fired (witness present), printed permissionDecision: "deny"
+RUN_COMMAND  created 22:22:40  completed 22:25:04  "The command completed successfully."
+```
 
-The bridge has the same problem in the other direction: it reads `tool_name`
-and `tool_input.command`, and Antigravity sends `toolCall.name` and
-`toolCall.args.CommandLine`. That failure is louder — the command arrives empty
-or as JSON — but it is the same root: one shape assumed to be three runtimes'.
+The two-and-a-half minute gap is a human answering a prompt, not a slow turn.
+
+So the concern this file opened with is real. `hook.sh`'s hard-coded denial —
+the one that exists to catch a Python that will not start — does not deny here.
+What saves it from being a silent approval is Antigravity's own prompt, and
+that prompt respects the user's cached "Always Allow" decisions: a second,
+identical command ran four seconds later without asking anybody. So for any
+command a user has ever waved through, an unreadable hook answer is an
+approval.
+
+**Nothing may be wired for Antigravity until the bridge emits `decision`.**
+
+### How this was got wrong first
+
+Worth keeping, because the mistake is the one this project keeps making.
+
+The deny run was checked ninety seconds after the message was sent. The marker
+file was absent, and absence was read as the gate working. It was not: the
+approval was still sitting unanswered, and the command ran two minutes later.
+Then an allow run completed in four seconds — cached permission from the first
+approval — and the pair was read as "deny blocks, allow passes, therefore the
+shape is understood."
+
+Two controls would have caught it. A witness file proves a hook *ran* and says
+nothing about whether its answer was *understood*; that needs the runtime's own
+record of what happened to the command, which the transcript had all along. And
+a repeated command is not an independent trial once a permission can be cached.
+
+## Timing
+
+A turn driven through `send-message` takes seconds when nothing blocks and
+minutes when a human is asked. Any conformance check here has to distinguish
+"stopped" from "still waiting", and reading the transcript's `RUN_COMMAND`
+record — which carries both created and completed times, and whether it
+succeeded — is how.
 
 ## PreToolUse — documented
 
@@ -97,6 +124,19 @@ fail-closed contract expressible here at all.
 Matchers are regular expressions over the tool name: `""` or `"*"` for
 everything, `"run_command"`, `"run_command|view_file"`, `"browser_.*"`.
 
+**A matcher of "ignored" also means a different shape.** The two tool events
+wrap their handlers in a `matcher`/`hooks` group; the other three are a *flat*
+list of handler objects:
+
+```json
+"PreToolUse": [{"matcher": "run_command", "hooks": [{"command": "./hook.sh"}]}],
+"Stop":       [{"command": "./relay.py"}]
+```
+
+Not cosmetic. A `Stop` written in the grouped shape puts no `command` where
+Antigravity looks for one, so the relay never runs and no reply reaches a phone
+— with the file present, the path correct, and everything reporting wired.
+
 The tool to gate is `run_command`. Note that this is a third spelling of the
 same idea — Claude Code says `Bash`, Codex says `Bash` from its CLI and `exec`
 from its app, Antigravity says `run_command`. The matcher has been wrong once
@@ -142,9 +182,9 @@ conversations under `~/.gemini/antigravity/`.
 ~/.gemini/antigravity/bin/agentapi                a two-line shim into the app
 ```
 
-There is **no `agy` or `antigravity` command on PATH.** `bin/agentapi` is a
-two-line shim into `Antigravity.app/Contents/Resources/bin/language_server`, and
-it offers exactly the three things an adapter needs — measured by running it:
+`bin/agentapi` is a two-line shim into
+`Antigravity.app/Contents/Resources/bin/language_server`, and it offers exactly
+the three things an adapter needs — measured by running it:
 
 ```
 get-conversation-metadata <conversation_id>
@@ -170,6 +210,98 @@ listens on — the other answers `error reading server preface`, so it is not th
 gRPC one — and the token is an argument on its command line. Discovering a
 service by reading another process's arguments is not a contract; it is what is
 available, and it will break without warning.
+
+## A delivered message cannot be made to look like a user's
+
+`agentapi send-message` is an agent-to-agent notification channel — its own
+help says "Send messages to another conversation or yourself" — so Antigravity
+files every delivery as a `SYSTEM_MESSAGE` and prefixes it with a sentence
+saying the user did not send it. In the application it is drawn under a
+**Message from System** header rather than as a turn the person typed.
+
+`--title` is the only flag it takes, and it changes none of that. Measured with
+`--title="alper (Telegram)"`, the envelope was byte-for-byte the shape it
+always is:
+
+```
+[Message] timestamp=2026-07-25T00:38:11Z sender=system priority=MESSAGE_PRIORITY_HIGH content=...
+```
+
+`sender=system` is fixed, and `agentapi` has exactly three commands, so there
+is no other way in. The other two runtimes deliver a genuine user turn; this
+one has no interface that can.
+
+### But `PreInvocation` can inject one — measured
+
+`PreInvocation` is the one hook that answers with `injectSteps`, and
+`{"userMessage": "..."}` is a supported step. Measured with a one-shot probe
+wired beside the gate under its own hook name:
+
+```
+probe received: artifactDirectoryPath conversationId initialNumSteps
+                invocationNum modelName transcriptPath workspacePaths
+probe answered: {"injectSteps": [{"userMessage": "...tek kelimeyle onayla."}]}
+the model said: "Onaylandı."
+```
+
+One word, because the instruction to answer in one word existed **only** in the
+injected step. So the injection reaches the model, and it arrives as a turn the
+person typed rather than as a system notice.
+
+Two things follow, and both shape the adapter:
+
+**It is written to neither transcript file.** Not `transcript.jsonl`, not
+`transcript_full.jsonl` — grepped for the probe text in both, zero hits. The
+message reaches the model and the screen and leaves nothing on disk, so
+delivery cannot be confirmed by reading afterwards. The queue is therefore
+emptied by the reader: `PreInvocation` fires before *every* model call, and a
+queue nothing cleared would put one sentence into every step of the turn.
+
+**An idle conversation still has to be woken.** `Stop` fires when a turn ends,
+not while nothing is happening — measured across a thirteen-minute silence with
+no records at all. A hook that is not being invoked cannot be answered, so
+"return `continue` from `Stop` when a message arrives" has nothing to return
+from. Waking still goes through `agentapi send-message`, which is why one short
+system line per message remains: it is a doorbell, not the message.
+
+## There are two Antigravities, and they share nothing
+
+Installing the `agy` CLI adds a **second store**, not a second way into the
+first:
+
+```
+~/.gemini/antigravity/        the application:  brain/, conversations/, annotations/
+~/.gemini/antigravity-cli/    agy:              its own brain/, conversations/, ...
+```
+
+A conversation started in one is invisible in the other. Measured from the
+symptom: `agy` was run inside this repository, and the session never appeared in
+the application. Asked about it, `agy` itself answered that the two "share the
+underlying session store" and to switch the app to the matching project folder.
+Both halves of that are wrong — the directory listing above is the whole
+argument.
+
+**`--conversation <id>` does not resume.** `agy --help` says "Resume a previous
+conversation by ID". Measured three times — with the value as a separate
+argument, with `=`, and via `-c`, which is not read as a flag at all — it starts
+a *new* conversation seeded with a summary of the one named. The databases are
+the proof:
+
+```
+3792ab62… (named on the command line)   13 steps before, 13 after, marker absent
+752d014d… (created by the call)          4 steps, and parent_references empty
+```
+
+Empty in both, so the two are not even linked; `conversation_summaries.db`
+beside them is what the flag actually reads.
+
+So **a conversation the CLI owns cannot be delivered to**, and the adapter
+refuses one by name rather than trying. This is the more important half of the
+finding: the attempt *succeeds*. It exits 0, and the text is answered in a
+conversation nobody is watching while the seat somebody is watching sits there
+looking idle. A visible failure is the better of the two, and `doctor` says so
+for a seat that names a CLI conversation — findable and unreachable is the
+combination worth printing.
 
 **`send-message` genuinely drives a turn.** Measured: the message arrives in the
 transcript as a `SYSTEM_MESSAGE` and the agent acts on it, producing a real
@@ -219,26 +351,25 @@ Nothing found so far provides one.
 
 ## Open questions, in the order they block work
 
-1. **Does an unrecognised output really fail open?** Everything above rests on
-   it, and it is **still unmeasured**. A hook printing Claude-shaped JSON was
-   installed at `.agents/hooks.json` and never fired — no witness file, in a
-   conversation that had started a day earlier. The likeliest explanation is
-   the behaviour every other runtime here shares: hooks are read when a session
-   starts, so one that predates the file never sees it. Retry in a conversation
-   opened *after* the hook exists, and keep the witness file — without it, a
-   hook that never ran and a gate that denied are the same observation.
-2. **Does `deny` actually stop a command**, and does a non-zero exit or empty
-   stdout run it? The same table that was built for the other two runtimes.
-3. **How does `agentapi` find the running app?** `send-message` is the whole
+1. **Does the documented shape actually block?** `{"decision": "deny"}` has
+   not been tried — only Claude's shape, which does not. Everything else waits
+   on this: if the documented shape blocks cleanly, the bridge needs a
+   translation and nothing more.
+2. **What do the failure modes do?** A non-zero exit, empty stdout, malformed
+   output, a missing interpreter and a hook that outruns its timeout — the same
+   table built for the other two runtimes, and the one that decides whether a
+   wrapper can hold the line here at all. Judge each by the transcript's
+   `RUN_COMMAND` record, never by a marker file alone.
+4. **How does `agentapi` find the running app?** `send-message` is the whole
    of delivery and it needs `ANTIGRAVITY_LS_ADDRESS`. Start the app and look:
    the environment of the running process, a socket, or something published
    under `~/.gemini`. If only child processes of the app get it, delivery needs
    a different route.
-4. **Does `--title` produce a name that survives, and does
+5. **Does `--title` produce a name that survives, and does
    `get-conversation-metadata` return it?** Seats are addressed by name, and the
    transcript has none. `conversationId` works as a fallback and is at least
    stable, unlike a Claude Code `session_id`.
-5. **What is the default hook timeout?** The ordering `approval < bridge < hook`
+6. **What is the default hook timeout?** The ordering `approval < bridge < hook`
    is enforced at startup and has to hold here too.
 
 ## What not to do yet
