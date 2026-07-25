@@ -158,6 +158,52 @@ def _hook_commands(
     return found
 
 
+def _travels_between_machines(settings_file: Path) -> str | None:
+    """Why this hooks file will follow the repository onto another machine.
+
+    A hooks file holds absolute paths — `/Users/you/checkout/bridge/hook.sh` —
+    so it describes one machine and nothing else. Committed, it arrives on the
+    next machine naming a home directory that does not exist there, and that
+    machine's `wire` appends its own entry beside the dead one. Measured on a
+    real project: two `PreToolUse` groups on one matcher, two `Stop` groups,
+    two `PermissionRequest` groups, half of them pointing nowhere.
+
+    `wire` cleans that up now, on every machine, every time the file comes
+    back. Ignoring it fixes the cause instead — which is what this repository
+    does with its own.
+
+    A warning, never a failure: a team that has decided to commit theirs, with
+    one shared checkout path, is not doing anything wrong.
+    """
+    import subprocess
+
+    directory = settings_file.parent
+    try:
+        tracked = subprocess.run(
+            ["git", "ls-files", "--error-unmatch", settings_file.name],
+            cwd=directory,
+            capture_output=True,
+            timeout=10,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if tracked.returncode == 0:
+        return "committed"
+
+    try:
+        ignored = subprocess.run(
+            ["git", "check-ignore", "-q", settings_file.name],
+            cwd=directory,
+            capture_output=True,
+            timeout=10,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    # 0 ignored, 1 not ignored, 128 not a repository at all — and a file
+    # outside a repository cannot travel this way.
+    return "not ignored" if ignored.returncode == 1 else None
+
+
 def _render(check, label: str, *, indent: bool = False, **context) -> tuple[list[str], bool]:
     """Turn a runtime's own findings into doctor's lines, and say if it is fatal.
 
@@ -284,6 +330,15 @@ def _check_gated_project(label: str, ref, seat, directory: str) -> tuple[list[st
     problems = 0
     seen_events: set[str] = set()
     for settings_file in present:
+        match _travels_between_machines(settings_file):
+            case "committed":
+                lines.append(f"{WARN}        {settings_file.name} is committed to this repository")
+                lines.append("                it names absolute paths on this machine, so another")
+                lines.append("                one gets hooks it cannot run. Add it to .gitignore.")
+            case "not ignored":
+                lines.append(f"{WARN}        {settings_file.name} is not in .gitignore")
+                lines.append("                committing it sends this machine's paths to every")
+                lines.append("                other checkout of this project.")
         switched_off = _disabled_hooks(settings_file) if spec and spec.hooks.disableable else []
         for name in switched_off:
             problems += 1

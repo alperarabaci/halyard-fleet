@@ -258,3 +258,58 @@ def test_not_being_able_to_tell_is_not_a_failure(monkeypatch) -> None:
     found = _claude_check(monkeypatch, found="/bin/claude", signed=None)
 
     assert [level for level, _ in found] == ["ok", "warn"]
+
+
+# --- a hooks file that will follow the repository elsewhere -------------------
+
+
+def _repo_with_hooks(tmp_path: Path, *, committed: bool, ignored: bool) -> Path:
+    """A real git repository, because the question is git's to answer."""
+    import subprocess
+
+    def git(*args: str) -> None:
+        subprocess.run(["git", *args], cwd=tmp_path, capture_output=True, check=False)
+
+    git("init")
+    (tmp_path / ".codex").mkdir()
+    hooks = tmp_path / ".codex" / "hooks.json"
+    hooks.write_text('{"hooks": {}}')
+    if ignored:
+        (tmp_path / ".gitignore").write_text(".codex/hooks.json\n")
+    if committed:
+        git("add", "-f", ".codex/hooks.json")
+        git("-c", "user.email=a@b", "-c", "user.name=c", "commit", "-m", "x")
+    return hooks
+
+
+def test_a_committed_hooks_file_is_reported(tmp_path: Path) -> None:
+    """It holds absolute paths, so committing it sends one machine's home
+    directory to every other checkout — which is how a project ended up with
+    two PreToolUse groups on one matcher, half of them pointing nowhere."""
+    hooks = _repo_with_hooks(tmp_path, committed=True, ignored=False)
+
+    assert doctor._travels_between_machines(hooks) == "committed"
+
+
+def test_an_unignored_hooks_file_is_reported_before_it_is_committed(tmp_path: Path) -> None:
+    """The next `git add -A` is all it takes, and by then it is on the other
+    machine."""
+    hooks = _repo_with_hooks(tmp_path, committed=False, ignored=False)
+
+    assert doctor._travels_between_machines(hooks) == "not ignored"
+
+
+def test_an_ignored_hooks_file_says_nothing(tmp_path: Path) -> None:
+    """The cause is fixed; there is nothing to warn about."""
+    hooks = _repo_with_hooks(tmp_path, committed=False, ignored=True)
+
+    assert doctor._travels_between_machines(hooks) is None
+
+
+def test_a_file_outside_a_repository_cannot_travel_this_way(tmp_path: Path) -> None:
+    """No repository, no journey. Warning here would be noise on every machine
+    that keeps its projects outside git."""
+    loose = tmp_path / "hooks.json"
+    loose.write_text('{"hooks": {}}')
+
+    assert doctor._travels_between_machines(loose) is None
