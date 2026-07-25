@@ -5,6 +5,13 @@ Wired to the `Stop` hook, which fires once per turn and carries the assistant's
 final message in `last_assistant_message` (measured — see
 `docs/session-io-notes.md`). Standard library only, like the approval bridge.
 
+**Except on Antigravity, whose `Stop` says what the turn did and never what it
+said.** Its payload is `executionNum`, `terminationReason`, `error` and
+`fullyIdle`, so there is no message field to find and the reply is read out of
+the transcript the payload points at. Its keys are camelCase too, which is the
+quieter half: `transcript_path` simply returns nothing, and every turn looks
+like a turn that said nothing at all.
+
 **This one fails open, and that is deliberate.** `hook_bridge.py` denies on
 every error because a permission request that goes unanswered would otherwise
 let a command run unsupervised. Nothing here is holding a decision: a relay that
@@ -29,7 +36,15 @@ import os
 import sys
 import urllib.request
 
-from _settings import codex_thread_name, control_plane_url, note, runtime_of, session_name
+from _settings import (
+    antigravity_reply,
+    antigravity_title,
+    codex_thread_name,
+    control_plane_url,
+    note,
+    runtime_of,
+    session_name,
+)
 from _settings import timeout as lookup_timeout
 
 #: Short on purpose. The agent's turn is waiting on this, and a slow relay is
@@ -43,8 +58,23 @@ def main() -> int:
         if not isinstance(payload, dict):
             return 0
 
-        transcript = payload.get("transcript_path")
-        runtime = runtime_of(transcript)
+        # Antigravity spells every key in camelCase — `transcriptPath`, not
+        # `transcript_path`. Reading only the snake_case name found nothing,
+        # which made every Antigravity turn look like a turn that said nothing.
+        camel = payload.get("transcriptPath") or payload.get("conversationId")
+        transcript = payload.get("transcript_path") or payload.get("transcriptPath")
+        # Recognised by the shape of the payload, not by where its transcript
+        # happens to sit. `runtime_of` reads the path for `/antigravity/` or
+        # `/.gemini/`, which is true of an installation and of nothing else —
+        # so a conversation stored anywhere unexpected is silently read as
+        # Claude Code, and a runtime that is guessed wrong here is a message
+        # delivered to the wrong seat rather than a message that fails.
+        runtime = "antigravity" if camel else runtime_of(transcript)
+        workspaces = payload.get("workspacePaths")
+        cwd = payload.get("cwd") or (
+            workspaces[0] if isinstance(workspaces, list) and workspaces else None
+        )
+        session_id = payload.get("session_id") or payload.get("conversationId") or "unknown"
 
         # Claude Code hands the turn's final message straight to the hook.
         # Whether Codex uses the same field is not known, so the alternatives
@@ -57,6 +87,12 @@ def main() -> int:
             if isinstance(candidate, str) and candidate.strip():
                 text = candidate
                 break
+        # Antigravity's Stop payload has no message field to find. It carries
+        # `executionNum`, `terminationReason`, `error` and `fullyIdle` — what
+        # the turn did, never what it said — so the reply is read from the
+        # transcript the same payload points at.
+        if text is None and runtime == "antigravity":
+            text = antigravity_reply(transcript)
         if text is None:
             if runtime != "claude-code":
                 note(f"{runtime} Stop: no message field. keys={sorted(payload)}")
@@ -64,22 +100,28 @@ def main() -> int:
             return 0
 
         body = {
-            "session_id": payload.get("session_id") or "unknown",
+            "session_id": session_id,
             "agent_id": runtime,
             "text": text,
-            "cwd": payload.get("cwd"),
+            "cwd": cwd,
             # Codex sets no project variable of its own, so for it the
             # session's directory is the only thing that says where this came
             # from. Left alone for Claude Code, where core already falls back
             # to `cwd` itself and passing it here would erase the difference
             # between "no project directory" and "it is the working directory".
             "project_dir": os.environ.get("CLAUDE_PROJECT_DIR")
-            or (payload.get("cwd") if runtime != "claude-code" else None),
+            or (cwd if runtime != "claude-code" else None),
             # Which seat this session is sitting in — see hook_bridge.py.
             "role": os.environ.get("HALYARD_ROLE") or None,
+            # Each runtime keeps the name somewhere else, and none of them in
+            # the payload. Antigravity's is in an annotation file beside the
+            # conversation; Codex's in a session index; Claude Code's in the
+            # transcript itself.
             "session_name": (
-                codex_thread_name(payload.get("session_id"))
+                codex_thread_name(session_id)
                 if runtime == "codex"
+                else antigravity_title(session_id)
+                if runtime == "antigravity"
                 else session_name(transcript)
             ),
         }

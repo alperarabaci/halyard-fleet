@@ -665,3 +665,97 @@ def test_a_missing_codex_index_is_no_name_rather_than_a_crash(
     )
 
     assert body["session_name"] is None
+
+
+# --- Antigravity, whose Stop says what a turn did and never what it said ------
+
+
+def antigravity_transcript(tmp_path: Path, records: list[dict]) -> Path:
+    """A transcript where the assistant's turns are typed PLANNER_RESPONSE."""
+    path = tmp_path / "transcript.jsonl"
+    path.write_text("\n".join(json.dumps(r) for r in records) + "\n")
+    return path
+
+
+def antigravity_stop(transcript: Path) -> dict:
+    """The documented Stop payload. Note there is no message field in it."""
+    return {
+        "executionNum": 1,
+        "terminationReason": "model_stop",
+        "error": "",
+        "fullyIdle": True,
+        "conversationId": "conv-1",
+        "workspacePaths": ["/repo"],
+        "transcriptPath": str(transcript),
+        "modelName": "auto",
+    }
+
+
+def test_the_relay_reads_antigravitys_reply_from_its_transcript(tmp_path: Path) -> None:
+    """Its Stop payload carries `executionNum`, `terminationReason`, `error`
+    and `fullyIdle` — what the turn did, never what it said. Every other
+    runtime hands the text straight to the hook."""
+    transcript = antigravity_transcript(
+        tmp_path,
+        [
+            {"type": "PLANNER_RESPONSE", "status": "DONE", "content": "earlier"},
+            {"type": "TOOL_CALL", "status": "DONE", "content": "ls"},
+            {"type": "PLANNER_RESPONSE", "status": "DONE", "content": "All 234 tests pass."},
+        ],
+    )
+
+    with control_plane(body={"delivered": True}) as (url, received):
+        result = run_relay(antigravity_stop(transcript), HALYARD_URL=url)
+
+    assert result.returncode == 0
+    assert received[0]["agent_id"] == "antigravity"
+    assert received[0]["text"] == "All 234 tests pass."
+
+
+def test_the_relay_reads_antigravitys_camelcase_keys(tmp_path: Path) -> None:
+    """`transcriptPath`, not `transcript_path`; `conversationId`, not
+    `session_id`; the workspace instead of a `cwd`.
+
+    The quieter half of the difference. Reading only the snake_case names
+    returns nothing rather than failing, so every Antigravity turn looks like a
+    turn that said nothing at all.
+    """
+    transcript = antigravity_transcript(
+        tmp_path, [{"type": "PLANNER_RESPONSE", "status": "DONE", "content": "hello"}]
+    )
+
+    with control_plane(body={"delivered": True}) as (url, received):
+        run_relay(antigravity_stop(transcript), HALYARD_URL=url)
+
+    assert received[0]["session_id"] == "conv-1"
+    assert received[0]["cwd"] == "/repo"
+
+
+def test_an_unfinished_reply_is_not_relayed(tmp_path: Path) -> None:
+    """A PLANNER_RESPONSE is written before it is complete, and a half-formed
+    one would be sent as a sentence that stops mid-word and never corrected."""
+    transcript = antigravity_transcript(
+        tmp_path,
+        [
+            {"type": "PLANNER_RESPONSE", "status": "DONE", "content": "the finished one"},
+            {"type": "PLANNER_RESPONSE", "status": "IN_PROGRESS", "content": "the half-writ"},
+        ],
+    )
+
+    with control_plane(body={"delivered": True}) as (url, received):
+        run_relay(antigravity_stop(transcript), HALYARD_URL=url)
+
+    assert received[0]["text"] == "the finished one"
+
+
+def test_a_turn_that_said_nothing_is_not_relayed(tmp_path: Path) -> None:
+    """A turn that only ran tools has nothing to forward."""
+    transcript = antigravity_transcript(
+        tmp_path, [{"type": "TOOL_CALL", "status": "DONE", "content": "ls"}]
+    )
+
+    with control_plane(body={"delivered": True}) as (url, received):
+        result = run_relay(antigravity_stop(transcript), HALYARD_URL=url)
+
+    assert result.returncode == 0
+    assert received == []

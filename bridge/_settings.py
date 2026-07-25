@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from datetime import datetime
 from pathlib import Path
 
@@ -114,6 +115,64 @@ def timeout(key: str, default: float) -> float:
 TRANSCRIPT_TAIL_BYTES = 256 * 1024
 
 
+def antigravity_title(conversation_id: str | None, home: Path | None = None) -> str | None:
+    """An Antigravity conversation's name, from its annotation file.
+
+    One line of protobuf text format — `title:"alpha-engine-driver" ...` — and
+    nothing else in the conversation carries it. Read here rather than in core
+    so the bridge can answer the only question routing asks, which seat this
+    is, with the standard library alone.
+    """
+    if not conversation_id:
+        return None
+    root = home or Path.home() / ".gemini" / "antigravity"
+    path = root / "annotations" / f"{conversation_id}.pbtxt"
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    match = re.search(r'title:\s*"((?:[^"\\]|\\.)*)"', text)
+    return match.group(1) if match else None
+
+
+def antigravity_reply(transcript_path: str | None) -> str | None:
+    """What the agent last said, read out of its own transcript.
+
+    The other two runtimes hand the turn's final message to the `Stop` hook.
+    Antigravity's `Stop` payload carries no text at all — `executionNum`,
+    `terminationReason`, `error`, `fullyIdle`, and the common fields — so the
+    reply has to be read from `transcriptPath`, where each line is a record and
+    the assistant's own turns are typed `PLANNER_RESPONSE`.
+
+    Only records that finished are considered. A `PLANNER_RESPONSE` is written
+    before it is complete, and relaying a half-formed one would send a sentence
+    that stops mid-word and never correct it.
+    """
+    if not transcript_path:
+        return None
+    try:
+        with open(transcript_path, encoding="utf-8", errors="replace") as handle:
+            lines = handle.readlines()
+    except OSError:
+        return None
+    for line in reversed(lines):
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            record = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(record, dict) or record.get("type") != "PLANNER_RESPONSE":
+            continue
+        if record.get("status") not in (None, "DONE"):
+            continue
+        content = record.get("content")
+        if isinstance(content, str) and content.strip():
+            return content
+    return None
+
+
 def runtime_of(transcript_path: str | None) -> str:
     """Which agent produced this payload, from where it keeps its transcript.
 
@@ -123,8 +182,11 @@ def runtime_of(transcript_path: str | None) -> str:
     both configured, a card that cannot say which one it came from goes to
     neither and lands in the default chat.
     """
-    if transcript_path and "/.codex/" in str(transcript_path):
+    path = str(transcript_path or "")
+    if "/.codex/" in path:
         return "codex"
+    if "/antigravity/" in path or "/.gemini/" in path:
+        return "antigravity"
     return "claude-code"
 
 
