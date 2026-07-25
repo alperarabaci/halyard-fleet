@@ -6,7 +6,8 @@
 
 Halyard Fleet puts your coding agent's permission prompt on your phone.
 
-When Claude Code or Codex wants to run something, you see the command, the project it
+When Claude Code, Codex or Antigravity wants to run something, you see the command, the
+project it
 came from, and how risky it is — then you allow or deny from Telegram. You can also
 send new instructions into the running session and read its replies there.
 
@@ -15,7 +16,7 @@ It runs on your own machine. No open ports, no exposed API, nothing to log into.
 Nothing is ever approved automatically: every failure — a crash, a timeout, an
 unreachable control plane — denies.
 
-**Runtimes:** Claude Code, Codex &nbsp;·&nbsp; **Channel:** Telegram
+**Runtimes:** Claude Code, Codex, Antigravity &nbsp;·&nbsp; **Channel:** Telegram
 
 <!-- Demo goes here:
 <p align="center">
@@ -63,7 +64,7 @@ uv run halyard init      # asks what you have, writes .env, wires the project, c
 uv run halyard           # keep this running
 ```
 
-`init` asks how many Claude and Codex seats you have, offers the session names it can
+`init` asks how many seats you have of each runtime, offers the session names it can
 already see, and reads the bot token without echoing it. It backs up any `.env` it
 replaces and keeps settings it does not manage.
 
@@ -124,7 +125,7 @@ behalf, uncontrolled agent-to-agent messaging, or multi-user RBAC.
 | [Architecture](docs/architecture.md) | How the layers fit, and the security posture |
 | [Hook behaviour](docs/hook-payload-notes.md) | What the runtimes' hooks actually do — measured |
 | [Session I/O](docs/session-io-notes.md) | Writing into a live session, and what forks it |
-| [Antigravity notes](docs/antigravity-payload-notes.md) | A third runtime, measured before anything is built |
+| [Antigravity notes](docs/antigravity-payload-notes.md) | The third runtime: its three hook dialects, its two stores, and what it will not let you do |
 | [Design document](docs/mobile-agent-control-plane.md) | The full plan this is built from |
 | [Postmortems](docs/postmortem/) | Regressions, and what they cost |
 
