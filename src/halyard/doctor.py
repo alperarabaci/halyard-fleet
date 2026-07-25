@@ -403,12 +403,12 @@ def run() -> int:
         # when seats replaced the two role settings this stopped looking at
         # anything and still printed a clean bill of health.
         print(f"{WARN}no seats configured — nothing is being routed anywhere")
-        print("        run `halyard init`, or set HALYARD_SEATS in .env")
+        print("        run `halyard init`, or add a `projects:` block to halyard.yaml")
     else:
         # Which file the seats came from, because the two dialects do not merge
-        # and a YAML file left behind would otherwise silently outrank the .env
+        # and a file left behind would otherwise silently outrank what was
         # somebody had just edited.
-        print(f"{OK}seats read from {source if source else '.env'}")
+        print(f"{OK}seats read from {source if source else 'the environment'}")
         for project in sorted({seat.project for seat in seats if seat.project}):
             labels = ", ".join(s.label for s in seats if s.project == project)
             print(f"        {project}: {labels}")
@@ -452,7 +452,7 @@ def run() -> int:
 def sessions() -> int:
     """List the session names this machine can see, newest first.
 
-    Exists so the two names in `.env` are copied rather than guessed. They have
+    Exists so the two names are copied rather than guessed. They have
     to match exactly, and a name typed from memory that is nearly right routes
     nothing and explains nothing.
 

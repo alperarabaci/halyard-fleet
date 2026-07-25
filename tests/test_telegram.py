@@ -15,7 +15,7 @@ from pathlib import Path
 import pytest
 
 from halyard.channels.telegram import cards
-from halyard.channels.telegram.adapter import TelegramChannel
+from halyard.channels.telegram.adapter import TelegramChannel, _SessionTarget
 from halyard.core.approvals import ApprovalStore, Decision, ResolutionReason
 from halyard.core.audit import AuditAction, AuditLog, JsonlAuditSink
 from halyard.core.events import RiskLevel, Role
@@ -1668,3 +1668,52 @@ async def test_the_claude_seat_of_that_pair_still_routes_to_its_own_group(tmp_pa
     )
 
     assert api.sent[0]["chat_id"] == DRV_CHAT
+
+
+async def test_a_failed_delivery_says_why_on_the_phone(tmp_path: Path, monkeypatch) -> None:
+    """The reason the machine printed, carried to the person who asked.
+
+    A Mac mini's `claude` CLI answered "Not logged in · Please run /login" and
+    Halyard said to check the control plane's log — which is on the machine
+    they had walked away from. The CLI writes that line to stdout, and the
+    runner was reading only stderr, so the log said `failed (exit 1):` with
+    nothing after the colon.
+    """
+    channel, api, _ = await routed(tmp_path)
+
+    class Refuses:
+        id = "claude-code"
+
+        def last_error(self, _session_id):
+            return "Not logged in · Please run /login"
+
+        async def send(self, *_args, **_kwargs):
+            return False
+
+    await channel._deliver(
+        _SessionTarget("s-1", "alpha-engine", None, Refuses()), "go", "tg:1", DRV_CHAT
+    )
+
+    said = api.sent[-1]["text"]
+    assert "Not logged in" in said
+    assert "s-1" in said
+
+
+async def test_a_failure_with_no_output_says_that_instead(tmp_path: Path, monkeypatch) -> None:
+    """Silence is a finding too, and must not be reported as a blank reason."""
+    channel, api, _ = await routed(tmp_path)
+
+    class Silent:
+        id = "codex"
+
+        def last_error(self, _session_id):
+            return None
+
+        async def send(self, *_args, **_kwargs):
+            return False
+
+    await channel._deliver(
+        _SessionTarget("s-2", "alpha-engine", None, Silent()), "go", "tg:1", DRV_CHAT
+    )
+
+    assert "Nothing was printed" in api.sent[-1]["text"]

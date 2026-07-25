@@ -152,6 +152,7 @@ class AntigravityRunner:
         self._timeout = timeout_seconds
         self._locks: dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
         self._models: dict[str, str] = {}
+        self._last_error: dict[str, str] = {}
         # What a conversation is owed but has not been given yet. See `send`:
         # the text does not travel with the wake, it waits here until the hook
         # comes and asks for it.
@@ -208,6 +209,17 @@ class AntigravityRunner:
         a channel can offer one command across every runtime; `options()` is
         where the honest answer lives, and it reports none.
         """
+
+    def last_error(self, session_id: str) -> str | None:
+        """Why the last delivery to this session failed, if one did.
+
+        Kept so the answer can travel to the person who asked. They are on a
+        phone, away from the machine, and "check the control plane's log" is
+        the one instruction they cannot follow — the log is on the machine they
+        are away from. The reason was already printed by the CLI; it only had
+        to be carried.
+        """
+        return self._last_error.get(session_id)
 
     def busy(self, session_id: str) -> bool:
         lock = self._locks.get(session_id)

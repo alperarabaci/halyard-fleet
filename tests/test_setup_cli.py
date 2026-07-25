@@ -1,8 +1,8 @@
-"""`halyard init` — the wizard that writes a `.env`.
+"""`halyard init` — the wizard that writes a `halyard.yaml`.
 
 The interactive parts take injected `ask`/`secret`/`say` callables, so the whole
 flow runs here without a terminal. What matters most is what ends up in the
-file: a `.env` this wizard writes has to load back into the seats the person
+file: a document this wizard writes has to load back into the seats the person
 described, and it must not lose anything it did not ask about.
 """
 
@@ -11,14 +11,15 @@ from __future__ import annotations
 from pathlib import Path
 
 from halyard import setup_cli
+from halyard.core.config_file import from_yaml
 from halyard.core.events import Role
-from halyard.core.seats import Seat, from_environment
+from halyard.core.seats import Seat
 
 
 def test_the_written_env_loads_back_into_the_same_seats() -> None:
     """The one property that makes the wizard worth having: what it writes is
     what the control plane then reads."""
-    text = setup_cli.assemble_env(
+    text = setup_cli.assemble_yaml(
         token="123:secret",
         default_chat="-999",
         authorized_ids="4242",
@@ -30,8 +31,7 @@ def test_the_written_env_loads_back_into_the_same_seats() -> None:
         carried_over={},
     )
 
-    env = _as_env(text)
-    loaded = from_environment(env)
+    loaded = from_yaml(text)
 
     assert [(s.label, s.runtime, s.session, s.chat, s.role) for s in loaded] == [
         ("nav", "claude-code", "alpha-nav", "-1001", Role.NAVIGATOR),
@@ -39,9 +39,9 @@ def test_the_written_env_loads_back_into_the_same_seats() -> None:
     ]
 
 
-def test_a_label_with_a_dash_becomes_a_valid_env_key() -> None:
-    """`codex-drv` has to become HALYARD_SEAT_CODEX_DRV, or its line is unread."""
-    text = setup_cli.assemble_env(
+def test_a_label_with_a_dash_survives_the_round_trip() -> None:
+    """It was once turned into an environment key, which could mangle it."""
+    text = setup_cli.assemble_yaml(
         token="t",
         default_chat="-1",
         authorized_ids="1",
@@ -50,13 +50,12 @@ def test_a_label_with_a_dash_becomes_a_valid_env_key() -> None:
         carried_over={},
     )
 
-    assert "HALYARD_SEAT_CODEX_DRV=" in text
-    assert from_environment(_as_env(text))[0].label == "codex-drv"
+    assert from_yaml(text)[0].label == "codex-drv"
 
 
 def test_unmanaged_keys_are_carried_over() -> None:
     """Re-running to add a seat must not drop the log config from last time."""
-    text = setup_cli.assemble_env(
+    text = setup_cli.assemble_yaml(
         token="t",
         default_chat="-1",
         authorized_ids="1",
@@ -65,14 +64,14 @@ def test_unmanaged_keys_are_carried_over() -> None:
         carried_over={"HALYARD_LOG_LEVEL": "DEBUG", "HALYARD_CLAUDE_DEFAULT_MODEL": "sonnet"},
     )
 
-    assert "HALYARD_LOG_LEVEL=DEBUG" in text
-    assert "HALYARD_CLAUDE_DEFAULT_MODEL=sonnet" in text
+    assert "HALYARD_LOG_LEVEL: DEBUG" in text
+    assert "HALYARD_CLAUDE_DEFAULT_MODEL: sonnet" in text
 
 
 def test_a_stale_managed_key_is_not_carried_over_twice() -> None:
     """The old token is a default, not a line to copy verbatim beside the new
     one — two TELEGRAM_BOT_TOKEN lines is an ambiguous file."""
-    text = setup_cli.assemble_env(
+    text = setup_cli.assemble_yaml(
         token="new-token",
         default_chat="-1",
         authorized_ids="1",
@@ -81,7 +80,7 @@ def test_a_stale_managed_key_is_not_carried_over_twice() -> None:
         carried_over={"TELEGRAM_BOT_TOKEN": "old-token", "TELEGRAM_CHAT_ID": "-old"},
     )
 
-    assert text.count("TELEGRAM_BOT_TOKEN=") == 1
+    assert text.count("TELEGRAM_BOT_TOKEN:") == 1
     assert "old-token" not in text
 
 
@@ -106,7 +105,7 @@ def test_the_token_is_read_through_secret_never_through_ask(tmp_path: Path) -> N
         pass
 
     code = setup_cli.run(
-        env_path=tmp_path / ".env",
+        env_path=tmp_path / "halyard.yaml",
         ask=ask,
         secret=secret,
         say=say,
@@ -115,12 +114,12 @@ def test_the_token_is_read_through_secret_never_through_ask(tmp_path: Path) -> N
 
     assert code == 0
     assert not any("token" in prompt.lower() for prompt in asked)
-    assert "TELEGRAM_BOT_TOKEN=123:the-secret" in (tmp_path / ".env").read_text()
+    assert 'TELEGRAM_BOT_TOKEN: "123:the-secret"' in (tmp_path / "halyard.yaml").read_text()
 
 
 def test_an_existing_env_is_backed_up_before_being_written(tmp_path: Path) -> None:
-    env = tmp_path / ".env"
-    env.write_text("TELEGRAM_BOT_TOKEN=old\nHALYARD_LOG_LEVEL=INFO\n")
+    env = tmp_path / "halyard.yaml"
+    env.write_text("settings:\n  TELEGRAM_BOT_TOKEN: old\n  HALYARD_LOG_LEVEL: INFO\n")
 
     setup_cli.run(
         env_path=env,
@@ -130,17 +129,17 @@ def test_an_existing_env_is_backed_up_before_being_written(tmp_path: Path) -> No
         now="20260724-000000",
     )
 
-    backup = env.with_name(".env.20260724-000000.bak")
+    backup = env.with_name("halyard.yaml.20260724-000000.bak")
     assert backup.exists()
-    assert "TELEGRAM_BOT_TOKEN=old" in backup.read_text()
+    assert "TELEGRAM_BOT_TOKEN: old" in backup.read_text()
     # And the carried-over unmanaged key survived into the new file.
-    assert "HALYARD_LOG_LEVEL=INFO" in env.read_text()
+    assert "HALYARD_LOG_LEVEL: INFO" in env.read_text()
 
 
 def test_no_token_and_no_previous_one_writes_nothing(tmp_path: Path) -> None:
     """A file with no bot token cannot run the gate, so it is not written at
     all rather than written broken."""
-    env = tmp_path / ".env"
+    env = tmp_path / "halyard.yaml"
 
     code = setup_cli.run(
         env_path=env,
@@ -169,12 +168,16 @@ def test_pressing_enter_through_a_re_run_keeps_every_seat(tmp_path: Path) -> Non
     seat — recoverable from the backup, but only by somebody who noticed, and
     nothing said a word.
     """
-    env = tmp_path / ".env"
+    env = tmp_path / "halyard.yaml"
     env.write_text(
-        "TELEGRAM_BOT_TOKEN=old\n"
-        "HALYARD_SEATS=nav,xdrv\n"
-        "HALYARD_SEAT_NAV=runtime=claude-code session=alpha-nav chat=-2001 role=navigator\n"
-        "HALYARD_SEAT_XDRV=runtime=codex session=alpha-xdrv chat=-2004 role=driver\n"
+        "settings:\n"
+        "  TELEGRAM_BOT_TOKEN: old\n"
+        "\n"
+        "projects:\n"
+        "  alpha-engine:\n"
+        "    seats:\n"
+        '      nav: {runtime: claude-code, session: alpha-nav, chat: "-2001", role: navigator}\n'
+        '      xdrv: {runtime: codex, session: alpha-xdrv, chat: "-2004", role: driver}\n'
     )
 
     setup_cli.run(
@@ -186,7 +189,7 @@ def test_pressing_enter_through_a_re_run_keeps_every_seat(tmp_path: Path) -> Non
         now="stamp",
     )
 
-    seats = from_environment(setup_cli._read_existing(env))
+    seats = setup_cli._existing_seats(env)
     assert [(s.label, s.runtime, s.session, s.chat) for s in seats] == [
         ("nav", "claude-code", "alpha-nav", "-2001"),
         ("xdrv", "codex", "alpha-xdrv", "-2004"),
@@ -195,8 +198,8 @@ def test_pressing_enter_through_a_re_run_keeps_every_seat(tmp_path: Path) -> Non
 
 def test_a_blank_token_keeps_the_one_already_there(tmp_path: Path) -> None:
     """Re-running to change a chat id must not require retyping the credential."""
-    env = tmp_path / ".env"
-    env.write_text("TELEGRAM_BOT_TOKEN=123:already-set\n")
+    env = tmp_path / "halyard.yaml"
+    env.write_text('settings:\n  TELEGRAM_BOT_TOKEN: "123:already-set"\n')
 
     setup_cli.run(
         env_path=env,
@@ -206,4 +209,4 @@ def test_a_blank_token_keeps_the_one_already_there(tmp_path: Path) -> None:
         now="stamp",
     )
 
-    assert "TELEGRAM_BOT_TOKEN=123:already-set" in env.read_text()
+    assert 'TELEGRAM_BOT_TOKEN: "123:already-set"' in env.read_text()

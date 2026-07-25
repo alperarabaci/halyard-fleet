@@ -1,17 +1,17 @@
-"""`halyard init` — build a `.env`, wire a project, and check it, in one sitting.
+"""`halyard init` — build a `halyard.yaml`, wire a project, and check it.
 
-The point is that nobody should have to know the shape of `.env` before they
-can produce one. You are asked what you have — how many Claude seats, how many
-Codex seats, which groups they speak in — and the file is assembled from the
-answers. It can start from nothing or amend what is already there.
+The point is that nobody should have to know the shape of the file before they
+can produce one. You are asked what you have — how many seats of each runtime,
+which groups they speak in — and the document is assembled from the answers. It
+can start from nothing or amend what is already there.
 
 Three things are deliberate.
 
 **The bot token is never echoed.** It is read through `getpass`, so it does not
 appear on screen or in shell history — the one credential in this file is also
 the one that has already been leaked once, into a log, earlier in this
-project's life. It is written to `.env` because that is what `.env` is; it is
-not passed on a command line or printed back.
+project's life. It is written to a gitignored file, and not passed on a command
+line or printed back.
 
 **The old file is kept, never silently replaced.** A timestamped copy is made
 before anything is written, the same rule `halyard wire` follows, and for the
@@ -22,17 +22,20 @@ them without a word is the failure worth engineering against.
 custom bind — keys this wizard does not ask about are read back out of the old
 file and written again, so re-running to add a seat cannot quietly drop them.
 
-YAML, and more than one project in one file, come next. This writes the flat
-`.env` that the control plane already reads, which is the thing that has to
-work first.
+**One file.** Settings lived in `.env` and seats in `halyard.yaml` for a while,
+which is two files describing one machine with no rule written down for which
+of them won. There is one now.
 """
 
 from __future__ import annotations
 
 import getpass
+import re
 from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
+
+import yaml
 
 from halyard.agents import registry
 from halyard.agents.spec import RuntimeSpec
@@ -46,7 +49,7 @@ Ask = Callable[[str, str], str]
 Secret = Callable[[str], str]
 Say = Callable[[str], None]
 
-#: Keys this wizard owns. Anything else in an existing `.env` is carried over
+#: Keys this wizard owns. Anything else already in the file is carried over
 #: untouched, so amending a configuration cannot lose a setting it never asked
 #: about.
 _MANAGED_PREFIXES = (
@@ -70,7 +73,18 @@ def _env_label(label: str) -> str:
     return label.upper().replace("-", "_")
 
 
-def assemble_env(
+def _scalar(value: str) -> str:
+    """Quote what YAML would otherwise read as something else.
+
+    Chat ids are the case that matters: `-1001234` is a number to YAML and a
+    string to Telegram, and a seat configured with the number routes nowhere.
+    """
+    if value == "" or re.search(r"""[:#{}\[\]&*!|>%@`'"]|^\s|\s$|^[-\d]""", value):
+        return '"' + value.replace('"', '\\"') + '"'
+    return value
+
+
+def assemble_yaml(
     *,
     token: str,
     default_chat: str,
@@ -80,70 +94,70 @@ def assemble_env(
     carried_over: dict[str, str],
     bind: str | None = None,
 ) -> str:
-    """Turn answers into the text of a `.env`, carrying unmanaged keys along.
+    """Turn answers into a `halyard.yaml`, carrying unmanaged settings along.
 
     Pure on purpose: every decision about what the file says is made here,
     where it can be checked without a terminal in the way.
+
+    **One file.** Settings lived in `.env` and seats in `halyard.yaml` for a
+    while, which meant two files describing one machine and nothing written
+    down about which of them won. Anything this wizard does not ask about is
+    read back out of the old document and written again, so amending one answer
+    cannot quietly drop a setting.
     """
+    settings: dict[str, str] = {"HALYARD_CHANNEL": "telegram"}
+    if bind:
+        settings["HALYARD_BIND"] = bind
+    if project_name:
+        settings["CLAUDE_PROJECT_NAME"] = project_name
+    settings["TELEGRAM_BOT_TOKEN"] = token
+    settings["TELEGRAM_CHAT_ID"] = default_chat
+    settings["TELEGRAM_AUTHORIZED_USER_IDS"] = authorized_ids
+    for key, value in carried_over.items():
+        if not _is_managed(key):
+            settings[key] = value
+
     lines = [
         "# Written by `halyard init`. Re-run it to amend; it keeps a backup first.",
         "",
-        "HALYARD_CHANNEL=telegram",
+        "settings:",
     ]
-    if bind:
-        lines.append(f"HALYARD_BIND={bind}")
-    if project_name:
-        lines.append(f"CLAUDE_PROJECT_NAME={project_name}")
-    lines += [
-        "",
-        "# One bot covers every group. The token is secret; the ids are not.",
-        f"TELEGRAM_BOT_TOKEN={token}",
-        f"TELEGRAM_CHAT_ID={default_chat}",
-        f"TELEGRAM_AUTHORIZED_USER_IDS={authorized_ids}",
-    ]
+    lines += [f"  {key}: {_scalar(value)}" for key, value in settings.items()]
 
+    lines += ["", "projects:", f"  {project_name or 'a-project'}:"]
     if seats:
-        lines += ["", "# Seats. Each is a place a message can go.", ""]
-        lines.append("HALYARD_SEATS=" + ",".join(seat.label for seat in seats))
+        lines.append("    seats:")
         for seat in seats:
-            parts = [f"runtime={seat.runtime}"]
+            lines.append(f"      {seat.label}:")
+            lines.append(f"        runtime: {seat.runtime}")
             if seat.session:
-                parts.append(f"session={seat.session}")
+                lines.append(f"        session: {_scalar(seat.session)}")
             if seat.chat:
-                parts.append(f"chat={seat.chat}")
+                lines.append(f"        chat: {_scalar(seat.chat)}")
             if seat.role:
-                parts.append(f"role={seat.role.value}")
-            lines.append(f"HALYARD_SEAT_{_env_label(seat.label)}=" + " ".join(parts))
-
-    leftover = {k: v for k, v in carried_over.items() if not _is_managed(k)}
-    if leftover:
-        lines += ["", "# Carried over from the previous file, unchanged.", ""]
-        lines += [f"{key}={value}" for key, value in leftover.items()]
+                lines.append(f"        role: {seat.role.value}")
+    else:
+        lines.append("    seats: {}")
 
     return "\n".join(lines) + "\n"
 
 
 def _read_existing(path: Path) -> dict[str, str]:
-    """The old `.env` as key→value, for defaults and for carrying over.
+    """The old document's `settings:` block, for defaults and for carrying over.
 
-    A line the wizard cannot parse is simply skipped rather than raising: the
+    A file the wizard cannot parse offers no defaults rather than raising: the
     goal is to be able to run this against a hand-edited file, not to police it.
     """
-    values: dict[str, str] = {}
     try:
-        text = path.read_text(encoding="utf-8")
-    except OSError:
-        return values
-    for line in text.splitlines():
-        line = line.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        key, _, value = line.partition("=")
-        value = value.strip()
-        if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
-            value = value[1:-1]
-        values[key.strip()] = value
-    return values
+        document = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    except (OSError, yaml.YAMLError):
+        return {}
+    block = document.get("settings") if isinstance(document, dict) else None
+    return (
+        {str(k): "" if v is None else str(v) for k, v in block.items()}
+        if isinstance(block, dict)
+        else {}
+    )
 
 
 def _back_up(path: Path, stamp: str) -> Path | None:
@@ -160,19 +174,27 @@ def _default_ask(prompt: str, default: str = "") -> str:
     return answer or default
 
 
-def _existing_seats(existing: dict[str, str]) -> list[Seat]:
-    """The seats already configured, so re-running can default to them."""
-    try:
-        from halyard.core.seats import from_environment
+def _existing_seats(path: Path) -> list[Seat]:
+    """The seats already in the file, so re-running can default to them.
 
-        return from_environment(existing)
+    Read from the document's `projects:` block. Reading them from the settings
+    block instead — which is what the environment dialect would have made this
+    do — finds nothing, and finding nothing here means a re-run that presses
+    Enter through every question deletes every seat. That has happened once
+    already, from a count that defaulted to zero.
+    """
+    try:
+        from halyard.core.config_file import projects_from_yaml
+
+        described = projects_from_yaml(path.read_text(encoding="utf-8"))
     except Exception:
         # A configuration this wizard cannot parse is one it should not refuse
         # to run against; it simply offers no defaults from it.
         return []
+    return [seat for project in described for seat in project.seats]
 
 
-def _collect_seats(existing: dict[str, str], ask: Ask, say: Say) -> list[Seat]:
+def _collect_seats(path: Path, ask: Ask, say: Say) -> list[Seat]:
     """Walk through the seats, one runtime at a time.
 
     Sessions the machine can see are offered by name, because the alternative —
@@ -186,7 +208,7 @@ def _collect_seats(existing: dict[str, str], ask: Ask, say: Say) -> list[Seat]:
     through with Enter deleted every seat — recoverable from the backup, but
     only by somebody who noticed, and nothing said a word.
     """
-    configured = _existing_seats(existing)
+    configured = _existing_seats(path)
     seats: list[Seat] = []
     for spec in registry.discover().values():
         runtime, human = spec.name, spec.human
@@ -266,10 +288,10 @@ def run(
     now: str | None = None,
 ) -> int:
     """Ask, assemble, back up, write — then offer to wire and to check."""
-    path = env_path or Path(".env")
+    path = env_path or Path("halyard.yaml")
     existing = _read_existing(path)
 
-    say("This writes .env, and can wire the project and check it afterwards.")
+    say("This writes halyard.yaml, and can wire the project and check it afterwards.")
     if existing:
         say(f"Found {path}; its values are the defaults below, and it will be backed up.\n")
 
@@ -291,9 +313,9 @@ def run(
     )
     project_name = ask("Project name shown on cards", existing.get("CLAUDE_PROJECT_NAME", ""))
 
-    seats = _collect_seats(existing, ask, say)
+    seats = _collect_seats(path, ask, say)
 
-    content = assemble_env(
+    content = assemble_yaml(
         token=token,
         default_chat=default_chat,
         authorized_ids=authorized,

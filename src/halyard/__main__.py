@@ -77,7 +77,7 @@ USAGE = """usage: halyard [command]
   serve         run the control plane
   doctor        check the configuration and say what is wrong with it
   sessions      list the session names this machine can see
-  init          build .env, wire a project, and check it — interactively
+  init          build halyard.yaml, wire a project, and check it
   verify [rt]   prove the gate stops things, by running into it (costs turns)
   wire [what]   put the gate on a project, by name or directory (keeps a backup)
   unwire [what] take it off again, leaving everything else in place

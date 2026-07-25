@@ -617,12 +617,19 @@ class TelegramChannel:
             # there is which session this went to and under which runtime.
             # Two runtimes can hold one name, so neither half is enough alone.
             runtime = getattr(session.runner, "id", "?")
+            because = getattr(session.runner, "last_error", lambda _: None)(session_id)
+            # The runtime usually said why, on a stream this used to discard.
+            # "Not logged in · Please run /login" was printed by the CLI, thrown
+            # away, and replaced with an instruction to read a log on a machine
+            # the person had walked away from.
+            detail = (
+                f"\n\n<pre>{html.escape(because[:300])}</pre>"
+                if because
+                else "\n\nNothing was printed. <code>halyard doctor</code> checks the rest."
+            )
             await self._say(
                 f"⚠️ That did not reach <b>{html.escape(str(session_id))}</b> "
-                f"({html.escape(str(runtime))}).\n\n"
-                "The session was found and the delivery failed, so the name is "
-                "right and something else is wrong — the app not running, or the "
-                "CLI missing. <code>halyard doctor</code> checks both.",
+                f"({html.escape(str(runtime))}).{detail}",
                 chat_id,
                 thread_id,
             )

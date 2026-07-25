@@ -1,4 +1,4 @@
-"""Configuration, read from the environment once at startup.
+"""Configuration, read once at startup from `halyard.yaml`.
 
 Two choices here are load-bearing rather than stylistic.
 
@@ -17,10 +17,17 @@ from __future__ import annotations
 
 from enum import StrEnum
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Any
 
+import yaml
 from pydantic import Field, field_validator, model_validator
-from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
+from pydantic.fields import FieldInfo
+from pydantic_settings import (
+    BaseSettings,
+    NoDecode,
+    PydanticBaseSettingsSource,
+    SettingsConfigDict,
+)
 
 
 class ChannelKind(StrEnum):
@@ -39,14 +46,82 @@ class ChannelKind(StrEnum):
         return self in {ChannelKind.STUB_ALLOW, ChannelKind.STUB_DENY}
 
 
+class YamlSettings(PydanticBaseSettingsSource):
+    """The `settings:` block of `halyard.yaml`, read as a settings source.
+
+    **One file describes a machine.** Seats moved to YAML first and everything
+    else stayed in `.env`, which left two files that each had to be edited to
+    change one thing and no rule saying which won. A person configuring this
+    had to know both.
+
+    Keys are the environment names — `TELEGRAM_BOT_TOKEN`, `HALYARD_BIND` —
+    rather than new ones. They are what every message, every doctor line and
+    every existing installation already says, and inventing a second vocabulary
+    for the same settings would be the same mistake in a smaller font.
+
+    A real environment variable still wins. That is not a second file; it is
+    how a container passes a secret in, and taking it away would mean writing
+    the token to disk is the only way to run this.
+    """
+
+    def __init__(self, settings_cls: type[BaseSettings], path: Path | None = None) -> None:
+        super().__init__(settings_cls)
+        self._path = path
+
+    def _values(self) -> dict[str, Any]:
+        from halyard.core.config_file import find_config
+
+        path = self._path or find_config()
+        if path is None:
+            return {}
+        try:
+            document = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        except (OSError, yaml.YAMLError):
+            # A file that cannot be read is reported by `halyard doctor`, which
+            # says which file and why. Refusing to start here would turn one
+            # bad line into a control plane that cannot say what is wrong.
+            return {}
+        block = document.get("settings") if isinstance(document, dict) else None
+        return {str(k): v for k, v in block.items()} if isinstance(block, dict) else {}
+
+    def get_field_value(self, field: FieldInfo, field_name: str) -> tuple[Any, str, bool]:
+        alias = str(field.validation_alias or field_name)
+        values = self._values()
+        return values.get(alias), alias, False
+
+    def __call__(self) -> dict[str, Any]:
+        found: dict[str, Any] = {}
+        for name, field in self.settings_cls.model_fields.items():
+            value, key, _ = self.get_field_value(field, name)
+            if value is not None:
+                found[key] = value
+        return found
+
+
 class Settings(BaseSettings):
     """Everything the control plane needs to run."""
 
     model_config = SettingsConfigDict(
-        env_file=".env",
+        env_file=None,
         env_file_encoding="utf-8",
         extra="ignore",
     )
+
+    @classmethod
+    def settings_customise_sources(
+        cls,
+        settings_cls: type[BaseSettings],
+        init_settings: PydanticBaseSettingsSource,
+        env_settings: PydanticBaseSettingsSource,
+        dotenv_settings: PydanticBaseSettingsSource,
+        file_secret_settings: PydanticBaseSettingsSource,
+    ) -> tuple[PydanticBaseSettingsSource, ...]:
+        """Arguments, then the environment, then `halyard.yaml`.
+
+        `.env` is gone. It was the second of two files describing one machine,
+        and which of them won was not written down anywhere.
+        """
+        return (init_settings, env_settings, YamlSettings(settings_cls))
 
     bind: str = Field(default="127.0.0.1:8787", validation_alias="HALYARD_BIND")
     #: How long an approval card stays answerable.

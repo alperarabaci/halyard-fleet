@@ -88,6 +88,7 @@ class CodexRunner:
         self._timeout = timeout_seconds
         self._default_model = default_model or None
         self._locks: dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
+        self._last_error: dict[str, str] = {}
         self._models: dict[str, str] = {}
         self._efforts: dict[str, str] = {}
         self._catalog: dict[str, tuple[str, ...]] | None = None
@@ -189,6 +190,17 @@ class CodexRunner:
         else:
             self._efforts.pop(session_id, None)
 
+    def last_error(self, session_id: str) -> str | None:
+        """Why the last delivery to this session failed, if one did.
+
+        Kept so the answer can travel to the person who asked. They are on a
+        phone, away from the machine, and "check the control plane's log" is
+        the one instruction they cannot follow — the log is on the machine they
+        are away from. The reason was already printed by the CLI; it only had
+        to be carried.
+        """
+        return self._last_error.get(session_id)
+
     def busy(self, session_id: str) -> bool:
         lock = self._locks.get(session_id)
         return lock is not None and lock.locked()
@@ -265,7 +277,9 @@ class CodexRunner:
             return False
 
         try:
-            _, stderr = await asyncio.wait_for(process.communicate(), timeout=self._timeout)
+            stdout, stderr = await asyncio.wait_for(
+                process.communicate(), timeout=self._timeout
+            )
         except TimeoutError:
             logger.error("A turn in %s ran past %.0fs; giving up on it", session_id, self._timeout)
             process.kill()
@@ -273,11 +287,21 @@ class CodexRunner:
             return False
 
         if process.returncode != 0:
+            # Both streams. The CLI says "Not logged in · Please run /login"
+            # on *stdout*, and reading only stderr logged `failed (exit 1):`
+            # with nothing after the colon — a delivery that failed for a
+            # reason the machine had printed and this threw away.
+            reason = (
+                (stderr or b"").decode("utf-8", "replace").strip()
+                or (stdout or b"").decode("utf-8", "replace").strip()
+                or "no output"
+            )[:400]
+            self._last_error[session_id] = reason
             logger.error(
                 "Delivering a message to %s failed (exit %s): %s",
                 session_id,
                 process.returncode,
-                (stderr or b"").decode("utf-8", "replace").strip()[:400],
+                reason,
             )
             return False
         return True

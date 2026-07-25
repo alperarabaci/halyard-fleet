@@ -26,52 +26,54 @@ from halyard.api.app import create_app
 from halyard.config import Settings
 from halyard.core.events import Role
 
-FOUR_SEATS = {
-    "HALYARD_CHANNEL": "telegram",
-    "TELEGRAM_BOT_TOKEN": "123:not-a-real-token",
-    "TELEGRAM_CHAT_ID": "-9999",
-    "TELEGRAM_AUTHORIZED_USER_IDS": "4242",
-    "HALYARD_SEATS": "nav,drv,xnav,xdrv",
-    "HALYARD_SEAT_NAV": "runtime=claude-code session=a-nav chat=-1001 role=navigator",
-    "HALYARD_SEAT_DRV": "runtime=claude-code session=a-drv chat=-1002 role=driver",
-    "HALYARD_SEAT_XNAV": "runtime=codex session=x-nav chat=-1003 role=navigator",
-    "HALYARD_SEAT_XDRV": "runtime=codex session=x-drv chat=-1004 role=driver",
-}
+#: One file, as a person would write it. Settings and seats together, which is
+#: the point: they used to be two files and neither said which one won.
+CONFIGURATION = """\
+settings:
+  HALYARD_CHANNEL: telegram
+  TELEGRAM_BOT_TOKEN: "123:not-a-real-token"
+  TELEGRAM_CHAT_ID: "-9999"
+  TELEGRAM_AUTHORIZED_USER_IDS: "4242"
+  HALYARD_DB_PATH: {db}
+  HALYARD_AUDIT_LOG: {audit}
+
+projects:
+  a-project:
+    seats:
+      nav: {{runtime: claude-code, session: a-nav, chat: "-1001", role: navigator}}
+      drv: {{runtime: claude-code, session: a-drv, chat: "-1002", role: driver}}
+      xnav: {{runtime: codex, session: x-nav, chat: "-1003", role: navigator}}
+      xdrv: {{runtime: codex, session: x-drv, chat: "-1004", role: driver}}
+"""
 
 
 @pytest.fixture
 def app_with_four_seats(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     """A control plane built the way the real one is built.
 
-    Configured through a real `.env` file rather than environment variables,
+    Configured through a real `halyard.yaml` rather than environment variables,
     because that is where the configuration actually lives and where it once
     went unread: seats were looked for in `os.environ` while everything else
-    came from the file, so four correct seats produced a control plane holding
+    came from a file, so four correct seats produced a control plane holding
     none. A test that sets environment variables would have passed throughout.
 
-    Run from an empty directory so the repository's own `.env` cannot leak into
-    the result — a test that passes because of the developer's configuration is
-    not a test.
+    The settings and the seats are in one document here because they are in one
+    document now. They were two files for a while, with no rule written down
+    for which of them won.
     """
     monkeypatch.chdir(tmp_path)
-    for stray in (*FOUR_SEATS, "HALYARD_NAVIGATOR_SESSION", "HALYARD_DRIVER_SESSION"):
-        monkeypatch.delenv(stray, raising=False)
-
-    (tmp_path / ".env").write_text(
-        "\n".join(f"{key}={value}" for key, value in FOUR_SEATS.items())
-        + f"\nHALYARD_DB_PATH={tmp_path / 'halyard.db'}"
-        + f"\nHALYARD_AUDIT_LOG={tmp_path / 'audit.jsonl'}\n"
+    (tmp_path / "halyard.yaml").write_text(
+        CONFIGURATION.format(db=tmp_path / "halyard.db", audit=tmp_path / "audit.jsonl")
     )
 
-    app = create_app(Settings())
-    return app
+    return create_app(Settings())
 
 
 def test_the_control_plane_sees_every_configured_seat(app_with_four_seats) -> None:
     """Seats were once configured correctly and invisible to the process.
 
-    They were read from `os.environ` while everything else was read from
-    `.env`, so four correct seats produced a control plane that reported none —
+    They were read from `os.environ` while everything else was read from a
+    file, so four correct seats produced a control plane that reported none —
     and `doctor` saying "no seats configured" was the only sign of it.
     """
     channel = app_with_four_seats.state.channel
@@ -153,10 +155,12 @@ def test_a_configuration_from_before_seats_still_routes(
 
     This is the shape every installation had before a second runtime existed,
     and it has to keep meaning what it meant.
+
+    Set as real environment variables, which is still a supported way in — the
+    file replaced `.env`, not the environment. A container passing a token in
+    should not have to write it to disk first.
     """
     monkeypatch.chdir(tmp_path)
-    for stray in FOUR_SEATS:
-        monkeypatch.delenv(stray, raising=False)
     for key, value in {
         "HALYARD_CHANNEL": "telegram",
         "TELEGRAM_BOT_TOKEN": "123:not-a-real-token",
