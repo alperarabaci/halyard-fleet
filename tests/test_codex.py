@@ -155,7 +155,7 @@ def test_an_unknown_name_is_none_rather_than_a_guess(tmp_path: Path) -> None:
 
 def runner_with_catalog(**kwargs) -> CodexRunner:
     made = CodexRunner(**kwargs)
-    made._binary = "/opt/homebrew/bin/codex"
+    made._configured = "/opt/homebrew/bin/codex"
     made._catalog = {
         "gpt-5.6-sol": ("low", "medium", "high", "xhigh", "max", "ultra"),
         "gpt-5.5": ("low", "medium", "high", "xhigh"),

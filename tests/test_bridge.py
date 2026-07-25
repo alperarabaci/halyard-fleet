@@ -147,7 +147,10 @@ def test_the_payload_is_forwarded_without_being_reinterpreted() -> None:
         # No transcript at that path, so no name — and no routing, which lands
         # everything in the default chat exactly as it would have anyway.
         "session_name": None,
-        "reason": None,
+        # The tool call's own one-line summary. Only `justification` was read
+        # before, which a Bash call does not have, so every card arrived as a
+        # bare command with the intent left to be guessed from the shell.
+        "reason": "Stop the stack",
     }
 
 
@@ -759,3 +762,70 @@ def test_a_turn_that_said_nothing_is_not_relayed(tmp_path: Path) -> None:
 
     assert result.returncode == 0
     assert received == []
+
+
+# --- the context a card used to arrive without ---------------------------------
+
+
+def transcript_saying(tmp_path, said: str):
+    """A Claude Code transcript whose last assistant turn is `said`."""
+    import json as _json
+
+    path = tmp_path / "t.jsonl"
+    path.write_text(
+        _json.dumps({"type": "assistant", "message": {"content": [{"type": "text", "text": said}]}})
+        + "\n"
+    )
+    return str(path)
+
+
+def test_a_card_carries_the_tool_calls_own_summary() -> None:
+    """`description` is in the payload and `justification` is not.
+
+    Only the second was read, so a Bash approval arrived as a bare command and
+    the reader had to infer the intent from the shell — on a phone, about
+    something they were being asked to allow.
+    """
+    from hook_bridge import _context
+
+    assert _context({"description": "Stop the stack"}, None) == "Stop the stack"
+
+
+def test_a_card_carries_what_the_agent_said_before_asking(tmp_path) -> None:
+    """The paragraph above the command is the context a person has on screen."""
+    from hook_bridge import _context
+
+    said = "Removing the stale containers first, so the rebuild starts clean."
+    found = _context({"description": "Stop the stack"}, transcript_saying(tmp_path, said))
+
+    assert found is not None
+    assert found.startswith("Stop the stack")
+    assert said in found
+
+
+def test_the_prose_is_bounded(tmp_path) -> None:
+    """A card whose context scrolls is a card nobody finishes, and the command
+    has to stay the thing being read."""
+    from hook_bridge import CONTEXT_LIMIT, _context
+
+    found = _context({"description": "d"}, transcript_saying(tmp_path, "x" * 5000))
+
+    assert found is not None
+    assert len(found) < CONTEXT_LIMIT + 100
+    assert found.endswith("…")
+
+
+def test_nothing_to_say_is_said_as_nothing() -> None:
+    """`None`, not an empty string: the card renders a `Why:` line whenever
+    there is a reason, and an empty one would be a heading over nothing."""
+    from hook_bridge import _context
+
+    assert _context({}, None) is None
+
+
+def test_an_unreadable_transcript_costs_only_the_prose(tmp_path) -> None:
+    """The summary is in the payload and must survive a transcript that is
+    missing, rotated, or on a machine this hook cannot see."""
+    from hook_bridge import _context
+
+    assert _context({"description": "Run the tests"}, "/nowhere/t.jsonl") == "Run the tests"

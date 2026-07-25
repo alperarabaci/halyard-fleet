@@ -40,8 +40,13 @@ def spying(monkeypatch) -> list[list[str]]:
 
 def runner(**kwargs) -> ClaudeCodeRunner:
     made = ClaudeCodeRunner(**kwargs)
-    # Stand in for a CLI that may not be installed wherever this runs.
-    made._binary = "/usr/bin/claude"
+    # A real executable standing in for a CLI that may not be installed
+    # wherever this runs. It has to exist: the runner resolves its path when it
+    # needs it rather than remembering one from startup, so that a CLI
+    # installed later is found without a restart — and an upgrade that moves
+    # the binary under a new version number does not strand a running control
+    # plane. A configured path that is not there is correctly no path at all.
+    made._configured = "/bin/sh"
     return made
 
 
