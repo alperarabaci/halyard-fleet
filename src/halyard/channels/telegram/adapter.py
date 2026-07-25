@@ -45,7 +45,7 @@ from halyard.core.audit import (
 from halyard.core.events import Role
 from halyard.core.gate import Gate
 from halyard.core.registry import SessionRegistry
-from halyard.core.seats import Seat, for_chat, for_session
+from halyard.core.seats import Seat, find, for_chat, for_session
 from halyard.core.seats import _default_runtime as default_runtime
 
 logger = logging.getLogger(__name__)
@@ -77,6 +77,7 @@ POLL_RETRY_MAX_SECONDS = 30.0
 #: description at most 256. Anything else is rejected for the whole list.
 COMMANDS: tuple[tuple[str, str], ...] = (
     ("chat", "Send a message into this seat's session"),
+    ("to", "Send a message to another seat by name"),
     ("status", "What is happening right now"),
     ("options", "Models and effort levels this seat accepts"),
     ("model", "Choose what answers, for turns sent from here"),
@@ -180,6 +181,9 @@ class TelegramChannel:
         self._open: dict[str, tuple[ApprovalRequest, int, str]] = {}
         self._poller: asyncio.Task | None = None
         self._offset: int | None = None
+        # Which chat the command being handled came from, so a listing can mark
+        # the seat you are already standing in.
+        self._here: str = ""
 
     @property
     def name(self) -> str:
@@ -444,6 +448,9 @@ class TelegramChannel:
                 return
             await self._forward_to_session(argument, actor, here or "", thread)
             return
+        if command == "to":
+            await self._forward_to_seat(argument, actor, here or "", thread)
+            return
         if command == "pause":
             _, changed = await self._gate.pause(actor)
             if changed:
@@ -485,6 +492,84 @@ class TelegramChannel:
                 here,
                 thread,
             )
+
+    def _seat_list(self) -> str:
+        """Every seat that can be addressed, as a person would pick one from.
+
+        Printed whenever a label is missing or wrong, rather than kept in a
+        separate `/seats` command — the moment you need the list is the moment
+        you got the name wrong, and a second command to go and look it up is a
+        second thing to remember.
+        """
+        if not self._seats:
+            return "No seats are configured."
+        lines = []
+        for seat in self._seats:
+            where = " (this chat)" if seat.chat and seat.chat.split(":")[0] == self._here else ""
+            lines.append(
+                f"  <code>{html.escape(seat.label)}</code> — "
+                f"{html.escape(seat.runtime)}"
+                f"{' · ' + html.escape(seat.session) if seat.session else ''}{where}"
+            )
+        return "Seats you can send to:\n" + "\n".join(lines)
+
+    async def _forward_to_seat(
+        self, argument: str, actor: str, chat_id: str, thread_id: int | None = None
+    ) -> None:
+        """Send a message to a seat by name, from anywhere.
+
+        Eight groups is what a person ends up with — a navigator and a driver
+        per runtime, per machine — and each one talks to exactly one session.
+        Handing a question to a different agent meant finding its group and
+        retyping the question in it.
+
+        This is the second way to reach a seat, and the one `seats.py` was
+        written for: *"any seat can be named explicitly from anywhere, which is
+        what makes it possible to take what one seat just wrote and hand it to
+        another."* The lookup has been there since; nothing called it.
+
+        **The reply still goes to the seat's own chat, not this one.** That is
+        the property worth keeping: a seat's conversation stays in one place,
+        readable from top to bottom, rather than being split across whichever
+        group somebody happened to be standing in.
+        """
+        self._here = chat_id
+        label, _, text = argument.partition(" ")
+        label, text = label.strip(), text.strip()
+
+        if not label or not text:
+            await self._say(
+                "Usage: <code>/to &lt;seat&gt; &lt;message&gt;</code>\n\n" + self._seat_list(),
+                chat_id,
+                thread_id,
+            )
+            return
+
+        seat = find(self._seats, label)
+        if seat is None:
+            await self._say(
+                f"No seat called <b>{html.escape(label)}</b>.\n\n" + self._seat_list(),
+                chat_id,
+                thread_id,
+            )
+            return
+
+        destination, destination_thread = parse_destination(seat.chat) or (chat_id, thread_id)
+        # Said in both places on purpose. The person sending it is not looking
+        # at the seat they sent it to, and the seat's own chat should not
+        # acquire a message from nowhere.
+        await self._say(
+            f"→ sent to <b>{html.escape(seat.label)}</b> ({html.escape(seat.runtime)})",
+            chat_id,
+            thread_id,
+        )
+        if destination != chat_id:
+            await self._say(
+                f"↪ from <b>{html.escape(actor)}</b>, via another chat:\n\n{html.escape(text)}",
+                destination,
+                destination_thread,
+            )
+        await self._forward_to_session(text, actor, destination, destination_thread)
 
     async def _forward_to_session(
         self, text: str, actor: str, chat_id: str, thread_id: int | None = None
@@ -757,7 +842,12 @@ class TelegramChannel:
         if chosen:
             lines.append(f"  from here: <b>{html.escape(chosen)}</b>")
         lines.append(f"\nSet with <code>/{what} &lt;value&gt;</code>, or <code>default</code>.")
-        await self._say("\n".join(lines), chat_id, thread_id)
+        # Buttons when the runtime named a closed set, and the typed form
+        # regardless: models are open-ended, so a name released this morning
+        # has to work whether or not it is on a keyboard written months ago.
+        await self._say(
+            "\n".join(lines), chat_id, thread_id, reply_markup=cards.choices(what, allowed)
+        )
 
     def _options(self, chat_id: str | None = None) -> str:
         """Everything that can be chosen, asked of the runtime rather than known.
@@ -823,7 +913,11 @@ class TelegramChannel:
         return lines
 
     async def _say(
-        self, text: str, chat_id: str | None = None, thread_id: int | None = None
+        self,
+        text: str,
+        chat_id: str | None = None,
+        thread_id: int | None = None,
+        reply_markup: dict | None = None,
     ) -> None:
         """Answer in the conversation that asked.
 
@@ -833,7 +927,10 @@ class TelegramChannel:
         """
         try:
             await self._api.send_message(
-                chat_id or self._chat_id, text, message_thread_id=thread_id
+                chat_id or self._chat_id,
+                text,
+                message_thread_id=thread_id,
+                reply_markup=reply_markup,
             )
         except Exception:
             logger.warning("Could not answer a command", exc_info=True)
@@ -841,6 +938,23 @@ class TelegramChannel:
     async def _handle_callback(self, callback: dict) -> None:
         query_id = str(callback.get("id", ""))
         user_id = str((callback.get("from") or {}).get("id", ""))
+
+        chosen = cards.parse_choice_data(callback.get("data") or "")
+        if chosen is not None:
+            # Checked exactly as an approval is. Setting the model for a seat
+            # is not an approval, but it is still an action taken on somebody
+            # else's session, and the button is visible to a whole group.
+            if user_id not in self._authorized:
+                await self._record(unauthorized_callback(actor=f"tg:{user_id}", channel="telegram"))
+                await self._dismiss(query_id)
+                return
+            message = callback.get("message") or {}
+            here = str((message.get("chat") or {}).get("id") or "") or None
+            what, value = chosen
+            await self._dismiss(query_id)
+            await self._choose(what, value, here, message.get("message_thread_id"))
+            return
+
         parsed = cards.parse_callback_data(callback.get("data") or "")
 
         if parsed is None:

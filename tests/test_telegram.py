@@ -1766,3 +1766,187 @@ async def test_a_refused_registration_does_not_stop_the_gate(tmp_path: Path) -> 
     await channel.stop()
 
     assert channel._poller is None, "started and stopped cleanly"
+
+
+# --- sending to a seat that is not this one -----------------------------------
+
+
+async def with_two_seats(tmp_path: Path):
+    from halyard.core.seats import Seat
+
+    channel, api, _ = await routed(tmp_path)
+    channel._seats = [
+        Seat("drv", "claude-code", "alpha-driver", DRV_CHAT, Role.DRIVER),
+        Seat("xnav", "codex", "alpha-xnav", "-1003333333333", Role.NAVIGATOR),
+    ]
+    return channel, api
+
+
+async def test_a_message_can_be_aimed_at_another_seat(tmp_path: Path) -> None:
+    """Eight groups is what a person ends up with — a navigator and a driver
+    per runtime, per machine. Handing a question to a different agent meant
+    finding its group and retyping the question in it."""
+    channel, api = await with_two_seats(tmp_path)
+
+    await channel._handle_message(typed_in("/to xnav look at the failing test", DRV_CHAT))
+
+    # The seat's own chat gets the message, not the one it was typed in.
+    assert any(sent["chat_id"] == "-1003333333333" for sent in api.sent)
+
+
+async def test_the_chat_it_was_typed_in_is_told_where_it_went(tmp_path: Path) -> None:
+    """The person sending it is not looking at the seat they sent it to."""
+    channel, api = await with_two_seats(tmp_path)
+
+    await channel._handle_message(typed_in("/to xnav carry on", DRV_CHAT))
+
+    here = [sent for sent in api.sent if sent["chat_id"] == DRV_CHAT]
+    assert any("xnav" in sent["text"] for sent in here)
+
+
+async def test_the_receiving_chat_says_where_it_came_from(tmp_path: Path) -> None:
+    """A seat's conversation should not acquire a message from nowhere."""
+    channel, api = await with_two_seats(tmp_path)
+
+    await channel._handle_message(typed_in("/to xnav carry on", DRV_CHAT))
+
+    there = [sent for sent in api.sent if sent["chat_id"] == "-1003333333333"]
+    assert any("via another chat" in sent["text"] for sent in there)
+
+
+async def test_an_unknown_seat_answers_with_the_list(tmp_path: Path) -> None:
+    """The moment you need the list is the moment you got the name wrong, so
+    it arrives then rather than behind a second command."""
+    channel, api = await with_two_seats(tmp_path)
+
+    await channel._handle_message(typed_in("/to nope hello", DRV_CHAT))
+
+    said = api.sent[-1]["text"]
+    assert "No seat called" in said
+    assert "xnav" in said and "drv" in said
+
+
+async def test_naming_a_seat_without_a_message_shows_usage(tmp_path: Path) -> None:
+    """Half a command is not an instruction to guess at the other half."""
+    channel, api = await with_two_seats(tmp_path)
+
+    await channel._handle_message(typed_in("/to xnav", DRV_CHAT))
+
+    assert "Usage" in api.sent[-1]["text"]
+
+
+async def test_plain_text_still_goes_to_this_chats_own_seat(tmp_path: Path) -> None:
+    """The property worth protecting: this adds a second way in and changes
+    nothing about the first."""
+    channel, api = await with_two_seats(tmp_path)
+
+    await channel._handle_message(typed_in("just carry on", DRV_CHAT))
+
+    assert not any(sent["chat_id"] == "-1003333333333" for sent in api.sent)
+
+
+# --- picking a model or an effort without typing it ---------------------------
+
+
+async def choosing(tmp_path: Path, *, allowed=("flash_lite", "flash", "pro")):
+    """A chat whose seat's runtime offers a closed set to pick from."""
+    channel, api, _ = await routed(tmp_path)
+
+    class Offering:
+        id = "antigravity"
+
+        def options(self, _session_id=None):
+            return {"model": (allowed, False), "effort": ((), True)}
+
+        def preferences(self, _session_id):
+            return None, None
+
+        def set_model(self, session_id, value):
+            self.set = (session_id, value)
+
+        set_effort = set_model
+
+        def resolve(self, _name):
+            return None
+
+    from halyard.core.seats import Seat
+
+    runner = Offering()
+    channel._runners = {"antigravity": runner}
+    channel._runner = runner
+    channel._seats = [Seat("drv", "antigravity", "a-conversation", DRV_CHAT, Role.DRIVER)]
+
+    class Resolves:
+        session_id = "a-conversation"
+        cwd = None
+        model = None
+        effort = None
+        named_by_a_person = True
+
+    runner.resolve = lambda _name: Resolves()
+    return channel, api, runner
+
+
+async def test_asking_without_a_value_offers_the_ones_it_accepts(tmp_path: Path) -> None:
+    """The list is already known — the runtime is asked for it — and typing a
+    name out on a phone to pick from three is work nobody needs to do."""
+    channel, api, _ = await choosing(tmp_path)
+
+    await channel._handle_message(typed_in("/model", DRV_CHAT))
+
+    keyboard = api.sent[-1].get("reply_markup")
+    assert keyboard is not None
+    assert [b["text"] for b in keyboard["inline_keyboard"][0]] == ["flash_lite", "flash", "pro"]
+
+
+async def test_an_empty_set_offers_no_keyboard(tmp_path: Path) -> None:
+    """Antigravity has no notion of reasoning effort. A keyboard with no keys
+    would suggest the question failed rather than that the answer is none."""
+    channel, api, _ = await choosing(tmp_path)
+
+    await channel._handle_message(typed_in("/effort", DRV_CHAT))
+
+    assert api.sent[-1].get("reply_markup") is None
+
+
+async def test_pressing_one_sets_it(tmp_path: Path) -> None:
+    channel, _api, runner = await choosing(tmp_path)
+
+    await channel._handle_callback(
+        {
+            "id": "q1",
+            "from": {"id": int(APPROVER)},
+            "message": {"chat": {"id": DRV_CHAT}},
+            "data": "hc:model:pro",
+        }
+    )
+
+    assert runner.set[1] == "pro"
+
+
+async def test_a_stranger_cannot_press_it(tmp_path: Path) -> None:
+    """Setting the model for a seat is not an approval, but it is still an
+    action on somebody else's session — and the button is visible to a whole
+    group."""
+    channel, _api, runner = await choosing(tmp_path)
+
+    await channel._handle_callback(
+        {
+            "id": "q1",
+            "from": {"id": 999999},
+            "message": {"chat": {"id": DRV_CHAT}},
+            "data": "hc:model:pro",
+        }
+    )
+
+    assert not hasattr(runner, "set")
+
+
+async def test_an_approval_button_is_not_read_as_a_choice(tmp_path: Path) -> None:
+    """Two prefixes, kept apart. An approval carries a nonce because it answers
+    a question that must not be answerable twice; a preference has no such
+    state and must not borrow that machinery."""
+    from halyard.channels.telegram import cards
+
+    assert cards.parse_choice_data("hf:handle:nonce:allow") is None
+    assert cards.parse_callback_data("hc:model:pro") is None
