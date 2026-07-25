@@ -682,3 +682,134 @@ def test_what_is_installed_does_not_decide_when_the_project_is_described(
 
     assert (project / ".claude" / "settings.local.json").exists()
     assert not (project / ".agents").exists()
+
+
+# --- a hooks file that travelled between machines ----------------------------
+
+
+def elsewhere(script: str) -> dict:
+    """A Halyard hook written by a machine that is not this one."""
+    return {
+        "hooks": [
+            {
+                "type": "command",
+                "command": f"/Users/somebody-else/checkout/bridge/{script}",
+                "timeout": 600,
+            }
+        ],
+        "matcher": CODEX.hooks.matcher,
+    }
+
+
+def test_a_hook_from_another_machine_is_dropped_rather_than_doubled(tmp_path: Path) -> None:
+    """The file this is a regression for came off a real project.
+
+    `.codex/hooks.json` is committed in some repositories, so it travels by
+    git. Each machine's `wire` correctly decided the other's entry was not its
+    own — and appended beside it. The result was two `PreToolUse` groups on one
+    matcher, one of them naming a home directory that does not exist here, and
+    `doctor` reporting a path that is not on this machine.
+    """
+    project = repo(tmp_path)
+    codex_dir = project / ".codex"
+    codex_dir.mkdir()
+    (codex_dir / "hooks.json").write_text(
+        json.dumps({"hooks": {"PreToolUse": [elsewhere("hook.sh")]}})
+    )
+
+    wiring.wire(project, runtimes=(CODEX,))
+
+    written = json.loads((codex_dir / "hooks.json").read_text())
+    commands = [
+        hook["command"] for group in written["hooks"]["PreToolUse"] for hook in group["hooks"]
+    ]
+    assert commands == [str(wiring.BRIDGE_DIR / "hook.sh")]
+
+
+def test_the_one_already_here_is_not_duplicated(tmp_path: Path) -> None:
+    """A file holding both machines' entries keeps exactly one afterwards.
+
+    Rewriting the dead entry to this machine's path would have left two
+    identical hooks where the file already had ours — which is the same
+    duplication, one indirection later.
+    """
+    project = repo(tmp_path)
+    codex_dir = project / ".codex"
+    codex_dir.mkdir()
+    ours = {
+        "hooks": [
+            {
+                "type": "command",
+                "command": str(wiring.BRIDGE_DIR / "hook.sh"),
+                "timeout": 600,
+            }
+        ],
+        "matcher": CODEX.hooks.matcher,
+    }
+    (codex_dir / "hooks.json").write_text(
+        json.dumps({"hooks": {"PreToolUse": [ours, elsewhere("hook.sh")]}})
+    )
+
+    wiring.wire(project, runtimes=(CODEX,))
+
+    written = json.loads((codex_dir / "hooks.json").read_text())
+    assert len(written["hooks"]["PreToolUse"]) == 1
+
+
+def test_somebody_elses_tool_is_still_left_alone(tmp_path: Path) -> None:
+    """The narrowness is the whole safety of this.
+
+    Only Halyard's own script names, only in a `bridge/` directory, and only
+    when the path does not exist here. A hook belonging to another tool is
+    untouched however dead its path looks — removing one somebody meant to
+    keep is the expensive mistake.
+    """
+    project = repo(tmp_path)
+    codex_dir = project / ".codex"
+    codex_dir.mkdir()
+    theirs = {
+        "hooks": [{"type": "command", "command": "/opt/other-tool/scripts/hook.sh"}],
+        "matcher": "^Bash$",
+    }
+    (codex_dir / "hooks.json").write_text(json.dumps({"hooks": {"PreToolUse": [theirs]}}))
+
+    wiring.wire(project, runtimes=(CODEX,))
+
+    written = json.loads((codex_dir / "hooks.json").read_text())
+    kept = [hook["command"] for group in written["hooks"]["PreToolUse"] for hook in group["hooks"]]
+    assert "/opt/other-tool/scripts/hook.sh" in kept
+
+
+def test_a_second_halyard_that_is_really_here_stays(tmp_path: Path) -> None:
+    """Two checkouts on one machine is a real shape, and both are alive.
+
+    The test is that "not ours" and "cannot run" are different questions: only
+    the second one removes anything.
+    """
+    project = repo(tmp_path)
+    other = tmp_path / "second-checkout" / "bridge"
+    other.mkdir(parents=True)
+    (other / "hook.sh").write_text("#!/bin/sh\n")
+    codex_dir = project / ".codex"
+    codex_dir.mkdir()
+    (codex_dir / "hooks.json").write_text(
+        json.dumps(
+            {
+                "hooks": {
+                    "PreToolUse": [
+                        {
+                            "hooks": [{"type": "command", "command": str(other / "hook.sh")}],
+                            "matcher": CODEX.hooks.matcher,
+                        }
+                    ]
+                }
+            }
+        )
+    )
+
+    wiring.wire(project, runtimes=(CODEX,))
+
+    written = json.loads((codex_dir / "hooks.json").read_text())
+    kept = [hook["command"] for group in written["hooks"]["PreToolUse"] for hook in group["hooks"]]
+    assert str(other / "hook.sh") in kept
+    assert str(wiring.BRIDGE_DIR / "hook.sh") in kept

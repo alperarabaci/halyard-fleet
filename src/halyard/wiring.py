@@ -199,14 +199,42 @@ def _write(path: Path, config: dict) -> None:
     path.write_text(json.dumps(config, indent=2) + "\n", encoding="utf-8")
 
 
+#: The bridge scripts, by name. Enough to recognise a Halyard hook written by
+#: an installation that is not this one.
+_SCRIPTS = frozenset({"hook.sh", "relay.py", "permission_hook.sh", "inject.py"})
+
+
 def _is_ours(command: object) -> bool:
-    """Whether this hook entry is one this install put there.
+    """Whether this hook entry is one *this* install put there.
 
     Path-based, so unwiring cannot remove somebody else's hook — including the
     same script from a second Halyard checkout, which is a real shape: two
     machines sharing a settings file through a synced directory.
     """
     return isinstance(command, str) and str(BRIDGE_DIR.resolve()) in command
+
+
+def _is_a_dead_halyard_hook(command: object) -> bool:
+    """A Halyard hook from another machine, pointing nowhere on this one.
+
+    `.codex/hooks.json` is committed in some projects, so it travels between
+    machines by git. Each machine's `wire` saw the other's entry, correctly
+    decided it was not its own, and appended beside it — leaving one project
+    with two `PreToolUse` groups on the same matcher, one of them naming a
+    `/Users/<somebody-else>/...` path that does not exist here.
+
+    Recognised narrowly, because the cost of being wrong is removing a hook
+    somebody meant to keep. All three have to hold: it is one of Halyard's own
+    script names, it sits in a `bridge/` directory, and **it does not exist on
+    this machine**. A second Halyard checkout that is really here stays exactly
+    where it is; only an entry that cannot possibly run is replaced.
+    """
+    if not isinstance(command, str) or _is_ours(command):
+        return False
+    path = Path(command.split()[0]) if command.split() else None
+    if path is None or path.name not in _SCRIPTS or path.parent.name != "bridge":
+        return False
+    return not path.exists()
 
 
 def named_handlers(document: dict, event: str, grouped: tuple[str, ...]) -> list[dict]:
@@ -344,6 +372,28 @@ def _wire_one(directory: Path, runtime: RuntimeSpec) -> int:
             print(f"halyard: {script} is missing from this install")
             return 1
         groups = hooks.setdefault(event, [])
+        # A Halyard hook this machine cannot run is dropped, not left beside a
+        # second copy. `.codex/hooks.json` is committed in some projects, so
+        # the file travels by git; each machine correctly decided the other's
+        # entry was not its own and appended anyway, leaving one project with
+        # two groups on one matcher and one of them naming a home directory
+        # that does not exist here.
+        #
+        # Removed rather than rewritten to this machine's path, which would
+        # leave two identical entries where the file already had ours. What
+        # this install needs is added below, once, by the code that was always
+        # going to add it.
+        removed = 0
+        for group in groups:
+            hooks_in = (group or {}).get("hooks") or []
+            alive = [h for h in hooks_in if not _is_a_dead_halyard_hook(h.get("command"))]
+            removed += len(hooks_in) - len(alive)
+            if group is not None:
+                group["hooks"] = alive
+        groups[:] = [g for g in groups if (g or {}).get("hooks")]
+        if removed:
+            added.append(f"{event} (dropped {removed} left by another machine)")
+
         mine = [
             group
             for group in groups
