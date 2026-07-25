@@ -41,6 +41,7 @@ from _settings import (
     antigravity_title,
     codex_thread_name,
     control_plane_url,
+    last_assistant_text,
     note,
     runtime_of,
     session_name,
@@ -151,6 +152,26 @@ def deny(reason: str, event: str = "PreToolUse", runtime: str = "claude-code") -
     emit(event, "deny", f"Denied by Halyard: {reason}", runtime)
 
 
+#: How much of the agent's own prose to carry onto a card. Long enough for the
+#: paragraph that explains a command, short enough that the command stays the
+#: thing being read — a card whose context scrolls is a card nobody finishes.
+CONTEXT_LIMIT = 600
+
+
+def _context(tool_input: dict, transcript: str | None) -> str | None:
+    """What was being attempted, in the agent's own words."""
+    summary = tool_input.get("description") or tool_input.get("justification")
+    summary = summary.strip() if isinstance(summary, str) else ""
+
+    said = last_assistant_text(transcript) or ""
+    if said and said[:CONTEXT_LIMIT] != summary:
+        said = said[:CONTEXT_LIMIT] + ("…" if len(said) > CONTEXT_LIMIT else "")
+    else:
+        said = ""
+
+    return "\n\n".join(part for part in (summary, said) if part) or None
+
+
 def build_body(payload: dict) -> dict:
     """Turn a hook payload into a control plane request.
 
@@ -226,9 +247,19 @@ def build_body(payload: dict) -> dict:
         # no shell to put HALYARD_ROLE in. Stable across restarts, unlike
         # session_id.
         "session_name": name,
-        "reason": tool_input.get("justification")
-        if isinstance(tool_input.get("justification"), str)
-        else None,
+        # The context a person has on screen and a card did not.
+        #
+        # Two sources, best first. `description` is the one-line summary the
+        # tool call carries — "Prove the wizard's output is what the control
+        # plane reads" — and it is in the payload, so it costs nothing and is
+        # always there for a Bash call. Only `justification` was being read,
+        # which Bash calls do not have, so every card said nothing.
+        #
+        # The prose above the command is richer and lives in the transcript,
+        # because the payload does not carry it. Read second, appended, and
+        # bounded: a bare command on a phone is a thing to approve with the
+        # intent guessed from the shell.
+        "reason": _context(tool_input, transcript),
     }
 
 

@@ -200,6 +200,54 @@ def antigravity_reply(transcript_path: str | None) -> str | None:
     return None
 
 
+def last_assistant_text(transcript_path: str | None) -> str | None:
+    """What the agent said just before it asked to run something.
+
+    This is the context a person has on screen and a card did not: the
+    paragraph above the command, explaining what is being attempted. Without
+    it an approval is a bare command and the reader has to infer the intent
+    from the shell — which is guessing, on a phone, about something they are
+    about to allow.
+
+    Read from the transcript rather than the payload, because the payload does
+    not carry it. Claude Code writes one JSON object per line; an assistant
+    turn's `message.content` is a list of blocks, and the prose is the `text`
+    ones. The tool call itself usually arrives in a record of its own, so the
+    text being looked for is a few records back.
+
+    Only the tail is read. These files reach several megabytes and this runs
+    on every gated command.
+    """
+    if not transcript_path:
+        return None
+    try:
+        with open(transcript_path, "rb") as handle:
+            handle.seek(0, 2)
+            handle.seek(max(0, handle.tell() - TRANSCRIPT_TAIL_BYTES))
+            lines = handle.read().decode("utf-8", "replace").splitlines()
+    except OSError:
+        return None
+
+    for line in reversed(lines):
+        try:
+            record = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(record, dict) or record.get("type") != "assistant":
+            continue
+        blocks = (record.get("message") or {}).get("content")
+        if not isinstance(blocks, list):
+            continue
+        said = " ".join(
+            block.get("text", "").strip()
+            for block in blocks
+            if isinstance(block, dict) and block.get("type") == "text"
+        ).strip()
+        if said:
+            return said
+    return None
+
+
 def runtime_of(transcript_path: str | None) -> str:
     """Which agent produced this payload, from where it keeps its transcript.
 

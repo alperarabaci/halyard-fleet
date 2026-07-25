@@ -22,6 +22,11 @@ halyard = "halyard.__main__:main"
 dev = [
     "pytest>=8.3",
     "pytest-asyncio>=0.24",
+    # So a hung test is a failure with a traceback rather than a job that runs
+    # for fourteen minutes and is cancelled by a person watching a spinner.
+    # That happened, and the log said nothing at all: progress stopped at 32%
+    # and the next line was "The operation was canceled."
+    "pytest-timeout>=2.3",
     "ruff>=0.7",
     # Drives the app's lifespan in tests, so startup and shutdown are exercised
     # rather than skipped — shutdown is where open approvals get denied.
@@ -45,3 +50,9 @@ select = ["E", "F", "I", "N", "UP", "B", "SIM", "RUF"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
+# Generous: the whole suite runs in about forty-five seconds, so any single
+# test reaching this is stuck rather than slow. `thread` rather than `signal`
+# because much of this suite is async and signal-based timeouts do not
+# interrupt a blocked await.
+timeout = 60
+timeout_method = "thread"

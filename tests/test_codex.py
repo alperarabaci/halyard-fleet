@@ -155,7 +155,9 @@ def test_an_unknown_name_is_none_rather_than_a_guess(tmp_path: Path) -> None:
 
 def runner_with_catalog(**kwargs) -> CodexRunner:
     made = CodexRunner(**kwargs)
-    made._binary = "/opt/homebrew/bin/codex"
+    # Real, for the same reason: this used to name a Homebrew path that
+    # exists on one developer's Mac and on no CI runner.
+    made._configured = "/bin/sh"
     made._catalog = {
         "gpt-5.6-sol": ("low", "medium", "high", "xhigh", "max", "ultra"),
         "gpt-5.5": ("low", "medium", "high", "xhigh"),
