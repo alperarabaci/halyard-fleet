@@ -1834,13 +1834,47 @@ async def test_an_unknown_seat_answers_with_the_list(tmp_path: Path) -> None:
     assert "xnav" in said and "drv" in said
 
 
-async def test_naming_a_seat_without_a_message_shows_usage(tmp_path: Path) -> None:
-    """Half a command is not an instruction to guess at the other half."""
+async def test_naming_a_seat_without_a_message_asks_for_one(tmp_path: Path) -> None:
+    """Half a command is not an instruction to guess at the other half — but it
+    is enough to ask the other half for, with the reply box already open."""
     channel, api = await with_two_seats(tmp_path)
 
     await channel._handle_message(typed_in("/to xnav", DRV_CHAT))
 
-    assert "Usage" in api.sent[-1]["text"]
+    assert api.sent[-1]["text"] == "Send what to xnav?"
+    assert api.sent[-1]["reply_markup"]["force_reply"] is True
+
+
+async def test_answering_that_question_sends_it(tmp_path: Path) -> None:
+    """`force_reply` is what makes this stateless: the answer arrives with the
+    question attached, and the question is the only place the seat was written
+    down."""
+    channel, api = await with_two_seats(tmp_path)
+
+    await channel._handle_message(replying("look at this", "Send what to xnav?", DRV_CHAT))
+
+    there = [sent for sent in api.sent if sent["chat_id"] == "-1003333333333"]
+    assert any("look at this" in sent["text"] for sent in there)
+
+
+async def test_a_bare_to_offers_the_seats(tmp_path: Path) -> None:
+    """Two taps and no memory: which seat, then what to send."""
+    channel, api = await with_two_seats(tmp_path)
+
+    await channel._handle_message(typed_in("/to", DRV_CHAT))
+
+    keyboard = api.sent[-1].get("reply_markup")
+    assert [b["text"] for b in keyboard["inline_keyboard"][0]] == ["drv", "xnav"]
+
+
+async def test_plain_text_that_answers_nothing_still_goes_to_this_seat(tmp_path: Path) -> None:
+    """A message that is not answering one of those questions is what it always
+    was: a message to the seat that owns this chat."""
+    channel, api = await with_two_seats(tmp_path)
+
+    await channel._handle_message(replying("carry on", "some other message", DRV_CHAT))
+
+    assert not any(sent["chat_id"] == "-1003333333333" for sent in api.sent)
 
 
 async def test_plain_text_still_goes_to_this_chats_own_seat(tmp_path: Path) -> None:
@@ -2035,8 +2069,9 @@ async def test_pressing_a_seat_sends_the_message_it_hangs_off(tmp_path: Path) ->
     assert any("hand this over" in sent["text"] for sent in there)
 
 
-async def test_a_press_with_nothing_left_to_send_says_so(tmp_path: Path) -> None:
-    """A deleted message is not a reason to send something else."""
+async def test_a_press_with_nothing_to_carry_asks_for_it(tmp_path: Path) -> None:
+    """The seat was picked from a bare `/to`, so there is no message yet —
+    which is a question to ask, not an error."""
     channel, api = await with_two_seats(tmp_path)
 
     await channel._handle_callback(
@@ -2048,5 +2083,117 @@ async def test_a_press_with_nothing_left_to_send_says_so(tmp_path: Path) -> None
         }
     )
 
-    assert "nothing to send" in api.sent[-1]["text"]
+    assert api.sent[-1]["text"] == "Send what to xnav?"
     assert not any(sent["chat_id"] == "-1003333333333" for sent in api.sent)
+
+
+async def test_the_list_is_written_to_every_scope_that_can_shadow_it(tmp_path: Path) -> None:
+    """Telegram shows the narrowest scope that has a list, and a person is
+    almost always an administrator of the groups they made.
+
+    Measured on a live bot, twice. Writing the default fixed nothing, because
+    `all_group_chats` held an older list. Writing two of the three fixed
+    nothing either, because `all_chat_administrators` is narrower than both and
+    was the one left out — so a command answered when typed and never appeared
+    in the menu.
+    """
+    from halyard.channels.telegram.api import TelegramApi
+
+    written: list[dict | None] = []
+
+    class Recording(TelegramApi):
+        def __init__(self) -> None: ...
+
+        async def _call(self, method: str, **payload):
+            if method == "setMyCommands":
+                written.append(payload.get("scope"))
+            return {}
+
+    await Recording().set_my_commands((("chat", "x"),))
+
+    kinds = {scope["type"] if scope else "default" for scope in written}
+    assert kinds == {
+        "default",
+        "all_private_chats",
+        "all_group_chats",
+        "all_chat_administrators",
+    }
+
+
+async def test_a_picked_seat_holds_even_when_the_reply_is_not_attached(tmp_path: Path) -> None:
+    """`force_reply` only *asks* the client to attach the question, and a client
+    that does not is indistinguishable from somebody talking to this chat.
+
+    Twice, measured live, that sent a message to the seat that owns the chat
+    instead of the one that had just been picked — the agent got a question
+    meant for somebody else and said so. So the seat is held for a few minutes
+    as well, and either signal is enough.
+    """
+    channel, api = await with_two_seats(tmp_path)
+
+    await channel._handle_message(typed_in("/to xnav", DRV_CHAT))
+    # No `reply_to_message`: exactly what arrives when the box never opened.
+    await channel._handle_message(typed_in("look at this", DRV_CHAT))
+
+    assert any("sent to <b>xnav</b>" in sent["text"] for sent in api.sent)
+
+
+async def test_a_held_seat_covers_one_message_and_no_more(tmp_path: Path) -> None:
+    """A tap redirects the sentence it was made for. If it kept redirecting,
+    one press would quietly move a whole conversation somewhere else."""
+    channel, api = await with_two_seats(tmp_path)
+
+    await channel._handle_message(typed_in("/to xnav", DRV_CHAT))
+    await channel._handle_message(typed_in("look at this", DRV_CHAT))
+    api.sent.clear()
+    await channel._handle_message(typed_in("and this stays here", DRV_CHAT))
+
+    assert not any("sent to <b>xnav</b>" in sent["text"] for sent in api.sent)
+
+
+async def test_a_command_drops_a_seat_nobody_finished_picking(tmp_path: Path) -> None:
+    """Typing a command instead of the sentence means it never came, and a
+    hand-off left lying around would attach itself to something said later."""
+    channel, api = await with_two_seats(tmp_path)
+
+    await channel._handle_message(typed_in("/to xnav", DRV_CHAT))
+    await channel._handle_message(typed_in("/status", DRV_CHAT))
+    api.sent.clear()
+    await channel._handle_message(typed_in("unrelated", DRV_CHAT))
+
+    assert not any("sent to <b>xnav</b>" in sent["text"] for sent in api.sent)
+
+
+async def test_a_held_seat_belongs_to_the_person_who_picked_it(tmp_path: Path) -> None:
+    """In a group, somebody else typing must not be swept into a hand-off they
+    did not ask for."""
+    channel, api = await with_two_seats(tmp_path)
+    # Authorized too, so this asserts about the hand-off rather than about
+    # being turned away at the door.
+    somebody_else = "9393"
+    channel._authorized = frozenset({APPROVER, somebody_else})
+
+    await channel._handle_message(typed_in("/to xnav", DRV_CHAT))
+    api.sent.clear()
+    await channel._handle_message(typed_in("mine", DRV_CHAT, user=somebody_else))
+
+    assert not any("sent to <b>xnav</b>" in sent["text"] for sent in api.sent)
+
+
+async def test_the_reply_box_opens_for_whoever_pressed(tmp_path: Path) -> None:
+    """`selective` limits a forced reply to people named in the text or the
+    author of the message being replied to.
+
+    This question names nobody and replies to nothing, so with that flag set it
+    opened the reply box for no one at all — and the answer arrived as ordinary
+    text, attached to nothing, and went to the seat that owns the chat instead
+    of the one that had just been picked. A message reaching an agent nobody
+    chose is the failure this whole flow is arranged to prevent.
+    """
+    channel, api = await with_two_seats(tmp_path)
+
+    await channel._handle_message(typed_in("/to xnav", DRV_CHAT))
+
+    markup = api.sent[-1]["reply_markup"]
+    assert markup["force_reply"] is True
+    assert "selective" not in markup

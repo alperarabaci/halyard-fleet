@@ -18,9 +18,10 @@ import asyncio
 import contextlib
 import html
 import logging
+import re
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from halyard.agents.base import AgentRunner
 from halyard.channels.telegram import cards
@@ -86,6 +87,30 @@ COMMANDS: tuple[tuple[str, str], ...] = (
     ("resume", "Take the gate back"),
     ("help", "This list"),
 )
+
+
+#: How the prompt names the seat it is waiting for.
+#:
+#: Written into the message so that a reply to it carries the seat back. That
+#: was meant to be the whole mechanism — nothing remembered between the button
+#: and the sentence somebody types. It is not enough on its own: `force_reply`
+#: only *asks* the client to attach the question, and when it does not, the
+#: sentence arrives looking like an ordinary message and goes to the seat that
+#: owns the chat. Measured twice, on a message meant for somebody else.
+ASK_FOR_TEXT = "Send what to {seat}?"
+_ASKED = re.compile(r"^Send what to (\S+)\?")
+
+#: How long a picked seat waits for the sentence that goes with it.
+#:
+#: Long enough to type a paragraph, short enough that a tap abandoned before
+#: lunch is not still holding the next thing said after it.
+HANDOFF_SECONDS = 300
+
+
+def _seat_being_asked_for(text: str) -> str | None:
+    """The seat named by one of our own prompts, or None if this is not one."""
+    found = _ASKED.match((text or "").strip())
+    return found.group(1) if found else None
 
 
 def _default_clock() -> datetime:
@@ -171,6 +196,10 @@ class TelegramChannel:
         self._runner = runner or next(iter(self._runners.values()), None)
         self._session_names = session_names or {}
         self._sending: set[asyncio.Task] = set()
+        # Who pressed a seat button and has not yet said what to send. Keyed by
+        # the person as well as the chat: in a group, somebody else typing must
+        # not be swept into a hand-off they did not ask for.
+        self._handoffs: dict[tuple[str, int | None, str], tuple[str, datetime]] = {}
         self._authorized = authorized_user_ids
         self._clock = clock
         self._poll_retry_seconds = poll_retry_seconds
@@ -432,8 +461,30 @@ class TelegramChannel:
         thread = message.get("message_thread_id")
 
         if not text.startswith("/"):
+            replied = (message.get("reply_to_message") or {}).get("text") or ""
+            # Two ways to know this sentence belongs to a seat that was picked
+            # a moment ago, and either is enough. The reply carries the question
+            # itself, which is exact; the pending hand-off is what remains when
+            # the client did not attach it. Relying on the reply alone put two
+            # messages in front of an agent nobody had chosen.
+            answering = _seat_being_asked_for(replied) or self._take_handoff(here, thread, user_id)
+            # The line that was missing while this was being guessed at: where
+            # the message went, and what it arrived attached to.
+            logger.info(
+                "Message from %s → %s (replying to %r)",
+                actor,
+                f"seat {answering}" if answering else "this chat's own seat",
+                replied[:60],
+            )
+            if answering:
+                await self._forward_to_seat(f"{answering} {text}", actor, here or "", thread)
+                return
             await self._forward_to_session(text, actor, here or "", thread)
             return
+
+        # Any command means the sentence never came. Dropping the hand-off here
+        # keeps it from attaching itself to something typed much later.
+        self._take_handoff(here, thread, user_id)
 
         command, _, argument = text.partition(" ")
         command = command.lstrip("/").split("@")[0].lower()
@@ -556,13 +607,14 @@ class TelegramChannel:
         # would be the worst kind of helpful.
         text = typed or replied
 
+        if not text and not label:
+            # Nothing to send and no seat named: ask which, and the press will
+            # ask for the message. Two taps, no memory.
+            await self._offer_seats("", chat_id, thread_id, anchor_id)
+            return
+
         if not text:
-            await self._say(
-                "Usage: <code>/to &lt;seat&gt; &lt;message&gt;</code>, or reply to a "
-                "message with <code>/to &lt;seat&gt;</code>.\n\n" + self._seat_list(),
-                chat_id,
-                thread_id,
-            )
+            await self._ask_for_text(label, chat_id, thread_id, actor.removeprefix("tg:"))
             return
 
         if not label:
@@ -598,6 +650,59 @@ class TelegramChannel:
                 destination_thread,
             )
         await self._forward_to_session(text, actor, destination, destination_thread)
+
+    def _remember_handoff(self, seat: str, chat_id: str, thread_id: int | None, user: str) -> None:
+        """Note that this person picked a seat and owes us a sentence."""
+        self._handoffs[(chat_id, thread_id, user)] = (seat, self._clock())
+
+    def _take_handoff(self, chat_id: str | None, thread_id: int | None, user: str) -> str | None:
+        """The seat this person picked, if they picked one recently enough.
+
+        Taken rather than read: a hand-off covers the next thing said and
+        nothing after it. Leaving it in place would mean a tap made once
+        quietly redirecting a conversation.
+        """
+        found = self._handoffs.pop((chat_id or "", thread_id, user), None)
+        if found is None:
+            return None
+        seat, when = found
+        if self._clock() - when > timedelta(seconds=HANDOFF_SECONDS):
+            return None
+        return seat
+
+    async def _ask_for_text(
+        self, label: str, chat_id: str, thread_id: int | None, user: str
+    ) -> None:
+        """Ask what to send, with the reply box already open.
+
+        `force_reply` asks the client to aim the next message at this one, so
+        the answer arrives with the question attached — and the question names
+        the seat. That is the exact path, and it is preferred when it works.
+
+        It is a request, though, not a guarantee, and a client that ignores it
+        sends a sentence that looks like any other. So the seat is also held
+        here for a few minutes. Belt and braces on purpose: the cost of the
+        belt slipping was a message reaching an agent nobody chose, twice.
+        """
+        seat = find(self._seats, label)
+        if seat is None:
+            await self._say(
+                f"No seat called <b>{html.escape(label)}</b>.\n\n" + self._seat_list(),
+                chat_id,
+                thread_id,
+            )
+            return
+        # No `selective`. That flag limits a forced reply to people named in the
+        # text or the author of the message being replied to — and this question
+        # names nobody and replies to nothing, so it opened the reply box for no
+        # one at all.
+        self._remember_handoff(seat.label, chat_id, thread_id, user)
+        await self._say(
+            ASK_FOR_TEXT.format(seat=html.escape(seat.label)),
+            chat_id,
+            thread_id,
+            reply_markup={"force_reply": True},
+        )
 
     async def _offer_seats(
         self, text: str, chat_id: str, thread_id: int | None, anchor_id: int | None
@@ -1013,10 +1118,11 @@ class TelegramChannel:
                 if carried.startswith("/to"):
                     carried = carried.partition(" ")[2].strip()
                 if not carried:
-                    await self._say(
-                        "That message is gone, so there is nothing to send.",
-                        here,
-                        message.get("message_thread_id"),
+                    # No message to carry — the seat was picked from a bare
+                    # `/to`. Ask for the text, naming the seat in the question
+                    # so the answer arrives knowing where it goes.
+                    await self._ask_for_text(
+                        value, here or "", message.get("message_thread_id"), user_id
                     )
                     return
                 await self._forward_to_seat(
