@@ -150,6 +150,18 @@ class Settings(BaseSettings):
     log_file: Path | None = Field(
         default=Path("./halyard.log"), validation_alias="HALYARD_LOG_FILE"
     )
+    #: Whether to stop the machine drifting off to sleep while serving.
+    #:
+    #: On, because a wired project cannot run a command without an answer from
+    #: this process — a sleeping control plane is every session on the machine
+    #: stopped, and it does not announce itself. Measured on a Mac mini whose
+    #: only wake assertion belonged to a screen-sharing session: when that
+    #: connection dropped the machine slept and approvals began appearing in
+    #: the desktop app instead of on a phone.
+    #:
+    #: Idle sleep only. A person can still close the lid or choose Sleep.
+    keep_awake: bool = Field(default=True, validation_alias="HALYARD_KEEP_AWAKE")
+
     log_level: str = Field(default="INFO", validation_alias="HALYARD_LOG_LEVEL")
     #: Rotation, so an always-on service cannot fill a disk.
     log_max_bytes: int = Field(default=5_000_000, validation_alias="HALYARD_LOG_MAX_BYTES", gt=0)
