@@ -8,7 +8,9 @@ Halyard Fleet puts your coding agent's permission prompt on your phone.
 
 When Claude Code or Codex wants to run something, you see the command, the project it
 came from, and how risky it is — then you allow or deny from Telegram. You can also
-send new instructions into the running session and read its replies there.
+send new instructions into the running session and read its replies there. And when a
+turn dies on a server error the desk would otherwise swallow — an overloaded model, a
+usage limit hit mid-run — that reaches you too, instead of the session just going quiet.
 
 It runs on your own machine. No open ports, no exposed API, nothing to log into.
 
@@ -135,6 +137,10 @@ what they say. macOS only — on Linux, run `halyard serve` under a systemd unit
 - **`/pause` steps aside rather than denying.** The runtime's own permission list
   then decides, with no card and no audit entry.
 - **The gate covers what the matcher covers** — Bash today, not `Write` or `Edit`.
+- **Multiple-choice questions reach you from a desktop or terminal session, not from a
+  turn you started over Telegram.** A Telegram-initiated turn runs headless, where
+  Claude Code does not load `AskUserQuestion` — so it asks in prose you can just reply
+  to, rather than as buttons.
 - **Only macOS has been run.** Nothing here is deliberately macOS-only and the
   Linux paths exist, but they have not been exercised: the CLIs are found by
   looking in places a Mac keeps them, and holding the machine awake uses
