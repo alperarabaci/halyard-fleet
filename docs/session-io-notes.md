@@ -265,6 +265,42 @@ synchronous, but not separately confirmed for this tool.
 
 ---
 
+## A turn that dies on an API error fires no hook
+
+Found in the field, on the phone: a desktop turn was working — it had run a
+command — and then hit `API Error: 529 Overloaded` partway through, and nothing
+reached the phone. Halyard was running and wired; the gate was answering.
+
+- **Claude Code version observed:** 2.1.x
+- **Measured on:** 2026-07-26, from a live session's transcript
+- **Method:** located the error in `~/.claude/projects/<...>/<session>.jsonl` and
+  read the entry.
+
+**The `Stop` hook does not fire for a turn that ends in an API error.** From
+Claude Code's side the turn did not *finish responding*, it broke — so the reply
+relay, wired to `Stop`, never runs. There is no event to react to.
+
+**The error is recorded in the transcript, and cleanly flagged.** Claude Code
+writes it as an ordinary `assistant` entry:
+
+```json
+{"type":"assistant","uuid":"…","isApiErrorMessage":true,"apiErrorStatus":529,
+ "error":"server_error","message":{"model":"<synthetic>",
+ "content":[{"type":"text","text":"API Error: 529 Overloaded. …"}]}}
+```
+
+`isApiErrorMessage: true` is the marker, the human text is in the usual
+`message.content[].text`, and `model` is `<synthetic>` because the client wrote
+it, not the model. A usage limit reached mid-turn lands the same way.
+
+Because no hook fires, the only way to notice this is to **watch the transcript**
+— see `core/transcripts.py`. The path is taken from the hook payload rather than
+computed from `~/.claude/projects/`, so a change to where transcripts live does
+not break it, and every read is best-effort: this is a courier for an alert, and
+must never be able to affect the gate.
+
+---
+
 ## Still to measure
 
 | Question | Why it matters |

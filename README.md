@@ -17,11 +17,11 @@ unreachable control plane — denies.
 
 **Runtimes:** Claude Code, Codex &nbsp;·&nbsp; **Channel:** Telegram &nbsp;·&nbsp; **Tested on:** macOS
 
-<!-- Demo goes here:
+
 <p align="center">
   <img src="assets/demo.gif" width="70%" alt="Approving a command from Telegram" />
 </p>
--->
+
 
 ## Why it exists
 

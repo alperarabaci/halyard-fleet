@@ -247,6 +247,10 @@ def build_body(payload: dict) -> dict:
         # no shell to put HALYARD_ROLE in. Stable across restarts, unlike
         # session_id.
         "session_name": name,
+        # Where this session's transcript is, passed on so the control plane can
+        # watch it for a turn that died with no hook to announce it. Read by
+        # nothing on the approval path — a courier's note, not a decision input.
+        "transcript_path": transcript,
         # The context a person has on screen and a card did not.
         #
         # Two sources, best first. `description` is the one-line summary the
