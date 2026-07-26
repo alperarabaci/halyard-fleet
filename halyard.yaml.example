@@ -42,6 +42,25 @@ settings:
   # that sleeps denies every command on the machine and says nothing.
   # HALYARD_KEEP_AWAKE: false
 
+# Sentences you say often enough to want a name for. Each key becomes a
+# command, so this one is `/md`, and anything typed after it is added on the
+# end — `/md the failing test` arrives as the prompt with that appended.
+#
+# The one below exists because a phone is bad at moving text. A long answer
+# arrives split into three messages, and handing it to another agent means
+# copying each piece — while that agent reads the first one, decides a message
+# has arrived, and starts working on a third of the instruction. So do not move
+# the text: ask the agent that already has it to write a file, and pass the path.
+#
+# Leave this out entirely and `/md` still works, with wording that assumes
+# nothing about where files live here. Replace it with yours.
+
+prompts:
+  md: >-
+    Write what you just produced to a Markdown file under
+    NOTES/development-prompts, in whichever place fits, and reply with the
+    path and nothing else.
+
 # Seats, arranged by the project they work in.
 #
 # Once a project has a `path`, wiring takes its name rather than a directory:

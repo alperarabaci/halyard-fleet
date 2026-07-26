@@ -159,6 +159,18 @@ def _build_channel(
         return StubChannel(store, Decision.ALLOW)
     if settings.channel is ChannelKind.STUB_DENY:
         return StubChannel(store, Decision.DENY)
+    # Prompts are the one part of the configuration a person edits often, so a
+    # mistake in them must not take the control plane down with it. Refusing to
+    # start over the wording of a shortcut would lose the gate as well.
+    from halyard.channels.telegram.adapter import COMMANDS
+    from halyard.core import prompts as configured_prompts
+
+    try:
+        prompts = configured_prompts.load(reserved=[name for name, _ in COMMANDS])
+    except ValueError as error:
+        logger.warning("Ignoring the `prompts:` block: %s", error)
+        prompts = dict(configured_prompts.DEFAULTS)
+
     # `Settings` has already refused to start if any of these are missing.
     return TelegramChannel(
         api=TelegramApi(settings.telegram_bot_token or ""),
@@ -174,6 +186,7 @@ def _build_channel(
         runner=runner,
         runners=runners,
         seats=seats,
+        prompts=prompts,
         session_names={
             role: name
             for name, role in (

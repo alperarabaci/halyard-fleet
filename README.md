@@ -88,8 +88,16 @@ reading configuration.
 | *(type anything)* | send it into that group's session |
 | `/options` | every model and effort level the runtime accepts |
 | `/model`, `/effort` | what answers, and how hard it thinks |
+| `/to` | hand a message to another seat by name |
+| `/md` | *(configurable)* have the agent write its answer to a file and pass the path |
 | `/status` | what each seat is, and what is running |
 | `/pause`, `/resume` | step out of the way, and come back |
+
+`/md` is one of the `prompts:` in `halyard.yaml` — a sentence you say often
+enough to want a name for. Each key there becomes a command. It exists because
+a phone is bad at moving text: a long answer arrives split into three messages,
+and handing it on means copying each piece while the agent receiving them
+starts working on a third of the instruction. Better not to move it at all.
 
 | On the machine | |
 |---|---|
