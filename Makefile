@@ -1,7 +1,7 @@
 # The handful of things you actually type. Everything here is a shortcut for a
 # command in the README, not a new way of doing anything.
 
-.PHONY: help run doctor sessions init wire unwire verify test lint fmt check
+.PHONY: help run service doctor sessions init wire unwire verify test lint fmt check
 
 help:  ## Show this help
 	@grep -hE '^[a-z-]+:.*?## ' $(MAKEFILE_LIST) \
@@ -9,6 +9,12 @@ help:  ## Show this help
 
 run:  ## Start the control plane
 	uv run halyard
+
+# `s` is the subcommand: install, uninstall, or status (the default).
+#
+#     make service s=install
+service:  ## Manage the launchd service, macOS  [s=install|uninstall|status]
+	uv run halyard service $(s)
 
 doctor:  ## Check the configuration and say what is wrong with it
 	@uv run halyard doctor

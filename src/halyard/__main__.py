@@ -82,6 +82,7 @@ USAGE = """usage: halyard [command]
   verify [rt]   prove the gate stops things, by running into it (costs turns)
   wire [what]   put the gate on a project, by name or directory (keeps a backup)
   unwire [what] take it off again, leaving everything else in place
+  service [cmd] install, uninstall, or status a launchd service (macOS)
 """
 
 
@@ -143,6 +144,11 @@ def main() -> None:
                 print()
             failures |= action(target.resolve())
         raise SystemExit(failures)
+
+    if command == "service":
+        from halyard import service
+
+        raise SystemExit(service.run(args[1] if len(args) > 1 else None))
 
     if command not in ("serve",):
         print(f"halyard: unknown command {command!r}\n\n{USAGE}", file=sys.stderr)
