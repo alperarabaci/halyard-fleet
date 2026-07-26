@@ -813,3 +813,32 @@ def test_a_second_halyard_that_is_really_here_stays(tmp_path: Path) -> None:
     kept = [hook["command"] for group in written["hooks"]["PreToolUse"] for hook in group["hooks"]]
     assert str(other / "hook.sh") in kept
     assert str(wiring.BRIDGE_DIR / "hook.sh") in kept
+
+
+def test_claude_code_gates_the_question_tool_as_well_as_the_shell(tmp_path: Path) -> None:
+    """`AskUserQuestion` rides the same `PreToolUse` hook as the shell tool, so
+    one matcher covers both. A second group sharing `hook.sh` would look to the
+    wiring like the gate was already installed and rewrite the gate's matcher."""
+    project = repo(tmp_path)
+
+    wiring.wire(project, runtimes=(CLAUDE,))
+
+    groups = read(project)["hooks"]["PreToolUse"]
+    matchers = [g["matcher"] for g in groups]
+    assert matchers == ["Bash|AskUserQuestion"]
+
+
+def test_a_shell_only_matcher_from_before_is_corrected(tmp_path: Path) -> None:
+    """An install wired before questions existed has a bare `Bash` matcher, and
+    leaving it means the question tool is never bridged — the quiet kind of
+    wrong the matcher-correction exists for."""
+    project = repo(tmp_path)
+    wiring.wire(project, runtimes=(CLAUDE,))
+    settings = project / ".claude" / "settings.local.json"
+    written = json.loads(settings.read_text())
+    written["hooks"]["PreToolUse"][0]["matcher"] = "Bash"
+    settings.write_text(json.dumps(written))
+
+    wiring.wire(project, runtimes=(CLAUDE,))
+
+    assert read(project)["hooks"]["PreToolUse"][0]["matcher"] == "Bash|AskUserQuestion"

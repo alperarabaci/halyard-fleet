@@ -99,6 +99,12 @@ a phone is bad at moving text: a long answer arrives split into three messages,
 and handing it on means copying each piece while the agent receiving them
 starts working on a third of the instruction. Better not to move it at all.
 
+When Claude Code asks a **multiple-choice question** (its `AskUserQuestion`
+tool), the options arrive on your phone as buttons — tap one, or reply with your
+own answer. The choice goes straight back into the session, and the picker at
+the desk never appears. Nobody answers in time, or Halyard is paused, and it
+falls back to that picker rather than deciding for you. Claude Code only for now.
+
 | On the machine | |
 |---|---|
 | `halyard init` | guided setup: `halyard.yaml`, wiring, and a check |
@@ -106,6 +112,16 @@ starts working on a third of the instruction. Better not to move it at all.
 | `halyard verify` | prove the gate stops things, by running into it |
 | `halyard wire` / `unwire` | put the gate on a project, or take it off |
 | `halyard sessions` | session names this machine can see |
+| `halyard service install` | run it as a launchd service (macOS) that updates itself first |
+
+`halyard service install` sets up a launchd agent that comes back after a crash
+and after a reboot. Every time it starts it runs `git pull --ff-only`, then
+`uv sync`, then serves — so the machine you leave running stays current without
+you logging in to update it. The pull is fail-open: it never rewinds or touches
+local changes, and a pull it cannot fast-forward is skipped so the last
+known-good code still serves. It runs the code it pulls, so point the branch at
+a remote you control; `install` prints which one. `uninstall` and `status` do
+what they say. macOS only — on Linux, run `halyard serve` under a systemd unit.
 
 ## Known limitations
 

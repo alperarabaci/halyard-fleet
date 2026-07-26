@@ -29,10 +29,13 @@ from halyard.core.audit import (
     approval_requested,
     approval_resolved,
     bridge_error,
+    question_answered,
+    question_asked,
 )
 from halyard.core.events import RiskLevel, Role
 from halyard.core.gate import Gate
 from halyard.core.policy import Policy
+from halyard.core.questions import Choice, QuestionStore
 from halyard.core.redaction import Redactor
 from halyard.core.registry import SessionRegistry
 
@@ -119,6 +122,165 @@ class ApprovalOutcome:
     @property
     def allowed(self) -> bool:
         return self.decision is BridgeDecision.ALLOW
+
+
+@dataclass(frozen=True)
+class QuestionOutcome:
+    """What the bridge gets back for an `AskUserQuestion`.
+
+    One field, and its absence is the load-bearing case. An answer means the
+    bridge fills it into `updatedInput.answers` and the agent proceeds as if the
+    person had chosen at the desk. No answer means the bridge says nothing, and
+    the terminal picker — which never went away — takes the choice instead.
+    """
+
+    #: The chosen label, or a sentence typed instead of choosing. None when
+    #: nobody answered in time, the gate is paused, or delivery failed: every
+    #: one of those sends the question back to the terminal rather than deciding
+    #: it, because a question is not dangerous to leave unanswered the way a
+    #: command is dangerous to leave unapproved.
+    answer: str | None
+
+
+class QuestionService:
+    """Runs one `AskUserQuestion` from arrival to answer.
+
+    The sibling of `ApprovalService`, failing **open** where that fails closed.
+    Every path that cannot produce a chosen answer returns `answer=None`, which
+    tells the bridge to stay quiet so the desk picker appears. It never raises,
+    for the same reason the approval service never raises — the caller is an
+    HTTP handler in front of a blocked hook.
+
+    Nothing here redacts. The approval service masks the command before it
+    leaves the machine; here the question text and the option labels have to
+    travel *verbatim*, because the text is the key and the label is the value
+    that `updatedInput.answers` is matched on — measured against a live session.
+    Masking either would break the round trip, and a question is the agent's own
+    words asking a person to choose, not the output of a command it just ran.
+    """
+
+    def __init__(
+        self,
+        *,
+        store: QuestionStore,
+        audit: AuditLog,
+        registry: SessionRegistry,
+        channel,
+        project: str,
+        gate: Gate | None = None,
+        seats: dict[str, Role] | None = None,
+    ) -> None:
+        self._seats = seats or {}
+        self._store = store
+        self._gate = gate or Gate()
+        self._audit = audit
+        self._registry = registry
+        self._channel = channel
+        self._project = project
+
+    async def ask(
+        self,
+        *,
+        session_id: str,
+        agent_id: str,
+        question: str,
+        options: list[Choice],
+        header: str | None = None,
+        tool_use_id: str | None = None,
+        cwd: str | None = None,
+        project_dir: str | None = None,
+        role: Role | None = None,
+        session_name: str | None = None,
+    ) -> QuestionOutcome:
+        """Ask a person to choose, and answer. Never raises."""
+        try:
+            return await self._ask(
+                session_id=session_id,
+                agent_id=agent_id,
+                question=question,
+                options=options,
+                header=header,
+                tool_use_id=tool_use_id,
+                cwd=cwd,
+                project_dir=project_dir,
+                role=role,
+                session_name=session_name,
+            )
+        except Exception:
+            # The outer net. Anything unhandled becomes "no answer", which is the
+            # safe direction here: the terminal picker is still standing and gets
+            # the choice.
+            logger.exception("Question failed unexpectedly; falling back to the terminal")
+            return QuestionOutcome(answer=None)
+
+    async def _ask(
+        self,
+        *,
+        session_id: str,
+        agent_id: str,
+        question: str,
+        options: list[Choice],
+        header: str | None,
+        tool_use_id: str | None,
+        cwd: str | None,
+        project_dir: str | None,
+        role: Role | None,
+        session_name: str | None,
+    ) -> QuestionOutcome:
+        if self._gate.paused:
+            # Pausing means the phone is off. The choice belongs at the desk,
+            # which is exactly where the terminal picker will put it.
+            return QuestionOutcome(answer=None)
+
+        project = project_name(project_dir, cwd, self._project)
+        role = seat_of(role, session_name, self._seats)
+
+        await self._registry.observe(
+            session_id=session_id,
+            agent_id=agent_id,
+            project=project,
+            role=role,
+            cwd=cwd,
+        )
+
+        request = await self._store.create(
+            session_id=session_id,
+            agent_id=agent_id,
+            project=project,
+            question=question,
+            options=options,
+            header=header,
+            tool_use_id=tool_use_id,
+            role=role,
+            session_name=session_name,
+        )
+
+        # Best effort, unlike the approval path. An approval that cannot be
+        # recorded is denied, because a command must not run unaccounted for; a
+        # question that cannot be recorded still only *asks* somebody to pick,
+        # and refusing to ask would send them to the desk over a logging blip.
+        await self._try_to_record(question_asked(request))
+
+        try:
+            await self._channel.send_question(request)
+        except Exception:
+            logger.exception("Channel refused the question; falling back to the terminal")
+            await self._store.give_up(request.request_id, reason=ResolutionReason.SHUTDOWN)
+            return QuestionOutcome(answer=None)
+
+        # Blocks until a person chooses or the deadline passes. Returns an
+        # unanswered resolution on timeout; it does not raise.
+        resolution = await self._store.wait_for(request.request_id)
+        await self._try_to_record(question_answered(request, resolution))
+        return QuestionOutcome(answer=resolution.answer)
+
+    async def _try_to_record(self, record) -> bool:
+        try:
+            await self._audit.record(record)
+        except Exception:
+            logger.exception("Audit write failed for %s", record.action.value)
+            return False
+        return True
 
 
 class MessageRelay:

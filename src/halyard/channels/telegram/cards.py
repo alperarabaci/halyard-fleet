@@ -18,6 +18,7 @@ from datetime import datetime
 
 from halyard.core.approvals import ApprovalRequest
 from halyard.core.events import RiskLevel
+from halyard.core.questions import QuestionRequest
 
 #: Telegram's hard limit on callback_data.
 CALLBACK_DATA_LIMIT = 64
@@ -150,6 +151,106 @@ def seat_choices(labels: tuple[str, ...]) -> dict | None:
     if not buttons:
         return None
     return {"inline_keyboard": [buttons[i : i + 3] for i in range(0, len(buttons), 3)]}
+
+
+#: Its own prefix, apart from the approval buttons and the preference ones.
+#:
+#: A question carries a nonce, like an approval and unlike a preference: it is
+#: open exactly once and must not be answerable twice. What the button carries
+#: for the *value* is the option's index, not its label — a label can be a
+#: sentence, and it would not survive Telegram's 64-byte callback. The adapter
+#: reads the label back out of the request the handle names.
+QUESTION_PREFIX = "hq"
+
+
+def question_handle_of(request: QuestionRequest) -> str:
+    return request.request_id.removeprefix("ask_")[:HANDLE_LENGTH]
+
+
+def question_data(request: QuestionRequest, index: int) -> str:
+    """`hq:{handle}:{nonce}:{index}` — which question, and which option."""
+    data = f"{QUESTION_PREFIX}:{question_handle_of(request)}:{request.nonce}:{index}"
+    if len(data.encode("utf-8")) > CALLBACK_DATA_LIMIT:
+        raise ValueError(f"question callback exceeds the {CALLBACK_DATA_LIMIT}-byte limit: {data}")
+    return data
+
+
+def parse_question_data(data: str) -> tuple[str, str, int] | None:
+    """Decode a question button into (handle, nonce, index), or None if not ours."""
+    parts = data.split(":")
+    if len(parts) != 4 or parts[0] != QUESTION_PREFIX:
+        return None
+    _, handle, nonce, raw_index = parts
+    if not handle or not nonce or not raw_index.isdigit():
+        return None
+    return handle, nonce, int(raw_index)
+
+
+def render_question(request: QuestionRequest, *, now: datetime) -> str:
+    """The question card: what is being asked, and the options, each numbered."""
+    header = request.header or "QUESTION"
+    role = (request.role.value if request.role else "agent").upper()
+    lines = [
+        f"<b>[{role} — {html.escape(header.upper())}]</b>",
+        "",
+        f"Project: <code>{html.escape(request.project)}</code>",
+        "",
+        html.escape(request.question),
+        "",
+    ]
+    for index, option in enumerate(request.options, start=1):
+        tail = f" — {html.escape(option.description)}" if option.description else ""
+        lines.append(f"<b>{index}.</b> {html.escape(option.label)}{tail}")
+    lines += [
+        "",
+        "<i>Tap an option, or reply with your own answer.</i>",
+        f"Expires in {format_remaining(request.expires_at, now)}",
+    ]
+    return _fit(lines)
+
+
+def render_question_resolved(
+    request: QuestionRequest, *, answer: str | None, by: str | None
+) -> str:
+    """What the question card becomes once it has been answered.
+
+    Edited in place, like a settled approval, so scrolling back shows the choice
+    rather than a row of live-looking buttons on a question long since decided.
+    """
+    who = f" by {html.escape(by)}" if by else ""
+    chosen = (
+        f"✅ <b>{html.escape(answer)}</b>{who}"
+        if answer is not None
+        else "↩️ <i>Left to the terminal — nobody answered in time.</i>"
+    )
+    return _fit(
+        [
+            chosen,
+            "",
+            f"Project: <code>{html.escape(request.project)}</code>",
+            "",
+            html.escape(request.question),
+        ]
+    )
+
+
+def question_keyboard(request: QuestionRequest) -> dict | None:
+    """One button per option, each on its own row so a long label is not cut.
+
+    `None` when nothing can be encoded, which sends the card out without
+    buttons — a reply in words still answers it, so the question is not lost.
+    """
+    rows = []
+    for index, option in enumerate(request.options):
+        try:
+            data = question_data(request, index)
+        except ValueError:
+            continue
+        # The button shows the label; if that is too long for a button, Telegram
+        # trims the display only — the value it carries is the index, which is
+        # exact regardless.
+        rows.append([{"text": option.label, "callback_data": data}])
+    return {"inline_keyboard": rows} if rows else None
 
 
 def format_remaining(expires_at: datetime, now: datetime) -> str:
