@@ -1744,7 +1744,11 @@ async def test_the_commands_are_registered_on_start(tmp_path: Path) -> None:
     await channel.stop()
 
     assert api.commands, "nothing was published"
-    assert {name for name, _ in api.commands} == {name for name, _ in adapter.COMMANDS}
+    # The built-in ones, and whatever prompts are configured beside them. One
+    # list feeds both this menu and `/help`, so a prompt that appears in one
+    # and not the other is not a shape this can get into.
+    assert {name for name, _ in api.commands} == {name for name, _ in channel._menu()}
+    assert {name for name, _ in adapter.COMMANDS} <= {name for name, _ in api.commands}
 
 
 async def test_the_help_text_lists_exactly_those(tmp_path: Path) -> None:
@@ -2197,3 +2201,58 @@ async def test_the_reply_box_opens_for_whoever_pressed(tmp_path: Path) -> None:
     markup = api.sent[-1]["reply_markup"]
     assert markup["force_reply"] is True
     assert "selective" not in markup
+
+
+async def test_a_configured_prompt_answers_to_its_own_command(tmp_path: Path) -> None:
+    """The point of naming a sentence is not typing it again.
+
+    A long answer arrives on a phone in three pieces, and handing it on means
+    copying each of them — while the agent receiving them decides a message has
+    arrived and starts working on a third of the instruction. `/md` asks the
+    agent that already has the text to write the file and say where, so what
+    travels is a path.
+    """
+    channel, _, runner, _ = await wired(tmp_path)
+    channel._prompts = {"md": "Write it to a file and reply with the path."}
+
+    await channel._handle_message(typed_in("/md", NAV_CHAT))
+    await drain()
+
+    assert runner.sent == [("session-nav", "Write it to a file and reply with the path.")]
+
+
+async def test_what_follows_the_command_is_added_to_it(tmp_path: Path) -> None:
+    """`/md the failing test` should reach the agent with that on the end,
+    rather than being dropped for not being part of the prompt."""
+    channel, _, runner, _ = await wired(tmp_path)
+    channel._prompts = {"md": "Write it to a file."}
+
+    await channel._handle_message(typed_in("/md the failing test", NAV_CHAT))
+    await drain()
+
+    assert runner.sent == [("session-nav", "Write it to a file.\n\nthe failing test")]
+
+
+async def test_configured_prompts_appear_in_the_menu_and_in_help(tmp_path: Path) -> None:
+    """One list for both. Two would drift, and the way you would find out is by
+    typing a command the menu offered and being ignored."""
+    channel, api, _, _ = await wired(tmp_path)
+    channel._prompts = {"md": "Write it to a file. Then say where."}
+
+    await channel._handle_message(typed_in("/help", NAV_CHAT))
+
+    assert ("md", "Write it to a file.") in channel._menu()
+    assert "/md — Write it to a file." in api.sent[-1]["text"]
+
+
+async def test_a_built_in_command_is_not_shadowed_by_a_prompt(tmp_path: Path) -> None:
+    """Configuration refuses the collision, and the dispatch order refuses it
+    again: a `prompts:` block cannot take `/pause` away from the gate."""
+    channel, api, runner, _ = await wired(tmp_path)
+    channel._prompts = {"pause": "this must never run"}
+
+    await channel._handle_message(typed_in("/pause", NAV_CHAT))
+    await drain()
+
+    assert runner.sent == []
+    assert "Paused" in api.sent[-1]["text"]

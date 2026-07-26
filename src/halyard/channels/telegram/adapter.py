@@ -19,13 +19,14 @@ import contextlib
 import html
 import logging
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
 from halyard.agents.base import AgentRunner
 from halyard.channels.telegram import cards
 from halyard.channels.telegram.api import TelegramApi
+from halyard.core import prompts as configured_prompts
 from halyard.core.approvals import (
     AlreadyResolvedError,
     ApprovalExpiredError,
@@ -169,6 +170,7 @@ class TelegramChannel:
         runners: dict[str, object] | None = None,
         seats: list[Seat] | None = None,
         session_names: dict[Role, str] | None = None,
+        prompts: Mapping[str, str] | None = None,
     ) -> None:
         self._api = api
         self._gate = gate or Gate()
@@ -195,6 +197,10 @@ class TelegramChannel:
         self._runners = dict(runners or {})
         self._runner = runner or next(iter(self._runners.values()), None)
         self._session_names = session_names or {}
+        # Sentences somebody says often enough to want a name for. Configured,
+        # so changing the wording of one is editing a file rather than waiting
+        # for a release.
+        self._prompts = dict(prompts if prompts is not None else configured_prompts.DEFAULTS)
         self._sending: set[asyncio.Task] = set()
         # Who pressed a seat button and has not yet said what to send. Keyed by
         # the person as well as the chat: in a group, somebody else typing must
@@ -218,6 +224,17 @@ class TelegramChannel:
     def name(self) -> str:
         return "telegram"
 
+    def _menu(self) -> tuple[tuple[str, str], ...]:
+        """Every command this bot answers: the built-in ones, then yours.
+
+        One list, used both for the menu Telegram publishes and for `/help`.
+        Two lists would drift, and the way you would find out is by typing a
+        command the menu offered and being ignored.
+        """
+        return COMMANDS + tuple(
+            (name, configured_prompts.describe(text)) for name, text in self._prompts.items()
+        )
+
     async def start(self) -> None:
         await self._api.open()
         # Registered so they appear when somebody types `/`. Best-effort: the
@@ -225,7 +242,7 @@ class TelegramChannel:
         # not, and a control plane that would not start because a menu could
         # not be published would be trading the thing for the label on it.
         try:
-            await self._api.set_my_commands(COMMANDS)
+            await self._api.set_my_commands(self._menu())
         except Exception:
             logger.warning("Could not register the command list with Telegram", exc_info=True)
         self._poller = asyncio.create_task(self._poll_forever(), name="telegram-poll")
@@ -545,8 +562,16 @@ class TelegramChannel:
             await self._say(self._options(here), here, thread)
         elif command == "status":
             await self._say(await self._status(), here, thread)
+        elif command in self._prompts:
+            # A sentence somebody says often enough to have named. Whatever
+            # follows the command is added to it, so `/md the failing test`
+            # arrives as the prompt with that on the end.
+            said = self._prompts[command]
+            await self._forward_to_session(
+                f"{said}\n\n{argument}" if argument else said, actor, here or "", thread
+            )
         elif command in ("start", "help"):
-            listed = "\n".join(f"/{name} — {description}" for name, description in COMMANDS)
+            listed = "\n".join(f"/{name} — {description}" for name, description in self._menu())
             await self._say(
                 "<b>Halyard</b>\n\nType anything to send it into the session.\n\n" + listed,
                 here,
