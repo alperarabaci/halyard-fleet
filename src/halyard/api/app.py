@@ -12,6 +12,7 @@ does not raise; the middleware below catches whatever still could.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
@@ -45,6 +46,7 @@ from halyard.core.service import (
     MessageRelay,
     QuestionService,
 )
+from halyard.core.transcripts import TranscriptWatcher
 
 logger = logging.getLogger(__name__)
 
@@ -76,6 +78,10 @@ class ApprovalRequestBody(BaseModel):
     #: What the agent says about its own call. Can raise the risk, never lower
     #: it — see `policy.py`.
     declared_risk: RiskLevel | None = None
+    #: Where this session's transcript is, so the watcher can notice a turn that
+    #: died where no hook fires. Off the approval path — read by nothing that
+    #: decides anything, so a bad value cannot affect a decision.
+    transcript_path: str | None = None
 
 
 class ApprovalResponse(BaseModel):
@@ -146,6 +152,7 @@ class MessageBody(BaseModel):
     project_dir: str | None = None
     role: Role | None = None
     session_name: str | None = None
+    transcript_path: str | None = None
 
 
 class MessageResponse(BaseModel):
@@ -326,11 +333,19 @@ def create_app(settings: Settings, *, channel=None) -> FastAPI:
         gate=gate,
         seats=seats,
     )
+    # Notices a turn that died where no hook fires — an API error mid-turn does
+    # not fire `Stop`, so the reply relay never runs. Entirely off the approval
+    # path: fed session paths as a side effect of requests it does not touch.
+    watcher = TranscriptWatcher(channel=resolved_channel, gate=gate)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         await audit.open()
         await resolved_channel.start()
+        # The watcher's own loop, alongside the channel's. A best-effort courier,
+        # so a failure to start it is logged and shrugged off rather than kept
+        # from serving.
+        watch_task = asyncio.create_task(watcher.run(), name="transcript-watch")
         await audit.record(
             AuditRecord(
                 action=AuditAction.CONTROL_PLANE_STARTED,
@@ -343,6 +358,7 @@ def create_app(settings: Settings, *, channel=None) -> FastAPI:
         try:
             yield
         finally:
+            watch_task.cancel()
             # Order matters. Deny everything still open before the audit log
             # closes, so the denials are recorded — and so no bridge is left
             # waiting out its own timeout, past which the hook fails open.
@@ -378,6 +394,7 @@ def create_app(settings: Settings, *, channel=None) -> FastAPI:
     app.state.service = service
     app.state.questions = questions
     app.state.relay = relay
+    app.state.watcher = watcher
     app.state.gate = gate
     app.state.runner = runner
     # Every runtime, by name. `runner` above is the Claude Code one, kept for
@@ -424,6 +441,15 @@ def create_app(settings: Settings, *, channel=None) -> FastAPI:
         Held open for as long as the approval deadline allows. The bridge's own
         HTTP timeout sits above that, and the hook timeout above both.
         """
+        # A side effect that touches nothing here decides: the watcher learns
+        # where this active session's transcript is. `note` never raises.
+        watcher.note(
+            session_id=body.session_id,
+            transcript_path=body.transcript_path,
+            agent_id=body.agent_id,
+            role=body.role,
+            session_name=body.session_name,
+        )
         outcome = await service.request(
             session_id=body.session_id,
             agent_id=body.agent_id,
@@ -475,6 +501,13 @@ def create_app(settings: Settings, *, channel=None) -> FastAPI:
         opposite of `/v1/approvals`, which holds the caller until a human
         decides.
         """
+        watcher.note(
+            session_id=body.session_id,
+            transcript_path=body.transcript_path,
+            agent_id=body.agent_id,
+            role=body.role,
+            session_name=body.session_name,
+        )
         delivered = await relay.relay(
             session_id=body.session_id,
             agent_id=body.agent_id,

@@ -147,6 +147,10 @@ def test_the_payload_is_forwarded_without_being_reinterpreted() -> None:
         # No transcript at that path, so no name — and no routing, which lands
         # everything in the default chat exactly as it would have anyway.
         "session_name": None,
+        # Passed on so the control plane can watch this session's transcript for
+        # a turn that dies with no hook to announce it. Nothing on the approval
+        # path reads it.
+        "transcript_path": "/tmp/transcript.jsonl",
         # The tool call's own one-line summary. Only `justification` was read
         # before, which a Bash call does not have, so every card arrived as a
         # bare command with the intent left to be guessed from the shell.
@@ -347,6 +351,7 @@ def test_the_relay_forwards_what_the_agent_said() -> None:
         "project_dir": None,
         "role": None,
         "session_name": None,
+        "transcript_path": "/tmp/t.jsonl",
     }
 
 
