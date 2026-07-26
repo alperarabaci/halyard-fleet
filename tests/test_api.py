@@ -290,3 +290,37 @@ async def test_a_runtime_with_no_queue_is_answered_rather_than_refused(tmp_path:
 
     assert answer.status_code == 200
     assert answer.json()["injectSteps"] == []
+
+
+QUESTION_BODY = {
+    "session_id": "session-1",
+    "question": "Which color?",
+    "options": [{"label": "Red", "description": "A warm color."}, {"label": "Blue"}],
+    "tool_use_id": "toolu_ask",
+    "cwd": "/repo",
+}
+
+
+async def test_a_question_the_stub_cannot_answer_falls_back_to_the_terminal(allowing) -> None:
+    """The stub has no human to pick, so the endpoint answers with nothing —
+    which the bridge reads as "say nothing" and the terminal picker takes it.
+    The fail-open twin of the approval endpoint, which the stub auto-allows."""
+    client, _ = allowing
+
+    response = await client.post("/v1/questions", json=QUESTION_BODY)
+
+    assert response.status_code == 200
+    assert response.json() == {"answer": None}
+
+
+async def test_the_question_endpoint_rejects_a_body_with_no_options(allowing) -> None:
+    client, _ = allowing
+
+    response = await client.post(
+        "/v1/questions", json={"session_id": "s", "question": "?", "options": []}
+    )
+
+    # An empty options list still parses; the service leaves it to the terminal
+    # rather than asking an unanswerable question.
+    assert response.status_code == 200
+    assert response.json()["answer"] is None

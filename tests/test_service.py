@@ -333,3 +333,122 @@ async def test_a_request_without_a_project_dir_keeps_the_configured_name(
 
     assert channel.last_request is not None
     assert channel.last_request.project == "alpha-engine"
+
+
+# --- questions: the fail-open twin of the approval path ----------------------
+
+import asyncio  # noqa: E402
+
+from halyard.core.gate import Gate  # noqa: E402
+from halyard.core.questions import Choice, QuestionStore  # noqa: E402
+from halyard.core.service import QuestionService  # noqa: E402
+
+
+class QuestionChannel:
+    """Captures the question and lets a test answer it out of band."""
+
+    name = "questions"
+
+    def __init__(self, store: QuestionStore) -> None:
+        self._store = store
+        self.last = None
+
+    async def start(self) -> None: ...
+    async def stop(self) -> None: ...
+
+    async def send_question(self, request) -> str:
+        self.last = request
+        return "sent"
+
+
+class ExplodingQuestionChannel:
+    name = "boom"
+
+    async def start(self) -> None: ...
+    async def stop(self) -> None: ...
+
+    async def send_question(self, request) -> str:
+        raise ConnectionError("telegram unreachable")
+
+
+def build_questions(tmp_path: Path, *, channel, gate=None, store=None):
+    store = store or QuestionStore(ttl=timedelta(minutes=5))
+    sink = JsonlAuditSink(tmp_path / "audit.jsonl")
+    audit = AuditLog([sink])
+    service = QuestionService(
+        store=store,
+        audit=audit,
+        registry=SessionRegistry(),
+        channel=channel,
+        project="alpha-engine",
+        gate=gate or Gate(),
+    )
+    return service, store, sink
+
+
+async def ask_question(service: QuestionService, **kwargs):
+    defaults = {
+        "session_id": "session-1",
+        "agent_id": "claude-code",
+        "question": "Which color?",
+        "options": [Choice(label="Red"), Choice(label="Blue")],
+    }
+    return await service.ask(**{**defaults, **kwargs})
+
+
+async def test_a_chosen_answer_comes_back(tmp_path: Path) -> None:
+    store = QuestionStore(ttl=timedelta(minutes=5))
+    channel = QuestionChannel(store)
+    service, store, sink = build_questions(tmp_path, channel=channel, store=store)
+    await sink.open()
+
+    async def answer_it() -> None:
+        while channel.last is None:
+            await asyncio.sleep(0)
+        await store.answer(channel.last.request_id, nonce=channel.last.nonce, answer="Red")
+
+    task = asyncio.create_task(answer_it())
+    outcome = await ask_question(service)
+    await task
+
+    assert outcome.answer == "Red"
+    actions = [r.action for r in await sink.read_all()]
+    assert AuditAction.QUESTION_ASKED in actions
+    assert AuditAction.QUESTION_ANSWERED in actions
+
+
+async def test_a_paused_gate_leaves_the_question_to_the_terminal(tmp_path: Path) -> None:
+    gate = Gate()
+    await gate.pause("tester")
+    store = QuestionStore(ttl=timedelta(minutes=5))
+    channel = QuestionChannel(store)
+    service, _, sink = build_questions(tmp_path, channel=channel, gate=gate, store=store)
+    await sink.open()
+
+    outcome = await ask_question(service)
+
+    # Pausing means the phone is off; the choice belongs at the desk.
+    assert outcome.answer is None
+    assert channel.last is None
+
+
+async def test_a_channel_that_cannot_deliver_falls_back_to_the_terminal(tmp_path: Path) -> None:
+    service, _, sink = build_questions(tmp_path, channel=ExplodingQuestionChannel())
+    await sink.open()
+
+    outcome = await ask_question(service)
+
+    # The approval twin denies here. A question is not dangerous to leave to the
+    # desk, so it says nothing instead.
+    assert outcome.answer is None
+
+
+async def test_a_question_nobody_answers_comes_back_empty(tmp_path: Path) -> None:
+    store = QuestionStore(ttl=timedelta(seconds=0))
+    channel = QuestionChannel(store)
+    service, _, sink = build_questions(tmp_path, channel=channel, store=store)
+    await sink.open()
+
+    outcome = await ask_question(service)
+
+    assert outcome.answer is None

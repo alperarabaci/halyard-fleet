@@ -19,6 +19,7 @@ from __future__ import annotations
 import logging
 
 from halyard.core.approvals import ApprovalRequest, ApprovalStore, Decision
+from halyard.core.questions import QuestionRequest, QuestionStore, ResolutionReason
 
 logger = logging.getLogger(__name__)
 
@@ -26,8 +27,14 @@ logger = logging.getLogger(__name__)
 class StubChannel:
     """Resolves every approval with a fixed decision, immediately."""
 
-    def __init__(self, store: ApprovalStore, decision: Decision) -> None:
+    def __init__(
+        self,
+        store: ApprovalStore,
+        decision: Decision,
+        question_store: QuestionStore | None = None,
+    ) -> None:
         self._store = store
+        self._question_store = question_store
         self._decision = decision
         self._sent = 0
 
@@ -85,6 +92,19 @@ class StubChannel:
             note=f"{self._past_tense} by the stub channel. No human was asked.",
         )
         return f"stub-message-{self._sent}"
+
+    async def send_question(self, request: QuestionRequest) -> str:
+        """Leave every question to the terminal, immediately.
+
+        A stub has no human to pick an option, and inventing an answer would be
+        the question-shaped version of the danger this channel already carries.
+        The safe direction for a question is the opposite of an approval's:
+        unanswered, so the terminal picker takes it.
+        """
+        logger.warning("StubChannel leaving a question to the terminal: %s", request.question)
+        if self._question_store is not None:
+            await self._question_store.give_up(request.request_id, reason=ResolutionReason.SHUTDOWN)
+        return "stub-question"
 
     async def send_message(
         self,

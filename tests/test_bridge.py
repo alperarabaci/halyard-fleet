@@ -829,3 +829,108 @@ def test_an_unreadable_transcript_costs_only_the_prose(tmp_path) -> None:
     from hook_bridge import _context
 
     assert _context({"description": "Run the tests"}, "/nowhere/t.jsonl") == "Run the tests"
+
+
+# --- AskUserQuestion: the agent asking a person to choose --------------------
+#
+# A different shape from the gate above. The bridge sends the options to the
+# phone and, when one comes back, answers the tool by *rewriting its input* —
+# `permissionDecision: allow` with an `updatedInput.answers` object. Everything
+# about this path fails open: no answer sends the choice back to the terminal.
+
+ASK_PAYLOAD = {
+    "session_id": "session-1",
+    "transcript_path": "/tmp/transcript.jsonl",
+    "cwd": "/repo",
+    "hook_event_name": "PreToolUse",
+    "tool_name": "AskUserQuestion",
+    "tool_use_id": "toolu_ask",
+    "tool_input": {
+        "questions": [
+            {
+                "question": "Which is your favorite color?",
+                "header": "Color",
+                "options": [
+                    {"label": "Red", "description": "A warm color."},
+                    {"label": "Blue", "description": "A cool color."},
+                ],
+                "multiSelect": False,
+            }
+        ]
+    },
+}
+
+
+def test_an_answered_question_is_filled_into_the_tool_input() -> None:
+    with control_plane(body={"answer": "Red"}) as (url, received):
+        decision = decision_of(run(BRIDGE, ASK_PAYLOAD, HALYARD_URL=url))
+
+    # Not a plain allow — an allow that carries the answer, keyed by the exact
+    # question text, so Claude Code proceeds as if the person had chosen it.
+    assert decision["permissionDecision"] == "allow"
+    assert decision["updatedInput"]["answers"] == {"Which is your favorite color?": "Red"}
+    # The options the phone was offered were the ones the tool wrote.
+    assert received[0]["options"][0]["label"] == "Red"
+    assert received[0]["question"] == "Which is your favorite color?"
+
+
+def test_a_question_nobody_answered_defers_to_the_terminal() -> None:
+    with control_plane(body={"answer": None}) as (url, _):
+        result = run(BRIDGE, ASK_PAYLOAD, HALYARD_URL=url)
+
+    # The fail-open direction: say nothing, and the terminal picker takes it.
+    assert result.stdout == ""
+    assert result.returncode == 64
+
+
+def test_an_answered_question_through_the_wrapper_prints_the_allow() -> None:
+    with control_plane(body={"answer": "Blue"}) as (url, _):
+        result = run(WRAPPER, ASK_PAYLOAD, HALYARD_URL=url)
+
+    assert result.returncode == 0
+    assert json.loads(result.stdout)["hookSpecificOutput"]["updatedInput"]["answers"] == {
+        "Which is your favorite color?": "Blue"
+    }
+
+
+def test_an_unanswered_question_through_the_wrapper_is_silence() -> None:
+    with control_plane(body={"answer": None}) as (url, _):
+        result = run(WRAPPER, ASK_PAYLOAD, HALYARD_URL=url)
+
+    assert result.returncode == 0
+    assert result.stdout == ""
+
+
+def test_multiselect_is_left_to_the_terminal_without_asking() -> None:
+    payload = json.loads(json.dumps(ASK_PAYLOAD))
+    payload["tool_input"]["questions"][0]["multiSelect"] = True
+
+    with control_plane(body={"answer": "Red"}) as (url, received):
+        result = run(BRIDGE, payload, HALYARD_URL=url)
+
+    # Not something a row of single-choice buttons can honestly represent, so it
+    # never even reaches the phone.
+    assert result.returncode == 64
+    assert received == []
+
+
+def test_more_than_one_question_is_left_to_the_terminal() -> None:
+    payload = json.loads(json.dumps(ASK_PAYLOAD))
+    payload["tool_input"]["questions"].append(
+        {"question": "And a shape?", "options": [{"label": "Round"}]}
+    )
+
+    with control_plane(body={"answer": "Red"}) as (url, received):
+        result = run(BRIDGE, payload, HALYARD_URL=url)
+
+    assert result.returncode == 64
+    assert received == []
+
+
+def test_an_unreachable_control_plane_leaves_the_question_to_the_terminal() -> None:
+    # Nothing listening on this port. The gate would deny here; a question falls
+    # back to the desk instead.
+    result = run(BRIDGE, ASK_PAYLOAD, HALYARD_URL="http://127.0.0.1:9")
+
+    assert result.stdout == ""
+    assert result.returncode == 64

@@ -263,9 +263,9 @@ def build_body(payload: dict) -> dict:
     }
 
 
-def ask(url: str, body: dict, timeout: float) -> dict:
+def ask(url: str, body: dict, timeout: float, endpoint: str = "/v1/approvals") -> dict:
     request = urllib.request.Request(
-        url.rstrip("/") + "/v1/approvals",
+        url.rstrip("/") + endpoint,
         data=json.dumps(body).encode("utf-8"),
         headers={"Content-Type": "application/json"},
         method="POST",
@@ -274,6 +274,112 @@ def ask(url: str, body: dict, timeout: float) -> dict:
         if response.status != 200:
             raise OSError(f"control plane answered {response.status}")
         return json.loads(response.read().decode("utf-8"))
+
+
+def emit_answers(updated_input: dict) -> None:
+    """Answer an AskUserQuestion by filling the choice straight into its input.
+
+    Not a permission decision — an `allow` that also *rewrites the tool's
+    arguments*. `updatedInput` carries an `answers` object keyed by each
+    question's text, and Claude Code proceeds as if the person had chosen at the
+    desk: the terminal picker never appears. Measured against a live session
+    before this was built on it; see `docs/session-io-notes.md`.
+
+    Claude Code only. The field is read from `hookSpecificOutput`, which is the
+    shape Antigravity's parser chokes on — but Antigravity has no such tool, so
+    this path is never reached for it.
+    """
+    answer = {
+        "hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "permissionDecision": "allow",
+            "updatedInput": updated_input,
+        }
+    }
+    json.dump(answer, sys.stdout, ensure_ascii=False)
+    sys.stdout.write("\n")
+    sys.stdout.flush()
+
+
+def _single_question(tool_input: dict) -> dict | None:
+    """The one single-select question we can answer from a phone, or None.
+
+    The MVP handles exactly one question, not multi-select. More than one, or a
+    `multiSelect` option, is left to the terminal rather than folded into
+    something a row of buttons cannot honestly represent — and `note`d, so a
+    silent cap does not read as coverage.
+    """
+    questions = tool_input.get("questions")
+    if not isinstance(questions, list) or len(questions) != 1:
+        if questions:
+            note(f"AskUserQuestion: {len(questions)} questions, leaving it to the terminal")
+        return None
+    question = questions[0]
+    if not isinstance(question, dict) or question.get("multiSelect"):
+        note("AskUserQuestion: multiSelect, leaving it to the terminal")
+        return None
+    options = question.get("options")
+    if not isinstance(options, list) or not options:
+        return None
+    return question
+
+
+def question_body(payload: dict, question: dict) -> dict:
+    """What `/v1/questions` is posted. Claude Code fields only, like the tool."""
+    transcript = payload.get("transcript_path")
+    options = [
+        {"label": o.get("label"), "description": o.get("description")}
+        for o in question.get("options", [])
+        if isinstance(o, dict) and o.get("label")
+    ]
+    return {
+        "session_id": payload.get("session_id") or "unknown",
+        "agent_id": "claude-code",
+        "question": question.get("question") or "",
+        "header": question.get("header"),
+        "options": options,
+        "tool_use_id": payload.get("tool_use_id"),
+        "cwd": payload.get("cwd"),
+        "project_dir": os.environ.get("CLAUDE_PROJECT_DIR"),
+        "role": os.environ.get("HALYARD_ROLE") or None,
+        "session_name": session_name(transcript),
+    }
+
+
+def answer_question(payload: dict, url: str, timeout: float) -> int:
+    """Ask the phone to choose, and fill the answer in — or defer to the terminal.
+
+    Fails open, the mirror of the approval path. Every way this can go wrong —
+    an unanswerable shape, an unreachable control plane, a timeout, no answer
+    before the deadline — ends in `DEFER_EXIT_CODE`, which says nothing and lets
+    the terminal picker take the choice. A question is not dangerous to leave to
+    the desk the way a command is dangerous to leave unapproved.
+    """
+    tool_input = payload.get("tool_input") or {}
+    question = _single_question(tool_input)
+    if question is None:
+        return DEFER_EXIT_CODE
+
+    body = question_body(payload, question)
+    if not body["options"]:
+        return DEFER_EXIT_CODE
+
+    try:
+        answer = ask(url, body, timeout, endpoint="/v1/questions").get("answer")
+    except Exception as exc:
+        note(f"question fell back to the terminal: {exc}")
+        return DEFER_EXIT_CODE
+
+    if not isinstance(answer, str) or not answer:
+        # Nobody chose, the gate was paused, or delivery failed. The terminal
+        # picker is still standing and gets it.
+        return DEFER_EXIT_CODE
+
+    # Keyed by the question text, exactly as measured. The rest of the input is
+    # carried through untouched so the tool sees what it expected plus the answer.
+    updated = {**tool_input, "answers": {question.get("question"): answer}}
+    emit_answers(updated)
+    return 0
 
 
 def main() -> int:
@@ -293,6 +399,15 @@ def main() -> int:
 
     url = control_plane_url()
     timeout = lookup_timeout("HALYARD_BRIDGE_TIMEOUT_SECONDS", DEFAULT_TIMEOUT_SECONDS)
+
+    # A different kind of question: the agent asking a person to choose, not to
+    # approve. Only Claude Code has the tool, and only Claude Code reads the
+    # `updatedInput` this answers it with. Everything about this path fails open
+    # — a question left unanswered goes back to the terminal picker, which is
+    # why it is kept out of the deny-on-everything flow below.
+    if event == "PreToolUse" and payload.get("tool_name") == "AskUserQuestion":
+        return answer_question(payload, url, timeout)
+
     body = build_body(payload)
     runtime = body["agent_id"]
     # Written before the call, not after, so a bridge that hangs or is killed

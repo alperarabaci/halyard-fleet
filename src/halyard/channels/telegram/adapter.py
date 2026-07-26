@@ -46,6 +46,16 @@ from halyard.core.audit import (
 )
 from halyard.core.events import Role
 from halyard.core.gate import Gate
+from halyard.core.questions import (
+    AlreadyAnsweredError,
+    QuestionExpiredError,
+    QuestionRequest,
+    QuestionStore,
+    UnknownQuestionError,
+)
+from halyard.core.questions import (
+    InvalidNonceError as QuestionInvalidNonceError,
+)
 from halyard.core.registry import SessionRegistry
 from halyard.core.seats import Seat, find, for_chat, for_session
 from halyard.core.seats import _default_runtime as default_runtime
@@ -158,6 +168,7 @@ class TelegramChannel:
         store: ApprovalStore,
         audit: AuditLog,
         chat_id: str,
+        question_store: QuestionStore | None = None,
         authorized_user_ids: frozenset[str],
         clock: Clock = _default_clock,
         poll_retry_seconds: float = POLL_RETRY_SECONDS,
@@ -214,6 +225,11 @@ class TelegramChannel:
         # the message id means editing against the wrong chat, which fails
         # quietly and leaves live-looking buttons on a settled question.
         self._open: dict[str, tuple[ApprovalRequest, int, str]] = {}
+        # Questions are held apart from approvals: a different store answers
+        # them, and their button carries an option index rather than allow/deny.
+        # Same shape otherwise — handle to (request, message id, chat).
+        self._question_store = question_store
+        self._open_questions: dict[str, tuple[QuestionRequest, int, str]] = {}
         self._poller: asyncio.Task | None = None
         self._offset: int | None = None
         # Which chat the command being handled came from, so a listing can mark
@@ -331,6 +347,34 @@ class TelegramChannel:
         # answer, and the answer decays as soon as they scroll.
         logger.info(
             "Card for %s (%s, session %r) sent to %s",
+            request.project,
+            request.agent_id,
+            request.session_name or "unnamed",
+            chat_id,
+        )
+        return str(message_id)
+
+    async def send_question(self, request: QuestionRequest) -> str:
+        """Put a question card in the seat's chat.
+
+        Routed exactly like an approval — a question from a Codex driver and one
+        from a Claude driver belong in different places for the same reason a
+        card does. Raising propagates to the service, which falls back to the
+        terminal picker; a question that reached nobody is not one to block on.
+        """
+        self._forget_expired_questions()
+        text = cards.render_question(request, now=self._clock())
+        markup = cards.question_keyboard(request)
+        chat_id, thread_id = self._route(
+            request.role, request.session_name, request.agent_id, request.session_id
+        )
+        message = await self._api.send_message(
+            chat_id, text, reply_markup=markup, message_thread_id=thread_id
+        )
+        message_id = int(message["message_id"])
+        self._open_questions[cards.question_handle_of(request)] = (request, message_id, chat_id)
+        logger.info(
+            "Question for %s (%s, session %r) sent to %s",
             request.project,
             request.agent_id,
             request.session_name or "unnamed",
@@ -478,6 +522,13 @@ class TelegramChannel:
         thread = message.get("message_thread_id")
 
         if not text.startswith("/"):
+            # A question open in this chat takes the message as its answer — the
+            # "Other" path. The session is blocked waiting on it, so this is what
+            # the words are for; a normal forward could not run anyway. Checked
+            # before anything else for that reason.
+            if here and await self._answer_open_question_with_text(here, text, user_id):
+                return
+
             replied = (message.get("reply_to_message") or {}).get("text") or ""
             # Two ways to know this sentence belongs to a seat that was picked
             # a moment ago, and either is enough. The reply carries the question
@@ -1160,6 +1211,11 @@ class TelegramChannel:
             await self._choose(what, value, here, message.get("message_thread_id"))
             return
 
+        asked = cards.parse_question_data(callback.get("data") or "")
+        if asked is not None:
+            await self._answer_question(asked, user_id, query_id)
+            return
+
         parsed = cards.parse_callback_data(callback.get("data") or "")
 
         if parsed is None:
@@ -1269,6 +1325,140 @@ class TelegramChannel:
             await self._audit.record(record)
         except Exception:
             logger.exception("Could not record %s", record.action.value)
+
+    async def _answer_question(
+        self, asked: tuple[str, str, int], user_id: str, query_id: str
+    ) -> None:
+        """Resolve a question from a tapped option."""
+        handle, nonce, index = asked
+        entry = self._open_questions.get(handle)
+        request_id = entry[0].request_id if entry else None
+
+        if user_id not in self._authorized:
+            await self._record(
+                unauthorized_callback(
+                    actor=f"tg:{user_id}", request_id=request_id, channel="telegram"
+                )
+            )
+            await self._dismiss(query_id)
+            return
+
+        if entry is None:
+            await self._dismiss(query_id, "That question is no longer open.")
+            return
+
+        request, message_id, chat_id = entry
+        if not 0 <= index < len(request.options):
+            # A button that names an option the request does not have. Nothing
+            # to answer with, and guessing would be the wrong kind of helpful.
+            await self._dismiss(query_id)
+            return
+
+        answer = request.options[index].label
+        await self._resolve_question(
+            request, message_id, chat_id, nonce, answer, f"tg:{user_id}", handle, query_id
+        )
+
+    async def _answer_open_question_with_text(self, here: str, text: str, user_id: str) -> bool:
+        """Answer the question open in this chat with a typed reply.
+
+        The "Other" path the tool always offers, and the reason a question card
+        says *reply with your own words*. The session is blocked on the question,
+        so a message typed into this chat is the answer to it rather than a new
+        turn — which could not be delivered anyway while the turn is paused.
+
+        Returns whether a question was answered, so the caller knows not to treat
+        the message as ordinary chat.
+        """
+        entry = self._oldest_open_question_in(here)
+        if entry is None:
+            return False
+        handle, (request, message_id, chat_id) = entry
+        # The request's own nonce: authorisation here is "an allowed user, and a
+        # question open in the chat it was asked in", which the caller already
+        # checked. The nonce guards a public button against replay; a typed
+        # answer is not that.
+        await self._resolve_question(
+            request, message_id, chat_id, request.nonce, text, f"tg:{user_id}", handle, None
+        )
+        return True
+
+    async def _resolve_question(
+        self,
+        request: QuestionRequest,
+        message_id: int,
+        chat_id: str,
+        nonce: str,
+        answer: str,
+        actor: str,
+        handle: str,
+        query_id: str | None,
+    ) -> None:
+        """Record an answer and settle the card, whichever way it arrived."""
+        if self._question_store is None:
+            return
+        try:
+            await self._question_store.answer(
+                request.request_id, nonce=nonce, answer=answer, decided_by=actor
+            )
+        except AlreadyAnsweredError:
+            await self._record(replayed_callback(actor=actor, request_id=request.request_id))
+            await self._dismiss(query_id, "Already answered.")
+            return
+        except QuestionInvalidNonceError:
+            await self._record(invalid_nonce(actor=actor, request_id=request.request_id))
+            await self._dismiss(query_id)
+            return
+        except QuestionExpiredError:
+            await self._settle_question_card(request, message_id, chat_id, None, None)
+            self._open_questions.pop(handle, None)
+            await self._dismiss(query_id, "Too late — that went back to the terminal.")
+            return
+        except UnknownQuestionError:
+            self._open_questions.pop(handle, None)
+            await self._dismiss(query_id, "That question is no longer open.")
+            return
+
+        self._open_questions.pop(handle, None)
+        await self._settle_question_card(request, message_id, chat_id, answer, actor)
+        await self._dismiss(query_id, "Answered.")
+
+    async def _settle_question_card(
+        self,
+        request: QuestionRequest,
+        message_id: int,
+        chat_id: str,
+        answer: str | None,
+        by: str | None,
+    ) -> None:
+        try:
+            await self._api.edit_message_text(
+                chat_id,
+                message_id,
+                cards.render_question_resolved(request, answer=answer, by=by),
+                reply_markup=None,
+            )
+        except Exception:
+            logger.warning(
+                "Could not update the question card for %s", request.request_id, exc_info=True
+            )
+
+    def _oldest_open_question_in(
+        self, chat_id: str
+    ) -> tuple[str, tuple[QuestionRequest, int, str]] | None:
+        """The longest-waiting question routed to this chat, if any."""
+        self._forget_expired_questions()
+        candidates = [
+            (handle, entry) for handle, entry in self._open_questions.items() if entry[2] == chat_id
+        ]
+        if not candidates:
+            return None
+        return min(candidates, key=lambda item: item[1][0].created_at)
+
+    def _forget_expired_questions(self) -> None:
+        now = self._clock()
+        for handle in [h for h, (r, _, _) in self._open_questions.items() if now >= r.expires_at]:
+            del self._open_questions[handle]
 
     def _forget_expired(self) -> None:
         """Drop cards that can no longer be acted on.

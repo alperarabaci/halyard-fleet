@@ -222,6 +222,49 @@ terminal or headless, so watching a session does not depend on who owns it.
 
 ---
 
+## AskUserQuestion is answerable from a hook
+
+A separate question from the two above: when the agent asks a person to *choose*
+— the `AskUserQuestion` tool, not a permission — can that be answered from a
+phone rather than the terminal? The gate holds a `PreToolUse` call open and
+returns allow or deny, and neither is a choice among options, so this needed its
+own measurement before anything rested on it.
+
+- **Claude Code version observed:** 2.x
+- **Measured on:** 2026-07-26
+- **Method:** a passive `PreToolUse` hook matched to `AskUserQuestion` in a
+  throwaway project, driven by asking an interactive session to pick a colour.
+
+**A `PreToolUse` hook can answer an `AskUserQuestion` by rewriting its input.**
+Returning `permissionDecision: allow` together with an `updatedInput` that adds
+an `answers` object made the session proceed as if the person had chosen — and
+the terminal picker never appeared. The answer is keyed by the question's exact
+text and the value is the option's label:
+
+```json
+{"hookSpecificOutput": {"hookEventName": "PreToolUse",
+  "permissionDecision": "allow",
+  "updatedInput": {"questions": [...], "answers": {"Which colour?": "Red"}}}}
+```
+
+The captured `tool_input` shape: `questions` is a list, each with `question`,
+`header`, `options` (a list of `{label, description}`) and `multiSelect`.
+
+This is what the question path is built on. It is **undocumented** — the Agent
+SDK's `canUseTool` callback documents the same `answers` structure, the CLI hook
+does not — so it was measured rather than assumed, and the halyard fields it
+verbatim: no redaction, because a masked question text would no longer match its
+own key. The path fails **open**: an unanswered question emits nothing and the
+terminal picker takes it, the opposite of the gate's fail-closed denial.
+
+**Not yet measured, and worth stating:** that a *slow* hook is awaited without
+the picker appearing. The probe returned immediately with a fixed answer, which
+proves `updatedInput` works but not that Claude Code will block on this hook for
+the minutes a phone might take — inferred from the gate, where `PreToolUse` is
+synchronous, but not separately confirmed for this tool.
+
+---
+
 ## Still to measure
 
 | Question | Why it matters |

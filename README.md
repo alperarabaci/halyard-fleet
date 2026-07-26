@@ -99,6 +99,12 @@ a phone is bad at moving text: a long answer arrives split into three messages,
 and handing it on means copying each piece while the agent receiving them
 starts working on a third of the instruction. Better not to move it at all.
 
+When Claude Code asks a **multiple-choice question** (its `AskUserQuestion`
+tool), the options arrive on your phone as buttons — tap one, or reply with your
+own answer. The choice goes straight back into the session, and the picker at
+the desk never appears. Nobody answers in time, or Halyard is paused, and it
+falls back to that picker rather than deciding for you. Claude Code only for now.
+
 | On the machine | |
 |---|---|
 | `halyard init` | guided setup: `halyard.yaml`, wiring, and a check |

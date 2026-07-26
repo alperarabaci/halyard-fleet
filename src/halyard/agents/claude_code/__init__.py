@@ -77,9 +77,16 @@ RUNTIME = RuntimeSpec(
     human="Claude Code",
     binary="claude",
     hooks=Hooks(
+        # `AskUserQuestion` rides the same `PreToolUse` hook as the shell tool,
+        # so one matcher covers both and the wiring keeps its one-hook-per-event
+        # shape — a second group under `PreToolUse` sharing `hook.sh` would look
+        # to the wiring like the gate already installed and quietly rewrite the
+        # gate's own matcher. The bridge tells the two apart by tool name and
+        # sends the question down a path that fails *open*: unanswered, it goes
+        # back to the terminal picker rather than being denied.
         settings=".claude/settings.local.json",
         also=(".claude/settings.json",),
-        matcher="Bash",
+        matcher="Bash|AskUserQuestion",
     ),
     runner=_runner,
     find_session=late("halyard.agents.claude_code", "find_session"),

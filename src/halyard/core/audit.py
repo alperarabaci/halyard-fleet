@@ -31,6 +31,7 @@ import aiosqlite
 from pydantic import BaseModel, ConfigDict, Field
 
 from halyard.core.approvals import ApprovalRequest, ApprovalResolution
+from halyard.core.questions import QuestionRequest, QuestionResolution
 
 Clock = Callable[[], datetime]
 
@@ -46,6 +47,10 @@ class AuditAction(StrEnum):
     APPROVAL_REQUESTED = "approval.requested"
     #: A decision was reached, by a human or by the deadline.
     APPROVAL_RESOLVED = "approval.resolved"
+    #: An agent asked a person to choose between options, and a card went out.
+    QUESTION_ASKED = "question.asked"
+    #: A question was answered, or left to the terminal by the deadline.
+    QUESTION_ANSWERED = "question.answered"
     #: A callback arrived from someone not on the authorized list.
     UNAUTHORIZED_CALLBACK = "callback.unauthorized"
     #: A callback arrived with a nonce that did not match.
@@ -138,6 +143,51 @@ def approval_resolved(
             # what was actually decided.
             "command": request.command_full,
             "risk": request.risk.value,
+        },
+    )
+
+
+def question_asked(request: QuestionRequest, *, now: datetime | None = None) -> AuditRecord:
+    return AuditRecord(
+        action=AuditAction.QUESTION_ASKED,
+        recorded_at=now or _default_clock(),
+        actor=request.agent_id,
+        request_id=request.request_id,
+        session_id=request.session_id,
+        agent_id=request.agent_id,
+        project=request.project,
+        detail={
+            "question": request.question,
+            # Labels only — a person chooses between these, and they are the
+            # agent's own words, not anything a redactor needs to see.
+            "options": [choice.label for choice in request.options],
+            "role": request.role.value if request.role else None,
+            "tool_use_id": request.tool_use_id,
+            "expires_at": request.expires_at.isoformat(),
+        },
+    )
+
+
+def question_answered(
+    request: QuestionRequest,
+    resolution: QuestionResolution,
+    *,
+    now: datetime | None = None,
+) -> AuditRecord:
+    return AuditRecord(
+        action=AuditAction.QUESTION_ANSWERED,
+        recorded_at=now or resolution.decided_at,
+        actor=resolution.decided_by or "system",
+        request_id=request.request_id,
+        session_id=request.session_id,
+        agent_id=request.agent_id,
+        project=request.project,
+        detail={
+            "question": request.question,
+            # The chosen label, or the sentence somebody typed instead, or null
+            # when nobody chose and the terminal picker took over.
+            "answer": resolution.answer,
+            "reason": resolution.reason.value,
         },
     )
 

@@ -35,10 +35,16 @@ from halyard.core.audit import (
 from halyard.core.events import RiskLevel, Role
 from halyard.core.gate import Gate
 from halyard.core.policy import Policy
+from halyard.core.questions import Choice, QuestionStore
 from halyard.core.redaction import Redactor
 from halyard.core.registry import SessionRegistry
 from halyard.core.seats import configured
-from halyard.core.service import ApprovalService, BridgeDecision, MessageRelay
+from halyard.core.service import (
+    ApprovalService,
+    BridgeDecision,
+    MessageRelay,
+    QuestionService,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -84,6 +90,48 @@ class ApprovalResponse(BaseModel):
     reason: str
     request_id: str | None = None
     risk: RiskLevel | None = None
+
+
+class QuestionOptionBody(BaseModel):
+    """One option the agent offered, straight off the `AskUserQuestion` input."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    label: str
+    description: str | None = None
+
+
+class QuestionRequestBody(BaseModel):
+    """What the bridge posts when it sees an `AskUserQuestion`.
+
+    A single question and its options — the MVP handles one at a time, and the
+    bridge sends the rest back to the terminal rather than folding them together.
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    session_id: str
+    question: str
+    options: list[QuestionOptionBody]
+    header: str | None = None
+    agent_id: str = runtimes.DEFAULT
+    tool_use_id: str | None = None
+    cwd: str | None = None
+    project_dir: str | None = None
+    role: Role | None = None
+    session_name: str | None = None
+
+
+class QuestionResponse(BaseModel):
+    """What the bridge fills into `updatedInput.answers`, or nothing.
+
+    `answer` is null when nobody chose in time, the gate is paused, or delivery
+    failed. The bridge reads that as "say nothing", and the terminal picker —
+    which never went away — takes the choice. The opposite of the approval
+    response, whose silence would be dangerous; here silence is the safe fallback.
+    """
+
+    answer: str | None = None
 
 
 class MessageBody(BaseModel):
@@ -154,11 +202,12 @@ def _build_channel(
     runner,
     runners: dict | None = None,
     seats: list | None = None,
+    question_store: QuestionStore | None = None,
 ):
     if settings.channel is ChannelKind.STUB_ALLOW:
-        return StubChannel(store, Decision.ALLOW)
+        return StubChannel(store, Decision.ALLOW, question_store)
     if settings.channel is ChannelKind.STUB_DENY:
-        return StubChannel(store, Decision.DENY)
+        return StubChannel(store, Decision.DENY, question_store)
     # Prompts are the one part of the configuration a person edits often, so a
     # mistake in them must not take the control plane down with it. Refusing to
     # start over the wording of a shortcut would lose the gate as well.
@@ -175,6 +224,7 @@ def _build_channel(
     return TelegramChannel(
         api=TelegramApi(settings.telegram_bot_token or ""),
         store=store,
+        question_store=question_store,
         audit=audit,
         chat_id=settings.telegram_chat_id or "",
         authorized_user_ids=settings.telegram_authorized_user_ids,
@@ -205,6 +255,11 @@ def create_app(settings: Settings, *, channel=None) -> FastAPI:
     environment.
     """
     store = ApprovalStore(ttl=timedelta(seconds=settings.approval_timeout_seconds))
+    # A question waits as long as an approval does, and against the same clock:
+    # the store answers before the bridge's HTTP call gives up, which is before
+    # the hook times out. Past it the question is unanswered and the terminal
+    # picker takes over.
+    question_store = QuestionStore(ttl=timedelta(seconds=settings.approval_timeout_seconds))
     audit = AuditLog([JsonlAuditSink(settings.audit_log), SqliteAuditSink(settings.db_path)])
     registry = SessionRegistry()
     gate = Gate()
@@ -231,7 +286,15 @@ def create_app(settings: Settings, *, channel=None) -> FastAPI:
         channel
         if channel is not None
         else _build_channel(
-            settings, store, audit, gate, registry, runner, by_runtime, configured_seats
+            settings,
+            store,
+            audit,
+            gate,
+            registry,
+            runner,
+            by_runtime,
+            configured_seats,
+            question_store,
         )
     )
     relay = MessageRelay(
@@ -247,6 +310,15 @@ def create_app(settings: Settings, *, channel=None) -> FastAPI:
         store=store,
         policy=Policy(),
         redactor=Redactor(),
+        audit=audit,
+        registry=registry,
+        channel=resolved_channel,
+        project=settings.project_name,
+        gate=gate,
+        seats=seats,
+    )
+    questions = QuestionService(
+        store=question_store,
         audit=audit,
         registry=registry,
         channel=resolved_channel,
@@ -275,6 +347,10 @@ def create_app(settings: Settings, *, channel=None) -> FastAPI:
             # closes, so the denials are recorded — and so no bridge is left
             # waiting out its own timeout, past which the hook fails open.
             await store.shutdown()
+            # Leave open questions unanswered so any bridge blocked on one is
+            # told to fall back to the terminal rather than waiting out its
+            # timeout. The fail-open twin of the denial above.
+            await question_store.shutdown()
             try:
                 await audit.record(
                     AuditRecord(
@@ -300,6 +376,7 @@ def create_app(settings: Settings, *, channel=None) -> FastAPI:
     app.state.registry = registry
     app.state.channel = resolved_channel
     app.state.service = service
+    app.state.questions = questions
     app.state.relay = relay
     app.state.gate = gate
     app.state.runner = runner
@@ -366,6 +443,28 @@ def create_app(settings: Settings, *, channel=None) -> FastAPI:
             request_id=outcome.request_id,
             risk=outcome.risk,
         )
+
+    @app.post("/v1/questions", response_model=QuestionResponse)
+    async def ask_question(body: QuestionRequestBody) -> QuestionResponse:
+        """Block until a person chooses, then answer — or fall back to the desk.
+
+        Held open for the same deadline as an approval, and above it sits the
+        bridge's HTTP timeout. Unlike `/v1/approvals`, an empty answer is safe:
+        it sends the choice back to the terminal picker rather than deciding it.
+        """
+        outcome = await questions.ask(
+            session_id=body.session_id,
+            agent_id=body.agent_id,
+            question=body.question,
+            options=[Choice(label=o.label, description=o.description) for o in body.options],
+            header=body.header,
+            tool_use_id=body.tool_use_id,
+            cwd=body.cwd,
+            project_dir=body.project_dir,
+            role=body.role,
+            session_name=body.session_name,
+        )
+        return QuestionResponse(answer=outcome.answer)
 
     @app.post("/v1/messages", response_model=MessageResponse)
     async def relay_message(body: MessageBody) -> MessageResponse:

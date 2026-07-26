@@ -2256,3 +2256,111 @@ async def test_a_built_in_command_is_not_shadowed_by_a_prompt(tmp_path: Path) ->
 
     assert runner.sent == []
     assert "Paused" in api.sent[-1]["text"]
+
+
+# --- questions: the agent asking a person to choose --------------------------
+
+from halyard.core.questions import Choice, QuestionStore  # noqa: E402
+
+
+async def with_a_question(tmp_path: Path, **overrides):
+    """A channel holding one open question, routed to the default chat."""
+    store = ApprovalStore(ttl=timedelta(minutes=5))
+    qstore = QuestionStore(ttl=timedelta(minutes=5))
+    sink = JsonlAuditSink(tmp_path / "audit.jsonl")
+    audit = AuditLog([sink])
+    await audit.open()
+    api = FakeTelegramApi()
+    channel = TelegramChannel(
+        api=api,
+        store=store,
+        question_store=qstore,
+        audit=audit,
+        chat_id=CHAT,
+        authorized_user_ids=frozenset({APPROVER}),
+        poll_retry_seconds=0.01,
+    )
+    defaults = {
+        "session_id": "session-1",
+        "agent_id": "claude-code",
+        "project": "alpha-engine",
+        "question": "Which is your favorite color?",
+        "options": [Choice(label="Red", description="A warm color."), Choice(label="Blue")],
+    }
+    defaults.update(overrides)
+    request = await qstore.create(**defaults)
+    await channel.send_question(request)
+    return channel, api, qstore, request
+
+
+def question_press(request, index: int, *, user: str = APPROVER) -> dict:
+    return {
+        "id": "q1",
+        "from": {"id": int(user)},
+        "message": {"chat": {"id": CHAT}},
+        "data": cards.question_data(request, index),
+    }
+
+
+async def test_a_question_card_carries_the_options_as_buttons(tmp_path: Path) -> None:
+    _channel, api, _qstore, _request = await with_a_question(tmp_path)
+
+    card = api.sent[-1]
+    assert "Which is your favorite color?" in card["text"]
+    labels = [b["text"] for row in card["reply_markup"]["inline_keyboard"] for b in row]
+    assert labels == ["Red", "Blue"]
+
+
+async def test_tapping_an_option_answers_with_its_label(tmp_path: Path) -> None:
+    channel, api, qstore, request = await with_a_question(tmp_path)
+
+    await channel._handle_callback(question_press(request, 0))
+
+    resolution = await qstore.wait_for(request.request_id)
+    assert resolution.answer == "Red"
+    # The card is rewritten to show the choice rather than left with live buttons.
+    assert any("Red" in edit["text"] for edit in api.edits)
+
+
+async def test_a_typed_reply_answers_the_open_question(tmp_path: Path) -> None:
+    """The "Other" path: the session is blocked on the question, so a message
+    typed into its chat is the answer to it, verbatim."""
+    channel, _api, qstore, request = await with_a_question(tmp_path)
+
+    await channel._handle_message(typed_in("actually, use teal", CHAT))
+
+    resolution = await qstore.wait_for(request.request_id)
+    assert resolution.answer == "actually, use teal"
+
+
+async def test_a_typed_answer_is_not_forwarded_as_a_message(tmp_path: Path) -> None:
+    """It must not also reach the session as a normal turn — the question owns
+    the message while it is open."""
+    channel, _api, _qstore, _request = await with_a_question(tmp_path)
+    forwarded = []
+    channel._forward_to_session = lambda *a, **k: forwarded.append(a)  # type: ignore[assignment]
+
+    await channel._handle_message(typed_in("teal", CHAT))
+
+    assert forwarded == []
+
+
+async def test_a_stranger_cannot_answer_a_question(tmp_path: Path) -> None:
+    channel, _api, qstore, request = await with_a_question(tmp_path)
+
+    await channel._handle_callback(question_press(request, 0, user=STRANGER))
+
+    # Still open — the press was recorded and ignored, not honoured.
+    assert await qstore.get(request.request_id) is not None
+    records = await JsonlAuditSink(tmp_path / "audit.jsonl").read_all()
+    assert AuditAction.UNAUTHORIZED_CALLBACK in {r.action for r in records}
+
+
+async def test_answering_a_question_twice_keeps_the_first_answer(tmp_path: Path) -> None:
+    channel, _api, qstore, request = await with_a_question(tmp_path)
+    await channel._handle_callback(question_press(request, 0))
+
+    await channel._handle_callback(question_press(request, 1))
+
+    resolution = await qstore.wait_for(request.request_id)
+    assert resolution.answer == "Red"
