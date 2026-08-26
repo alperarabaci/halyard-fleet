@@ -178,6 +178,35 @@ run unsandboxed code on the machine.
 
 The measurements are in [Antigravity notes](antigravity-payload-notes.md).
 
+## The service is installed and launchd says it does not exist
+
+```
+Could not find service "com.halyard.fleet" in domain for user gui: 501
+```
+
+The plist is in `~/Library/LaunchAgents`, `halyard service install` reported
+success, and `launchctl` will not admit the service exists at all. Nothing about
+the file is wrong.
+
+Something ran `launchctl unload -w`, which is what people reach for to stop the
+service while working locally — and this project's own instructions said so for
+a while. The `-w` writes a **persistent disabled record** into launchd's own
+database, separate from the plist, and the legacy `load -w` does not reliably
+undo it. Reinstalling looked like it worked every time.
+
+```bash
+launchctl print-disabled gui/$(id -u) | grep halyard    # the evidence
+uv run halyard service install                          # clears it and starts
+```
+
+`install` now enables the label before it bootstraps, so this cannot recur, and
+`halyard service status` reports the disabled state by name rather than as
+"not loaded". To stop it for local work, use the command that leaves no record:
+
+```bash
+launchctl bootout gui/$(id -u)/com.halyard.fleet
+```
+
 ---
 
 ## What is worth checking before asking anywhere else
