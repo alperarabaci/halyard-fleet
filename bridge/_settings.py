@@ -49,6 +49,7 @@ def bridge_log_path(when: datetime | None = None) -> Path:
     """
     return BRIDGE_LOG_DIR / f"bridge-{(when or datetime.now()).strftime('%G-W%V')}.log"
 
+
 #: Searched in order, first hit wins. `halyard.yaml` is the file the control
 #: plane is configured from; the home location exists for installs where the
 #: bridges are referenced from somewhere else.
