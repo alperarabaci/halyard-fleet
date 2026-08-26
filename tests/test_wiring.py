@@ -825,7 +825,7 @@ def test_claude_code_gates_the_question_tool_as_well_as_the_shell(tmp_path: Path
 
     groups = read(project)["hooks"]["PreToolUse"]
     matchers = [g["matcher"] for g in groups]
-    assert matchers == ["Bash|AskUserQuestion"]
+    assert matchers == ["Bash|AskUserQuestion|Write|Edit|MultiEdit|NotebookEdit"]
 
 
 def test_a_shell_only_matcher_from_before_is_corrected(tmp_path: Path) -> None:
@@ -841,4 +841,5 @@ def test_a_shell_only_matcher_from_before_is_corrected(tmp_path: Path) -> None:
 
     wiring.wire(project, runtimes=(CLAUDE,))
 
-    assert read(project)["hooks"]["PreToolUse"][0]["matcher"] == "Bash|AskUserQuestion"
+    gated = "Bash|AskUserQuestion|Write|Edit|MultiEdit|NotebookEdit"
+    assert read(project)["hooks"]["PreToolUse"][0]["matcher"] == gated

@@ -151,6 +151,9 @@ def test_the_payload_is_forwarded_without_being_reinterpreted() -> None:
         # a turn that dies with no hook to announce it. Nothing on the approval
         # path reads it.
         "transcript_path": "/tmp/transcript.jsonl",
+        # No file path: this is a Bash call, and its whole argument is a
+        # command rather than a destination.
+        "file_path": None,
         # The tool call's own one-line summary. Only `justification` was read
         # before, which a Bash call does not have, so every card arrived as a
         # bare command with the intent left to be guessed from the shell.
@@ -163,7 +166,11 @@ def test_a_tool_without_a_command_is_described_rather_than_dropped() -> None:
     with control_plane(body={"decision": "allow", "reason": "ok"}) as (url, received):
         run(BRIDGE, payload, HALYARD_URL=url)
 
-    assert json.loads(received[0]["command"]) == {"file_path": "/a", "content": "b"}
+    # The destination, not the file. A `Write` carries its whole content in
+    # `tool_input`, and putting that on a phone would bury the one fact worth
+    # reading — while the path travels separately, for `writes:` to match on.
+    assert received[0]["command"] == "Write /a"
+    assert received[0]["file_path"] == "/a"
 
 
 def test_a_codex_permission_request_prints_its_native_decision_shape() -> None:

@@ -14,8 +14,9 @@ usage limit hit mid-run — that reaches you too, instead of the session just go
 
 It runs on your own machine. No open ports, no exposed API, nothing to log into.
 
-Nothing is ever approved automatically: every failure — a crash, a timeout, an
-unreachable control plane — denies.
+Nothing is approved by accident: every failure — a crash, a timeout, an unreachable
+control plane — denies. The only thing that goes through without a person is a write
+to a path you named yourself, and each one is written to the audit log.
 
 **Runtimes:** Claude Code, Codex &nbsp;·&nbsp; **Channel:** Telegram &nbsp;·&nbsp; **Tested on:** macOS
 
@@ -101,6 +102,22 @@ a phone is bad at moving text: a long answer arrives split into three messages,
 and handing it on means copying each piece while the agent receiving them
 starts working on a third of the instruction. Better not to move it at all.
 
+**Files the agent writes** reach you the same way. A turn you start from the
+phone runs headless, where Claude Code cannot open its own permission dialog —
+so an unlisted `Write` used to be denied outright, with nothing to answer and no
+sign of why. Now it asks. Name the places that should not have to ask in
+`halyard.yaml`:
+
+```yaml
+writes:
+  - NOTES/**
+```
+
+That is the one thing Halyard permits without a person, so it is empty by
+default, every grant is written to the audit log with the pattern that allowed
+it, and patterns are matched *inside the project the write belongs to* — a path
+that climbs out with `..` or through a symlink is refused however it is spelled.
+
 When Claude Code asks a **multiple-choice question** (its `AskUserQuestion`
 tool), the options arrive on your phone as buttons — tap one, or reply with your
 own answer. The choice goes straight back into the session, and the picker at
@@ -136,7 +153,9 @@ what they say. macOS only — on Linux, run `halyard serve` under a systemd unit
 - **One bot token per machine.** Telegram's `getUpdates` has a single consumer.
 - **`/pause` steps aside rather than denying.** The runtime's own permission list
   then decides, with no card and no audit entry.
-- **The gate covers what the matcher covers** — Bash today, not `Write` or `Edit`.
+- **The gate covers what the matcher covers** — Bash, `Write`, `Edit` and the
+  question tool today. Widening it also widens what stops when Halyard is down:
+  those tools are denied then, exactly as Bash is.
 - **Multiple-choice questions reach you from a desktop or terminal session, not from a
   turn you started over Telegram.** A Telegram-initiated turn runs headless, where
   Claude Code does not load `AskUserQuestion` — so it asks in prose you can just reply

@@ -114,7 +114,17 @@ RUNTIME = RuntimeSpec(
         # back to the terminal picker rather than being denied.
         settings=".claude/settings.local.json",
         also=(".claude/settings.json",),
-        matcher="Bash|AskUserQuestion",
+        # `Write` and `Edit` are here because of a failure the gate could not
+        # see. A turn started from a phone runs headless, where Claude Code
+        # cannot open a permission dialog — so a write that is not on its own
+        # allow list was denied outright, with no card and nothing to answer.
+        # Work stopped mid-sentence and the reason was invisible from away.
+        #
+        # The cost is stated rather than hidden: these tools now need Halyard
+        # running, exactly as Bash does, and each unlisted write asks. The
+        # `writes:` block in halyard.yaml is how you say which paths should not
+        # have to — see `core/writes.py`.
+        matcher="Bash|AskUserQuestion|Write|Edit|MultiEdit|NotebookEdit",
     ),
     runner=_runner,
     find_session=late("halyard.agents.claude_code", "find_session"),

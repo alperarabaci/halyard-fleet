@@ -18,7 +18,7 @@ from halyard.core.events import RiskLevel
 from halyard.core.policy import Policy
 from halyard.core.redaction import Redactor
 from halyard.core.registry import SessionRegistry
-from halyard.core.service import ApprovalService
+from halyard.core.service import ApprovalService, BridgeDecision
 
 SECRET = "hunter2SuperSecretValue"
 
@@ -452,3 +452,142 @@ async def test_a_question_nobody_answers_comes_back_empty(tmp_path: Path) -> Non
     outcome = await ask_question(service)
 
     assert outcome.answer is None
+
+
+# --- the one grant: writes to a configured path ------------------------------
+
+
+def build_with_writes(tmp_path: Path, patterns: tuple[str, ...], *, channel=None):
+    """A service that would otherwise deny everything, so a grant is visible."""
+    store = ApprovalStore(ttl=timedelta(minutes=5))
+    sink = JsonlAuditSink(tmp_path / "audit.jsonl")
+    service = ApprovalService(
+        store=store,
+        policy=Policy(),
+        redactor=Redactor(),
+        audit=AuditLog([sink]),
+        registry=SessionRegistry(),
+        channel=channel if channel is not None else StubChannel(store, Decision.DENY),
+        project="alpha-engine",
+        allowed_writes=patterns,
+    )
+    return service, sink
+
+
+async def test_a_write_to_a_configured_path_is_allowed_without_a_card(tmp_path: Path) -> None:
+    """The channel here denies everything, so an allow can only have come from
+    the configuration rather than from anybody being asked."""
+    project = tmp_path / "repo"
+    (project / "NOTES").mkdir(parents=True)
+    service, sink = build_with_writes(tmp_path, ("NOTES/**",))
+    await sink.open()
+
+    outcome = await service.request(
+        session_id="s1",
+        agent_id="claude-code",
+        tool="Write",
+        command="Write NOTES/p2.md",
+        project_dir=str(project),
+        file_path=str(project / "NOTES" / "p2.md"),
+    )
+
+    assert outcome.allowed
+    assert "NOTES/**" in outcome.reason
+
+
+async def test_the_grant_is_written_down_with_the_pattern(tmp_path: Path) -> None:
+    """ "Why did that run without asking" must always have an answer."""
+    project = tmp_path / "repo"
+    (project / "NOTES").mkdir(parents=True)
+    service, sink = build_with_writes(tmp_path, ("NOTES/**",))
+    await sink.open()
+
+    await service.request(
+        session_id="s1",
+        agent_id="claude-code",
+        tool="Write",
+        command="Write NOTES/p2.md",
+        project_dir=str(project),
+        file_path=str(project / "NOTES" / "p2.md"),
+    )
+
+    records = await sink.read_all()
+    assert [r.action for r in records] == [AuditAction.WRITE_PREAUTHORIZED]
+    assert records[0].detail["pattern"] == "NOTES/**"
+    assert records[0].actor == "config"
+
+
+async def test_a_write_outside_the_configured_paths_still_asks(tmp_path: Path) -> None:
+    project = tmp_path / "repo"
+    (project / "src").mkdir(parents=True)
+    service, sink = build_with_writes(tmp_path, ("NOTES/**",))
+    await sink.open()
+
+    outcome = await service.request(
+        session_id="s1",
+        agent_id="claude-code",
+        tool="Write",
+        command="Write src/main.py",
+        project_dir=str(project),
+        file_path=str(project / "src" / "main.py"),
+    )
+
+    # It reached the channel — which denies here — rather than being granted.
+    assert not outcome.allowed
+    assert AuditAction.APPROVAL_REQUESTED in {r.action for r in await sink.read_all()}
+
+
+async def test_a_bash_command_is_never_granted_by_a_path(tmp_path: Path) -> None:
+    """Its whole argument is a command, not a destination. A `writes:` entry
+    must not become a way to run things without asking."""
+    project = tmp_path / "repo"
+    (project / "NOTES").mkdir(parents=True)
+    service, sink = build_with_writes(tmp_path, ("NOTES/**", "**"))
+    await sink.open()
+
+    outcome = await service.request(
+        session_id="s1",
+        agent_id="claude-code",
+        tool="Bash",
+        command="rm -rf NOTES",
+        project_dir=str(project),
+        file_path=str(project / "NOTES" / "x.md"),
+    )
+
+    assert not outcome.allowed
+
+
+async def test_a_paused_gate_still_defers_rather_than_granting(tmp_path: Path) -> None:
+    """Pausing hands the question back to the runtime. A configured path must
+    not turn that into an approval Halyard made while stepped aside."""
+    from halyard.core.gate import Gate
+
+    project = tmp_path / "repo"
+    (project / "NOTES").mkdir(parents=True)
+    store = ApprovalStore(ttl=timedelta(minutes=5))
+    sink = JsonlAuditSink(tmp_path / "audit.jsonl")
+    gate = Gate()
+    await gate.pause("tester")
+    service = ApprovalService(
+        store=store,
+        policy=Policy(),
+        redactor=Redactor(),
+        audit=AuditLog([sink]),
+        registry=SessionRegistry(),
+        channel=StubChannel(store, Decision.DENY),
+        project="alpha-engine",
+        gate=gate,
+        allowed_writes=("NOTES/**",),
+    )
+    await sink.open()
+
+    outcome = await service.request(
+        session_id="s1",
+        agent_id="claude-code",
+        tool="Write",
+        command="Write NOTES/p2.md",
+        project_dir=str(project),
+        file_path=str(project / "NOTES" / "p2.md"),
+    )
+
+    assert outcome.decision is BridgeDecision.DEFER

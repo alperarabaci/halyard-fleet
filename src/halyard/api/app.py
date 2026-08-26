@@ -25,6 +25,7 @@ from halyard.agents import registry as runtimes
 from halyard.channels.stub import StubChannel
 from halyard.channels.telegram import TelegramApi, TelegramChannel
 from halyard.config import ChannelKind, Settings
+from halyard.core import writes as configured_writes
 from halyard.core.approvals import ApprovalStore, Decision
 from halyard.core.audit import (
     AuditAction,
@@ -82,6 +83,9 @@ class ApprovalRequestBody(BaseModel):
     #: died where no hook fires. Off the approval path — read by nothing that
     #: decides anything, so a bad value cannot affect a decision.
     transcript_path: str | None = None
+    #: The destination of a file tool, matched against the `writes:` block to
+    #: decide whether this one may go through without a card.
+    file_path: str | None = None
 
 
 class ApprovalResponse(BaseModel):
@@ -313,6 +317,20 @@ def create_app(settings: Settings, *, channel=None) -> FastAPI:
         gate=gate,
         seats=seats,
     )
+    # Paths a write may reach without anybody being asked. Empty unless the
+    # configuration says otherwise, and a block that will not parse is refused
+    # loudly rather than read as "nothing" — a grant somebody believes they have
+    # written and that is silently absent is the worse of the two failures.
+    try:
+        allowed_writes = configured_writes.load()
+    except ValueError as error:
+        logger.error("Ignoring the `writes:` block, so every write will ask: %s", error)
+        allowed_writes = ()
+    if allowed_writes:
+        logger.info(
+            "Writes to %s go through without asking", ", ".join(repr(p) for p in allowed_writes)
+        )
+
     service = ApprovalService(
         store=store,
         policy=Policy(),
@@ -323,6 +341,7 @@ def create_app(settings: Settings, *, channel=None) -> FastAPI:
         project=settings.project_name,
         gate=gate,
         seats=seats,
+        allowed_writes=allowed_writes,
     )
     questions = QuestionService(
         store=question_store,
@@ -462,6 +481,7 @@ def create_app(settings: Settings, *, channel=None) -> FastAPI:
             session_name=body.session_name,
             reason=body.reason,
             declared_risk=body.declared_risk,
+            file_path=body.file_path,
         )
         return ApprovalResponse(
             decision=outcome.decision,
