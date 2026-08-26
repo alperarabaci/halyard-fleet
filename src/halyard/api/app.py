@@ -25,6 +25,7 @@ from halyard.agents import registry as runtimes
 from halyard.channels.stub import StubChannel
 from halyard.channels.telegram import TelegramApi, TelegramChannel
 from halyard.config import ChannelKind, Settings
+from halyard.core import compaction as after_compaction
 from halyard.core import tools as configured_tools
 from halyard.core import writes as configured_writes
 from halyard.core.approvals import ApprovalStore, Decision
@@ -158,6 +159,31 @@ class MessageBody(BaseModel):
     role: Role | None = None
     session_name: str | None = None
     transcript_path: str | None = None
+
+
+class CompactionBody(BaseModel):
+    """What the `SessionStart` bridge asks after a compaction."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    session_id: str
+    agent_id: str = runtimes.DEFAULT
+    session_name: str | None = None
+    transcript_path: str | None = None
+    #: `before` starts the record while the summary is being made; `after`
+    #: collects it. Anything else is treated as `after`, which only ever reads.
+    when: str = "after"
+
+
+class CompactionResponse(BaseModel):
+    """The orientation to fold back into the session, or nothing.
+
+    Empty is the ordinary answer: a seat with no `after_compaction:` file, or a
+    session that resolves to no seat at all. The bridge prints nothing then, and
+    the session carries on exactly as the compaction left it.
+    """
+
+    context: str | None = None
 
 
 class MessageResponse(BaseModel):
@@ -366,6 +392,11 @@ def create_app(settings: Settings, *, channel=None) -> FastAPI:
     # not fire `Stop`, so the reply relay never runs. Entirely off the approval
     # path: fed session paths as a side effect of requests it does not touch.
     watcher = TranscriptWatcher(channel=resolved_channel, gate=gate)
+    # Writes the record a compaction is about to make unrecoverable, in a turn
+    # of its own so the session it is about is never resumed or forked.
+    recorder = after_compaction.Recorder(
+        seats=configured_seats, runners=by_runtime, model=settings.compaction_model
+    )
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -521,6 +552,48 @@ def create_app(settings: Settings, *, channel=None) -> FastAPI:
             session_name=body.session_name,
         )
         return QuestionResponse(answer=outcome.answer)
+
+    @app.post("/v1/compaction", response_model=CompactionResponse)
+    async def compaction_context(body: CompactionBody) -> CompactionResponse:
+        """What to tell a session that has just been compacted.
+
+        Answers immediately and never blocks: the session is waiting on this
+        before it does anything. Nothing here decides anything, so every
+        uncertainty answers with nothing rather than guessing.
+        """
+        if body.when == "before":
+            # Held open while the record is written. The compaction waits for
+            # it, which is the trade taken deliberately: a summary that starts a
+            # minute later beats a record that arrives after the context it was
+            # about is gone. Bounded in `Recorder`, and every failure there ends
+            # in the compaction simply going ahead.
+            await recorder.write(
+                session_id=body.session_id,
+                agent_id=body.agent_id,
+                session_name=body.session_name,
+                transcript_path=body.transcript_path,
+            )
+            return CompactionResponse()
+
+        # What the seat says to read, and what this session knew before the
+        # summary took it. Either may be missing; both missing means the bridge
+        # prints nothing and the session carries on as compaction left it.
+        standing = after_compaction.for_seat(
+            configured_seats,
+            agent_id=body.agent_id,
+            session_name=body.session_name,
+            session_id=body.session_id,
+        )
+        record = recorder.take(body.session_id)
+        parts = [
+            part
+            for part in (
+                f"Record of this session before it was compacted:\n\n{record}" if record else None,
+                standing,
+            )
+            if part
+        ]
+        return CompactionResponse(context="\n\n---\n\n".join(parts) or None)
 
     @app.post("/v1/messages", response_model=MessageResponse)
     async def relay_message(body: MessageBody) -> MessageResponse:

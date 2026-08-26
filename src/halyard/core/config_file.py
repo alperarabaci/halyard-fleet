@@ -47,7 +47,7 @@ from halyard.core.seats import Seat, _default_runtime, known_runtimes
 
 #: Where a project's own settings live, beside its seats.
 _PROJECT_FIELDS = {"path", "seats", "name"}
-_SEAT_FIELDS = {"runtime", "session", "chat", "role"}
+_SEAT_FIELDS = {"runtime", "session", "chat", "role", "after_compaction", "before_compaction"}
 
 
 @dataclass(frozen=True)
@@ -104,6 +104,8 @@ def _seat_from(label: str, spec: Any, project: str) -> Seat:
         chat=_as_text(spec.get("chat")),
         role=Role(role.lower()) if role else None,
         project=project,
+        after_compaction=_as_text(spec.get("after_compaction")),
+        before_compaction=_as_text(spec.get("before_compaction")),
     )
 
 
