@@ -41,6 +41,45 @@ Fixed: the reason now travels to the phone with the failure, so the card says
 what happened rather than telling you to read a log on a machine you are away
 from.
 
+## Deliveries stop with "OAuth session expired and could not be refreshed"
+
+The gate still works, the card still arrives, and every message you send from
+your phone comes back as:
+
+```
+⚠️ That did not reach <session> (claude-code).
+Failed to authenticate: OAuth session expired and could not be refreshed
+```
+
+The login `/login` creates is refreshed while somebody is at the keyboard, and
+eventually cannot be. Measured on one machine twice, four days apart — each time
+it stopped remote work until somebody signed in at the desk, which is precisely
+where you are not.
+
+The fix is to give the control plane a credential of its own:
+
+```bash
+claude setup-token
+```
+
+That mints a long-lived token — it uses your **subscription** rather than
+pay-as-you-go API billing, and lasts about a year. Put it in `halyard.yaml`:
+
+```yaml
+settings:
+  HALYARD_CLAUDE_OAUTH_TOKEN: "sk-ant-oat01-…"
+```
+
+It is a secret, and lives in the same gitignored file as the bot token. Only the
+turns *Halyard* starts use it; a session you drive at the keyboard is untouched.
+
+`halyard doctor` warns whenever this is unset, and names what the CLI is falling
+back to. Two things it cannot do: `claude auth status` carries no expiry — only
+`loggedIn`, `authMethod`, `apiProvider`, measured on 2.1.246 — so nothing can
+warn you *before* it lapses; and if `ANTHROPIC_API_KEY` is set anywhere in the
+environment it outranks the token **and bills the API instead of your plan**, so
+`doctor` says that too.
+
 ## The CLI is installed and says "Not logged in"
 
 `claude` runs, prints `Not logged in · Please run /login`, and every delivery

@@ -33,23 +33,51 @@ def _runner(settings=None) -> ClaudeCodeRunner:
         binary=settings.claude_binary,
         models=models or None,
         default_model=(settings.claude_default_model or "").strip() or None,
+        oauth_token=settings.claude_oauth_token,
     )
 
 
-def _check_available(claude_binary=None, **_) -> list[tuple[str, str]]:
+def _check_available(claude_binary=None, claude_oauth_token=None, **_) -> list[tuple[str, str]]:
     """The CLI, which one, and whether it can sign in.
 
     The last of those is what a Mac mini was missing while looking healthy:
     the binary was there, doctor said so, and every delivery failed with the
     CLI's own "Not logged in · Please run /login".
     """
-    from halyard.agents.claude_code.runner import find_claude_binary, signed_in
+    import os
+
+    from halyard.agents.claude_code.runner import auth_method, find_claude_binary, signed_in
 
     found = find_claude_binary(claude_binary)
     if found is None:
         return [("fail", "the claude CLI is not on this machine")]
 
     lines = [("ok", f"messages use {found}")]
+
+    # Which credential, not just whether there is one. A control plane running
+    # on the login somebody made at the keyboard works until that login expires
+    # — measured twice, four days apart, each time stopping remote work with
+    # "OAuth session expired and could not be refreshed" until somebody was
+    # back at the desk. `auth status` carries no expiry to warn from, so the
+    # useful thing to say is which credential is in use and what that implies.
+    if claude_oauth_token:
+        lines.append(("ok", "turns from here use a long-lived token"))
+        if os.environ.get("ANTHROPIC_API_KEY"):
+            lines.append(
+                ("warn", "ANTHROPIC_API_KEY outranks that token, and bills the API not the plan")
+            )
+    else:
+        lines.append(
+            ("warn", "turns from here use the desktop login, which expires and stops deliveries")
+        )
+        # Said only here, where somebody needs to know what it is falling back
+        # to. A clean check stays one line rather than a paragraph about what
+        # is already fine.
+        if method := auth_method(claude_binary):
+            lines.append(("", f"the CLI reports authMethod={method}"))
+        lines.append(("", f'mint one that lasts a year:  "{found}" setup-token'))
+        lines.append(("", "then set HALYARD_CLAUDE_OAUTH_TOKEN in halyard.yaml"))
+
     match signed_in(claude_binary):
         case False:
             lines.append(("fail", "that CLI is not signed in, so nothing can be delivered"))

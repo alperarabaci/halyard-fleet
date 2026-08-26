@@ -24,6 +24,22 @@ settings:
   # refused and the attempt is written to the audit log.
   TELEGRAM_AUTHORIZED_USER_IDS: "11111111"
 
+  # The credential the turns Halyard starts run on.
+  #
+  # Without this they use the login you made at the keyboard, and that login
+  # expires and cannot always be refreshed — which stops remote deliveries
+  # until somebody signs in at the desk, the one thing you are away from.
+  #
+  # Mint one with:  claude setup-token
+  # It uses your subscription rather than pay-as-you-go API billing, and lasts
+  # about a year. Secret, like the token above — this is what the gitignore is
+  # for. A session you drive at the keyboard is untouched by this.
+  #
+  # HALYARD_CLAUDE_OAUTH_TOKEN: "sk-ant-oat01-replace-me"
+  #
+  # Note: ANTHROPIC_API_KEY, if it is set anywhere in the environment, outranks
+  # the token and bills the API instead of your plan. `halyard doctor` says so.
+
   # What a card calls this codebase.
   CLAUDE_PROJECT_NAME: alpha-engine
 
