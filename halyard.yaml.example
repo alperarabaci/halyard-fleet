@@ -131,6 +131,23 @@ projects:
       # project, because it is also how `doctor` names a seat.
       nav:
         runtime: claude-code
+        # What survives a compaction, for the seats where it matters. A
+        # navigator holding a plan across a day needs this; a driver running
+        # one command does not, and is left alone by leaving these out.
+        #
+        #   before_compaction  instructions for the record Halyard writes
+        #                      *about* this session as it is compacted — a
+        #                      separate one-shot turn reads the transcript, so
+        #                      the session itself is never resumed or forked.
+        #   after_compaction   handed to the session once the summary is done,
+        #                      when it has to work out what it was doing.
+        #
+        # Both are files, relative to the Halyard checkout. Measured: a hook
+        # cannot steer the summary itself — `PreCompact` output is refused by
+        # the runtime — so this is the shape that actually works.
+        #
+        # before_compaction: compaction_hook/alpha_engine/precompact.md
+        # after_compaction: compaction_hook/alpha_engine/postcompact.md
         # The name the runtime knows the session by. `halyard sessions` lists
         # the ones this machine can see; a Codex thread id works too.
         session: alpha-engine-navigator

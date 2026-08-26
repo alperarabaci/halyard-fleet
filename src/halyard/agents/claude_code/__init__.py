@@ -134,6 +134,18 @@ RUNTIME = RuntimeSpec(
         matcher=(
             "Bash|AskUserQuestion|Write|Edit|MultiEdit|NotebookEdit|WebFetch|WebSearch|mcp__.*"
         ),
+        # `SessionStart` fires when a session opens and again once a compaction
+        # has finished, told apart by `source`. The second is where a seat gets
+        # its orientation back — measured to be the only injection point around
+        # a compaction that reaches the model at all.
+        extra=(
+            # Generous, because this one blocks: the record is written while
+            # the compaction waits. The control plane gives up at 120s, and a
+            # hook that outruns its own timeout is discarded — which here means
+            # the summary proceeds without a record, the safe direction.
+            ("PreCompact", None, "compaction.py", 180),
+            ("SessionStart", None, "compaction.py", 15),
+        ),
     ),
     runner=_runner,
     find_session=late("halyard.agents.claude_code", "find_session"),

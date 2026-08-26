@@ -80,6 +80,17 @@ class Seat:
     #: dialect has no way to say it and leaves it unset, which is honest —
     #: that dialect only ever described one project.
     project: str | None = None
+    #: A file whose contents are handed to this session after a compaction, when
+    #: half its context has just been thrown away and it has to work out what it
+    #: was doing. Optional, per seat: a navigator holding a plan needs this and a
+    #: driver running one command usually does not.
+    after_compaction: str | None = None
+    #: A file of instructions for the record Halyard writes *about* this session
+    #: just before it is compacted. Not injected anywhere: a hook cannot make a
+    #: model write anything, and `PreCompact` output is refused outright —
+    #: measured twice. So the record is produced by a separate one-shot turn
+    #: reading the transcript, and handed back afterwards with the file above.
+    before_compaction: str | None = None
 
     def __post_init__(self) -> None:
         allowed = known_runtimes()

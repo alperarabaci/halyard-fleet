@@ -224,6 +224,11 @@ class Settings(BaseSettings):
     #: without waiting for a release, because models ship faster than this does.
     claude_models: str | None = Field(default=None, validation_alias="HALYARD_CLAUDE_MODELS")
 
+    #: Which model writes the record carried across a compaction. A distillation
+    #: of text somebody else already wrote — the reasoning happened in the
+    #: session, not here — so it does not need the expensive one.
+    compaction_model: str = Field(default="sonnet", validation_alias="HALYARD_COMPACTION_MODEL")
+
     #: Which Claude Code executable sends turns received from a channel.
     #: On macOS the runner otherwise prefers the engine bundled with Claude
     #: Desktop, keeping the writer and the already-open session on one version.

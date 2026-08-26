@@ -140,6 +140,34 @@ own answer. The choice goes straight back into the session, and the picker at
 the desk never appears. Nobody answers in time, or Halyard is paused, and it
 falls back to that picker rather than deciding for you. Claude Code only for now.
 
+**When a session is compacted**, half its context goes and what it loses is the
+expensive half: which numbers were measured rather than claimed, what you
+already rejected and why, the corrections it made to its own earlier mistakes.
+What comes back is a confident agent working from a slightly older version of
+events.
+
+Two files per seat close that, and neither needs you to be watching:
+
+```yaml
+seats:
+  nav:
+    runtime: claude-code
+    before_compaction: compaction_hook/precompact.md
+    after_compaction: compaction_hook/postcompact.md
+```
+
+`before_compaction` is instructions for a record Halyard writes *about* the
+session as it is compacted — a separate one-shot turn reads the transcript, so
+the live session is never resumed or forked. `after_compaction` is what the
+session is handed once the summary is done. Both are optional and per seat: a
+navigator holding a plan needs them, a driver running one command does not.
+
+Measured before it was built: a hook cannot steer the summary itself — output
+from `PreCompact` is refused by the runtime as an injection attempt — and
+`SessionStart` after a compaction is the one channel that reaches the model.
+The whole path is best effort, so a record that is late or a file that is
+missing costs orientation, never the session.
+
 | On the machine | |
 |---|---|
 | `halyard init` | guided setup: `halyard.yaml`, wiring, and a check |

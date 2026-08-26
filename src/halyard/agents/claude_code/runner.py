@@ -305,6 +305,56 @@ class ClaudeCodeRunner:
         async with self._locks[session_id]:
             return await self._run(session_id, text, cwd)
 
+    async def ask(
+        self, text: str, *, timeout: float = 180.0, model: str | None = None
+    ) -> str | None:
+        """Run one prompt in a session of its own and return what came back.
+
+        No `--resume`, which is the point. Everything else here writes *into* a
+        conversation somebody is having, and two overlapping resumes of one
+        session fork it silently — so work that is *about* a session, rather
+        than part of it, has to happen somewhere else entirely. This is that
+        somewhere else: a throwaway turn that reads what it is given and answers.
+
+        Returns None on every failure. The caller is producing a convenience —
+        a record of what a session knew before it was compacted — and a session
+        must not be held up, or changed, because that could not be produced.
+        """
+        binary = self._binary
+        if not binary or not text.strip():
+            return None
+        arguments = [binary, "-p"]
+        if chosen := model or self._default_model:
+            arguments += ["--model", chosen]
+        arguments.append(text)
+        try:
+            process = await asyncio.create_subprocess_exec(
+                *arguments,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                env=self._environment(),
+            )
+        except OSError:
+            logger.warning("Could not start the claude CLI for a one-shot turn", exc_info=True)
+            return None
+        try:
+            stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=timeout)
+        except TimeoutError:
+            process.kill()
+            await process.wait()
+            logger.warning("A one-shot turn ran past %.0fs; giving up on it", timeout)
+            return None
+        if process.returncode != 0:
+            reason = (
+                (stderr or b"").decode("utf-8", "replace").strip()
+                or (stdout or b"").decode("utf-8", "replace").strip()
+                or "no output"
+            )[:300]
+            logger.warning("A one-shot turn failed (exit %s): %s", process.returncode, reason)
+            return None
+        answer = (stdout or b"").decode("utf-8", "replace").strip()
+        return answer or None
+
     def _environment(self) -> dict[str, str]:
         """The environment one delivery runs in.
 

@@ -147,10 +147,6 @@ def test_the_payload_is_forwarded_without_being_reinterpreted() -> None:
         # No transcript at that path, so no name — and no routing, which lands
         # everything in the default chat exactly as it would have anyway.
         "session_name": None,
-        # Passed on so the control plane can watch this session's transcript for
-        # a turn that dies with no hook to announce it. Nothing on the approval
-        # path reads it.
-        "transcript_path": "/tmp/transcript.jsonl",
         # No file path: this is a Bash call, and its whole argument is a
         # command rather than a destination.
         "file_path": None,
@@ -358,7 +354,6 @@ def test_the_relay_forwards_what_the_agent_said() -> None:
         "project_dir": None,
         "role": None,
         "session_name": None,
-        "transcript_path": "/tmp/t.jsonl",
     }
 
 

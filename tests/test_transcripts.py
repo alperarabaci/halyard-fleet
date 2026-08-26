@@ -13,7 +13,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from halyard.core.gate import Gate
-from halyard.core.transcripts import TranscriptWatcher, find_api_errors
+from halyard.core.transcripts import TranscriptWatcher, find_api_errors, find_transcript
 
 START = datetime(2026, 7, 26, 10, 0, tzinfo=UTC)
 
@@ -66,12 +66,13 @@ def normal_line(text: str = "on it") -> str:
     )
 
 
-def watcher(channel=None, gate=None, clock=None) -> TranscriptWatcher:
+def watcher(channel=None, gate=None, clock=None, roots=None) -> TranscriptWatcher:
     return TranscriptWatcher(
         channel=channel or RecordingChannel(),
         gate=gate or Gate(),
         clock=clock or ManualClock(),
         idle_ttl=timedelta(minutes=30),
+        roots=roots,
     )
 
 
@@ -116,12 +117,12 @@ def test_an_id_already_seen_is_not_reported_again() -> None:
 
 async def test_only_errors_appended_after_watching_are_relayed(tmp_path: Path) -> None:
     channel = RecordingChannel()
-    w = watcher(channel)
-    tx = tmp_path / "sess.jsonl"
+    w = watcher(channel, roots=(tmp_path,))
+    tx = tmp_path / "9f1c2b3a-0000-0000-0000-000000000000.jsonl"
     # An error already in the file before anybody was watching.
     append(tx, error_line(uuid="old"))
 
-    w.note(session_id="s1", transcript_path=str(tx), agent_id="claude-code", session_name="drv")
+    w.note(session_id=tx.stem, agent_id="claude-code", session_name="drv")
     await w.poll_once()
     # Nothing yet: the offset started at the end, so history is not replayed.
     assert channel.messages == []
@@ -131,15 +132,15 @@ async def test_only_errors_appended_after_watching_are_relayed(tmp_path: Path) -
 
     assert len(channel.messages) == 1
     assert "session limit" in channel.messages[0]["text"]
-    assert channel.messages[0]["session_id"] == "s1"
+    assert channel.messages[0]["session_id"] == tx.stem
 
 
 async def test_a_partial_final_line_waits_until_it_is_whole(tmp_path: Path) -> None:
     channel = RecordingChannel()
-    w = watcher(channel)
-    tx = tmp_path / "sess.jsonl"
+    w = watcher(channel, roots=(tmp_path,))
+    tx = tmp_path / "9f1c2b3a-0000-0000-0000-000000000000.jsonl"
     tx.write_text("")
-    w.note(session_id="s1", transcript_path=str(tx), agent_id="claude-code")
+    w.note(session_id=tx.stem, agent_id="claude-code")
 
     append(tx, error_line(), newline=False)  # written, but no newline yet
     await w.poll_once()
@@ -152,10 +153,10 @@ async def test_a_partial_final_line_waits_until_it_is_whole(tmp_path: Path) -> N
 
 async def test_the_same_error_is_not_relayed_twice(tmp_path: Path) -> None:
     channel = RecordingChannel()
-    w = watcher(channel)
-    tx = tmp_path / "sess.jsonl"
+    w = watcher(channel, roots=(tmp_path,))
+    tx = tmp_path / "9f1c2b3a-0000-0000-0000-000000000000.jsonl"
     tx.write_text("")
-    w.note(session_id="s1", transcript_path=str(tx), agent_id="claude-code")
+    w.note(session_id=tx.stem, agent_id="claude-code")
 
     append(tx, error_line(uuid="u1"))
     await w.poll_once()
@@ -166,12 +167,8 @@ async def test_the_same_error_is_not_relayed_twice(tmp_path: Path) -> None:
 
 async def test_a_missing_transcript_does_not_raise(tmp_path: Path) -> None:
     channel = RecordingChannel()
-    w = watcher(channel)
-    w.note(
-        session_id="s1",
-        transcript_path=str(tmp_path / "gone.jsonl"),
-        agent_id="claude-code",
-    )
+    w = watcher(channel, roots=(tmp_path,))
+    w.note(session_id="9f1c2b3a-0000-0000-0000-000000000000", agent_id="claude-code")
 
     await w.poll_once()  # must not raise
 
@@ -180,10 +177,10 @@ async def test_a_missing_transcript_does_not_raise(tmp_path: Path) -> None:
 
 async def test_a_transcript_that_shrank_is_not_re_read(tmp_path: Path) -> None:
     channel = RecordingChannel()
-    w = watcher(channel)
-    tx = tmp_path / "sess.jsonl"
+    w = watcher(channel, roots=(tmp_path,))
+    tx = tmp_path / "9f1c2b3a-0000-0000-0000-000000000000.jsonl"
     append(tx, normal_line(), normal_line())
-    w.note(session_id="s1", transcript_path=str(tx), agent_id="claude-code")
+    w.note(session_id=tx.stem, agent_id="claude-code")
 
     tx.write_text(error_line(uuid="fresh") + "\n")  # replaced, now smaller
     await w.poll_once()  # resets to the new end rather than re-reading
@@ -202,10 +199,10 @@ async def test_a_paused_gate_stays_quiet(tmp_path: Path) -> None:
     channel = RecordingChannel()
     gate = Gate()
     await gate.pause("tester")
-    w = watcher(channel, gate=gate)
-    tx = tmp_path / "sess.jsonl"
+    w = watcher(channel, gate=gate, roots=(tmp_path,))
+    tx = tmp_path / "9f1c2b3a-0000-0000-0000-000000000000.jsonl"
     tx.write_text("")
-    w.note(session_id="s1", transcript_path=str(tx), agent_id="claude-code")
+    w.note(session_id=tx.stem, agent_id="claude-code")
 
     append(tx, error_line())
     await w.poll_once()
@@ -215,24 +212,59 @@ async def test_a_paused_gate_stays_quiet(tmp_path: Path) -> None:
 
 
 def test_only_claude_code_is_watched(tmp_path: Path) -> None:
-    w = watcher()
-    tx = tmp_path / "sess.jsonl"
+    w = watcher(roots=(tmp_path,))
+    tx = tmp_path / "9f1c2b3a-0000-0000-0000-000000000000.jsonl"
     tx.write_text("")
 
-    w.note(session_id="s1", transcript_path=str(tx), agent_id="codex")
+    w.note(session_id=tx.stem, agent_id="codex")
 
     # The transcript shape read here is Claude Code's; the others are not it.
-    assert "s1" not in w._watched
+    assert not w._watched
 
 
 async def test_an_idle_session_is_dropped(tmp_path: Path) -> None:
     clock = ManualClock()
-    w = watcher(clock=clock)
-    tx = tmp_path / "sess.jsonl"
+    w = watcher(clock=clock, roots=(tmp_path,))
+    tx = tmp_path / "9f1c2b3a-0000-0000-0000-000000000000.jsonl"
     tx.write_text("")
-    w.note(session_id="s1", transcript_path=str(tx), agent_id="claude-code")
+    w.note(session_id=tx.stem, agent_id="claude-code")
 
     clock.advance(timedelta(minutes=31).total_seconds())
     await w.poll_once()
 
-    assert "s1" not in w._watched
+    assert not w._watched
+
+
+# --- the path never comes from the payload ----------------------------------
+
+
+def test_a_transcript_is_found_by_its_session_id(tmp_path: Path) -> None:
+    wanted = tmp_path / "deep" / "9f1c2b3a-0000-0000-0000-000000000000.jsonl"
+    wanted.parent.mkdir(parents=True)
+    wanted.write_text("", encoding="utf-8")
+
+    assert find_transcript("9f1c2b3a-0000-0000-0000-000000000000", (tmp_path,)) == wanted
+
+
+def test_an_id_that_could_name_another_file_is_refused(tmp_path: Path) -> None:
+    """The id becomes a filename, so it may not contain a separator or a dot.
+    This is why the path is no longer taken from the payload at all: a value
+    posted over HTTP was becoming a filename, and CodeQL was right about it."""
+    for hostile in ("../../../etc/passwd", "a/b", "..", "x.jsonl", ""):
+        assert find_transcript(hostile, (tmp_path,)) is None
+
+
+def test_an_id_with_no_transcript_finds_nothing(tmp_path: Path) -> None:
+    assert find_transcript("9f1c2b3a-0000-0000-0000-000000000000", (tmp_path,)) is None
+
+
+def test_a_missing_root_is_skipped_rather_than_raised(tmp_path: Path) -> None:
+    assert find_transcript("9f1c2b3a-0000-0000-0000-000000000000", (tmp_path / "gone",)) is None
+
+
+async def test_the_watcher_watches_nothing_it_cannot_find(tmp_path: Path) -> None:
+    w = watcher(roots=(tmp_path,))
+
+    w.note(session_id="9f1c2b3a-0000-0000-0000-000000000000", agent_id="claude-code")
+
+    assert not w._watched

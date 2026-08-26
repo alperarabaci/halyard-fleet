@@ -66,3 +66,8 @@ hooks.html
 # every project it gates. One file describes all of it.
 halyard.yaml
 halyard.yml
+
+# Compaction prompts. Yours, like halyard.yaml: they name your own directories
+# and are written in whatever language you work in, and this repository is
+# English-only. `before_compaction:` and `after_compaction:` point at them.
+compaction_hook/

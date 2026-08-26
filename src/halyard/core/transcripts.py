@@ -31,6 +31,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -62,6 +63,64 @@ MAX_SEEN = 200
 
 #: Only this runtime writes a transcript in the shape read below.
 CLAUDE_CODE = "claude-code"
+
+#: Where the runtimes keep their transcripts. A path that resolves outside all
+#: of these is not a transcript and is not opened.
+#:
+#: The path itself still comes from the hook payload rather than being computed
+#: — a layout that moves inside one of these directories keeps working, which
+#: was the point of not building the path here. What this adds is a boundary:
+#: the payload arrives over HTTP, and anything that can reach the control plane
+#: could otherwise name `~/.ssh/id_rsa` and have its contents read, summarised
+#: by a model and handed back at the next session start. Found by CodeQL, and
+#: it was right.
+TRANSCRIPT_ROOTS = (
+    Path.home() / ".claude",
+    Path.home() / ".codex",
+    Path.home() / ".gemini",
+)
+
+
+#: What a session id may look like before it is allowed to name a file. Hex and
+#: dashes: every runtime's id measured so far is a UUID. No dot and no separator
+#: can pass, so nothing here can climb out of a directory or name a file of its
+#: own choosing — which is the whole reason the id is used instead of the path
+#: the payload offered.
+_SESSION_ID = re.compile(r"^[A-Za-z0-9_-]{8,64}$")
+
+
+def find_transcript(session_id: str | None, roots: tuple[Path, ...] | None = None) -> Path | None:
+    """This session's transcript, found rather than taken from the payload.
+
+    The path used to arrive in the hook body, which meant a value posted over
+    HTTP became a filename — so anything able to reach the control plane could
+    name `~/.ssh/id_rsa` and have it read, summarised by a model and handed back
+    at the next session start. CodeQL found it; this removes it rather than
+    guarding it, because a guard around a tainted path is still a tainted path.
+
+    What is assumed instead is narrow and was measured: a transcript is named
+    `<session_id>.jsonl` and sits somewhere under the runtime's own directory.
+    The directory part is searched, so a store that reorganises itself still
+    works; a naming scheme that changes finds nothing, says so, and the feature
+    that depends on it does nothing — the same failure it always had.
+    """
+    if not session_id or not _SESSION_ID.match(session_id):
+        return None
+    for root in roots or TRANSCRIPT_ROOTS:
+        base = Path(root).expanduser()
+        try:
+            if not base.is_dir():
+                continue
+            # The id is the whole filename, and it cannot contain a separator,
+            # so the search decides the directory and nothing else does.
+            for found in base.glob(f"**/{session_id}.jsonl"):
+                if found.is_file():
+                    return found
+        except OSError:
+            continue
+    logger.info("No transcript named %s.jsonl under any runtime directory", session_id)
+    return None
+
 
 #: How much of the error text to carry onto the phone.
 TEXT_LIMIT = 300
@@ -138,6 +197,7 @@ class TranscriptWatcher:
         clock=lambda: datetime.now(UTC),
         poll_seconds: float = DEFAULT_POLL_SECONDS,
         idle_ttl: timedelta = DEFAULT_IDLE_TTL,
+        roots: tuple[Path, ...] | None = None,
     ) -> None:
         self._channel = channel
         self._gate = gate or Gate()
@@ -145,12 +205,14 @@ class TranscriptWatcher:
         self._poll_seconds = poll_seconds
         self._idle_ttl = idle_ttl
         self._watched: dict[str, _Watched] = {}
+        # Which directories a transcript may live in. A parameter so a test can
+        # point it somewhere real, not so an operator can widen it.
+        self._roots = roots
 
     def note(
         self,
         *,
         session_id: str | None,
-        transcript_path: str | None,
         agent_id: str | None,
         role: Role | None = None,
         session_name: str | None = None,
@@ -163,23 +225,27 @@ class TranscriptWatcher:
         read in the shape below.
         """
         try:
-            if agent_id != CLAUDE_CODE or not session_id or not transcript_path:
+            if agent_id != CLAUDE_CODE or not session_id:
                 return
             now = self._clock()
             existing = self._watched.get(session_id)
             if existing is not None:
+                # Already found once. Looking it up again on every approval
+                # would be a directory walk per gated command.
                 # Keep the offset — the point is to read only what is appended
                 # after we started watching — but refresh the rest.
-                existing.transcript = Path(transcript_path)
                 existing.role = role
                 existing.session_name = session_name
                 existing.last_noted = now
                 return
             # New session: start from the end of the file, so history is not
             # replayed and the first read is not a scan of the whole transcript.
-            offset = self._size(Path(transcript_path))
+            found = find_transcript(session_id, self._roots)
+            if found is None:
+                return
+            offset = self._size(found)
             self._watched[session_id] = _Watched(
-                transcript=Path(transcript_path),
+                transcript=found,
                 agent_id=agent_id,
                 role=role,
                 session_name=session_name,

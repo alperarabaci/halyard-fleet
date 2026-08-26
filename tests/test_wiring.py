@@ -106,7 +106,10 @@ def test_wiring_preserves_the_complete_claude_document(tmp_path: Path) -> None:
     assert written["permissions"] == original["permissions"]
     assert written["enabledPlugins"] == original["enabledPlugins"]
     assert written["env"] == original["env"]
-    assert written["hooks"]["SessionStart"] == original["hooks"]["SessionStart"]
+    # Halyard now has a `SessionStart` hook of its own — it hands a seat its
+    # orientation back after a compaction. Somebody else's is kept beside it
+    # rather than replaced, which is the property this test is about.
+    assert original["hooks"]["SessionStart"][0] in written["hooks"]["SessionStart"]
     assert original["hooks"]["PreToolUse"][0] in written["hooks"]["PreToolUse"]
     backup = next(settings.parent.glob(f"{settings.name}.*.bak"))
     assert backup.read_bytes() == before
@@ -265,7 +268,10 @@ def test_wiring_preserves_and_backs_up_the_complete_codex_document(tmp_path: Pat
 
     written = json.loads(hooks_file.read_text())
     assert written["futureCodexField"] == original["futureCodexField"]
-    assert written["hooks"]["SessionStart"] == original["hooks"]["SessionStart"]
+    # Halyard now has a `SessionStart` hook of its own — it hands a seat its
+    # orientation back after a compaction. Somebody else's is kept beside it
+    # rather than replaced, which is the property this test is about.
+    assert original["hooks"]["SessionStart"][0] in written["hooks"]["SessionStart"]
     assert original["hooks"]["PreToolUse"][0] in written["hooks"]["PreToolUse"]
     assert written["hooks"]["PermissionRequest"]
     backup = next(codex_dir.glob(f"{hooks_file.name}.*.bak"))
