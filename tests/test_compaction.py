@@ -60,9 +60,13 @@ def seat(**overrides) -> Seat:
 
 
 def test_the_conversation_is_read_as_plain_text(tmp_path: Path) -> None:
-    path = transcript(tmp_path / "t.jsonl", ("user", "run the tests"), ("assistant", "712 passed"))
+    path = transcript(
+        tmp_path / "9f1c2b3a-0000-0000-0000-000000000000.jsonl",
+        ("user", "run the tests"),
+        ("assistant", "712 passed"),
+    )
 
-    text = conversation_tail(path, roots=(tmp_path,))
+    text = conversation_tail(path)
 
     assert "run the tests" in text and "712 passed" in text
 
@@ -79,11 +83,11 @@ def test_a_transcript_that_will_not_parse_yields_what_it_can(tmp_path: Path) -> 
         encoding="utf-8",
     )
 
-    assert "ok" in conversation_tail(path, roots=(tmp_path,))
+    assert "ok" in conversation_tail(path)
 
 
 def test_a_missing_transcript_is_empty_rather_than_an_error(tmp_path: Path) -> None:
-    assert conversation_tail(tmp_path / "gone.jsonl", roots=(tmp_path,)) == ""
+    assert conversation_tail(tmp_path / "gone.jsonl") == ""
 
 
 def test_an_api_error_entry_is_not_part_of_the_conversation(tmp_path: Path) -> None:
@@ -101,7 +105,7 @@ def test_an_api_error_entry_is_not_part_of_the_conversation(tmp_path: Path) -> N
         encoding="utf-8",
     )
 
-    assert conversation_tail(path, roots=(tmp_path,)) == ""
+    assert conversation_tail(path) == ""
 
 
 # --- what a seat is handed afterwards ----------------------------------------
@@ -112,7 +116,12 @@ def test_a_seat_with_a_file_gets_its_contents(tmp_path: Path) -> None:
     orientation.write_text("read the queue first", encoding="utf-8")
     seats = [seat(after_compaction=str(orientation))]
 
-    found = for_seat(seats, agent_id="claude-code", session_name="alpha-navigator", session_id="s1")
+    found = for_seat(
+        seats,
+        agent_id="claude-code",
+        session_name="alpha-navigator",
+        session_id="9f1c2b3a-0000-0000-0000-000000000000",
+    )
 
     assert found == "read the queue first"
 
@@ -120,7 +129,12 @@ def test_a_seat_with_a_file_gets_its_contents(tmp_path: Path) -> None:
 def test_a_seat_without_one_is_handed_nothing(tmp_path: Path) -> None:
     """The common case. A driver running one command has no use for a page."""
     assert (
-        for_seat([seat()], agent_id="claude-code", session_name="alpha-navigator", session_id="s1")
+        for_seat(
+            [seat()],
+            agent_id="claude-code",
+            session_name="alpha-navigator",
+            session_id="9f1c2b3a-0000-0000-0000-000000000000",
+        )
         is None
     )
 
@@ -129,7 +143,12 @@ def test_a_file_that_is_not_there_is_not_an_error(tmp_path: Path) -> None:
     seats = [seat(after_compaction=str(tmp_path / "missing.md"))]
 
     assert (
-        for_seat(seats, agent_id="claude-code", session_name="alpha-navigator", session_id="s1")
+        for_seat(
+            seats,
+            agent_id="claude-code",
+            session_name="alpha-navigator",
+            session_id="9f1c2b3a-0000-0000-0000-000000000000",
+        )
         is None
     )
 
@@ -142,7 +161,13 @@ def test_an_unresolved_session_is_handed_nothing(tmp_path: Path) -> None:
     seats = [seat(after_compaction=str(orientation))]
 
     assert (
-        for_seat(seats, agent_id="codex", session_name="alpha-navigator", session_id="s1") is None
+        for_seat(
+            seats,
+            agent_id="codex",
+            session_name="alpha-navigator",
+            session_id="9f1c2b3a-0000-0000-0000-000000000000",
+        )
+        is None
     )
 
 
@@ -159,7 +184,10 @@ def test_an_enormous_file_is_bounded(tmp_path: Path) -> None:
 async def test_the_record_is_written_and_handed_back(tmp_path: Path) -> None:
     instructions = tmp_path / "pre.md"
     instructions.write_text("write down the measured numbers", encoding="utf-8")
-    path = transcript(tmp_path / "t.jsonl", ("assistant", "712 passed, I ran it"))
+    transcript(
+        tmp_path / "9f1c2b3a-0000-0000-0000-000000000000.jsonl",
+        ("assistant", "712 passed, I ran it"),
+    )
     runner = FakeRunner("AKTIF IS: 712 passed — measured")
     recorder = Recorder(
         roots=(tmp_path,),
@@ -168,14 +196,15 @@ async def test_the_record_is_written_and_handed_back(tmp_path: Path) -> None:
     )
 
     written = await recorder.write(
-        session_id="s1",
+        session_id="9f1c2b3a-0000-0000-0000-000000000000",
         agent_id="claude-code",
         session_name="alpha-navigator",
-        transcript_path=str(path),
     )
 
     assert written
-    assert recorder.take("s1") == "AKTIF IS: 712 passed — measured"
+    assert (
+        recorder.take("9f1c2b3a-0000-0000-0000-000000000000") == "AKTIF IS: 712 passed — measured"
+    )
     # The instructions and the conversation both reached the one-shot turn.
     assert "write down the measured numbers" in runner.asked[0]
     assert "712 passed" in runner.asked[0]
@@ -186,7 +215,7 @@ async def test_the_record_is_written_by_the_cheap_model(tmp_path: Path) -> None:
     happened in the session, not here."""
     instructions = tmp_path / "pre.md"
     instructions.write_text("record", encoding="utf-8")
-    path = transcript(tmp_path / "t.jsonl", ("assistant", "done"))
+    transcript(tmp_path / "9f1c2b3a-0000-0000-0000-000000000000.jsonl", ("assistant", "done"))
     runner = FakeRunner("x")
     recorder = Recorder(
         roots=(tmp_path,),
@@ -195,10 +224,9 @@ async def test_the_record_is_written_by_the_cheap_model(tmp_path: Path) -> None:
     )
 
     await recorder.write(
-        session_id="s1",
+        session_id="9f1c2b3a-0000-0000-0000-000000000000",
         agent_id="claude-code",
         session_name="alpha-navigator",
-        transcript_path=str(path),
     )
 
     assert runner.models == ["sonnet"]
@@ -211,7 +239,7 @@ async def test_a_long_record_is_trimmed_before_it_is_carried(tmp_path: Path) -> 
 
     instructions = tmp_path / "pre.md"
     instructions.write_text("record", encoding="utf-8")
-    path = transcript(tmp_path / "t.jsonl", ("assistant", "done"))
+    transcript(tmp_path / "9f1c2b3a-0000-0000-0000-000000000000.jsonl", ("assistant", "done"))
     recorder = Recorder(
         roots=(tmp_path,),
         seats=[seat(before_compaction=str(instructions))],
@@ -219,13 +247,14 @@ async def test_a_long_record_is_trimmed_before_it_is_carried(tmp_path: Path) -> 
     )
 
     await recorder.write(
-        session_id="s1",
+        session_id="9f1c2b3a-0000-0000-0000-000000000000",
         agent_id="claude-code",
         session_name="alpha-navigator",
-        transcript_path=str(path),
     )
 
-    assert len(recorder.take("s1") or "") <= compaction.RECORD_LIMIT
+    assert (
+        len(recorder.take("9f1c2b3a-0000-0000-0000-000000000000") or "") <= compaction.RECORD_LIMIT
+    )
 
 
 async def test_the_prompt_asks_for_brevity_as_well(tmp_path: Path) -> None:
@@ -233,7 +262,7 @@ async def test_the_prompt_asks_for_brevity_as_well(tmp_path: Path) -> None:
     is cut off, so the limit is asked for and enforced."""
     instructions = tmp_path / "pre.md"
     instructions.write_text("record", encoding="utf-8")
-    path = transcript(tmp_path / "t.jsonl", ("assistant", "done"))
+    transcript(tmp_path / "9f1c2b3a-0000-0000-0000-000000000000.jsonl", ("assistant", "done"))
     runner = FakeRunner("x")
     recorder = Recorder(
         roots=(tmp_path,),
@@ -242,10 +271,9 @@ async def test_the_prompt_asks_for_brevity_as_well(tmp_path: Path) -> None:
     )
 
     await recorder.write(
-        session_id="s1",
+        session_id="9f1c2b3a-0000-0000-0000-000000000000",
         agent_id="claude-code",
         session_name="alpha-navigator",
-        transcript_path=str(path),
     )
 
     assert "characters" in runner.asked[0]
@@ -256,21 +284,20 @@ async def test_the_record_is_handed_over_once(tmp_path: Path) -> None:
     one as though it were fresh."""
     instructions = tmp_path / "pre.md"
     instructions.write_text("record", encoding="utf-8")
-    path = transcript(tmp_path / "t.jsonl", ("assistant", "done"))
+    transcript(tmp_path / "9f1c2b3a-0000-0000-0000-000000000000.jsonl", ("assistant", "done"))
     recorder = Recorder(
         roots=(tmp_path,),
         seats=[seat(before_compaction=str(instructions))],
         runners={"claude-code": FakeRunner("once")},
     )
     await recorder.write(
-        session_id="s1",
+        session_id="9f1c2b3a-0000-0000-0000-000000000000",
         agent_id="claude-code",
         session_name="alpha-navigator",
-        transcript_path=str(path),
     )
 
-    assert recorder.take("s1") == "once"
-    assert recorder.take("s1") is None
+    assert recorder.take("9f1c2b3a-0000-0000-0000-000000000000") == "once"
+    assert recorder.take("9f1c2b3a-0000-0000-0000-000000000000") is None
 
 
 async def test_a_seat_without_instructions_writes_nothing(tmp_path: Path) -> None:
@@ -278,10 +305,9 @@ async def test_a_seat_without_instructions_writes_nothing(tmp_path: Path) -> Non
     recorder = Recorder(roots=(tmp_path,), seats=[seat()], runners={"claude-code": runner})
 
     written = await recorder.write(
-        session_id="s1",
+        session_id="9f1c2b3a-0000-0000-0000-000000000000",
         agent_id="claude-code",
         session_name="alpha-navigator",
-        transcript_path="/x",
     )
 
     assert written is False
@@ -301,10 +327,9 @@ async def test_a_runtime_that_cannot_run_one_shot_turns_is_skipped(tmp_path: Pat
 
     assert (
         await recorder.write(
-            session_id="s1",
+            session_id="9f1c2b3a-0000-0000-0000-000000000000",
             agent_id="claude-code",
             session_name="alpha-navigator",
-            transcript_path="/x",
         )
         is False
     )
@@ -315,7 +340,7 @@ async def test_a_turn_that_fails_lets_the_compaction_go_ahead(tmp_path: Path) ->
     summary simply proceeding."""
     instructions = tmp_path / "pre.md"
     instructions.write_text("record", encoding="utf-8")
-    path = transcript(tmp_path / "t.jsonl", ("assistant", "done"))
+    transcript(tmp_path / "9f1c2b3a-0000-0000-0000-000000000000.jsonl", ("assistant", "done"))
 
     class Broken:
         async def ask(self, text: str, **_):
@@ -329,14 +354,13 @@ async def test_a_turn_that_fails_lets_the_compaction_go_ahead(tmp_path: Path) ->
 
     assert (
         await recorder.write(
-            session_id="s1",
+            session_id="9f1c2b3a-0000-0000-0000-000000000000",
             agent_id="claude-code",
             session_name="alpha-navigator",
-            transcript_path=str(path),
         )
         is False
     )
-    assert recorder.take("s1") is None
+    assert recorder.take("9f1c2b3a-0000-0000-0000-000000000000") is None
 
 
 async def test_a_record_that_runs_long_is_given_up_on(tmp_path: Path) -> None:
@@ -346,7 +370,7 @@ async def test_a_record_that_runs_long_is_given_up_on(tmp_path: Path) -> None:
 
     instructions = tmp_path / "pre.md"
     instructions.write_text("record", encoding="utf-8")
-    path = transcript(tmp_path / "t.jsonl", ("assistant", "done"))
+    transcript(tmp_path / "9f1c2b3a-0000-0000-0000-000000000000.jsonl", ("assistant", "done"))
     recorder = Recorder(
         roots=(tmp_path,),
         seats=[seat(before_compaction=str(instructions))],
@@ -356,13 +380,12 @@ async def test_a_record_that_runs_long_is_given_up_on(tmp_path: Path) -> None:
     compaction.RECORD_TIMEOUT_SECONDS = 0.05
     try:
         written = await recorder.write(
-            session_id="s1",
+            session_id="9f1c2b3a-0000-0000-0000-000000000000",
             agent_id="claude-code",
             session_name="alpha-navigator",
-            transcript_path=str(path),
         )
     finally:
         compaction.RECORD_TIMEOUT_SECONDS = original
 
     assert written is False
-    assert recorder.take("s1") is None
+    assert recorder.take("9f1c2b3a-0000-0000-0000-000000000000") is None

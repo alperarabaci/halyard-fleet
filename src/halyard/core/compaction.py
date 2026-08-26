@@ -39,7 +39,7 @@ import time
 from pathlib import Path
 
 from halyard.core.seats import Seat, for_session
-from halyard.core.transcripts import inside_a_transcript_root
+from halyard.core.transcripts import find_transcript
 
 logger = logging.getLogger(__name__)
 
@@ -124,9 +124,7 @@ RECORD_MODEL = "sonnet"
 RECORD_TIMEOUT_SECONDS = 120.0
 
 
-def conversation_tail(
-    path: str | Path, limit: int = TAIL_BYTES, roots: tuple[Path, ...] | None = None
-) -> str:
+def conversation_tail(path: str | Path, limit: int = TAIL_BYTES) -> str:
     """The recent conversation as plain text, for a model to read.
 
     Read from the end, because the end is what a compaction is about to lose
@@ -135,17 +133,11 @@ def conversation_tail(
     thinner record, never a raised exception — nothing in this file is allowed
     to interrupt a session.
 
-    **Only from a transcript.** The path arrives in a hook payload posted over
-    HTTP, so anything that can reach the control plane could name any file on
-    the machine and have its contents read, summarised by a model, and handed
-    back at the next session start. `inside_a_transcript_root` is the boundary;
-    CodeQL found the hole and was right about it.
+    Given a path the caller found rather than one a payload offered — see
+    `find_transcript`, and the finding that made it necessary.
     """
-    safe = inside_a_transcript_root(path, roots)
-    if safe is None:
-        return ""
     try:
-        with safe.open("rb") as handle:
+        with Path(path).open("rb") as handle:
             handle.seek(0, 2)
             size = handle.tell()
             handle.seek(max(0, size - limit))
@@ -238,7 +230,6 @@ class Recorder:
         session_id: str,
         agent_id: str | None,
         session_name: str | None,
-        transcript_path: str | None,
     ) -> bool:
         """Write this session's record now. Returns whether one was produced.
 
@@ -247,7 +238,13 @@ class Recorder:
         failure here has to end in the compaction simply going ahead.
         """
         seat = for_session(self._seats, agent_id, session_name, session_id)
-        if seat is None or not seat.before_compaction or not transcript_path:
+        if seat is None or not seat.before_compaction:
+            return False
+        # Found by id under the runtimes' own directories, never taken from the
+        # request: a path in a payload posted over HTTP is a path an attacker
+        # chooses. See `find_transcript`.
+        transcript = find_transcript(session_id, self._roots)
+        if transcript is None:
             return False
         runner = self._runners.get(seat.runtime)
         if runner is None or not hasattr(runner, "ask"):
@@ -261,7 +258,7 @@ class Recorder:
 
         started = self._clock()
         try:
-            conversation = conversation_tail(transcript_path, roots=self._roots)
+            conversation = conversation_tail(transcript)
             if not conversation:
                 return False
             record = await asyncio.wait_for(

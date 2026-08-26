@@ -53,7 +53,6 @@ def main() -> int:
             "session_id": payload.get("session_id") or "unknown",
             "agent_id": runtime_of(transcript),
             "session_name": session_name(transcript),
-            "transcript_path": transcript,
             # `before` starts the record and returns at once; `after` collects
             # it. Two moments, one script, because they are one feature.
             "when": "before" if event == "PreCompact" else "after",

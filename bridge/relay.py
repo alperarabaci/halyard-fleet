@@ -104,10 +104,6 @@ def main() -> int:
             "agent_id": runtime,
             "text": text,
             "cwd": cwd,
-            # So a normal turn also registers this session for transcript
-            # watching, and a *later* turn that dies without firing Stop is
-            # noticed. Claude Code only reads this; the others are not watched.
-            "transcript_path": transcript,
             # Codex sets no project variable of its own, so for it the
             # session's directory is the only thing that says where this came
             # from. Left alone for Claude Code, where core already falls back

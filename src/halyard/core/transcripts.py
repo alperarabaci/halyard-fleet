@@ -31,7 +31,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import os.path
+import re
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -81,47 +81,44 @@ TRANSCRIPT_ROOTS = (
 )
 
 
-def inside_a_transcript_root(
-    path: str | Path, roots: tuple[Path, ...] | None = None
-) -> Path | None:
-    """The path, resolved, if it sits inside a runtime's own transcript store.
+#: What a session id may look like before it is allowed to name a file. Hex and
+#: dashes: every runtime's id measured so far is a UUID. No dot and no separator
+#: can pass, so nothing here can climb out of a directory or name a file of its
+#: own choosing — which is the whole reason the id is used instead of the path
+#: the payload offered.
+_SESSION_ID = re.compile(r"^[A-Za-z0-9_-]{8,64}$")
 
-    None for everything else, which every caller turns into "read nothing".
 
-    **The containment check happens on the string, before anything touches the
-    filesystem.** That ordering is the point: `resolve()` follows symlinks, so
-    calling it on an unchecked path is itself a filesystem operation driven by
-    whatever the payload said. CodeQL flagged exactly that and was right twice
-    — once for the read, and again for this.
+def find_transcript(session_id: str | None, roots: tuple[Path, ...] | None = None) -> Path | None:
+    """This session's transcript, found rather than taken from the payload.
 
-    Symlinks are still refused, by resolving *after* the string check and
-    requiring the answer to be inside the same root. A link planted inside a
-    transcript directory cannot point out of one.
+    The path used to arrive in the hook body, which meant a value posted over
+    HTTP became a filename — so anything able to reach the control plane could
+    name `~/.ssh/id_rsa` and have it read, summarised by a model and handed back
+    at the next session start. CodeQL found it; this removes it rather than
+    guarding it, because a guard around a tainted path is still a tainted path.
+
+    What is assumed instead is narrow and was measured: a transcript is named
+    `<session_id>.jsonl` and sits somewhere under the runtime's own directory.
+    The directory part is searched, so a store that reorganises itself still
+    works; a naming scheme that changes finds nothing, says so, and the feature
+    that depends on it does nothing — the same failure it always had.
     """
-    if not path:
+    if not session_id or not _SESSION_ID.match(session_id):
         return None
-
-    candidate = os.path.normpath(os.path.expanduser(str(path)))
-    if not os.path.isabs(candidate):
-        # Transcript paths arrive absolute. A relative one would be measured
-        # against this process's working directory, which is a fact about the
-        # service and not about the file.
-        return None
-
     for root in roots or TRANSCRIPT_ROOTS:
-        prefix = os.path.normpath(os.path.expanduser(str(root)))
-        if candidate != prefix and not candidate.startswith(prefix + os.sep):
-            continue
-        # Inside a known root by name. Only now is it worth asking the
-        # filesystem, and the answer has to stay inside the same root.
+        base = Path(root).expanduser()
         try:
-            resolved = Path(candidate).resolve()
-            resolved.relative_to(Path(prefix).resolve())
-        except (OSError, RuntimeError, ValueError):
-            return None
-        return resolved
-
-    logger.warning("Refusing to read %s: it is not inside a runtime's transcript directory", path)
+            if not base.is_dir():
+                continue
+            # The id is the whole filename, and it cannot contain a separator,
+            # so the search decides the directory and nothing else does.
+            for found in base.glob(f"**/{session_id}.jsonl"):
+                if found.is_file():
+                    return found
+        except OSError:
+            continue
+    logger.info("No transcript named %s.jsonl under any runtime directory", session_id)
     return None
 
 
@@ -216,7 +213,6 @@ class TranscriptWatcher:
         self,
         *,
         session_id: str | None,
-        transcript_path: str | None,
         agent_id: str | None,
         role: Role | None = None,
         session_name: str | None = None,
@@ -231,24 +227,25 @@ class TranscriptWatcher:
         try:
             if agent_id != CLAUDE_CODE or not session_id:
                 return
-            safe = inside_a_transcript_root(transcript_path, self._roots)
-            if safe is None:
-                return
             now = self._clock()
             existing = self._watched.get(session_id)
             if existing is not None:
+                # Already found once. Looking it up again on every approval
+                # would be a directory walk per gated command.
                 # Keep the offset — the point is to read only what is appended
                 # after we started watching — but refresh the rest.
-                existing.transcript = safe
                 existing.role = role
                 existing.session_name = session_name
                 existing.last_noted = now
                 return
             # New session: start from the end of the file, so history is not
             # replayed and the first read is not a scan of the whole transcript.
-            offset = self._size(safe)
+            found = find_transcript(session_id, self._roots)
+            if found is None:
+                return
+            offset = self._size(found)
             self._watched[session_id] = _Watched(
-                transcript=safe,
+                transcript=found,
                 agent_id=agent_id,
                 role=role,
                 session_name=session_name,

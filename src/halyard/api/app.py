@@ -81,10 +81,6 @@ class ApprovalRequestBody(BaseModel):
     #: What the agent says about its own call. Can raise the risk, never lower
     #: it — see `policy.py`.
     declared_risk: RiskLevel | None = None
-    #: Where this session's transcript is, so the watcher can notice a turn that
-    #: died where no hook fires. Off the approval path — read by nothing that
-    #: decides anything, so a bad value cannot affect a decision.
-    transcript_path: str | None = None
     #: The destination of a file tool, matched against the `writes:` block to
     #: decide whether this one may go through without a card.
     file_path: str | None = None
@@ -158,7 +154,6 @@ class MessageBody(BaseModel):
     project_dir: str | None = None
     role: Role | None = None
     session_name: str | None = None
-    transcript_path: str | None = None
 
 
 class CompactionBody(BaseModel):
@@ -169,7 +164,6 @@ class CompactionBody(BaseModel):
     session_id: str
     agent_id: str = runtimes.DEFAULT
     session_name: str | None = None
-    transcript_path: str | None = None
     #: `before` starts the record while the summary is being made; `after`
     #: collects it. Anything else is treated as `after`, which only ever reads.
     when: str = "after"
@@ -505,7 +499,6 @@ def create_app(settings: Settings, *, channel=None) -> FastAPI:
         # where this active session's transcript is. `note` never raises.
         watcher.note(
             session_id=body.session_id,
-            transcript_path=body.transcript_path,
             agent_id=body.agent_id,
             role=body.role,
             session_name=body.session_name,
@@ -571,7 +564,6 @@ def create_app(settings: Settings, *, channel=None) -> FastAPI:
                 session_id=body.session_id,
                 agent_id=body.agent_id,
                 session_name=body.session_name,
-                transcript_path=body.transcript_path,
             )
             return CompactionResponse()
 
@@ -606,7 +598,6 @@ def create_app(settings: Settings, *, channel=None) -> FastAPI:
         """
         watcher.note(
             session_id=body.session_id,
-            transcript_path=body.transcript_path,
             agent_id=body.agent_id,
             role=body.role,
             session_name=body.session_name,
