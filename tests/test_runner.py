@@ -154,3 +154,101 @@ async def test_preferences_report_what_will_happen_not_what_was_typed() -> None:
 
     made.set_effort("session-1", "xhigh")
     assert made.preferences("session-1") == (None, "xhigh")
+
+
+# --- the credential these turns run on ---------------------------------------
+#
+# The login `/login` creates is refreshed while somebody is at the keyboard and
+# eventually cannot be. Measured twice, four days apart: deliveries stopped with
+# "OAuth session expired and could not be refreshed" until somebody signed in at
+# the desk — which is the one thing a control plane for working away from the
+# desk cannot ask for.
+
+
+def spying_on_the_environment(monkeypatch) -> list[dict]:
+    """Capture the environment each delivery would run in."""
+    seen: list[dict] = []
+
+    async def fake_exec(*_arguments, **kwargs):
+        seen.append(kwargs.get("env") or {})
+        return FakeProcess()
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec)
+    return seen
+
+
+async def test_a_configured_token_reaches_the_cli(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`claude setup-token` mints one that lasts about a year and uses the
+    subscription. This is how it gets to the process that needs it."""
+    seen = spying_on_the_environment(monkeypatch)
+
+    await runner(oauth_token="sk-ant-oat-example").send("session-1", "carry on")
+
+    assert seen[0]["CLAUDE_CODE_OAUTH_TOKEN"] == "sk-ant-oat-example"
+
+
+async def test_a_configured_token_replaces_an_inherited_one(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Set, not defaulted. The point is that these turns stop depending on
+    whatever the surrounding environment happens to hold, so a stale inherited
+    value must not win over the one that was configured."""
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "stale-from-the-shell")
+    seen = spying_on_the_environment(monkeypatch)
+
+    await runner(oauth_token="sk-ant-oat-configured").send("session-1", "carry on")
+
+    assert seen[0]["CLAUDE_CODE_OAUTH_TOKEN"] == "sk-ant-oat-configured"
+
+
+async def test_without_a_token_the_environment_is_left_alone(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An installation that has not configured one keeps working exactly as it
+    did, on whatever credential the CLI already had."""
+    monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN", raising=False)
+    seen = spying_on_the_environment(monkeypatch)
+
+    await runner().send("session-1", "carry on")
+
+    assert "CLAUDE_CODE_OAUTH_TOKEN" not in seen[0]
+
+
+async def test_a_blank_token_is_not_a_token(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An empty setting is somebody who has not filled it in, not somebody
+    asking for an empty credential — which would authenticate as nobody."""
+    monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN", raising=False)
+    seen = spying_on_the_environment(monkeypatch)
+
+    await runner(oauth_token="   ").send("session-1", "carry on")
+
+    assert "CLAUDE_CODE_OAUTH_TOKEN" not in seen[0]
+
+
+async def test_the_token_never_reaches_the_argument_list(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Arguments are visible to anyone who can run `ps`. A credential travels
+    in the environment of one subprocess and nowhere else."""
+    calls = spying(monkeypatch)
+
+    await runner(oauth_token="sk-ant-oat-secret").send("session-1", "carry on")
+
+    assert not any("sk-ant-oat-secret" in argument for argument in calls[0])
+
+
+async def test_an_api_key_that_outranks_the_token_is_reported(
+    monkeypatch: pytest.MonkeyPatch, caplog
+) -> None:
+    """ANTHROPIC_API_KEY wins over the token *and* bills the API rather than the
+    subscription, so an inherited one quietly changes who pays."""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-api-inherited")
+    spying_on_the_environment(monkeypatch)
+
+    with caplog.at_level("WARNING"):
+        await runner(oauth_token="sk-ant-oat-example").send("session-1", "carry on")
+
+    assert "outranks" in caplog.text
+    # The warning explains the consequence, and quotes neither credential.
+    assert "sk-ant-api-inherited" not in caplog.text
+    assert "sk-ant-oat-example" not in caplog.text

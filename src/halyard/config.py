@@ -224,6 +224,25 @@ class Settings(BaseSettings):
     #: session. A value here deliberately replaces that model.
     claude_default_model: str = Field(default="", validation_alias="HALYARD_CLAUDE_DEFAULT_MODEL")
 
+    #: A long-lived credential for turns this control plane starts, so they do
+    #: not depend on the desktop login that expires.
+    #:
+    #: The login `/login` creates is refreshed while somebody is at the keyboard
+    #: and eventually cannot be — measured twice, four days apart, each time
+    #: stopping remote work with "OAuth session expired and could not be
+    #: refreshed" until somebody signed in at the desk. That is exactly the
+    #: situation Halyard exists to survive.
+    #:
+    #: Mint one with `claude setup-token`: it uses the subscription rather than
+    #: pay-as-you-go API billing, and lasts about a year. Passed to the CLI as
+    #: `CLAUDE_CODE_OAUTH_TOKEN` for the turns Halyard starts and nothing else —
+    #: a session someone drives at the keyboard is untouched by this.
+    #:
+    #: Secret, like the bot token, and lives in the same gitignored file.
+    claude_oauth_token: str | None = Field(
+        default=None, validation_alias="HALYARD_CLAUDE_OAUTH_TOKEN"
+    )
+
     @model_validator(mode="after")
     def _timeouts_must_be_ordered(self) -> Settings:
         """Refuse to start unless approval < bridge < hook.

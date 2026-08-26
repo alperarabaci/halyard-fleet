@@ -232,3 +232,24 @@ def test_the_log_filter_masks_secrets_a_library_prints(caplog) -> None:
     # same as keeping it out of the log.
     assert "AAFAKEfake_TOKEN-value-here-1234567" not in record.getMessage()
     assert "bot123456789:***" in record.getMessage()
+
+
+def test_an_anthropic_token_is_masked() -> None:
+    """Including the long-lived `sk-ant-oat…` a `setup-token` mints, which now
+    lives in halyard.yaml beside the bot token and must never reach a log.
+
+    Both shapes: written as an assignment, which the sensitive-assignment rule
+    takes whole, and bare in a sentence, which only a rule for the format
+    itself catches — the same gap the Telegram token had, where the anchored
+    rule missed one written into a log message.
+    """
+    from halyard.core.redaction import Redactor
+
+    assigned = Redactor().redact("CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat01-AbCdEfGhIjKlMnOpQrSt")
+    assert "AbCdEfGhIjKlMnOpQrSt" not in assigned.text
+
+    bare = Redactor().redact("it answered with sk-ant-oat01-AbCdEfGhIjKlMnOpQrSt instead")
+    assert "AbCdEfGhIjKlMnOpQrSt" not in bare.text
+    assert bare.redacted
+    # The prefix survives, so a reader can see what kind of credential it was.
+    assert "sk-ant-" in bare.text

@@ -113,6 +113,10 @@ DEFAULT_RULES: tuple[RedactionRule, ...] = (
     # are written to a file now, so a miss here is a secret left on disk.
     _rule("telegram_bot_token", r"\b(\d{8,12}):AA[A-Za-z0-9_-]{30,}", rf"\g<1>:{MASK}"),
     _rule("github_token", r"\b(gh[pousr]_)[A-Za-z0-9]{16,}", rf"\g<1>{MASK}"),
+    # Anthropic's own, including the long-lived `sk-ant-oat…` a `setup-token`
+    # mints. Listed before the rule below, which would otherwise swallow it and
+    # report every one of them as somebody else's key.
+    _rule("anthropic_key", r"\bsk-ant-[A-Za-z0-9_\-]{16,}", f"sk-ant-{MASK}"),
     _rule("openai_key", r"\bsk-(?:proj-)?[A-Za-z0-9_\-]{16,}", f"sk-{MASK}"),
     _rule("slack_token", r"\bxox[baprs]-[A-Za-z0-9\-]{10,}", f"xox-{MASK}"),
     _rule("aws_access_key_id", r"\bAKIA[0-9A-Z]{16}\b", f"AKIA{MASK}"),

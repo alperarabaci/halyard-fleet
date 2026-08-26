@@ -206,13 +206,30 @@ def test_another_tools_hooks_are_read_too(tmp_path: Path) -> None:
 # --- a CLI that is present and cannot sign in ---------------------------------
 
 
-def _claude_check(monkeypatch, *, found: str | None, signed: bool | None):
-    """The Claude Code spec's own availability check, with both answers forced."""
+def _claude_check(
+    monkeypatch,
+    *,
+    found: str | None,
+    signed: bool | None,
+    token: str | None = "sk-ant-oat-configured",
+    method: str | None = None,
+    api_key: str | None = None,
+):
+    """The Claude Code spec's own availability check, with the answers forced.
+
+    A token is supplied by default so most cases describe the arrangement this
+    is meant to be run in — a control plane with a credential of its own, rather
+    than one riding on a login somebody made at a keyboard.
+    """
     from halyard.agents import registry
 
     monkeypatch.setattr("halyard.agents.claude_code.runner.find_claude_binary", lambda *_a: found)
     monkeypatch.setattr("halyard.agents.claude_code.runner.signed_in", lambda *_a: signed)
-    return registry.get("claude-code").check_available()
+    monkeypatch.setattr("halyard.agents.claude_code.runner.auth_method", lambda *_a: method)
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    if api_key:
+        monkeypatch.setenv("ANTHROPIC_API_KEY", api_key)
+    return registry.get("claude-code").check_available(claude_oauth_token=token)
 
 
 def test_a_cli_that_cannot_sign_in_is_a_failure(monkeypatch) -> None:
@@ -224,9 +241,9 @@ def test_a_cli_that_cannot_sign_in_is_a_failure(monkeypatch) -> None:
     """
     found = _claude_check(monkeypatch, found="/bin/claude", signed=False)
 
-    assert [level for level, _ in found] == ["ok", "fail", ""]
-    assert "not signed in" in found[1][1]
-    assert "auth login" in found[2][1], "say the command, not just the problem"
+    assert [level for level, _ in found] == ["ok", "ok", "fail", ""]
+    assert "not signed in" in found[2][1]
+    assert "auth login" in found[3][1], "say the command, not just the problem"
 
 
 def test_the_command_it_prints_can_be_pasted(monkeypatch) -> None:
@@ -241,14 +258,14 @@ def test_the_command_it_prints_can_be_pasted(monkeypatch) -> None:
         monkeypatch, found="/Users/x/Library/Application Support/Claude/claude", signed=False
     )
 
-    assert '"/Users/x/Library/Application Support/Claude/claude" auth login' in found[2][1]
+    assert '"/Users/x/Library/Application Support/Claude/claude" auth login' in found[3][1]
 
 
 def test_a_signed_in_cli_says_nothing_extra(monkeypatch) -> None:
     """A clean check should be one line, not a paragraph about what is fine."""
     found = _claude_check(monkeypatch, found="/bin/claude", signed=True)
 
-    assert [level for level, _ in found] == ["ok"]
+    assert [level for level, _ in found] == ["ok", "ok"]
 
 
 def test_not_being_able_to_tell_is_not_a_failure(monkeypatch) -> None:
@@ -257,7 +274,7 @@ def test_not_being_able_to_tell_is_not_a_failure(monkeypatch) -> None:
     re-authenticate something that was never signed out."""
     found = _claude_check(monkeypatch, found="/bin/claude", signed=None)
 
-    assert [level for level, _ in found] == ["ok", "warn"]
+    assert [level for level, _ in found] == ["ok", "ok", "warn"]
 
 
 # --- a hooks file that will follow the repository elsewhere -------------------
@@ -313,3 +330,47 @@ def test_a_file_outside_a_repository_cannot_travel_this_way(tmp_path: Path) -> N
     loose.write_text('{"hooks": {}}')
 
     assert doctor._travels_between_machines(loose) is None
+
+
+# --- the credential these turns actually run on ------------------------------
+#
+# Measured twice, four days apart: remote work stopped with "OAuth session
+# expired and could not be refreshed" until somebody signed in at the desk. A
+# control plane whose whole purpose is to work while nobody is at the desk
+# cannot depend on a login that only a person at the desk can renew.
+
+
+def test_running_on_the_desktop_login_is_a_warning(monkeypatch) -> None:
+    """It works until it does not, and the failure lands while you are away."""
+    found = _claude_check(monkeypatch, found="/bin/claude", signed=True, token=None)
+
+    levels = [level for level, _ in found]
+    assert "warn" in levels
+    said = " ".join(text for _, text in found)
+    assert "expires" in said
+    # The way out, spelled out where it is needed rather than in a document.
+    assert "setup-token" in said
+    assert "HALYARD_CLAUDE_OAUTH_TOKEN" in said
+
+
+def test_it_names_what_the_cli_is_falling_back_to(monkeypatch) -> None:
+    """Which credential, not just that there is a problem — the two failures
+    look identical from outside and are fixed differently."""
+    found = _claude_check(
+        monkeypatch, found="/bin/claude", signed=True, token=None, method="claudeai"
+    )
+
+    assert any("authMethod=claudeai" in text for _, text in found)
+
+
+def test_an_api_key_silently_outranks_the_token(monkeypatch) -> None:
+    """ANTHROPIC_API_KEY ranks above the token *and* bills the API rather than
+    the subscription, so an inherited one changes both which credential is used
+    and who pays. Nothing else would say so."""
+    found = _claude_check(
+        monkeypatch, found="/bin/claude", signed=True, token="sk-ant-oat-x", api_key="sk-ant-api-y"
+    )
+
+    warning = [text for level, text in found if level == "warn"]
+    assert warning and "outranks" in warning[0]
+    assert "bills" in warning[0]

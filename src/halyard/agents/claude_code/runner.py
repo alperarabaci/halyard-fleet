@@ -122,6 +122,29 @@ def signed_in(binary: str | None = None) -> bool | None:
         return None
 
 
+def auth_method(binary: str | None = None) -> str | None:
+    """Which credential the CLI would use, as it names it, or None if unasked.
+
+    Worth reporting separately from *whether* it is signed in. The two failures
+    look identical from outside and are fixed differently: a login that expired
+    needs somebody at the keyboard, and a control plane running on the desktop
+    login needs a token so that it stops needing one.
+
+    `auth status` carries no expiry, measured on 2.1.246 — `loggedIn`,
+    `authMethod`, `apiProvider` and nothing about time — so nothing here can
+    warn ahead of the event. Naming the method is what is available.
+    """
+    found = find_claude_binary(binary)
+    if found is None:
+        return None
+    try:
+        done = subprocess.run([found, "auth", "status"], capture_output=True, text=True, timeout=15)
+        method = json.loads(done.stdout or "{}").get("authMethod")
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return None
+    return method if isinstance(method, str) and method else None
+
+
 def find_claude_binary(configured: str | None = None) -> str | None:
     """Locate the CLI, preferring an explicit setting then Desktop's engine."""
     if configured:
@@ -147,9 +170,15 @@ class ClaudeCodeRunner:
         timeout_seconds: float = DEFAULT_TURN_TIMEOUT_SECONDS,
         models: tuple[str, ...] | None = None,
         default_model: str | None = DEFAULT_MODEL,
+        oauth_token: str | None = None,
     ) -> None:
         self._known_models = models or DEFAULT_MODELS
         self._default_model = default_model or None
+        # A credential of our own for the turns this runner starts, so they do
+        # not ride on the desktop login that expires while nobody is at the
+        # keyboard. Never logged: it reaches the CLI through the environment of
+        # one subprocess and appears in no argument list.
+        self._oauth_token = (oauth_token or "").strip() or None
         # The path is *not* resolved here. A control plane runs for days, and
         # what it can reach changes underneath it: a CLI installed after
         # startup stayed invisible until a restart, and Claude Code's binary
@@ -276,6 +305,31 @@ class ClaudeCodeRunner:
         async with self._locks[session_id]:
             return await self._run(session_id, text, cwd)
 
+    def _environment(self) -> dict[str, str]:
+        """The environment one delivery runs in.
+
+        A configured token is put in as `CLAUDE_CODE_OAUTH_TOKEN`, which is what
+        `claude setup-token` mints and what a non-interactive run reads. It is
+        set rather than defaulted: the whole point is to stop these turns
+        depending on the desktop login, so a stale inherited value must not win.
+
+        `ANTHROPIC_API_KEY` is deliberately left alone but *noticed*. It ranks
+        above the token, and it bills per request against the API rather than
+        against a subscription — so an inherited one silently changes both which
+        credential is used and who pays. Saying so once is the difference
+        between a surprise and a decision.
+        """
+        environment = os.environ.copy()
+        if self._oauth_token:
+            environment["CLAUDE_CODE_OAUTH_TOKEN"] = self._oauth_token
+            if environment.get("ANTHROPIC_API_KEY"):
+                logger.warning(
+                    "ANTHROPIC_API_KEY is set and outranks HALYARD_CLAUDE_OAUTH_TOKEN, so "
+                    "these turns authenticate with the API key and bill against the API "
+                    "rather than the subscription. Unset it to use the token."
+                )
+        return environment
+
     async def _run(self, session_id: str, text: str, cwd: str | None) -> bool:
         try:
             arguments = [self._binary, "-p", "--resume", session_id]
@@ -294,7 +348,7 @@ class ClaudeCodeRunner:
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 cwd=cwd,
-                env=os.environ.copy(),
+                env=self._environment(),
             )
         except OSError:
             logger.exception("Could not start the claude CLI")
