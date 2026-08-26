@@ -62,7 +62,7 @@ def seat(**overrides) -> Seat:
 def test_the_conversation_is_read_as_plain_text(tmp_path: Path) -> None:
     path = transcript(tmp_path / "t.jsonl", ("user", "run the tests"), ("assistant", "712 passed"))
 
-    text = conversation_tail(path)
+    text = conversation_tail(path, roots=(tmp_path,))
 
     assert "run the tests" in text and "712 passed" in text
 
@@ -79,11 +79,11 @@ def test_a_transcript_that_will_not_parse_yields_what_it_can(tmp_path: Path) -> 
         encoding="utf-8",
     )
 
-    assert "ok" in conversation_tail(path)
+    assert "ok" in conversation_tail(path, roots=(tmp_path,))
 
 
 def test_a_missing_transcript_is_empty_rather_than_an_error(tmp_path: Path) -> None:
-    assert conversation_tail(tmp_path / "gone.jsonl") == ""
+    assert conversation_tail(tmp_path / "gone.jsonl", roots=(tmp_path,)) == ""
 
 
 def test_an_api_error_entry_is_not_part_of_the_conversation(tmp_path: Path) -> None:
@@ -101,7 +101,7 @@ def test_an_api_error_entry_is_not_part_of_the_conversation(tmp_path: Path) -> N
         encoding="utf-8",
     )
 
-    assert conversation_tail(path) == ""
+    assert conversation_tail(path, roots=(tmp_path,)) == ""
 
 
 # --- what a seat is handed afterwards ----------------------------------------
@@ -162,7 +162,9 @@ async def test_the_record_is_written_and_handed_back(tmp_path: Path) -> None:
     path = transcript(tmp_path / "t.jsonl", ("assistant", "712 passed, I ran it"))
     runner = FakeRunner("AKTIF IS: 712 passed — measured")
     recorder = Recorder(
-        seats=[seat(before_compaction=str(instructions))], runners={"claude-code": runner}
+        roots=(tmp_path,),
+        seats=[seat(before_compaction=str(instructions))],
+        runners={"claude-code": runner},
     )
 
     written = await recorder.write(
@@ -187,7 +189,9 @@ async def test_the_record_is_written_by_the_cheap_model(tmp_path: Path) -> None:
     path = transcript(tmp_path / "t.jsonl", ("assistant", "done"))
     runner = FakeRunner("x")
     recorder = Recorder(
-        seats=[seat(before_compaction=str(instructions))], runners={"claude-code": runner}
+        roots=(tmp_path,),
+        seats=[seat(before_compaction=str(instructions))],
+        runners={"claude-code": runner},
     )
 
     await recorder.write(
@@ -209,6 +213,7 @@ async def test_a_long_record_is_trimmed_before_it_is_carried(tmp_path: Path) -> 
     instructions.write_text("record", encoding="utf-8")
     path = transcript(tmp_path / "t.jsonl", ("assistant", "done"))
     recorder = Recorder(
+        roots=(tmp_path,),
         seats=[seat(before_compaction=str(instructions))],
         runners={"claude-code": FakeRunner("y" * 50_000)},
     )
@@ -231,7 +236,9 @@ async def test_the_prompt_asks_for_brevity_as_well(tmp_path: Path) -> None:
     path = transcript(tmp_path / "t.jsonl", ("assistant", "done"))
     runner = FakeRunner("x")
     recorder = Recorder(
-        seats=[seat(before_compaction=str(instructions))], runners={"claude-code": runner}
+        roots=(tmp_path,),
+        seats=[seat(before_compaction=str(instructions))],
+        runners={"claude-code": runner},
     )
 
     await recorder.write(
@@ -251,6 +258,7 @@ async def test_the_record_is_handed_over_once(tmp_path: Path) -> None:
     instructions.write_text("record", encoding="utf-8")
     path = transcript(tmp_path / "t.jsonl", ("assistant", "done"))
     recorder = Recorder(
+        roots=(tmp_path,),
         seats=[seat(before_compaction=str(instructions))],
         runners={"claude-code": FakeRunner("once")},
     )
@@ -267,7 +275,7 @@ async def test_the_record_is_handed_over_once(tmp_path: Path) -> None:
 
 async def test_a_seat_without_instructions_writes_nothing(tmp_path: Path) -> None:
     runner = FakeRunner()
-    recorder = Recorder(seats=[seat()], runners={"claude-code": runner})
+    recorder = Recorder(roots=(tmp_path,), seats=[seat()], runners={"claude-code": runner})
 
     written = await recorder.write(
         session_id="s1",
@@ -286,7 +294,9 @@ async def test_a_runtime_that_cannot_run_one_shot_turns_is_skipped(tmp_path: Pat
     instructions = tmp_path / "pre.md"
     instructions.write_text("record", encoding="utf-8")
     recorder = Recorder(
-        seats=[seat(before_compaction=str(instructions))], runners={"claude-code": object()}
+        roots=(tmp_path,),
+        seats=[seat(before_compaction=str(instructions))],
+        runners={"claude-code": object()},
     )
 
     assert (
@@ -312,7 +322,9 @@ async def test_a_turn_that_fails_lets_the_compaction_go_ahead(tmp_path: Path) ->
             raise RuntimeError("the CLI died")
 
     recorder = Recorder(
-        seats=[seat(before_compaction=str(instructions))], runners={"claude-code": Broken()}
+        roots=(tmp_path,),
+        seats=[seat(before_compaction=str(instructions))],
+        runners={"claude-code": Broken()},
     )
 
     assert (
@@ -336,6 +348,7 @@ async def test_a_record_that_runs_long_is_given_up_on(tmp_path: Path) -> None:
     instructions.write_text("record", encoding="utf-8")
     path = transcript(tmp_path / "t.jsonl", ("assistant", "done"))
     recorder = Recorder(
+        roots=(tmp_path,),
         seats=[seat(before_compaction=str(instructions))],
         runners={"claude-code": FakeRunner("late", delay=5)},
     )

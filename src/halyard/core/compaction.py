@@ -39,6 +39,7 @@ import time
 from pathlib import Path
 
 from halyard.core.seats import Seat, for_session
+from halyard.core.transcripts import inside_a_transcript_root
 
 logger = logging.getLogger(__name__)
 
@@ -123,7 +124,9 @@ RECORD_MODEL = "sonnet"
 RECORD_TIMEOUT_SECONDS = 120.0
 
 
-def conversation_tail(path: str | Path, limit: int = TAIL_BYTES) -> str:
+def conversation_tail(
+    path: str | Path, limit: int = TAIL_BYTES, roots: tuple[Path, ...] | None = None
+) -> str:
     """The recent conversation as plain text, for a model to read.
 
     Read from the end, because the end is what a compaction is about to lose
@@ -131,9 +134,18 @@ def conversation_tail(path: str | Path, limit: int = TAIL_BYTES) -> str:
     entry with no text, a file that has moved. The worst outcome here is a
     thinner record, never a raised exception — nothing in this file is allowed
     to interrupt a session.
+
+    **Only from a transcript.** The path arrives in a hook payload posted over
+    HTTP, so anything that can reach the control plane could name any file on
+    the machine and have its contents read, summarised by a model, and handed
+    back at the next session start. `inside_a_transcript_root` is the boundary;
+    CodeQL found the hole and was right about it.
     """
+    safe = inside_a_transcript_root(path, roots)
+    if safe is None:
+        return ""
     try:
-        with Path(path).open("rb") as handle:
+        with safe.open("rb") as handle:
             handle.seek(0, 2)
             size = handle.tell()
             handle.seek(max(0, size - limit))
@@ -204,12 +216,16 @@ class Recorder:
         root: Path | None = None,
         model: str | None = RECORD_MODEL,
         clock=time.monotonic,
+        roots: tuple[Path, ...] | None = None,
     ) -> None:
         self._seats = list(seats)
         self._runners = dict(runners or {})
         self._root = root or Path.cwd()
         self._model = model or RECORD_MODEL
         self._clock = clock
+        # Which directories a transcript may live in. A parameter so a test can
+        # point it somewhere real, not so an operator can widen it.
+        self._roots = roots
         # The record, and when it was written. The second half is only there to
         # measure with: `PreCompact` to `SessionStart` is the compaction itself,
         # and that number is the one worth having when asking whether holding
@@ -245,7 +261,7 @@ class Recorder:
 
         started = self._clock()
         try:
-            conversation = conversation_tail(transcript_path)
+            conversation = conversation_tail(transcript_path, roots=self._roots)
             if not conversation:
                 return False
             record = await asyncio.wait_for(

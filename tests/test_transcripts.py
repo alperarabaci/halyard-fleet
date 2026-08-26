@@ -13,7 +13,11 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from halyard.core.gate import Gate
-from halyard.core.transcripts import TranscriptWatcher, find_api_errors
+from halyard.core.transcripts import (
+    TranscriptWatcher,
+    find_api_errors,
+    inside_a_transcript_root,
+)
 
 START = datetime(2026, 7, 26, 10, 0, tzinfo=UTC)
 
@@ -66,12 +70,13 @@ def normal_line(text: str = "on it") -> str:
     )
 
 
-def watcher(channel=None, gate=None, clock=None) -> TranscriptWatcher:
+def watcher(channel=None, gate=None, clock=None, roots=None) -> TranscriptWatcher:
     return TranscriptWatcher(
         channel=channel or RecordingChannel(),
         gate=gate or Gate(),
         clock=clock or ManualClock(),
         idle_ttl=timedelta(minutes=30),
+        roots=roots,
     )
 
 
@@ -116,7 +121,7 @@ def test_an_id_already_seen_is_not_reported_again() -> None:
 
 async def test_only_errors_appended_after_watching_are_relayed(tmp_path: Path) -> None:
     channel = RecordingChannel()
-    w = watcher(channel)
+    w = watcher(channel, roots=(tmp_path,))
     tx = tmp_path / "sess.jsonl"
     # An error already in the file before anybody was watching.
     append(tx, error_line(uuid="old"))
@@ -136,7 +141,7 @@ async def test_only_errors_appended_after_watching_are_relayed(tmp_path: Path) -
 
 async def test_a_partial_final_line_waits_until_it_is_whole(tmp_path: Path) -> None:
     channel = RecordingChannel()
-    w = watcher(channel)
+    w = watcher(channel, roots=(tmp_path,))
     tx = tmp_path / "sess.jsonl"
     tx.write_text("")
     w.note(session_id="s1", transcript_path=str(tx), agent_id="claude-code")
@@ -152,7 +157,7 @@ async def test_a_partial_final_line_waits_until_it_is_whole(tmp_path: Path) -> N
 
 async def test_the_same_error_is_not_relayed_twice(tmp_path: Path) -> None:
     channel = RecordingChannel()
-    w = watcher(channel)
+    w = watcher(channel, roots=(tmp_path,))
     tx = tmp_path / "sess.jsonl"
     tx.write_text("")
     w.note(session_id="s1", transcript_path=str(tx), agent_id="claude-code")
@@ -166,7 +171,7 @@ async def test_the_same_error_is_not_relayed_twice(tmp_path: Path) -> None:
 
 async def test_a_missing_transcript_does_not_raise(tmp_path: Path) -> None:
     channel = RecordingChannel()
-    w = watcher(channel)
+    w = watcher(channel, roots=(tmp_path,))
     w.note(
         session_id="s1",
         transcript_path=str(tmp_path / "gone.jsonl"),
@@ -180,7 +185,7 @@ async def test_a_missing_transcript_does_not_raise(tmp_path: Path) -> None:
 
 async def test_a_transcript_that_shrank_is_not_re_read(tmp_path: Path) -> None:
     channel = RecordingChannel()
-    w = watcher(channel)
+    w = watcher(channel, roots=(tmp_path,))
     tx = tmp_path / "sess.jsonl"
     append(tx, normal_line(), normal_line())
     w.note(session_id="s1", transcript_path=str(tx), agent_id="claude-code")
@@ -202,7 +207,7 @@ async def test_a_paused_gate_stays_quiet(tmp_path: Path) -> None:
     channel = RecordingChannel()
     gate = Gate()
     await gate.pause("tester")
-    w = watcher(channel, gate=gate)
+    w = watcher(channel, gate=gate, roots=(tmp_path,))
     tx = tmp_path / "sess.jsonl"
     tx.write_text("")
     w.note(session_id="s1", transcript_path=str(tx), agent_id="claude-code")
@@ -215,7 +220,7 @@ async def test_a_paused_gate_stays_quiet(tmp_path: Path) -> None:
 
 
 def test_only_claude_code_is_watched(tmp_path: Path) -> None:
-    w = watcher()
+    w = watcher(roots=(tmp_path,))
     tx = tmp_path / "sess.jsonl"
     tx.write_text("")
 
@@ -227,12 +232,70 @@ def test_only_claude_code_is_watched(tmp_path: Path) -> None:
 
 async def test_an_idle_session_is_dropped(tmp_path: Path) -> None:
     clock = ManualClock()
-    w = watcher(clock=clock)
+    w = watcher(clock=clock, roots=(tmp_path,))
     tx = tmp_path / "sess.jsonl"
     tx.write_text("")
     w.note(session_id="s1", transcript_path=str(tx), agent_id="claude-code")
 
     clock.advance(timedelta(minutes=31).total_seconds())
     await w.poll_once()
+
+    assert "s1" not in w._watched
+
+
+# --- the boundary CodeQL found ----------------------------------------------
+
+
+def test_a_transcript_inside_a_runtime_directory_is_read(tmp_path: Path) -> None:
+    inside = tmp_path / "projects" / "x" / "s.jsonl"
+    inside.parent.mkdir(parents=True)
+    inside.write_text("", encoding="utf-8")
+
+    assert inside_a_transcript_root(inside, (tmp_path,)) == inside.resolve()
+
+
+def test_a_file_outside_every_runtime_directory_is_refused(tmp_path: Path) -> None:
+    """The path arrives in a hook payload posted over HTTP. Without this,
+    anything that could reach the control plane could name any file on the
+    machine and have its contents read, summarised by a model, and handed back
+    at the next session start."""
+    elsewhere = tmp_path.parent / "not-a-transcript.txt"
+    elsewhere.write_text("secrets", encoding="utf-8")
+
+    assert inside_a_transcript_root(elsewhere, (tmp_path,)) is None
+
+
+def test_climbing_out_with_dot_dot_is_refused(tmp_path: Path) -> None:
+    """Resolved before it is compared: the check is about where the file is,
+    not how it was spelled."""
+    escape = tmp_path / ".." / "etc" / "passwd"
+
+    assert inside_a_transcript_root(escape, (tmp_path,)) is None
+
+
+def test_a_symlink_out_of_the_tree_is_refused(tmp_path: Path) -> None:
+    outside = tmp_path.parent / "outside-transcripts"
+    outside.mkdir(exist_ok=True)
+    (outside / "secret.txt").write_text("secrets", encoding="utf-8")
+    link = tmp_path / "link"
+    link.symlink_to(outside, target_is_directory=True)
+
+    assert inside_a_transcript_root(link / "secret.txt", (tmp_path,)) is None
+
+
+def test_nothing_is_refused_rather_than_raised() -> None:
+    assert inside_a_transcript_root(None, (Path("/tmp"),)) is None
+    assert inside_a_transcript_root("", (Path("/tmp"),)) is None
+
+
+async def test_the_watcher_will_not_watch_a_file_outside_a_transcript_root(
+    tmp_path: Path,
+) -> None:
+    """The same refusal, at the point the watcher accepts a path."""
+    elsewhere = tmp_path.parent / "elsewhere.jsonl"
+    elsewhere.write_text("", encoding="utf-8")
+    w = watcher(roots=(tmp_path,))
+
+    w.note(session_id="s1", transcript_path=str(elsewhere), agent_id="claude-code")
 
     assert "s1" not in w._watched

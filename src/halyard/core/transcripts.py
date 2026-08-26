@@ -63,6 +63,49 @@ MAX_SEEN = 200
 #: Only this runtime writes a transcript in the shape read below.
 CLAUDE_CODE = "claude-code"
 
+#: Where the runtimes keep their transcripts. A path that resolves outside all
+#: of these is not a transcript and is not opened.
+#:
+#: The path itself still comes from the hook payload rather than being computed
+#: — a layout that moves inside one of these directories keeps working, which
+#: was the point of not building the path here. What this adds is a boundary:
+#: the payload arrives over HTTP, and anything that can reach the control plane
+#: could otherwise name `~/.ssh/id_rsa` and have its contents read, summarised
+#: by a model and handed back at the next session start. Found by CodeQL, and
+#: it was right.
+TRANSCRIPT_ROOTS = (
+    Path.home() / ".claude",
+    Path.home() / ".codex",
+    Path.home() / ".gemini",
+)
+
+
+def inside_a_transcript_root(
+    path: str | Path, roots: tuple[Path, ...] | None = None
+) -> Path | None:
+    """The path, resolved, if it sits inside a runtime's own transcript store.
+
+    None for everything else, which every caller turns into "read nothing".
+    Resolved before it is compared, so `..` and a symlink out of the tree are
+    the same refusal — the check has to be about where the file *is*, not how
+    it was spelled.
+    """
+    if not path:
+        return None
+    try:
+        resolved = Path(path).expanduser().resolve()
+    except (OSError, RuntimeError):
+        return None
+    for root in roots or TRANSCRIPT_ROOTS:
+        try:
+            resolved.relative_to(Path(root).expanduser().resolve())
+        except (ValueError, OSError):
+            continue
+        return resolved
+    logger.warning("Refusing to read %s: it is not inside a runtime's transcript directory", path)
+    return None
+
+
 #: How much of the error text to carry onto the phone.
 TEXT_LIMIT = 300
 
@@ -138,6 +181,7 @@ class TranscriptWatcher:
         clock=lambda: datetime.now(UTC),
         poll_seconds: float = DEFAULT_POLL_SECONDS,
         idle_ttl: timedelta = DEFAULT_IDLE_TTL,
+        roots: tuple[Path, ...] | None = None,
     ) -> None:
         self._channel = channel
         self._gate = gate or Gate()
@@ -145,6 +189,9 @@ class TranscriptWatcher:
         self._poll_seconds = poll_seconds
         self._idle_ttl = idle_ttl
         self._watched: dict[str, _Watched] = {}
+        # Which directories a transcript may live in. A parameter so a test can
+        # point it somewhere real, not so an operator can widen it.
+        self._roots = roots
 
     def note(
         self,
@@ -163,23 +210,26 @@ class TranscriptWatcher:
         read in the shape below.
         """
         try:
-            if agent_id != CLAUDE_CODE or not session_id or not transcript_path:
+            if agent_id != CLAUDE_CODE or not session_id:
+                return
+            safe = inside_a_transcript_root(transcript_path, self._roots)
+            if safe is None:
                 return
             now = self._clock()
             existing = self._watched.get(session_id)
             if existing is not None:
                 # Keep the offset — the point is to read only what is appended
                 # after we started watching — but refresh the rest.
-                existing.transcript = Path(transcript_path)
+                existing.transcript = safe
                 existing.role = role
                 existing.session_name = session_name
                 existing.last_noted = now
                 return
             # New session: start from the end of the file, so history is not
             # replayed and the first read is not a scan of the whole transcript.
-            offset = self._size(Path(transcript_path))
+            offset = self._size(safe)
             self._watched[session_id] = _Watched(
-                transcript=Path(transcript_path),
+                transcript=safe,
                 agent_id=agent_id,
                 role=role,
                 session_name=session_name,
