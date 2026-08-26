@@ -31,6 +31,7 @@ on trust.
 
 from __future__ import annotations
 
+import os
 import plistlib
 import shlex
 import shutil
@@ -145,6 +146,11 @@ def _launchctl(*args: str) -> subprocess.CompletedProcess[str]:
     return subprocess.run(["launchctl", *args], capture_output=True, text=True, check=False)
 
 
+def domain() -> str:
+    """The launchd domain a per-user agent lives in."""
+    return f"gui/{os.getuid()}"
+
+
 def install() -> int:
     """Write the LaunchAgent and load it.
 
@@ -178,11 +184,25 @@ def install() -> int:
     path = plist_path()
     path.parent.mkdir(parents=True, exist_ok=True)
 
-    # Unload a previous copy before overwriting, so a reload is a reload and not
-    # a second agent. Errors are ignored: "not loaded" is the state we want.
-    _launchctl("unload", "-w", str(path))
+    # Take down a previous copy before overwriting, so a reload is a reload and
+    # not a second agent. Errors are ignored: "not loaded" is the state wanted.
+    target = f"{domain()}/{LABEL}"
+    _launchctl("bootout", target)
     path.write_bytes(render_plist(repo, git, uv, log))
-    loaded = _launchctl("load", "-w", str(path))
+
+    # **Enable before bootstrapping, always.** `launchctl unload -w` — which is
+    # what a person reaches for to stop this while developing locally, and what
+    # this project's own instructions used to say — writes a *persistent*
+    # disabled record into launchd's database. The plist then sits there looking
+    # installed while launchd will not admit the service exists at all:
+    #
+    #     Could not find service "com.halyard.fleet" in domain for user gui: 501
+    #
+    # Reinstalling did not clear it, because the legacy `load -w` does not
+    # reliably undo the modern disabled state. This does, and costs nothing when
+    # there was nothing disabled.
+    _launchctl("enable", target)
+    loaded = _launchctl("bootstrap", domain(), str(path))
     if loaded.returncode != 0:
         print(f"halyard: launchctl could not load the agent: {loaded.stderr.strip()}")
         return 1
@@ -219,7 +239,10 @@ def uninstall() -> int:
         print(f"{LABEL} is not installed.")
         return 0
 
-    _launchctl("unload", "-w", str(path))
+    # `bootout` and not `unload -w`. The latter leaves a persistent disabled
+    # record behind, and the next install then looks like it worked while
+    # launchd refuses to admit the service exists.
+    _launchctl("bootout", f"{domain()}/{LABEL}")
     path.unlink(missing_ok=True)
     print(f"Removed {LABEL}. The gate is down until you start it again.")
     return 0
@@ -234,6 +257,13 @@ def status() -> int:
     path = plist_path()
     if not path.exists():
         print(f"{LABEL}: not installed. `halyard service install` to set it up.")
+        return 1
+
+    disabled = _launchctl("print-disabled", domain())
+    if f'"{LABEL}" => disabled' in disabled.stdout:
+        print(f"{LABEL}: installed but DISABLED in launchd, so it will not start.")
+        print("        Something ran `launchctl unload -w`, which is persistent.")
+        print("        `halyard service install` clears it.")
         return 1
 
     listed = _launchctl("list", LABEL)
