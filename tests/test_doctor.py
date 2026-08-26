@@ -374,3 +374,53 @@ def test_an_api_key_silently_outranks_the_token(monkeypatch) -> None:
     warning = [text for level, text in found if level == "warn"]
     assert warning and "outranks" in warning[0]
     assert "bills" in warning[0]
+
+
+# --- the service's own log, which launchd holds and Halyard cannot rotate ----
+
+
+def test_the_service_log_is_named_even_when_it_is_small(tmp_path: Path) -> None:
+    """Silence would leave a file growing all year that nothing ever names."""
+    log = tmp_path / "halyard-service.log"
+    log.write_bytes(b"x" * 1000)
+
+    lines, problems = doctor.check_service_log(log)
+
+    assert problems == 0
+    assert any(str(log) in line for line in lines)
+
+
+def test_a_large_service_log_says_how_to_empty_it(tmp_path: Path) -> None:
+    """Truncating in place is the safe move: launchd holds the file open, so
+    renaming it leaves the service writing where nobody can find it."""
+    log = tmp_path / "halyard-service.log"
+    log.write_bytes(b"x" * (doctor.SERVICE_LOG_WARN_BYTES + 1))
+
+    lines, problems = doctor.check_service_log(log)
+
+    assert problems == 1
+    printed = "\n".join(lines)
+    assert f": > {log}" in printed
+    assert "cannot rotate" in printed
+
+
+def test_a_growing_service_log_is_mentioned_before_it_is_a_problem(tmp_path: Path) -> None:
+    log = tmp_path / "halyard-service.log"
+    log.write_bytes(b"x" * (doctor.SERVICE_LOG_NOTE_BYTES + 1))
+
+    lines, problems = doctor.check_service_log(log)
+
+    # Worth saying, not worth failing over.
+    assert problems == 0
+    assert any(": >" in line for line in lines)
+
+
+def test_no_service_log_still_says_where_it_would_be(tmp_path: Path) -> None:
+    """Not installed as a service is not a problem — but that path is where the
+    `git pull` and `uv sync` output goes, and nothing else says so."""
+    missing = tmp_path / "not-there.log"
+
+    lines, problems = doctor.check_service_log(missing)
+
+    assert problems == 0
+    assert any(str(missing) in line for line in lines)
