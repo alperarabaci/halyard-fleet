@@ -15,8 +15,9 @@ usage limit hit mid-run — that reaches you too, instead of the session just go
 It runs on your own machine. No open ports, no exposed API, nothing to log into.
 
 Nothing is approved by accident: every failure — a crash, a timeout, an unreachable
-control plane — denies. The only thing that goes through without a person is a write
-to a path you named yourself, and each one is written to the audit log.
+control plane — denies. Two things go through without a person, both empty until you
+fill them in: writes to paths you named, and tools you named. Every one is written to
+the audit log with the pattern that allowed it.
 
 **Runtimes:** Claude Code, Codex &nbsp;·&nbsp; **Channel:** Telegram &nbsp;·&nbsp; **Tested on:** macOS
 
@@ -118,6 +119,21 @@ default, every grant is written to the audit log with the pattern that allowed
 it, and patterns are matched *inside the project the write belongs to* — a path
 that climbs out with `..` or through a symlink is refused however it is spelled.
 
+**MCP calls and web fetches** are gated the same way, and for the same reason:
+at the desk they are a popup, and from a phone they were denied with nothing to
+answer. An MCP server is mostly read-only queries that one turn calls dozens of
+times, so name those in `halyard.yaml` rather than approving each:
+
+```yaml
+tools:
+  - mcp__*__list_*
+  - mcp__*__get_*
+```
+
+One pattern covers the same tool on a local server and a production one. `Bash`
+and the file tools cannot be granted here — the first is what the gate is for,
+and the second is granted by destination under `writes:`.
+
 When Claude Code asks a **multiple-choice question** (its `AskUserQuestion`
 tool), the options arrive on your phone as buttons — tap one, or reply with your
 own answer. The choice goes straight back into the session, and the picker at
@@ -153,8 +169,10 @@ what they say. macOS only — on Linux, run `halyard serve` under a systemd unit
 - **One bot token per machine.** Telegram's `getUpdates` has a single consumer.
 - **`/pause` steps aside rather than denying.** The runtime's own permission list
   then decides, with no card and no audit entry.
-- **The gate covers what the matcher covers** — Bash, `Write`, `Edit` and the
-  question tool today. Widening it also widens what stops when Halyard is down:
+- **The gate covers what the matcher covers** — Bash, the file tools, the
+  question tool, MCP calls, `WebFetch` and `WebSearch`. Not `Read`, `Grep` or
+  the client's own tool loading, which fire too and would put a card in front of
+  every file read. Widening it also widens what stops when Halyard is down:
   those tools are denied then, exactly as Bash is.
 - **Multiple-choice questions reach you from a desktop or terminal session, not from a
   turn you started over Telegram.** A Telegram-initiated turn runs headless, where

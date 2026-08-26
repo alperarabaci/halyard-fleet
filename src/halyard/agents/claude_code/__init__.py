@@ -105,26 +105,35 @@ RUNTIME = RuntimeSpec(
     human="Claude Code",
     binary="claude",
     hooks=Hooks(
-        # `AskUserQuestion` rides the same `PreToolUse` hook as the shell tool,
-        # so one matcher covers both and the wiring keeps its one-hook-per-event
-        # shape — a second group under `PreToolUse` sharing `hook.sh` would look
-        # to the wiring like the gate already installed and quietly rewrite the
-        # gate's own matcher. The bridge tells the two apart by tool name and
-        # sends the question down a path that fails *open*: unanswered, it goes
-        # back to the terminal picker rather than being denied.
         settings=".claude/settings.local.json",
         also=(".claude/settings.json",),
-        # `Write` and `Edit` are here because of a failure the gate could not
-        # see. A turn started from a phone runs headless, where Claude Code
-        # cannot open a permission dialog — so a write that is not on its own
-        # allow list was denied outright, with no card and nothing to answer.
-        # Work stopped mid-sentence and the reason was invisible from away.
+        # Everything gated rides this one `PreToolUse` hook, so one matcher
+        # covers them all and the wiring keeps its one-hook-per-event shape — a
+        # second group sharing `hook.sh` would look to the wiring like the gate
+        # was already installed and quietly rewrite the gate's own matcher. The
+        # bridge tells them apart by tool name.
         #
-        # The cost is stated rather than hidden: these tools now need Halyard
-        # running, exactly as Bash does, and each unlisted write asks. The
-        # `writes:` block in halyard.yaml is how you say which paths should not
-        # have to — see `core/writes.py`.
-        matcher="Bash|AskUserQuestion|Write|Edit|MultiEdit|NotebookEdit",
+        # Each addition after `Bash` closed a silence somebody hit in the field.
+        # A turn started from a phone runs headless, where Claude Code cannot
+        # open a permission dialog: at the desk an ungranted tool is a popup,
+        # and from away it was denied outright, with no card and nothing to
+        # answer. `Write`/`Edit` stopped work mid-sentence that way; MCP calls
+        # and `WebFetch` were the same failure a week later.
+        #
+        # `AskUserQuestion` is the exception in kind: it fails *open*, back to
+        # the terminal picker, because a question nobody answers is not
+        # dangerous the way an unapproved command is.
+        #
+        # Deliberately a list rather than `.*`. Measured with a passive hook:
+        # `Read` and `ToolSearch` fire too, so gating everything would put a
+        # card in front of every file read and every tool the client loads.
+        #
+        # The cost is stated rather than hidden: all of these now need Halyard
+        # running, exactly as Bash does. `writes:` and `tools:` in halyard.yaml
+        # are how you say which of them should not have to ask.
+        matcher=(
+            "Bash|AskUserQuestion|Write|Edit|MultiEdit|NotebookEdit|WebFetch|WebSearch|mcp__.*"
+        ),
     ),
     runner=_runner,
     find_session=late("halyard.agents.claude_code", "find_session"),

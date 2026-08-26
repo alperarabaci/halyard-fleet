@@ -591,3 +591,59 @@ async def test_a_paused_gate_still_defers_rather_than_granting(tmp_path: Path) -
     )
 
     assert outcome.decision is BridgeDecision.DEFER
+
+
+async def test_a_named_tool_runs_without_a_card(tmp_path: Path) -> None:
+    """The channel denies everything here, so an allow can only have come from
+    the configuration."""
+    store = ApprovalStore(ttl=timedelta(minutes=5))
+    sink = JsonlAuditSink(tmp_path / "audit.jsonl")
+    service = ApprovalService(
+        store=store,
+        policy=Policy(),
+        redactor=Redactor(),
+        audit=AuditLog([sink]),
+        registry=SessionRegistry(),
+        channel=StubChannel(store, Decision.DENY),
+        project="alpha-engine",
+        allowed_tools=("mcp__*__list_*",),
+    )
+    await sink.open()
+
+    outcome = await service.request(
+        session_id="s1",
+        agent_id="claude-code",
+        tool="mcp__claude_ai_alpha_explore_prod__list_companies",
+        command="{}",
+    )
+
+    assert outcome.allowed
+    records = await sink.read_all()
+    assert [r.action for r in records] == [AuditAction.TOOL_PREAUTHORIZED]
+    assert records[0].detail["pattern"] == "mcp__*__list_*"
+
+
+async def test_an_unnamed_tool_still_asks(tmp_path: Path) -> None:
+    store = ApprovalStore(ttl=timedelta(minutes=5))
+    sink = JsonlAuditSink(tmp_path / "audit.jsonl")
+    service = ApprovalService(
+        store=store,
+        policy=Policy(),
+        redactor=Redactor(),
+        audit=AuditLog([sink]),
+        registry=SessionRegistry(),
+        channel=StubChannel(store, Decision.DENY),
+        project="alpha-engine",
+        allowed_tools=("mcp__*__list_*",),
+    )
+    await sink.open()
+
+    outcome = await service.request(
+        session_id="s1",
+        agent_id="claude-code",
+        tool="mcp__claude_ai_alpha_explore_prod__propose_prompt",
+        command="{}",
+    )
+
+    assert not outcome.allowed
+    assert AuditAction.APPROVAL_REQUESTED in {r.action for r in await sink.read_all()}

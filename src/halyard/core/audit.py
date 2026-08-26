@@ -52,6 +52,10 @@ class AuditAction(StrEnum):
     #: permitted without a person, so it is recorded with the pattern that
     #: allowed it — "why did that run without asking" must always have an answer.
     WRITE_PREAUTHORIZED = "write.preauthorized"
+    #: A tool ran without anybody being asked, because the configuration names
+    #: it. Recorded for the same reason as the line above: this and `writes:`
+    #: are the only two things permitted without a person.
+    TOOL_PREAUTHORIZED = "tool.preauthorized"
     #: An agent asked a person to choose between options, and a card went out.
     QUESTION_ASKED = "question.asked"
     #: A question was answered, or left to the terminal by the deadline.
@@ -171,6 +175,27 @@ def write_preauthorized(
         agent_id=agent_id,
         project=project,
         detail={"tool": tool, "path": file_path, "pattern": pattern},
+    )
+
+
+def tool_preauthorized(
+    *,
+    session_id: str,
+    agent_id: str,
+    project: str,
+    tool: str,
+    pattern: str,
+    now: datetime | None = None,
+) -> AuditRecord:
+    """A tool that was let through because the configuration named it."""
+    return AuditRecord(
+        action=AuditAction.TOOL_PREAUTHORIZED,
+        recorded_at=now or _default_clock(),
+        actor="config",
+        session_id=session_id,
+        agent_id=agent_id,
+        project=project,
+        detail={"tool": tool, "pattern": pattern},
     )
 
 
