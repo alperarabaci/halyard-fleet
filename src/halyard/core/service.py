@@ -18,7 +18,7 @@ import logging
 from dataclasses import dataclass
 from enum import StrEnum
 
-from halyard.core import writes
+from halyard.core import tools, writes
 from halyard.core.approvals import (
     ApprovalRequest,
     ApprovalStore,
@@ -32,6 +32,7 @@ from halyard.core.audit import (
     bridge_error,
     question_answered,
     question_asked,
+    tool_preauthorized,
     write_preauthorized,
 )
 from halyard.core.events import RiskLevel, Role
@@ -417,6 +418,7 @@ class ApprovalService:
         gate: Gate | None = None,
         seats: dict[str, Role] | None = None,
         allowed_writes: tuple[str, ...] = (),
+        allowed_tools: tuple[str, ...] = (),
     ) -> None:
         self._seats = seats or {}
         self._store = store
@@ -424,6 +426,8 @@ class ApprovalService:
         self._policy = policy
         # Paths a write may reach without a card. Empty unless configured.
         self._writes = tuple(allowed_writes)
+        # Tools that may run without a card, by name. Also empty by default.
+        self._tools = tuple(allowed_tools)
         self._redactor = redactor
         self._audit = audit
         self._registry = registry
@@ -511,6 +515,26 @@ class ApprovalService:
         classification = self._policy.classify(prepared.full, declared=declared_risk)
         project = project_name(project_dir, cwd, self._project)
         role = seat_of(role, session_name, self._seats)
+
+        # Named in `tools:` — an MCP query, a search. Checked before the write
+        # grant below because it is the cheaper question, and it can never reach
+        # `Bash` or a file tool: `tools.NEVER` refuses those at both ends.
+        by_name = tools.allowed_by(tool, self._tools)
+        if by_name is not None:
+            await self._try_to_record(
+                tool_preauthorized(
+                    session_id=session_id,
+                    agent_id=agent_id,
+                    project=project,
+                    tool=tool,
+                    pattern=by_name,
+                )
+            )
+            return ApprovalOutcome(
+                decision=BridgeDecision.ALLOW,
+                reason=f"Allowed without asking: {tool} matches {by_name!r} under `tools:`.",
+                risk=classification.risk,
+            )
 
         # The one grant in this system. A write to a path the configuration
         # names is let through without a card — see `writes.py` for why every

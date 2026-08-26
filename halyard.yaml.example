@@ -79,6 +79,24 @@ settings:
 # writes:
 #   - NOTES/**
 
+# Tools that may run without being asked.
+#
+# The gate also covers MCP tools, `WebFetch` and `WebSearch` — at the desk those
+# are a popup, and from a phone they used to be denied with nothing to answer.
+# An MCP server is mostly read-only queries, though, and one analysis turn calls
+# them dozens of times, so name the ones that need not ask.
+#
+# Matched as globs against the tool's name. `mcp__*__list_*` covers the same
+# tool on a local server and a production one, which is how these are deployed.
+#
+# `Bash` cannot be granted here, and neither can `Write`/`Edit` — a shell
+# command is what the gate is for, and a write is granted by its destination
+# under `writes:` above. A pattern wide enough to reach them is refused.
+#
+# tools:
+#   - mcp__*__list_*
+#   - mcp__*__get_*
+
 # Sentences you say often enough to want a name for. Each key becomes a
 # command, so this one is `/md`, and anything typed after it is added on the
 # end — `/md the failing test` arrives as the prompt with that appended.

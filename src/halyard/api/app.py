@@ -25,6 +25,7 @@ from halyard.agents import registry as runtimes
 from halyard.channels.stub import StubChannel
 from halyard.channels.telegram import TelegramApi, TelegramChannel
 from halyard.config import ChannelKind, Settings
+from halyard.core import tools as configured_tools
 from halyard.core import writes as configured_writes
 from halyard.core.approvals import ApprovalStore, Decision
 from halyard.core.audit import (
@@ -331,6 +332,14 @@ def create_app(settings: Settings, *, channel=None) -> FastAPI:
             "Writes to %s go through without asking", ", ".join(repr(p) for p in allowed_writes)
         )
 
+    try:
+        allowed_tools = configured_tools.load()
+    except ValueError as error:
+        logger.error("Ignoring the `tools:` block, so every one of them will ask: %s", error)
+        allowed_tools = ()
+    if allowed_tools:
+        logger.info("Tools %s run without asking", ", ".join(repr(p) for p in allowed_tools))
+
     service = ApprovalService(
         store=store,
         policy=Policy(),
@@ -342,6 +351,7 @@ def create_app(settings: Settings, *, channel=None) -> FastAPI:
         gate=gate,
         seats=seats,
         allowed_writes=allowed_writes,
+        allowed_tools=allowed_tools,
     )
     questions = QuestionService(
         store=question_store,
