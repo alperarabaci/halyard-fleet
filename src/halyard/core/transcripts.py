@@ -31,6 +31,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os.path
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -86,22 +87,40 @@ def inside_a_transcript_root(
     """The path, resolved, if it sits inside a runtime's own transcript store.
 
     None for everything else, which every caller turns into "read nothing".
-    Resolved before it is compared, so `..` and a symlink out of the tree are
-    the same refusal — the check has to be about where the file *is*, not how
-    it was spelled.
+
+    **The containment check happens on the string, before anything touches the
+    filesystem.** That ordering is the point: `resolve()` follows symlinks, so
+    calling it on an unchecked path is itself a filesystem operation driven by
+    whatever the payload said. CodeQL flagged exactly that and was right twice
+    — once for the read, and again for this.
+
+    Symlinks are still refused, by resolving *after* the string check and
+    requiring the answer to be inside the same root. A link planted inside a
+    transcript directory cannot point out of one.
     """
     if not path:
         return None
-    try:
-        resolved = Path(path).expanduser().resolve()
-    except (OSError, RuntimeError):
+
+    candidate = os.path.normpath(os.path.expanduser(str(path)))
+    if not os.path.isabs(candidate):
+        # Transcript paths arrive absolute. A relative one would be measured
+        # against this process's working directory, which is a fact about the
+        # service and not about the file.
         return None
+
     for root in roots or TRANSCRIPT_ROOTS:
-        try:
-            resolved.relative_to(Path(root).expanduser().resolve())
-        except (ValueError, OSError):
+        prefix = os.path.normpath(os.path.expanduser(str(root)))
+        if candidate != prefix and not candidate.startswith(prefix + os.sep):
             continue
+        # Inside a known root by name. Only now is it worth asking the
+        # filesystem, and the answer has to stay inside the same root.
+        try:
+            resolved = Path(candidate).resolve()
+            resolved.relative_to(Path(prefix).resolve())
+        except (OSError, RuntimeError, ValueError):
+            return None
         return resolved
+
     logger.warning("Refusing to read %s: it is not inside a runtime's transcript directory", path)
     return None
 
