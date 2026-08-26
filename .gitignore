@@ -49,7 +49,10 @@ htmlcov/
 docs/mobile-agent-control-plane.md
 
 
-# Running log
+# Running logs — a folder now, a new file each week, and the bridge's own
+# weekly files beside them. The old flat names stay listed so a checkout that
+# predates the folder does not suddenly start offering them to `git add`.
+logs/
 halyard.log
 halyard.log.*
 

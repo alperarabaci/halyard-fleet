@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import logging
 import sys
-from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
 import uvicorn
@@ -13,6 +12,7 @@ from halyard import awake
 from halyard.api.app import create_app
 from halyard.config import Settings
 from halyard.core.redaction import SecretRedactingFilter
+from halyard.logs import WeeklyFileHandler, prune_bridge_logs
 
 
 def configure_logging(
@@ -48,11 +48,7 @@ def configure_logging(
     if log_file is not None:
         try:
             log_file.parent.mkdir(parents=True, exist_ok=True)
-            handlers.append(
-                RotatingFileHandler(
-                    log_file, maxBytes=max_bytes, backupCount=backups, encoding="utf-8"
-                )
-            )
+            handlers.append(WeeklyFileHandler(log_file, backup_count=backups, max_bytes=max_bytes))
         except OSError as error:
             print(f"halyard: cannot write to {log_file} ({error}); logging to console only")
 
@@ -212,7 +208,17 @@ def serve() -> None:
         settings.channel.value,
     )
     if settings.log_file is not None:
-        logger.info("Logging to %s at %s", settings.log_file.resolve(), settings.log_level)
+        logger.info(
+            "Logging to %s at %s, a new file each week, keeping %d",
+            settings.log_file.resolve(),
+            settings.log_level,
+            settings.log_backups,
+        )
+        # The hooks write their own weekly files and cannot tidy them: several
+        # run at once, each for under a second. This process is alone, so it is
+        # the one that can.
+        if dropped := prune_bridge_logs(settings.log_file.parent, settings.log_backups):
+            logger.info("Removed %d bridge log(s) older than that", len(dropped))
     _announce_the_rules(settings)
     if settings.channel.decides_without_a_human:
         logger.warning(
