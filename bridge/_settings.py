@@ -32,7 +32,22 @@ DEFAULT_URL = "http://127.0.0.1:8787"
 #: That last one is why this exists. Whether a runtime actually invoked the
 #: hook was, until now, unanswerable — the control plane records what arrives
 #: and can say nothing about what never left.
-BRIDGE_LOG = Path(__file__).resolve().parent.parent / "bridge.log"
+BRIDGE_LOG_DIR = Path(__file__).resolve().parent.parent / "logs"
+
+
+def bridge_log_path(when: datetime | None = None) -> Path:
+    """This week's bridge log: `logs/bridge-2026-W35.log`.
+
+    Split by writing to a week-stamped name rather than by rotating, because
+    the writers here are not one process. Every hook every runtime fires runs
+    one of these scripts, several at a time, each alive for under a second —
+    and rotation means renaming a file out from under whoever else has it open.
+    A name nobody has to agree on has no race in it.
+
+    ISO week, so the number agrees with the year beside it in the days around
+    New Year, where the calendar year and the ISO year part company.
+    """
+    return BRIDGE_LOG_DIR / f"bridge-{(when or datetime.now()).strftime('%G-W%V')}.log"
 
 #: Searched in order, first hit wins. `halyard.yaml` is the file the control
 #: plane is configured from; the home location exists for installs where the
@@ -346,7 +361,11 @@ def note(message: str) -> None:
     unwritable would be a worse failure than the one this is here to diagnose.
     """
     try:
-        with BRIDGE_LOG.open("a", encoding="utf-8") as handle:
+        path = bridge_log_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        # Append, and only ever append. Old weeks are tidied by the control
+        # plane at startup, which is the one process here that is alone.
+        with path.open("a", encoding="utf-8") as handle:
             handle.write(f"{datetime.now().isoformat(timespec='seconds')} {message}\n")
     except Exception:
         pass

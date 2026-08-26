@@ -183,11 +183,39 @@ The measurements are in [Antigravity notes](antigravity-payload-notes.md).
 ## What is worth checking before asking anywhere else
 
 ```bash
-make doctor                               # the whole chain, in order
-pmset -g assertions | grep caffeinate     # macOS: is it holding the machine awake
-tail -20 bridge.log                       # what the hooks did, including the ones
-                                          # the control plane never heard about
+make doctor                                    # the whole chain, in order
+pmset -g assertions | grep caffeinate          # macOS: is it holding the machine awake
+tail -20 logs/halyard.log                      # what the control plane was doing
+tail -20 logs/bridge-$(date +%G-W%V).log       # what the hooks did, including the
+                                               # ones it never heard about
 ```
 
-`bridge.log` is the one place a hook that never reached the control plane
+The bridge log is the one place a hook that never reached the control plane
 leaves a trace. It is where several of the entries above were first seen.
+
+**Logs live in `logs/`, a new file each week.** One flat file reached thirty-six
+thousand lines in a month, which is a file you grep and hope rather than a log
+you read. `logs/halyard.log` is always the current week and past weeks sit
+beside it as `halyard.log.2026-W34`; the hooks write their own
+`bridge-2026-W35.log` into the same folder, so everything about one week is in
+one place. Eight weeks are kept — `HALYARD_LOG_BACKUPS` changes that — and a
+week noisy enough to threaten the disk rolls early rather than growing until
+Monday.
+
+If you are on an installation from before this, the old flat `halyard.log` and
+`bridge.log` stay exactly where they are; nothing is moved. New lines simply go
+to the folder, and the line the control plane prints at startup says where.
+
+The service's own log is separate and is launchd's, not Halyard's:
+
+```bash
+tail -20 ~/Library/Logs/halyard-service.log    # git pull, uv sync, and the console
+```
+
+It holds everything the process printed to its console, so it repeats much of
+`logs/halyard.log` and grows without bound. Nothing rotates it — truncate it
+when it gets big:
+
+```bash
+: > ~/Library/Logs/halyard-service.log
+```

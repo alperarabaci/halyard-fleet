@@ -147,8 +147,14 @@ class Settings(BaseSettings):
     #: it made them — and, more to the point, what it was doing when it made
     #: none. On by default, because the moment you want it is always in the past.
     #: Set it empty to log only to the console.
+    #:
+    #: In a folder, and a new file each week. One flat file reached thirty-six
+    #: thousand lines in a month, which is not something anybody reads — and the
+    #: unit a person actually looks in is the week. The bridge writes its own
+    #: weekly files into the same folder, so everything about one week is in one
+    #: place.
     log_file: Path | None = Field(
-        default=Path("./halyard.log"), validation_alias="HALYARD_LOG_FILE"
+        default=Path("./logs/halyard.log"), validation_alias="HALYARD_LOG_FILE"
     )
     #: Whether to stop the machine drifting off to sleep while serving.
     #:
@@ -163,9 +169,13 @@ class Settings(BaseSettings):
     keep_awake: bool = Field(default=True, validation_alias="HALYARD_KEEP_AWAKE")
 
     log_level: str = Field(default="INFO", validation_alias="HALYARD_LOG_LEVEL")
-    #: Rotation, so an always-on service cannot fill a disk.
+    #: A ceiling on one week, so an always-on service cannot fill a disk before
+    #: the next Monday. Reaching it rolls early and keeps both halves.
     log_max_bytes: int = Field(default=5_000_000, validation_alias="HALYARD_LOG_MAX_BYTES", gt=0)
-    log_backups: int = Field(default=5, validation_alias="HALYARD_LOG_BACKUPS", ge=0)
+    #: How many past weeks to keep — of the running log, and of the bridge's own
+    #: weekly files beside it. Two months, which is longer than any question
+    #: about "when did this start" has needed so far.
+    log_backups: int = Field(default=8, validation_alias="HALYARD_LOG_BACKUPS", ge=0)
 
     channel: ChannelKind = Field(validation_alias="HALYARD_CHANNEL")
 
