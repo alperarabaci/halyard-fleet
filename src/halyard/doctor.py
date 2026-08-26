@@ -398,13 +398,65 @@ def _check_gated_project(label: str, ref, seat, directory: str) -> tuple[list[st
     return lines, problems
 
 
+#: When the service's own log is worth mentioning, and when it is worth acting
+#: on. It holds everything the process printed to its console, so it repeats
+#: much of the running log and grows for as long as the service does.
+SERVICE_LOG_NOTE_BYTES = 20_000_000
+SERVICE_LOG_WARN_BYTES = 100_000_000
+
+
+def _megabytes(size: int) -> str:
+    return f"{size / 1_000_000:.0f} MB"
+
+
+def check_service_log(path: Path) -> tuple[list[str], int]:
+    """Say something useful about launchd's copy of the console output.
+
+    This one is not Halyard's to rotate. launchd opens it and holds it, so
+    renaming it out from under a running service leaves the service writing to
+    a file nobody can find — the quiet kind of wrong this project keeps writing
+    down. Truncating in place is the safe move, and it is a person's to make.
+
+    So: mention it exists, and say the number when the number starts to matter.
+    Silence would leave a file growing all year that nothing ever names.
+    """
+    try:
+        size = path.stat().st_size
+    except OSError:
+        # Not installed as a service, or somewhere this cannot look. Neither is
+        # a problem — but the path is still worth printing once, because it is
+        # where the `git pull` and `uv sync` output goes and nothing else says so.
+        return (
+            [
+                f"{OK}no service log at {path}",
+                "        the launchd service keeps its console output there when installed",
+            ],
+            0,
+        )
+
+    lines = [f"{OK}service log is {_megabytes(size)} ({path})"]
+    if size >= SERVICE_LOG_WARN_BYTES:
+        lines = [
+            f"{WARN}service log has reached {_megabytes(size)} ({path})",
+            "        launchd holds this open, so Halyard cannot rotate it — empty it in place:",
+            f"        : > {path}",
+        ]
+        return lines, 1
+    if size >= SERVICE_LOG_NOTE_BYTES:
+        lines.append("        launchd's, not Halyard's. Empty it when it gets large:")
+        lines.append(f"        : > {path}")
+    return lines, 0
+
+
 def run() -> int:
     """Check the chain end to end. Returns a process exit code."""
     problems = 0
+    settings_ok = False
     print("Halyard doctor\n")
 
     try:
         settings = Settings()
+        settings_ok = True
         print(f"{OK}configuration loads")
         print(f"        channel={settings.channel.value} project={settings.project_name!r}")
         print(
@@ -511,6 +563,23 @@ def run() -> int:
             print(f"{FAIL if required else WARN}{name} is not executable (chmod +x)")
         else:
             print(f"{OK}{name} is present and executable")
+
+    print()
+    if settings_ok and settings.log_file is not None:
+        folder = settings.log_file.parent
+        weeks = sorted(folder.glob("bridge-*.log")) if folder.is_dir() else []
+        print(f"{OK}logs are in {folder}, a new file each week")
+        print(
+            f"        {settings.log_file.name} is this week"
+            + (f", and {len(weeks)} week(s) of bridge log beside it" if weeks else "")
+        )
+
+    from halyard.service import log_path as service_log_path
+
+    lines, found = check_service_log(service_log_path())
+    problems += found
+    for line in lines:
+        print(line)
 
     print()
     print(f"{problems} problem(s) found." if problems else "Everything checks out.")
