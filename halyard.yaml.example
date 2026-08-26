@@ -58,6 +58,27 @@ settings:
   # that sleeps denies every command on the machine and says nothing.
   # HALYARD_KEEP_AWAKE: false
 
+# Paths the agent may write to without being asked.
+#
+# The gate covers `Write` and `Edit`, so a write to anywhere else puts a card
+# on your phone rather than failing — which is what a turn started from the
+# phone used to do, silently, because a headless session cannot open Claude
+# Code's own permission dialog.
+#
+# This is the one thing Halyard permits without a person, so it is empty by
+# default and every grant is written to the audit log with the pattern that
+# allowed it. Patterns are matched *inside the project the write belongs to*,
+# never against the whole machine: `NOTES/**` means `NOTES/**` of whichever
+# gated project the agent is working in. A path that climbs out with `..`, or
+# through a symlink, is refused however it is spelled.
+#
+#   NOTES/**        everything under NOTES, at any depth
+#   NOTES           the same thing, written shorter
+#   NOTES/*.md      Markdown directly in NOTES, and no deeper
+#
+# writes:
+#   - NOTES/**
+
 # Sentences you say often enough to want a name for. Each key becomes a
 # command, so this one is `/md`, and anything typed after it is added on the
 # end — `/md the failing test` arrives as the prompt with that appended.

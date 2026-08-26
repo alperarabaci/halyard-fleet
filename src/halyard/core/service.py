@@ -18,6 +18,7 @@ import logging
 from dataclasses import dataclass
 from enum import StrEnum
 
+from halyard.core import writes
 from halyard.core.approvals import (
     ApprovalRequest,
     ApprovalStore,
@@ -31,6 +32,7 @@ from halyard.core.audit import (
     bridge_error,
     question_answered,
     question_asked,
+    write_preauthorized,
 )
 from halyard.core.events import RiskLevel, Role
 from halyard.core.gate import Gate
@@ -414,11 +416,14 @@ class ApprovalService:
         project: str,
         gate: Gate | None = None,
         seats: dict[str, Role] | None = None,
+        allowed_writes: tuple[str, ...] = (),
     ) -> None:
         self._seats = seats or {}
         self._store = store
         self._gate = gate or Gate()
         self._policy = policy
+        # Paths a write may reach without a card. Empty unless configured.
+        self._writes = tuple(allowed_writes)
         self._redactor = redactor
         self._audit = audit
         self._registry = registry
@@ -439,6 +444,7 @@ class ApprovalService:
         session_name: str | None = None,
         reason: str | None = None,
         declared_risk: RiskLevel | None = None,
+        file_path: str | None = None,
     ) -> ApprovalOutcome:
         """Ask for permission, and answer. Never raises."""
         try:
@@ -454,6 +460,7 @@ class ApprovalService:
                 session_name=session_name,
                 reason=reason,
                 declared_risk=declared_risk,
+                file_path=file_path,
             )
         except Exception:
             # The outer net. Anything not handled below still has to come out of
@@ -485,6 +492,7 @@ class ApprovalService:
         session_name: str | None,
         reason: str | None,
         declared_risk: RiskLevel | None,
+        file_path: str | None = None,
     ) -> ApprovalOutcome:
         # Redaction first, before the command is copied anywhere. Everything
         # downstream — policy, the store, the audit log, the card — sees only
@@ -503,6 +511,32 @@ class ApprovalService:
         classification = self._policy.classify(prepared.full, declared=declared_risk)
         project = project_name(project_dir, cwd, self._project)
         role = seat_of(role, session_name, self._seats)
+
+        # The one grant in this system. A write to a path the configuration
+        # names is let through without a card — see `writes.py` for why every
+        # rule there is narrow. Recorded with the pattern that allowed it,
+        # because this is the single path where nobody was asked.
+        if tool in writes.FILE_TOOLS:
+            pattern = writes.allowed_by(file_path, project_dir or cwd, self._writes)
+            if pattern is not None:
+                await self._try_to_record(
+                    write_preauthorized(
+                        session_id=session_id,
+                        agent_id=agent_id,
+                        project=project,
+                        tool=tool,
+                        file_path=file_path or "",
+                        pattern=pattern,
+                    )
+                )
+                return ApprovalOutcome(
+                    decision=BridgeDecision.ALLOW,
+                    reason=(
+                        f"Allowed without asking: {file_path} matches "
+                        f"{pattern!r} under `writes:` in halyard.yaml."
+                    ),
+                    risk=classification.risk,
+                )
 
         await self._registry.observe(
             session_id=session_id,

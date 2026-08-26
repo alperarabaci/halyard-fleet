@@ -47,6 +47,11 @@ class AuditAction(StrEnum):
     APPROVAL_REQUESTED = "approval.requested"
     #: A decision was reached, by a human or by the deadline.
     APPROVAL_RESOLVED = "approval.resolved"
+    #: A write ran without anybody being asked, because the configuration says
+    #: that path may be written to. The one thing in this system that is
+    #: permitted without a person, so it is recorded with the pattern that
+    #: allowed it — "why did that run without asking" must always have an answer.
+    WRITE_PREAUTHORIZED = "write.preauthorized"
     #: An agent asked a person to choose between options, and a card went out.
     QUESTION_ASKED = "question.asked"
     #: A question was answered, or left to the terminal by the deadline.
@@ -144,6 +149,28 @@ def approval_resolved(
             "command": request.command_full,
             "risk": request.risk.value,
         },
+    )
+
+
+def write_preauthorized(
+    *,
+    session_id: str,
+    agent_id: str,
+    project: str,
+    tool: str,
+    file_path: str,
+    pattern: str,
+    now: datetime | None = None,
+) -> AuditRecord:
+    """A write that was let through because the configuration named its path."""
+    return AuditRecord(
+        action=AuditAction.WRITE_PREAUTHORIZED,
+        recorded_at=now or _default_clock(),
+        actor="config",
+        session_id=session_id,
+        agent_id=agent_id,
+        project=project,
+        detail={"tool": tool, "path": file_path, "pattern": pattern},
     )
 
 

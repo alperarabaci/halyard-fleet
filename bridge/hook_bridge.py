@@ -223,10 +223,19 @@ def build_body(payload: dict) -> dict:
 
     tool_input = payload.get("tool_input") or {}
     command = tool_input.get("command")
+    file_path = tool_input.get("file_path")
+    if not isinstance(file_path, str):
+        file_path = None
     if not isinstance(command, str):
-        # Phase 1 only relays Bash. Anything else still gets described rather
-        # than silently summarised to nothing, and core redacts it either way.
-        command = json.dumps(tool_input, ensure_ascii=False)
+        if file_path:
+            # A file tool. The card wants the destination, not the file — a
+            # `Write` carries its whole content in `tool_input`, and putting
+            # that on a phone would bury the one fact worth reading.
+            command = f"{payload.get('tool_name') or 'write'} {file_path}"
+        else:
+            # Anything else still gets described rather than silently summarised
+            # to nothing, and core redacts it either way.
+            command = json.dumps(tool_input, ensure_ascii=False)
     return {
         "session_id": payload.get("session_id") or "unknown",
         "agent_id": runtime,
@@ -251,6 +260,9 @@ def build_body(payload: dict) -> dict:
         # watch it for a turn that died with no hook to announce it. Read by
         # nothing on the approval path — a courier's note, not a decision input.
         "transcript_path": transcript,
+        # The destination of a file tool, passed separately from the summary so
+        # the control plane can match it against `writes:` without parsing prose.
+        "file_path": file_path,
         # The context a person has on screen and a card did not.
         #
         # Two sources, best first. `description` is the one-line summary the
