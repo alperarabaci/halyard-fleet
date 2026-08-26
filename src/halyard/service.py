@@ -248,6 +248,59 @@ def uninstall() -> int:
     return 0
 
 
+def restart() -> int:
+    """Take the service down and bring it straight back up.
+
+    The command wanted after every merge: the agent runs `git pull` on its own
+    start, so restarting it *is* updating it. Kept here rather than left as a
+    `launchctl` line to paste, because every launchd detail this project has
+    got wrong was in a line somebody pasted.
+    """
+    if not _is_macos():
+        print("halyard: `service` is macOS only.")
+        return 1
+
+    path = plist_path()
+    if not path.exists():
+        print(f"{LABEL} is not installed. `halyard service install` sets it up.")
+        return 1
+
+    target = f"{domain()}/{LABEL}"
+    _launchctl("bootout", target)
+    # Enabled on the way back up for the same reason `install` does it: a stop
+    # that was done with `unload -w` leaves a record that would otherwise make
+    # this look like it worked while launchd refuses to start anything.
+    _launchctl("enable", target)
+    started = _launchctl("bootstrap", domain(), str(path))
+    if started.returncode != 0:
+        print(f"halyard: launchctl could not start the agent: {started.stderr.strip()}")
+        return 1
+    print(f"Restarted {LABEL}. It pulls, syncs and serves on the way up.")
+    return 0
+
+
+def stop() -> int:
+    """Take the service down, leaving it installed.
+
+    For working on Halyard itself: the port and the bot token allow one
+    consumer, so a local `halyard` cannot run beside the service. `bootout`
+    rather than `unload -w` — the latter is what left the service disabled and
+    unfindable for an afternoon.
+
+    **The gate is down while nothing is serving.** A wired project denies every
+    Bash command in that window, so start the local one straight after.
+    """
+    if not _is_macos():
+        print("halyard: `service` is macOS only.")
+        return 1
+
+    _launchctl("bootout", f"{domain()}/{LABEL}")
+    print(f"Stopped {LABEL}. It stays installed; `halyard service restart` brings it back.")
+    print("  The gate is down until something serves — start `uv run halyard` now if you")
+    print("  are working locally, or a wired project will deny every command.")
+    return 0
+
+
 def status() -> int:
     """Say whether the agent is installed and whether launchd has it loaded."""
     if not _is_macos():
@@ -278,9 +331,18 @@ def status() -> int:
 
 def run(argument: str | None) -> int:
     """Dispatch `halyard service [install|uninstall|status]`."""
-    actions = {"install": install, "uninstall": uninstall, "status": status}
+    actions = {
+        "install": install,
+        "restart": restart,
+        "stop": stop,
+        "status": status,
+        "uninstall": uninstall,
+    }
     action = actions.get(argument or "status")
     if action is None:
-        print(f"halyard: unknown service command {argument!r}. Use install, uninstall, or status.")
+        print(
+            f"halyard: unknown service command {argument!r}. "
+            "Use install, restart, stop, status, or uninstall."
+        )
         return 2
     return action()
