@@ -1,7 +1,7 @@
 # The handful of things you actually type. Everything here is a shortcut for a
 # command in the README, not a new way of doing anything.
 
-.PHONY: help run service doctor sessions init wire unwire verify test lint fmt check
+.PHONY: help run service restart stop doctor sessions init wire unwire verify test lint fmt check
 
 help:  ## Show this help
 	@grep -hE '^[a-z-]+:.*?## ' $(MAKEFILE_LIST) \
@@ -13,8 +13,16 @@ run:  ## Start the control plane
 # `s` is the subcommand: install, uninstall, or status (the default).
 #
 #     make service s=install
-service:  ## Manage the launchd service, macOS  [s=install|uninstall|status]
+service:  ## Manage the launchd service, macOS  [s=install|restart|stop|status|uninstall]
 	uv run halyard service $(s)
+
+# The two typed daily, so they get names of their own. `restart` is also how you
+# update: the agent pulls and syncs on its own way up.
+restart:  ## Restart the service — this is also how you deploy a merge
+	uv run halyard service restart
+
+stop:  ## Stop the service, keeping it installed (for working on Halyard itself)
+	uv run halyard service stop
 
 doctor:  ## Check the configuration and say what is wrong with it
 	@uv run halyard doctor

@@ -78,7 +78,7 @@ USAGE = """usage: halyard [command]
   verify [rt]   prove the gate stops things, by running into it (costs turns)
   wire [what]   put the gate on a project, by name or directory (keeps a backup)
   unwire [what] take it off again, leaving everything else in place
-  service [cmd] install, uninstall, or status a launchd service (macOS)
+  service [cmd] install, restart, stop, status, uninstall — the macOS service
 """
 
 

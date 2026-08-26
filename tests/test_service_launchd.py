@@ -203,3 +203,50 @@ def _ok(args):
     import subprocess
 
     return subprocess.CompletedProcess(args, 0, "", "")
+
+
+def test_restart_enables_on_the_way_back_up(macos, monkeypatch, tmp_path) -> None:
+    """A stop done with `unload -w` leaves a record that would otherwise make a
+    restart look like it worked while launchd refuses to start anything."""
+    calls: list[tuple[str, ...]] = []
+    plist = tmp_path / "agent.plist"
+    plist.write_bytes(b"<plist></plist>")
+    monkeypatch.setattr(service, "plist_path", lambda: plist)
+    monkeypatch.setattr(service, "_launchctl", lambda *a: (calls.append(a), _ok(a))[1])
+
+    assert service.restart() == 0
+
+    names = [args[0] for args in calls]
+    assert names == ["bootout", "enable", "bootstrap"]
+
+
+def test_restart_says_so_when_nothing_is_installed(macos, monkeypatch, tmp_path, capsys) -> None:
+    monkeypatch.setattr(service, "plist_path", lambda: tmp_path / "missing.plist")
+
+    assert service.restart() == 1
+    assert "not installed" in capsys.readouterr().out
+
+
+def test_stop_leaves_no_disabled_record(macos, monkeypatch, tmp_path, capsys) -> None:
+    """`bootout`, never `unload -w` — the latter is what left the service
+    unfindable for an afternoon, and this is the command that replaces it."""
+    calls: list[tuple[str, ...]] = []
+    monkeypatch.setattr(service, "plist_path", lambda: tmp_path / "agent.plist")
+    monkeypatch.setattr(service, "_launchctl", lambda *a: (calls.append(a), _ok(a))[1])
+
+    assert service.stop() == 0
+
+    assert [args[0] for args in calls] == ["bootout"]
+    # And it says what stopping costs, because the gate is down meanwhile.
+    assert "deny every command" in capsys.readouterr().out
+
+
+def test_stop_keeps_the_agent_installed(macos, monkeypatch, tmp_path) -> None:
+    plist = tmp_path / "agent.plist"
+    plist.write_bytes(b"<plist></plist>")
+    monkeypatch.setattr(service, "plist_path", lambda: plist)
+    monkeypatch.setattr(service, "_launchctl", lambda *a: _ok(a))
+
+    service.stop()
+
+    assert plist.exists()
