@@ -99,6 +99,52 @@ class Hooks:
 
 
 @dataclass(frozen=True)
+class Alert:
+    """Something a runtime did not report, worth putting on a phone.
+
+    Carries its own text because only the runtime knows how to phrase what it
+    found — "stopped on a server error" and "is at 91% of its 5h limit" are the
+    same kind of event and read nothing alike.
+
+    `key` is what stops it being said twice. It has to be stable for the same
+    fact and different for a new one: a transcript entry's uuid, or a window
+    plus the time it resets.
+    """
+
+    key: str
+    text: str
+
+
+@dataclass(frozen=True)
+class Watching:
+    """How to notice what a runtime never says out loud.
+
+    Some failures fire no hook at all. A turn that dies on an API error does
+    not reach `Stop`, and a usage limit filling up is not an event anywhere —
+    both are only visible in the file the runtime writes as it goes. Watching
+    that file is the one way to see them, and *how* to read it is a fact about
+    the runtime, not about Halyard.
+
+    This exists because it was nearly not written down. The first watcher put
+    `CLAUDE_CODE = "claude-code"` and a Claude-shaped parser straight into
+    core, which worked exactly until Codex needed the same thing and had a
+    different filename, a different entry shape, and a different thing worth
+    saying. Everything runtime-specific belongs to the runtime; core keeps the
+    polling, the byte offsets, the gate and the not-saying-it-twice.
+    """
+
+    #: Where this runtime keeps its transcripts. Nothing outside this directory
+    #: is ever opened — the session id arrives over HTTP, so the boundary is
+    #: what stops it naming any file on the machine.
+    home: Path
+    #: This session's transcript, by id, or None. Given the id and the home.
+    transcript: Callable[[str, Path], Path | None]
+    #: What is worth saying about lines just appended, given what has already
+    #: been said. Pure: no reading, no sending, so it can be tested as a table.
+    alerts: Callable[[list[str], set[str]], list[Alert]]
+
+
+@dataclass(frozen=True)
 class Verification:
     """How to drive one non-interactive turn, for `halyard verify`.
 
@@ -157,7 +203,7 @@ class RuntimeSpec:
     find_session: Callable[[str], SessionRef | None]
     #: Named sessions as (name, id, last modified), newest first. Offered as
     #: suggestions by `halyard init`.
-    list_sessions: Callable[[], list[tuple[str, str, float]]]
+    list_sessions: Callable[[], list[SessionRef]]
     #: What a generated seat label starts with, so three runtimes' defaults are
     #: not all `drv1`. Matches what people were already writing by hand:
     #: `nav`/`drv`, `xnav`/`xdrv`, `gnav`/`gdrv`.
@@ -191,6 +237,10 @@ class RuntimeSpec:
     check_wired: Callable[..., list[tuple[str, str]]] | None = field(default=None)
     #: How `halyard verify` drives this runtime, when it can at all.
     verify: Verification | None = None
+    #: How to watch this runtime's transcript for what it never reports. `None`
+    #: means it is not watched, which is honest for a runtime whose file shape
+    #: nobody has measured yet.
+    watching: Watching | None = None
 
     def on_this_machine(self) -> bool:
         return self.present() if self.present else bool(shutil.which(self.binary))

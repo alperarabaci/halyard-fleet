@@ -25,6 +25,7 @@ from __future__ import annotations
 import contextlib
 import logging
 import re
+from datetime import datetime
 from pathlib import Path
 
 from halyard.agents.base import SessionRef
@@ -146,15 +147,22 @@ def find_session(name: str, *, root: Path | None = None) -> SessionRef | None:
     return None
 
 
-def list_named_sessions(*, root: Path | None = None) -> list[tuple[str, str, float]]:
-    """Every named conversation as (name, id, last modified), newest first."""
-    rows = []
+def list_named_sessions(*, root: Path | None = None) -> list[SessionRef]:
+    """Every named conversation, newest first.
+
+    `cwd` is unset: Antigravity records the workspace in the hook payload and
+    nowhere a listing can reach, which is honest to leave blank rather than
+    guess at.
+    """
+    refs = []
     for name, conversation_id in _titles(root).items():
         home = home_of(conversation_id, root) or antigravity_home(root)
         annotation = home / "annotations" / f"{conversation_id}.pbtxt"
         try:
-            modified = annotation.stat().st_mtime
+            modified = datetime.fromtimestamp(annotation.stat().st_mtime)
         except OSError:
-            modified = 0.0
-        rows.append((name, conversation_id, modified))
-    return sorted(rows, key=lambda row: -row[2])
+            modified = None
+        refs.append(
+            SessionRef(session_id=conversation_id, name=name, cwd=None, last_active=modified)
+        )
+    return sorted(refs, key=lambda ref: -(ref.last_active.timestamp() if ref.last_active else 0.0))

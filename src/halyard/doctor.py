@@ -16,7 +16,6 @@ import os
 import sys
 import urllib.error
 import urllib.request
-from datetime import datetime
 from pathlib import Path
 
 from pydantic import ValidationError
@@ -589,70 +588,60 @@ def run() -> int:
 def sessions() -> int:
     """List the session names this machine can see, newest first.
 
-    Exists so the two names are copied rather than guessed. They have
-    to match exactly, and a name typed from memory that is nearly right routes
-    nothing and explains nothing.
+    Exists so the names are copied rather than guessed. They have to match
+    exactly, and a name typed from memory that is nearly right routes nothing
+    and explains nothing.
+
+    Asked of every runtime rather than of Claude Code. This read `~/.claude`
+    directly for a long time, which meant a machine with Codex seats was told
+    it had no sessions — and `tests/test_runtime_isolation.py` now fails if any
+    module outside a runtime's own package names one or knows where it lives.
 
     Read on the host, not in the container: transcripts live in the user's home
     directory, which the control plane cannot see.
     """
-    from halyard.agents.claude_code.sessions import describe
+    from halyard.agents import registry
 
-    root = Path.home() / ".claude" / "projects"
-    if not root.exists():
-        print(f"No transcripts found under {root}.")
-        return 1
-
-    seen: dict[str, tuple[float, str, bool]] = {}
-    for transcript in root.glob("*/*.jsonl"):
+    found: list[tuple[object, str]] = []
+    for name, spec in sorted(registry.discover().items()):
         try:
-            modified = transcript.stat().st_mtime
-        except OSError:
-            continue
-        ref = describe(transcript)
-        if ref is None or not ref.name:
-            continue
-        # The directory comes from the transcript's own `cwd`, never from the
-        # name of the folder transcripts are filed under: that name replaced
-        # every separator with a dash, so `halyard-fleet` and `halyard/fleet`
-        # encode identically and decoding produces a path that does not exist.
-        project = ref.cwd or "(directory not recorded)"
-        # One named conversation spans many session ids; keep the most recent
-        # sighting of each name rather than listing it once per restart.
-        if ref.name not in seen or modified > seen[ref.name][0]:
-            seen[ref.name] = (modified, project, ref.named_by_a_person)
+            found += [(ref, name) for ref in spec.list_sessions()]
+        except Exception:
+            # One runtime that cannot list must not hide the others.
+            print(f"{WARN}could not list {name} sessions")
 
-    if not seen:
-        print("No named sessions found.")
+    if not found:
+        print("No named sessions found on this machine.")
         return 1
+
+    found.sort(key=lambda item: -(item[0].last_active.timestamp() if item[0].last_active else 0.0))
 
     print("Session names visible on this machine, newest first:\n")
     generated = False
-    for name, (modified, project, chosen) in sorted(seen.items(), key=lambda i: -i[1][0]):
-        when = datetime.fromtimestamp(modified).strftime("%Y-%m-%d %H:%M")
-        generated = generated or not chosen
-        print(f"  {when}  {name}{'' if chosen else '   ⚠ auto-titled'}")
-        print(f"{'':20}{project}")
+    for ref, runtime in found:
+        when = ref.last_active.strftime("%Y-%m-%d %H:%M") if ref.last_active else " " * 16
+        generated = generated or not ref.named_by_a_person
+        mark = "" if ref.named_by_a_person else "   ⚠ auto-titled"
+        print(f"  {when}  {runtime:<12} {ref.name}{mark}")
+        # Said even when absent. A blank line reads as "no directory", and a
+        # seat pointed at a session whose directory nobody recorded fails in a
+        # way that looks like the name being wrong.
+        print(f"{'':20}{ref.cwd or '(directory not recorded)'}")
     print(
         "\nGive one to a seat, exactly as printed above:\n"
         "\n"
         "  seats:\n"
         "    drv:\n"
-        "      runtime: claude-code\n"
+        "      runtime: <the runtime column>\n"
         "      session: <one of the names above>\n"
         '      chat: "-100..."      # the group this seat speaks in\n'
         "\n"
         "Seats are read at startup, so restart the control plane afterwards."
     )
     if generated:
-        # Worth interrupting for. A generated title routes correctly the day it
-        # is copied and stops without an error the moment Claude rewrites it,
-        # which looks like Halyard losing messages rather than like a name
-        # having moved underneath it.
         print(
-            "\n⚠ Names marked auto-titled were written by Claude, not by you, and\n"
-            "  are rewritten as the conversation moves. A seat pointed at one\n"
-            "  works until it changes, then quietly routes nothing. Rename the\n"
-            "  session in the app first, then copy the name you chose."
+            f"\n{WARN}A name marked auto-titled was written by the runtime, not by you.\n"
+            "        Those are rewritten as a conversation moves, so a seat pointed at\n"
+            "        one works today and silently stops later. Rename it first."
         )
     return 0

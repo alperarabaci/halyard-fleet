@@ -38,6 +38,10 @@ class SessionRef:
     #: pointed at one works until it silently stops.
     named_by_a_person: bool = True
     started_at: datetime | None = None
+    #: When this session was last written to. What a listing sorts by, and the
+    #: one fact the three runtimes each kept in a different type before this —
+    #: two floats and an ISO string behind a signature that promised a float.
+    last_active: datetime | None = None
 
 
 @runtime_checkable

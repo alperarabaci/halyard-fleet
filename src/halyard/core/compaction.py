@@ -40,7 +40,7 @@ import time
 from pathlib import Path
 
 from halyard.core.seats import Seat, for_session
-from halyard.core.transcripts import find_transcript
+from halyard.core.transcripts import find_transcript, watching_for
 
 logger = logging.getLogger(__name__)
 
@@ -288,7 +288,9 @@ class Recorder:
         # Found by id under the runtimes' own directories, never taken from the
         # request: a path in a payload posted over HTTP is a path an attacker
         # chooses. See `find_transcript`.
-        transcript = find_transcript(session_id, self._roots)
+        # The seat says which runtime this is; the registry says how to find
+        # its transcript. Nothing here knows either.
+        transcript = find_transcript(session_id, watching_for(seat.runtime), self._roots)
         if transcript is None:
             return False
         runner = self._runners.get(seat.runtime)

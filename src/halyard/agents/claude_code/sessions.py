@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import logging
+from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
 
@@ -150,10 +151,14 @@ def find_session(name: str, *, root: Path | None = None) -> SessionRef | None:
     return None
 
 
-def list_named_sessions(*, root: Path | None = None) -> list[tuple[str, str, float]]:
-    """Every named session as (name, session_id, last modified), newest first."""
+def list_named_sessions(*, root: Path | None = None) -> list[SessionRef]:
+    """Every named session, newest first.
+
+    A `SessionRef` rather than a tuple: the caller wants the directory and
+    whether a person chose the name, and this already had both and dropped them.
+    """
     directory = root or transcript_root()
-    seen: dict[str, tuple[str, float]] = {}
+    seen: dict[str, tuple[SessionRef, float]] = {}
     try:
         transcripts = list(directory.glob("*/*.jsonl"))
     except OSError:
@@ -166,9 +171,14 @@ def list_named_sessions(*, root: Path | None = None) -> list[tuple[str, str, flo
         ref = describe(transcript)
         if ref is None:
             continue
+        if not ref.name:
+            continue
         if ref.name not in seen or modified > seen[ref.name][1]:
-            seen[ref.name] = (ref.session_id, modified)
+            seen[ref.name] = (
+                replace(ref, last_active=datetime.fromtimestamp(modified)),
+                modified,
+            )
     return sorted(
-        ((name, sid, mtime) for name, (sid, mtime) in seen.items()),
-        key=lambda item: -item[2],
+        (ref for ref, _ in seen.values()),
+        key=lambda ref: -(ref.last_active.timestamp() if ref.last_active else 0.0),
     )

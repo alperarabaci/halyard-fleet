@@ -12,8 +12,10 @@ import json
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+from halyard.agents.claude_code.watching import WATCHING
+from halyard.agents.claude_code.watching import alerts as claude_alerts
 from halyard.core.gate import Gate
-from halyard.core.transcripts import TranscriptWatcher, find_api_errors, find_transcript
+from halyard.core.transcripts import TranscriptWatcher, find_transcript
 
 START = datetime(2026, 7, 26, 10, 0, tzinfo=UTC)
 
@@ -86,30 +88,32 @@ def append(path: Path, *lines: str, newline: bool = True) -> None:
 
 
 def test_it_finds_an_api_error_and_reads_its_text() -> None:
-    found = find_api_errors([normal_line(), error_line(text="529 Overloaded")], seen=set())
+    found = claude_alerts([normal_line(), error_line(text="529 Overloaded")], set())
 
-    assert found == [("u1", "529 Overloaded")]
+    assert [(a.key, a.text) for a in found] == [
+        ("u1", "stopped on a server error:\n\n529 Overloaded")
+    ]
 
 
 def test_a_line_that_is_not_json_is_skipped_not_raised() -> None:
     # A write caught mid-flight, a log line that slipped in — none of it should
     # be able to throw, because this runs off a background loop that must not die.
-    assert find_api_errors(["{ not json", "", error_line()], seen=set())
+    assert claude_alerts(["{ not json", "", error_line()], set())
 
 
 def test_an_entry_without_the_flag_is_not_an_error() -> None:
-    assert find_api_errors([normal_line()], seen=set()) == []
+    assert claude_alerts([normal_line()], set()) == []
 
 
 def test_a_shape_with_no_text_falls_back_to_the_status() -> None:
     line = json.dumps({"uuid": "x", "isApiErrorMessage": True, "apiErrorStatus": 503})
 
-    ((_, text),) = find_api_errors([line], seen=set())
-    assert "503" in text
+    (alert,) = claude_alerts([line], set())
+    assert "503" in alert.text
 
 
 def test_an_id_already_seen_is_not_reported_again() -> None:
-    assert find_api_errors([error_line(uuid="u1")], seen={"u1"}) == []
+    assert claude_alerts([error_line(uuid="u1")], {"u1"}) == []
 
 
 # --- watching stays cheap and only looks forward ----------------------------
@@ -243,7 +247,7 @@ def test_a_transcript_is_found_by_its_session_id(tmp_path: Path) -> None:
     wanted.parent.mkdir(parents=True)
     wanted.write_text("", encoding="utf-8")
 
-    assert find_transcript("9f1c2b3a-0000-0000-0000-000000000000", (tmp_path,)) == wanted
+    assert find_transcript("9f1c2b3a-0000-0000-0000-000000000000", WATCHING, (tmp_path,)) == wanted
 
 
 def test_an_id_that_could_name_another_file_is_refused(tmp_path: Path) -> None:
@@ -251,15 +255,18 @@ def test_an_id_that_could_name_another_file_is_refused(tmp_path: Path) -> None:
     This is why the path is no longer taken from the payload at all: a value
     posted over HTTP was becoming a filename, and CodeQL was right about it."""
     for hostile in ("../../../etc/passwd", "a/b", "..", "x.jsonl", ""):
-        assert find_transcript(hostile, (tmp_path,)) is None
+        assert find_transcript(hostile, WATCHING, (tmp_path,)) is None
 
 
 def test_an_id_with_no_transcript_finds_nothing(tmp_path: Path) -> None:
-    assert find_transcript("9f1c2b3a-0000-0000-0000-000000000000", (tmp_path,)) is None
+    assert find_transcript("9f1c2b3a-0000-0000-0000-000000000000", WATCHING, (tmp_path,)) is None
 
 
 def test_a_missing_root_is_skipped_rather_than_raised(tmp_path: Path) -> None:
-    assert find_transcript("9f1c2b3a-0000-0000-0000-000000000000", (tmp_path / "gone",)) is None
+    assert (
+        find_transcript("9f1c2b3a-0000-0000-0000-000000000000", WATCHING, (tmp_path / "gone",))
+        is None
+    )
 
 
 async def test_the_watcher_watches_nothing_it_cannot_find(tmp_path: Path) -> None:

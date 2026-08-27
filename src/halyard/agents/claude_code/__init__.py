@@ -2,6 +2,7 @@
 
 from halyard.agents.claude_code.runner import ClaudeCodeRunner
 from halyard.agents.claude_code.sessions import SessionRef, find_session, list_named_sessions
+from halyard.agents.claude_code.watching import WATCHING
 from halyard.agents.spec import Hooks, RuntimeSpec, Verification, late
 
 
@@ -163,6 +164,7 @@ RUNTIME = RuntimeSpec(
         # exactly that reason.
         settings_extra=lambda marker: {"permissions": {"allow": [f"Bash(touch {marker})"]}},
     ),
+    watching=WATCHING,
 )
 
 __all__ = [

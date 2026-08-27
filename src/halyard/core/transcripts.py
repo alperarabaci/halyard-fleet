@@ -1,16 +1,19 @@
-"""Notice when a turn dies where no hook fires, and say so on the phone.
+"""Notice what a runtime never says out loud, and put it on the phone.
 
-Some failures leave no event to react to. A turn that hits an API error mid-way
-— a 529 overloaded, a usage limit reached in the middle — does not fire `Stop`,
-because from Claude Code's side the turn did not *finish responding*, it broke.
-So the reply relay never runs, and somebody away from the desk sees nothing:
-the session simply goes quiet with a synthetic error message sitting in its
-transcript.
+Some things fire no hook at all. A turn that dies on an API error does not
+reach `Stop`, because from the runtime's side it did not *finish responding*,
+it broke — so the reply relay never runs and a session simply goes quiet. A
+usage window filling up is not an event anywhere. Both are visible only in the
+file the runtime writes as it goes, so this polls that file.
 
-The transcript is the one place the failure is always recorded. Claude Code
-writes it as an ordinary assistant entry carrying `"isApiErrorMessage": true`
-and the human-readable text — measured, see `docs/session-io-notes.md`. There
-is nothing to hang a hook on, so this watches the file on a timer instead.
+**What is in the file is the runtime's business, not this module's.** Where the
+transcripts live, how one is named, and what in it is worth a message all come
+from `RuntimeSpec.watching`. That was learned the expensive way: the first
+version of this file had `CLAUDE_CODE = "claude-code"` and a Claude-shaped
+parser in it, and worked perfectly until Codex needed the same thing with a
+different filename, a different entry shape, and a different thing worth saying
+— a percentage climbing rather than wreckage after the fact.
+`tests/test_runtime_isolation.py` now fails if a runtime is named here again.
 
 Two rules shape every line here, both asked for directly:
 
@@ -22,17 +25,14 @@ never raise.
 
 **It must stay cheap.** Only sessions a hook has actually mentioned are watched,
 the poll reads only the bytes appended since last time, an idle session is
-dropped, and the path is taken from the hook payload rather than guessed from a
-directory layout that is not ours to depend on.
+dropped, and a transcript is located once rather than on every approval.
 """
 
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 import re
-from collections.abc import Iterable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -61,112 +61,54 @@ MAX_READ_BYTES = 512 * 1024
 #: session cannot grow this without limit.
 MAX_SEEN = 200
 
-#: Only this runtime writes a transcript in the shape read below.
-CLAUDE_CODE = "claude-code"
-
-#: Where the runtimes keep their transcripts. A path that resolves outside all
-#: of these is not a transcript and is not opened.
-#:
-#: The path itself still comes from the hook payload rather than being computed
-#: — a layout that moves inside one of these directories keeps working, which
-#: was the point of not building the path here. What this adds is a boundary:
-#: the payload arrives over HTTP, and anything that can reach the control plane
-#: could otherwise name `~/.ssh/id_rsa` and have its contents read, summarised
-#: by a model and handed back at the next session start. Found by CodeQL, and
-#: it was right.
-TRANSCRIPT_ROOTS = (
-    Path.home() / ".claude",
-    Path.home() / ".codex",
-    Path.home() / ".gemini",
-)
-
-
 #: What a session id may look like before it is allowed to name a file. Hex and
 #: dashes: every runtime's id measured so far is a UUID. No dot and no separator
 #: can pass, so nothing here can climb out of a directory or name a file of its
-#: own choosing — which is the whole reason the id is used instead of the path
-#: the payload offered.
+#: own choosing — which is why the id is used instead of the path a payload
+#: offered. This stays in core: it is a security boundary, not a runtime's taste.
 _SESSION_ID = re.compile(r"^[A-Za-z0-9_-]{8,64}$")
 
 
-def find_transcript(session_id: str | None, roots: tuple[Path, ...] | None = None) -> Path | None:
-    """This session's transcript, found rather than taken from the payload.
+def watching_for(agent_id: str | None):
+    """How to watch this runtime, or None if it is not watched.
 
-    The path used to arrive in the hook body, which meant a value posted over
-    HTTP became a filename — so anything able to reach the control plane could
-    name `~/.ssh/id_rsa` and have it read, summarised by a model and handed back
-    at the next session start. CodeQL found it; this removes it rather than
-    guarding it, because a guard around a tainted path is still a tainted path.
-
-    What is assumed instead is narrow and was measured: a transcript is named
-    `<session_id>.jsonl` and sits somewhere under the runtime's own directory.
-    The directory part is searched, so a store that reorganises itself still
-    works; a naming scheme that changes finds nothing, says so, and the feature
-    that depends on it does nothing — the same failure it always had.
+    Asked of the registry rather than decided here. Core knows that transcripts
+    are polled, that bytes are read once, and that a thing is not said twice; it
+    knows nothing about which runtime writes what, and a `if agent_id ==` in
+    this file is the shape that made adding Codex a rewrite rather than a
+    package. `tests/test_runtime_isolation.py` keeps it that way.
     """
-    if not session_id or not _SESSION_ID.match(session_id):
+    if not agent_id:
         return None
-    for root in roots or TRANSCRIPT_ROOTS:
-        base = Path(root).expanduser()
-        try:
-            if not base.is_dir():
-                continue
-            # The id is the whole filename, and it cannot contain a separator,
-            # so the search decides the directory and nothing else does.
-            for found in base.glob(f"**/{session_id}.jsonl"):
-                if found.is_file():
-                    return found
-        except OSError:
-            continue
-    logger.info("No transcript named %s.jsonl under any runtime directory", session_id)
-    return None
+    try:
+        from halyard.agents import registry
+
+        spec = registry.discover().get(agent_id)
+    except Exception:
+        return None
+    return spec.watching if spec is not None else None
 
 
-#: How much of the error text to carry onto the phone.
-TEXT_LIMIT = 300
+def find_transcript(session_id: str | None, watching, roots: tuple[Path, ...] | None = None):
+    """This session's transcript, found by the runtime and checked by core.
 
-
-def find_api_errors(lines: Iterable[str], seen: set[str]) -> list[tuple[str | None, str]]:
-    """The API-error entries in these transcript lines not already seen.
-
-    Pure, and forgiving of everything: a line that is not JSON, an entry that is
-    not an error, a shape that has changed so the flag is gone — all produce
-    nothing rather than an exception. A false negative is a missed alert; a
-    raise would be the feature taking something down with it, which is the one
-    outcome ruled out.
+    The runtime says how one of its files is named; core says where it may be.
+    Both halves matter: the finder is the only thing that knows the shape, and
+    the containment check is the only thing standing between an id posted over
+    HTTP and any file on the machine.
     """
-    found: list[tuple[str | None, str]] = []
-    for line in lines:
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            entry = json.loads(line)
-        except (ValueError, TypeError):
-            continue
-        if not isinstance(entry, dict) or not entry.get("isApiErrorMessage"):
-            continue
-        uuid = entry.get("uuid")
-        if isinstance(uuid, str) and uuid in seen:
-            continue
-        found.append((uuid if isinstance(uuid, str) else None, _text_of(entry)))
-    return found
-
-
-def _text_of(entry: dict) -> str:
-    """The human-readable error, from the entry's own content or its status."""
-    message = entry.get("message")
-    if isinstance(message, dict):
-        parts = [
-            block["text"]
-            for block in message.get("content") or []
-            if isinstance(block, dict) and isinstance(block.get("text"), str)
-        ]
-        joined = " ".join(part.strip() for part in parts if part.strip())
-        if joined:
-            return joined[:TEXT_LIMIT]
-    status = entry.get("apiErrorStatus")
-    return f"Server error{f' ({status})' if status else ''}."
+    if not session_id or watching is None or not _SESSION_ID.match(session_id):
+        return None
+    root = Path(roots[0]) if roots else Path(watching.home)
+    try:
+        found = watching.transcript(session_id, root)
+        if found is None:
+            return None
+        resolved = Path(found).resolve()
+        resolved.relative_to(root.expanduser().resolve())
+    except (OSError, RuntimeError, ValueError):
+        return None
+    return resolved
 
 
 @dataclass
@@ -221,11 +163,12 @@ class TranscriptWatcher:
 
         Best-effort and total: any bad input is ignored rather than raised on,
         because this is called from inside the approval endpoint and must not be
-        able to affect it. Only Claude Code, the one runtime whose transcript is
-        read in the shape below.
+        able to affect it. A runtime with no `watching` is left alone, which is
+        the honest answer for one whose file shape nobody has measured.
         """
         try:
-            if agent_id != CLAUDE_CODE or not session_id:
+            watching = watching_for(agent_id)
+            if watching is None or not session_id:
                 return
             now = self._clock()
             existing = self._watched.get(session_id)
@@ -240,7 +183,7 @@ class TranscriptWatcher:
                 return
             # New session: start from the end of the file, so history is not
             # replayed and the first read is not a scan of the whole transcript.
-            found = find_transcript(session_id, self._roots)
+            found = find_transcript(session_id, watching, self._roots)
             if found is None:
                 return
             offset = self._size(found)
@@ -284,10 +227,12 @@ class TranscriptWatcher:
         lines = self._read_new_lines(watched)
         if not lines:
             return
-        for uuid, text in find_api_errors(lines, watched.seen):
-            if uuid is not None:
-                watched.seen.add(uuid)
-            await self._relay(session_id, watched, text)
+        watching = watching_for(watched.agent_id)
+        if watching is None:
+            return
+        for alert in watching.alerts(lines, watched.seen):
+            watched.seen.add(alert.key)
+            await self._relay(session_id, watched, alert.text)
         # Bound the memory a long-lived session's seen-set can take.
         if len(watched.seen) > MAX_SEEN:
             watched.seen = set(list(watched.seen)[-MAX_SEEN:])
@@ -332,7 +277,7 @@ class TranscriptWatcher:
             await self._channel.send_message(
                 # Routes to wherever this session's replies already go.
                 session_id,
-                f"⚠️ <b>{where}</b> stopped on a server error:\n\n{text}",
+                f"⚠️ <b>{where}</b> {text}",
                 watched.role,
                 agent_id=watched.agent_id,
                 session_name=watched.session_name,
