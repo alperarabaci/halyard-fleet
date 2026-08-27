@@ -192,7 +192,10 @@ class InjectBody(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
     session_id: str
-    agent_id: str = "antigravity"
+    #: Whichever runtime asked. Only one queues anything, and the bridge always
+    #: says which it is — a name written here would be this module knowing about
+    #: a runtime, which is what `RuntimeSpec` exists to prevent.
+    agent_id: str = runtimes.DEFAULT
 
 
 class InjectResponse(BaseModel):
