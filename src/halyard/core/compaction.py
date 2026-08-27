@@ -33,6 +33,7 @@ session that will not start.
 from __future__ import annotations
 
 import asyncio
+import html
 import json
 import logging
 import time
@@ -105,12 +106,19 @@ def for_seat(
 TAIL_BYTES = 200_000
 
 #: How much of that answer is allowed back. The point of a compaction is that
-#: the context was full; carrying a long record across would refill what was
-#: just emptied and buy a second compaction an hour later. This is the size of
-#: a page — the measured orientation file is about 1,600 characters — and it is
-#: asked for in the prompt as well as enforced here, because a model told to be
+#: the context was full; carrying a long record across refills what was just
+#: emptied and brings the next compaction closer.
+#:
+#: Lowered from 4,000 after the first one in the field: the record came back at
+#: 3,539 characters, which is to say the model filled very nearly whatever it
+#: was given, and the seat's own orientation file — a page that does real work —
+#: is about 1,600. A navigator reporting on that same compaction put it plainly:
+#: every line costs context, and a long list teaches the reader to skip lists.
+#:
+#: Asked for in the prompt as well as enforced here, because a model told to be
 #: brief writes something better than a model whose answer is cut off.
-RECORD_LIMIT = 4_000
+#: `HALYARD_COMPACTION_RECORD_LIMIT` moves it.
+RECORD_LIMIT = 2_000
 
 #: Which model writes the record. It is a distillation of text somebody else
 #: already wrote — the reasoning was done in the session, not here — so this
@@ -122,6 +130,11 @@ RECORD_MODEL = "sonnet"
 #: a compaction that starts a minute later is better than a record that arrives
 #: after the context it was about is gone. Past this the summary proceeds.
 RECORD_TIMEOUT_SECONDS = 120.0
+
+#: How many unclaimed records one session may hold. Two overlapping compactions
+#: have been seen; anything past a few means nothing is collecting them, and
+#: holding more would be keeping text nobody will ever be handed.
+MAX_WAITING = 3
 
 
 def conversation_tail(path: str | Path, limit: int = TAIL_BYTES) -> str:
@@ -207,22 +220,42 @@ class Recorder:
         runners: dict,
         root: Path | None = None,
         model: str | None = RECORD_MODEL,
+        limit: int = RECORD_LIMIT,
         clock=time.monotonic,
         roots: tuple[Path, ...] | None = None,
+        channel=None,
+        gate=None,
     ) -> None:
         self._seats = list(seats)
+        # Somewhere to say that a compaction is happening. Found in the field:
+        # the first one arrived as a session that had simply stopped answering,
+        # and the way to find out what was going on was to walk to the desk and
+        # then read a log. Both moments are known here exactly.
+        self._channel = channel
+        self._gate = gate
         self._runners = dict(runners or {})
         self._root = root or Path.cwd()
         self._model = model or RECORD_MODEL
+        self._limit = limit or RECORD_LIMIT
         self._clock = clock
         # Which directories a transcript may live in. A parameter so a test can
         # point it somewhere real, not so an operator can widen it.
         self._roots = roots
-        # The record, and when it was written. The second half is only there to
-        # measure with: `PreCompact` to `SessionStart` is the compaction itself,
-        # and that number is the one worth having when asking whether holding
-        # the summary for a record was worth it.
-        self._records: dict[str, tuple[str, float]] = {}
+        # A queue per session, not a single slot. Measured in the field: two
+        # compactions of one session overlapped —
+        #
+        #     14:41:37 before   14:43:11 before
+        #     14:45:46 after    14:47:32 after
+        #
+        # — and with one slot the second record overwrote the first, the first
+        # `after` collected the *second* compaction's record, and the second
+        # `after` got nothing. A record belongs to the compaction that produced
+        # it, so they are paired in order.
+        #
+        # Each entry carries when it was written, which is only there to measure
+        # with: `PreCompact` to `SessionStart` is the compaction itself, and
+        # nothing else in this system can see that number.
+        self._records: dict[str, list[tuple[str, float]]] = {}
 
     async def write(
         self,
@@ -238,7 +271,19 @@ class Recorder:
         failure here has to end in the compaction simply going ahead.
         """
         seat = for_session(self._seats, agent_id, session_name, session_id)
-        if seat is None or not seat.before_compaction:
+        if seat is None:
+            return False
+
+        # Said before anything else, and for every seat rather than only the
+        # configured ones: what confused somebody was the pause, not the record.
+        await self._say(
+            seat,
+            session_id,
+            f"🗜 <b>{html.escape(seat.label)}</b> is compacting. "
+            "The session is paused until it finishes.",
+        )
+
+        if not seat.before_compaction:
             return False
         # Found by id under the runtimes' own directories, never taken from the
         # request: a path in a payload posted over HTTP is a path an attacker
@@ -278,12 +323,16 @@ class Recorder:
 
         if not record:
             return False
-        if len(record) > RECORD_LIMIT:
+        if len(record) > self._limit:
             logger.info(
                 "Record for %s was %d chars; trimmed to %d", session_id, len(record), RECORD_LIMIT
             )
             record = record[:RECORD_LIMIT].rstrip()
-        self._records[session_id] = (record, self._clock())
+        waiting = self._records.setdefault(session_id, [])
+        waiting.append((record, self._clock()))
+        # Bounded, so a session that somehow never collects cannot grow this.
+        # Oldest first, so what is dropped is what is most out of date.
+        del waiting[:-MAX_WAITING]
         # The numbers worth having when asking whether this is worth its cost:
         # what it took, and how much came back.
         logger.info(
@@ -296,31 +345,103 @@ class Recorder:
         return True
 
     def _prompt(self, instructions: str, conversation: str) -> str:
+        """The seat's own instructions, wrapped in what is true of every record.
+
+        The wrapper earns its place from one observation, made by a navigator
+        about the compaction it had just come out of. What survived and did work
+        was the standing rules — short imperatives already sitting in context.
+        What did not was the part telling it which files to open: a message from
+        the operator arrived, pulled it straight into the work, and the reading
+        list lost. *Reading is a decision; text is already there.*
+
+        The other half of the same report: a compaction summary keeps history
+        rather well, and loses **work in flight** — a delegate's report that
+        arrived and was never checked, a command that ran and whose output was
+        never read, a question waiting on an answer. The summary said "pending
+        tasks"; it did not say "something is waiting on you right now", and that
+        was the thing that went missing.
+
+        So the wrapper asks for the unfinished first, and for imperatives rather
+        than errands. The seat's file decides what matters in that project; this
+        decides what a record for an emptied context has to look like.
+        """
         return (
             f"{instructions}\n\n"
             "---\n\n"
-            f"Keep the whole record under {RECORD_LIMIT} characters. It is about to be "
-            "put into a context that was just emptied on purpose, and a long one would "
-            "refill it. Facts and numbers, no prose, no preamble, no offer to help. "
-            "Answer in the language the conversation uses.\n\n"
+            "How to write it, whatever the instructions above ask for:\n"
+            "- Put anything still IN FLIGHT first, and say it is waiting: a report "
+            "received and not yet checked, a command run whose output was never read, "
+            "a question asked and not answered. A summary keeps history well and "
+            "loses exactly this.\n"
+            "- Write facts, not errands. A line that says what is true survives; a "
+            "line that says 'read file X' loses to the next thing the operator says.\n"
+            "- Imperative and short. Every line costs context and brings the next "
+            f"compaction closer, and a long list teaches the reader to skip lists. "
+            f"Under {self._limit} characters, and shorter is better.\n"
+            "- No preamble, no offer to help. Answer in the language the "
+            "conversation uses.\n\n"
             "Below is the recent conversation of the session this is about.\n\n"
             f"{conversation}"
         )
 
-    def take(self, session_id: str) -> str | None:
-        """This session's record, once. A record describes one compaction, and
-        leaving it behind would hand it to the next one as though it were fresh.
+    async def take(
+        self, session_id: str, *, agent_id: str | None = None, session_name: str | None = None
+    ) -> str | None:
+        """This session's record, once, announcing that the compaction is over.
+
+        A record describes one compaction, and leaving it behind would hand it
+        to the next one as though it were fresh.
         """
-        found = self._records.pop(session_id, None)
+        waiting = self._records.get(session_id) or []
+        found = waiting.pop(0) if waiting else None
+        if not waiting:
+            self._records.pop(session_id, None)
+        seat = for_session(self._seats, agent_id, session_name, session_id)
+
         if found is None:
+            if seat is not None:
+                await self._say(
+                    seat,
+                    session_id,
+                    f"✅ <b>{html.escape(seat.label)}</b> finished compacting.",
+                )
             return None
+
         record, written_at = found
+        took = self._clock() - written_at
         # What the compaction itself cost, which nothing else in this system can
         # see: the gap between the hook that held it and the one that came back.
         logger.info(
             "Compaction of %s took %.1fs; carrying %d chars across",
             session_id,
-            self._clock() - written_at,
+            took,
             len(record),
         )
+        if seat is not None:
+            await self._say(
+                seat,
+                session_id,
+                f"✅ <b>{html.escape(seat.label)}</b> finished compacting in "
+                f"{took:.0f}s, carrying {len(record)} characters across.",
+            )
         return record
+
+    async def _say(self, seat: Seat, session_id: str, text: str) -> None:
+        """Tell the seat's chat, and never let that failure reach the session.
+
+        Paused means the phone is off, which is how the reply relay and the
+        transcript watcher both read it — a compaction is not more important
+        than that.
+        """
+        if self._channel is None or (self._gate is not None and self._gate.paused):
+            return
+        try:
+            await self._channel.send_message(
+                session_id,
+                text,
+                seat.role,
+                agent_id=seat.runtime,
+                session_name=seat.session,
+            )
+        except Exception:
+            logger.debug("Could not announce a compaction", exc_info=True)

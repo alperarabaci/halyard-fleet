@@ -203,7 +203,8 @@ async def test_the_record_is_written_and_handed_back(tmp_path: Path) -> None:
 
     assert written
     assert (
-        recorder.take("9f1c2b3a-0000-0000-0000-000000000000") == "AKTIF IS: 712 passed — measured"
+        await recorder.take("9f1c2b3a-0000-0000-0000-000000000000")
+        == "AKTIF IS: 712 passed — measured"
     )
     # The instructions and the conversation both reached the one-shot turn.
     assert "write down the measured numbers" in runner.asked[0]
@@ -253,7 +254,8 @@ async def test_a_long_record_is_trimmed_before_it_is_carried(tmp_path: Path) -> 
     )
 
     assert (
-        len(recorder.take("9f1c2b3a-0000-0000-0000-000000000000") or "") <= compaction.RECORD_LIMIT
+        len(await recorder.take("9f1c2b3a-0000-0000-0000-000000000000") or "")
+        <= compaction.RECORD_LIMIT
     )
 
 
@@ -296,8 +298,8 @@ async def test_the_record_is_handed_over_once(tmp_path: Path) -> None:
         session_name="alpha-navigator",
     )
 
-    assert recorder.take("9f1c2b3a-0000-0000-0000-000000000000") == "once"
-    assert recorder.take("9f1c2b3a-0000-0000-0000-000000000000") is None
+    assert await recorder.take("9f1c2b3a-0000-0000-0000-000000000000") == "once"
+    assert await recorder.take("9f1c2b3a-0000-0000-0000-000000000000") is None
 
 
 async def test_a_seat_without_instructions_writes_nothing(tmp_path: Path) -> None:
@@ -360,7 +362,7 @@ async def test_a_turn_that_fails_lets_the_compaction_go_ahead(tmp_path: Path) ->
         )
         is False
     )
-    assert recorder.take("9f1c2b3a-0000-0000-0000-000000000000") is None
+    assert await recorder.take("9f1c2b3a-0000-0000-0000-000000000000") is None
 
 
 async def test_a_record_that_runs_long_is_given_up_on(tmp_path: Path) -> None:
@@ -388,4 +390,217 @@ async def test_a_record_that_runs_long_is_given_up_on(tmp_path: Path) -> None:
         compaction.RECORD_TIMEOUT_SECONDS = original
 
     assert written is False
-    assert recorder.take("9f1c2b3a-0000-0000-0000-000000000000") is None
+    assert await recorder.take("9f1c2b3a-0000-0000-0000-000000000000") is None
+
+
+# --- saying that it is happening ---------------------------------------------
+
+
+class Chatty:
+    """A channel that records what it was asked to say."""
+
+    def __init__(self) -> None:
+        self.said: list[str] = []
+
+    async def send_message(self, session_id, text, role=None, **_) -> str:
+        self.said.append(text)
+        return "ok"
+
+
+async def test_the_seat_is_told_a_compaction_started_and_finished(tmp_path: Path) -> None:
+    """Found in the field: the first compaction arrived as a session that had
+    simply stopped answering, and working out why meant walking to the desk and
+    then reading a log. Both moments are known exactly."""
+    instructions = tmp_path / "pre.md"
+    instructions.write_text("record", encoding="utf-8")
+    transcript(tmp_path / "9f1c2b3a-0000-0000-0000-000000000000.jsonl", ("assistant", "done"))
+    channel = Chatty()
+    recorder = Recorder(
+        roots=(tmp_path,),
+        seats=[seat(before_compaction=str(instructions))],
+        runners={"claude-code": FakeRunner("the record")},
+        channel=channel,
+    )
+
+    await recorder.write(
+        session_id="9f1c2b3a-0000-0000-0000-000000000000",
+        agent_id="claude-code",
+        session_name="alpha-navigator",
+    )
+    await recorder.take(
+        "9f1c2b3a-0000-0000-0000-000000000000",
+        agent_id="claude-code",
+        session_name="alpha-navigator",
+    )
+
+    assert "compacting" in channel.said[0]
+    assert "finished compacting" in channel.said[1]
+    # The numbers, because the question after "what happened" is "how long".
+    assert "characters across" in channel.said[1]
+
+
+async def test_a_seat_with_nothing_configured_is_still_told(tmp_path: Path) -> None:
+    """What confused somebody was the pause, not the record — so this is said
+    for every seat rather than only the ones carrying a file across."""
+    channel = Chatty()
+    recorder = Recorder(roots=(tmp_path,), seats=[seat()], runners={}, channel=channel)
+
+    await recorder.write(
+        session_id="9f1c2b3a-0000-0000-0000-000000000000",
+        agent_id="claude-code",
+        session_name="alpha-navigator",
+    )
+    await recorder.take(
+        "9f1c2b3a-0000-0000-0000-000000000000",
+        agent_id="claude-code",
+        session_name="alpha-navigator",
+    )
+
+    assert len(channel.said) == 2
+
+
+async def test_a_paused_gate_says_nothing(tmp_path: Path) -> None:
+    """Paused means the phone is off, which is how the reply relay and the
+    transcript watcher both read it."""
+    from halyard.core.gate import Gate
+
+    gate = Gate()
+    await gate.pause("tester")
+    channel = Chatty()
+    recorder = Recorder(roots=(tmp_path,), seats=[seat()], runners={}, channel=channel, gate=gate)
+
+    await recorder.write(
+        session_id="9f1c2b3a-0000-0000-0000-000000000000",
+        agent_id="claude-code",
+        session_name="alpha-navigator",
+    )
+
+    assert channel.said == []
+
+
+async def test_a_channel_that_fails_does_not_reach_the_session(tmp_path: Path) -> None:
+    """The compaction is waiting on this hook. An undelivered notification must
+    not be why a session does not come back."""
+
+    class Broken:
+        async def send_message(self, *a, **k):
+            raise ConnectionError("telegram unreachable")
+
+    recorder = Recorder(roots=(tmp_path,), seats=[seat()], runners={}, channel=Broken())
+
+    assert (
+        await recorder.write(
+            session_id="9f1c2b3a-0000-0000-0000-000000000000",
+            agent_id="claude-code",
+            session_name="alpha-navigator",
+        )
+        is False
+    )
+
+
+async def test_a_session_with_no_seat_is_not_announced(tmp_path: Path) -> None:
+    """Nowhere to say it, and guessing a chat would put a message in front of
+    somebody who is not running this."""
+    channel = Chatty()
+    recorder = Recorder(roots=(tmp_path,), seats=[], runners={}, channel=channel)
+
+    await recorder.write(
+        session_id="9f1c2b3a-0000-0000-0000-000000000000",
+        agent_id="claude-code",
+        session_name="nobody",
+    )
+
+    assert channel.said == []
+
+
+async def test_the_record_is_asked_for_what_is_in_flight_first(tmp_path: Path) -> None:
+    """A navigator reported it after coming out of one: the summary keeps
+    history well and loses work in flight — a report received and not checked,
+    a command run whose output was never read."""
+    instructions = tmp_path / "pre.md"
+    instructions.write_text("their own instructions", encoding="utf-8")
+    transcript(tmp_path / "9f1c2b3a-0000-0000-0000-000000000000.jsonl", ("assistant", "done"))
+    runner = FakeRunner("x")
+    recorder = Recorder(
+        roots=(tmp_path,),
+        seats=[seat(before_compaction=str(instructions))],
+        runners={"claude-code": runner},
+    )
+
+    await recorder.write(
+        session_id="9f1c2b3a-0000-0000-0000-000000000000",
+        agent_id="claude-code",
+        session_name="alpha-navigator",
+    )
+
+    asked = runner.asked[0]
+    assert "IN FLIGHT" in asked
+    # And facts rather than errands: the reading list is what lost to the
+    # operator's next message.
+    assert "not errands" in asked
+    # The seat's own file still leads; the wrapper only says how to write it.
+    assert asked.index("their own instructions") < asked.index("IN FLIGHT")
+
+
+async def test_two_overlapping_compactions_each_get_their_own_record(tmp_path: Path) -> None:
+    """Measured in the field, on one session in six minutes:
+
+        14:41:37 before   14:43:11 before
+        14:45:46 after    14:47:32 after
+
+    With one slot per session the second record overwrote the first, the first
+    `after` collected the second compaction's record, and the second `after`
+    got nothing at all.
+    """
+    instructions = tmp_path / "pre.md"
+    instructions.write_text("record", encoding="utf-8")
+    transcript(tmp_path / "9f1c2b3a-0000-0000-0000-000000000000.jsonl", ("assistant", "done"))
+    runner = FakeRunner("first")
+    recorder = Recorder(
+        roots=(tmp_path,),
+        seats=[seat(before_compaction=str(instructions))],
+        runners={"claude-code": runner},
+    )
+    session = dict(
+        session_id="9f1c2b3a-0000-0000-0000-000000000000",
+        agent_id="claude-code",
+        session_name="alpha-navigator",
+    )
+
+    await recorder.write(**session)
+    runner.answer = "second"
+    await recorder.write(**session)
+
+    assert await recorder.take(**session) == "first"
+    assert await recorder.take(**session) == "second"
+    assert await recorder.take(**session) is None
+
+
+async def test_records_nobody_collects_do_not_pile_up(tmp_path: Path) -> None:
+    """Past a few, nothing is collecting them, and holding more would keep text
+    nobody will ever be handed. The oldest goes, being the most out of date."""
+    import halyard.core.compaction as compaction
+
+    instructions = tmp_path / "pre.md"
+    instructions.write_text("record", encoding="utf-8")
+    transcript(tmp_path / "9f1c2b3a-0000-0000-0000-000000000000.jsonl", ("assistant", "done"))
+    runner = FakeRunner("x")
+    recorder = Recorder(
+        roots=(tmp_path,),
+        seats=[seat(before_compaction=str(instructions))],
+        runners={"claude-code": runner},
+    )
+    session = dict(
+        session_id="9f1c2b3a-0000-0000-0000-000000000000",
+        agent_id="claude-code",
+        session_name="alpha-navigator",
+    )
+
+    for index in range(compaction.MAX_WAITING + 2):
+        runner.answer = f"record-{index}"
+        await recorder.write(**session)
+
+    kept = [await recorder.take(**session) for _ in range(compaction.MAX_WAITING)]
+
+    assert kept == [f"record-{i}" for i in range(2, compaction.MAX_WAITING + 2)]
+    assert await recorder.take(**session) is None

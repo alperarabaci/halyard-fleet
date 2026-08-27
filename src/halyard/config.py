@@ -229,6 +229,13 @@ class Settings(BaseSettings):
     #: session, not here — so it does not need the expensive one.
     compaction_model: str = Field(default="sonnet", validation_alias="HALYARD_COMPACTION_MODEL")
 
+    #: How much of the compaction record may be carried into the fresh context.
+    #: Measured in the field: the model fills very nearly whatever it is given,
+    #: and what is carried across is what the next compaction arrives sooner for.
+    compaction_record_limit: int = Field(
+        default=2_000, validation_alias="HALYARD_COMPACTION_RECORD_LIMIT", gt=0
+    )
+
     #: Which Claude Code executable sends turns received from a channel.
     #: On macOS the runner otherwise prefers the engine bundled with Claude
     #: Desktop, keeping the writer and the already-open session on one version.
