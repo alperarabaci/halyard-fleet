@@ -146,6 +146,24 @@ projects:
         # cannot steer the summary itself — `PreCompact` output is refused by
         # the runtime — so this is the shape that actually works.
         #
+        # What to put in them, learned from a navigator reporting on the
+        # compaction it had just come out of:
+        #
+        #   Write facts, not errands. Its standing rules survived and caught a
+        #   delegate's false report. The part listing which files to open did
+        #   not: a message from the operator arrived, pulled it into the work,
+        #   and the reading list lost. Reading is a decision; text is already
+        #   there. Three lines of "the active job is X, the last measurements
+        #   are Y" beat any number of "now go and open Z".
+        #
+        #   Lead with what is unfinished. A summary keeps history rather well
+        #   and loses work in flight — a report received and never checked, a
+        #   command run whose output was never read, a question waiting on an
+        #   answer. That is the part worth spending the space on.
+        #
+        #   Keep it short. Every line costs context and brings the next
+        #   compaction closer, and a long list teaches the reader to skip lists.
+        #
         # before_compaction: compaction_hook/alpha_engine/precompact.md
         # after_compaction: compaction_hook/alpha_engine/postcompact.md
         # The name the runtime knows the session by. `halyard sessions` lists

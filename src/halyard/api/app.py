@@ -389,7 +389,12 @@ def create_app(settings: Settings, *, channel=None) -> FastAPI:
     # Writes the record a compaction is about to make unrecoverable, in a turn
     # of its own so the session it is about is never resumed or forked.
     recorder = after_compaction.Recorder(
-        seats=configured_seats, runners=by_runtime, model=settings.compaction_model
+        seats=configured_seats,
+        runners=by_runtime,
+        model=settings.compaction_model,
+        limit=settings.compaction_record_limit,
+        channel=resolved_channel,
+        gate=gate,
     )
 
     @asynccontextmanager
@@ -576,7 +581,9 @@ def create_app(settings: Settings, *, channel=None) -> FastAPI:
             session_name=body.session_name,
             session_id=body.session_id,
         )
-        record = recorder.take(body.session_id)
+        record = await recorder.take(
+            body.session_id, agent_id=body.agent_id, session_name=body.session_name
+        )
         parts = [
             part
             for part in (
