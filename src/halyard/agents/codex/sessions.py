@@ -23,6 +23,7 @@ from __future__ import annotations
 import json
 import logging
 import mmap
+from datetime import datetime
 from pathlib import Path
 
 from halyard.agents.base import SessionRef
@@ -170,15 +171,42 @@ def find_session(name: str, *, root: Path | None = None) -> SessionRef | None:
     return None
 
 
-def list_named_sessions(*, root: Path | None = None) -> list[tuple[str, str, str]]:
-    """Every named session as (name, session_id, last updated), newest first."""
-    latest: dict[str, tuple[str, str]] = {}
+def _as_time(value: object) -> datetime | None:
+    """The index's ISO timestamp, or None if it is not one.
+
+    Parsed here rather than handed on as a string. Before this the three
+    runtimes each kept "last active" in a different type — two floats and this
+    ISO string — behind a signature that promised a float, and nothing caught
+    it because the only caller discarded the field.
+    """
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def list_named_sessions(*, root: Path | None = None) -> list[SessionRef]:
+    """Every named thread, newest first.
+
+    The index carries a name, an id and a timestamp — no directory, which lives
+    in the rollout and is not worth opening one per thread just to list them.
+    `cwd` is left unset rather than guessed.
+    """
+    latest: dict[str, SessionRef] = {}
     for entry in _index_entries(root):
         thread_name = entry.get("thread_name")
-        if thread_name:
-            latest[str(thread_name)] = (str(entry["id"]), str(entry.get("updated_at") or ""))
+        if not thread_name:
+            continue
+        # Append-only, so a later line for the same name supersedes an earlier.
+        latest[str(thread_name)] = SessionRef(
+            session_id=str(entry["id"]),
+            name=str(thread_name),
+            cwd=None,
+            last_active=_as_time(entry.get("updated_at")),
+        )
     return sorted(
-        ((name, sid, when) for name, (sid, when) in latest.items()),
-        key=lambda item: item[2],
-        reverse=True,
+        latest.values(),
+        key=lambda ref: -(ref.last_active.timestamp() if ref.last_active else 0.0),
     )

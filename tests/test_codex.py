@@ -79,7 +79,7 @@ def test_a_renamed_session_resolves_to_its_latest_name(tmp_path: Path) -> None:
     )
 
     assert find_session("new", root=root) is not None
-    assert list_named_sessions(root=root)[0][0] == "new"
+    assert list_named_sessions(root=root)[0].name == "new"
 
 
 def test_the_newest_turn_wins_over_the_first(tmp_path: Path) -> None:

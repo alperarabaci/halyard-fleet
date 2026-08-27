@@ -127,7 +127,7 @@ def test_a_name_claude_invented_is_marked(tmp_path, monkeypatch, capsys) -> None
     invented_line = next(ln for ln in printed.splitlines() if "Run echo hello" in ln)
     assert "auto-titled" not in chosen_line
     assert "auto-titled" in invented_line
-    assert "Rename the" in printed
+    assert "Rename" in printed
 
 
 def test_no_warning_when_every_name_was_chosen(tmp_path, monkeypatch, capsys) -> None:

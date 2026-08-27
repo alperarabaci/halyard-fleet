@@ -267,7 +267,7 @@ def _known_sessions(spec: RuntimeSpec) -> list[str]:
     suggestions, and a name can always be typed by hand.
     """
     try:
-        return [name for name, _, _ in spec.list_sessions()]
+        return [ref.name for ref in spec.list_sessions()]
     except Exception:
         return []
 
