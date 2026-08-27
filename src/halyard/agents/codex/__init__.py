@@ -4,6 +4,7 @@ from halyard.agents.base import SessionRef
 from halyard.agents.codex import trust
 from halyard.agents.codex.runner import CodexRunner, find_codex_binary
 from halyard.agents.codex.sessions import find_session, list_named_sessions
+from halyard.agents.codex.watching import WATCHING
 from halyard.agents.spec import Hooks, RuntimeSpec, Verification, late
 
 
@@ -92,6 +93,7 @@ RUNTIME = RuntimeSpec(
         matcher="^Bash$",
         expects_hook_mention=True,
     ),
+    watching=WATCHING,
 )
 
 __all__ = [
