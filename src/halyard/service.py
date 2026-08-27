@@ -37,6 +37,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 #: One service per machine — the usage model is one Halyard per machine, so
@@ -151,6 +152,32 @@ def domain() -> str:
     return f"gui/{os.getuid()}"
 
 
+#: How many times to retry a bootstrap that lost the race with its own teardown.
+BOOTSTRAP_ATTEMPTS = 10
+BOOTSTRAP_PAUSE_SECONDS = 0.2
+
+
+def _bootstrap(path: Path) -> subprocess.CompletedProcess[str]:
+    """Bootstrap the agent, retrying while launchd is still tearing it down.
+
+    `bootout` returns before launchd has finished, so a bootstrap issued
+    immediately after one is answered with:
+
+        Bootstrap failed: 5: Input/output error
+
+    which reads like a permissions problem and is not one — it means the
+    service still exists. There is no "wait until gone" to call, so this asks
+    again for a couple of seconds and gives up with whatever launchd last said.
+    """
+    for attempt in range(BOOTSTRAP_ATTEMPTS):
+        done = _launchctl("bootstrap", domain(), str(path))
+        if done.returncode == 0:
+            return done
+        if attempt + 1 < BOOTSTRAP_ATTEMPTS:
+            time.sleep(BOOTSTRAP_PAUSE_SECONDS)
+    return done
+
+
 def install() -> int:
     """Write the LaunchAgent and load it.
 
@@ -202,9 +229,9 @@ def install() -> int:
     # reliably undo the modern disabled state. This does, and costs nothing when
     # there was nothing disabled.
     _launchctl("enable", target)
-    loaded = _launchctl("bootstrap", domain(), str(path))
-    if loaded.returncode != 0:
-        print(f"halyard: launchctl could not load the agent: {loaded.stderr.strip()}")
+    started = _bootstrap(path)
+    if started.returncode != 0:
+        print(f"halyard: launchctl could not load the agent: {started.stderr.strip()}")
         return 1
 
     print(f"Installed and loaded {LABEL}.")
@@ -248,13 +275,24 @@ def uninstall() -> int:
     return 0
 
 
+def loaded() -> bool:
+    """Whether launchd currently holds this service."""
+    return _launchctl("print", f"{domain()}/{LABEL}").returncode == 0
+
+
 def restart() -> int:
     """Take the service down and bring it straight back up.
 
     The command wanted after every merge: the agent runs `git pull` on its own
-    start, so restarting it *is* updating it. Kept here rather than left as a
-    `launchctl` line to paste, because every launchd detail this project has
-    got wrong was in a line somebody pasted.
+    start, so restarting it *is* updating it.
+
+    **Two paths, because `bootout` is asynchronous.** Tearing down and
+    bootstrapping again looks obvious and fails on a service that is already
+    running — launchd has not finished the teardown when the bootstrap arrives,
+    and answers `Bootstrap failed: 5: Input/output error`, which reads like a
+    permissions problem and is not one. So a loaded service is restarted with
+    `kickstart -k`, which is atomic and has no gap to race in, and bootstrapping
+    is kept for the case where there is genuinely nothing loaded.
     """
     if not _is_macos():
         print("halyard: `service` is macOS only.")
@@ -266,16 +304,22 @@ def restart() -> int:
         return 1
 
     target = f"{domain()}/{LABEL}"
-    _launchctl("bootout", target)
-    # Enabled on the way back up for the same reason `install` does it: a stop
-    # that was done with `unload -w` leaves a record that would otherwise make
-    # this look like it worked while launchd refuses to start anything.
+    if loaded():
+        done = _launchctl("kickstart", "-k", target)
+        if done.returncode != 0:
+            print(f"halyard: launchctl could not restart the agent: {done.stderr.strip()}")
+            return 1
+        print(f"Restarted {LABEL}. It pulls, syncs and serves on the way up.")
+        return 0
+
+    # Nothing loaded: enabled first, in case a `launchctl unload -w` left the
+    # record that makes launchd deny the service exists at all.
     _launchctl("enable", target)
-    started = _launchctl("bootstrap", domain(), str(path))
+    started = _bootstrap(path)
     if started.returncode != 0:
         print(f"halyard: launchctl could not start the agent: {started.stderr.strip()}")
         return 1
-    print(f"Restarted {LABEL}. It pulls, syncs and serves on the way up.")
+    print(f"Started {LABEL}. It pulls, syncs and serves on the way up.")
     return 0
 
 

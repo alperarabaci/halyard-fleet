@@ -205,19 +205,88 @@ def _ok(args):
     return subprocess.CompletedProcess(args, 0, "", "")
 
 
-def test_restart_enables_on_the_way_back_up(macos, monkeypatch, tmp_path) -> None:
-    """A stop done with `unload -w` leaves a record that would otherwise make a
-    restart look like it worked while launchd refuses to start anything."""
+def test_restarting_a_running_service_uses_kickstart(macos, monkeypatch, tmp_path) -> None:
+    """`bootout` returns before launchd has finished, so tearing down and
+    bootstrapping again fails on a service that is already up:
+
+        Bootstrap failed: 5: Input/output error
+
+    which reads like a permissions problem and is not one. `kickstart -k` is
+    atomic and has no gap to race in.
+    """
     calls: list[tuple[str, ...]] = []
     plist = tmp_path / "agent.plist"
     plist.write_bytes(b"<plist></plist>")
     monkeypatch.setattr(service, "plist_path", lambda: plist)
+    # A fake that answers everything successfully means `print` succeeds, which
+    # is what "already loaded" looks like.
     monkeypatch.setattr(service, "_launchctl", lambda *a: (calls.append(a), _ok(a))[1])
 
     assert service.restart() == 0
 
     names = [args[0] for args in calls]
-    assert names == ["bootout", "enable", "bootstrap"]
+    assert "kickstart" in names
+    assert "bootstrap" not in names
+
+
+def test_restarting_a_stopped_service_enables_then_bootstraps(macos, monkeypatch, tmp_path) -> None:
+    """Nothing loaded, so there is nothing to kickstart — and enabling first in
+    case a `launchctl unload -w` left the record that hides the service."""
+    calls: list[tuple[str, ...]] = []
+    plist = tmp_path / "agent.plist"
+    plist.write_bytes(b"<plist></plist>")
+    monkeypatch.setattr(service, "plist_path", lambda: plist)
+
+    def answer(*args: str):
+        calls.append(args)
+        if args[0] == "print":
+            return subprocess.CompletedProcess(args, 1, "", "not loaded")
+        return _ok(args)
+
+    monkeypatch.setattr(service, "_launchctl", answer)
+
+    assert service.restart() == 0
+
+    names = [args[0] for args in calls]
+    assert "kickstart" not in names
+    assert names.index("enable") < names.index("bootstrap")
+
+
+def test_a_bootstrap_that_loses_the_race_is_retried(macos, monkeypatch, tmp_path) -> None:
+    """The teardown is asynchronous and there is no "wait until gone" to call,
+    so the answer is to ask again rather than to fail in front of somebody."""
+    monkeypatch.setattr(service, "BOOTSTRAP_PAUSE_SECONDS", 0)
+    attempts = []
+
+    def answer(*args: str):
+        if args[0] == "bootstrap":
+            attempts.append(args)
+            if len(attempts) < 3:
+                return subprocess.CompletedProcess(
+                    args, 5, "", "Bootstrap failed: 5: Input/output error"
+                )
+        return _ok(args)
+
+    monkeypatch.setattr(service, "_launchctl", answer)
+
+    assert service._bootstrap(tmp_path / "agent.plist").returncode == 0
+    assert len(attempts) == 3
+
+
+def test_a_bootstrap_that_never_succeeds_gives_up_with_what_launchd_said(
+    macos, monkeypatch, tmp_path, capsys
+) -> None:
+    monkeypatch.setattr(service, "BOOTSTRAP_PAUSE_SECONDS", 0)
+    monkeypatch.setattr(
+        service,
+        "_launchctl",
+        lambda *a: subprocess.CompletedProcess(a, 5, "", "Bootstrap failed: 5: Input/output error"),
+    )
+
+    done = service._bootstrap(tmp_path / "agent.plist")
+
+    assert done.returncode == 5
+    assert "Input/output error" in done.stderr
 
 
 def test_restart_says_so_when_nothing_is_installed(macos, monkeypatch, tmp_path, capsys) -> None:
