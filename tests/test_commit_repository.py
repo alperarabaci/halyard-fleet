@@ -1,4 +1,4 @@
-"""Tests for committing what is already staged.
+"""Tests for committing what is already work.
 
 Driven against real repositories rather than a mocked `subprocess`. What can
 actually go wrong here is misreading git's own output — a rename arriving as
@@ -16,7 +16,8 @@ from pathlib import Path
 
 import pytest
 
-from halyard.core import commits
+from halyard import commits
+from halyard.commits import repository
 
 
 def git(repo: Path, *args: str) -> str:
@@ -71,15 +72,15 @@ def test_staged_changes_are_read_with_their_shape(repo: Path) -> None:
     stage(repo, "loader.py", "def load():\n    return 1\n")
     stage(repo, "seed.txt", "b\n")
 
-    staged = commits.read(repo, "alpha-engine")
+    work = commits.read(repo, "alpha-engine")
 
-    assert staged.blocked is None
-    assert staged.branch == "281-power-gen-minor-fixes"
-    assert staged.reference == "alpha-engine#281"
-    assert {(c.status, c.path) for c in staged.changes} == {("A", "loader.py"), ("M", "seed.txt")}
-    assert (staged.insertions, staged.deletions) == (3, 1)
-    assert "def load()" in staged.diff
-    assert staged.style == ("alpha-engine#279 p2",)
+    assert work.blocked is None
+    assert work.branch == "281-power-gen-minor-fixes"
+    assert work.reference == "alpha-engine#281"
+    assert {(c.status, c.path) for c in work.changes} == {("A", "loader.py"), ("M", "seed.txt")}
+    assert (work.insertions, work.deletions) == (3, 1)
+    assert "def load()" in work.diff
+    assert work.style == ("alpha-engine#279 p2",)
 
 
 def test_a_rename_is_reported_under_the_name_it_has_now(repo: Path) -> None:
@@ -87,10 +88,10 @@ def test_a_rename_is_reported_under_the_name_it_has_now(repo: Path) -> None:
     would name a file that no longer exists."""
     git(repo, "mv", "seed.txt", "planted.txt")
 
-    staged = commits.read(repo, "alpha-engine")
+    work = commits.read(repo, "alpha-engine")
 
-    assert [c.path for c in staged.changes] == ["planted.txt"]
-    assert staged.changes[0].status == "R"
+    assert [c.path for c in work.changes] == ["planted.txt"]
+    assert work.changes[0].status == "R"
 
 
 def test_a_binary_file_counts_as_something_rather_than_nothing(repo: Path) -> None:
@@ -99,24 +100,35 @@ def test_a_binary_file_counts_as_something_rather_than_nothing(repo: Path) -> No
     (repo / "logo.png").write_bytes(bytes(range(256)) * 8)
     git(repo, "add", "logo.png")
 
-    staged = commits.read(repo, "alpha-engine")
+    work = commits.read(repo, "alpha-engine")
 
-    assert [c.path for c in staged.changes] == ["logo.png"]
-    assert staged.blocked is None
+    assert [c.path for c in work.changes] == ["logo.png"]
+    assert work.blocked is None
 
 
 # --- what it refuses to do -------------------------------------------------
 
 
-def test_nothing_staged_is_an_answer_not_a_commit(repo: Path) -> None:
-    """The staging area is a decision made at a desk. Nothing here makes it."""
-    (repo / "unstaged.txt").write_text("not added\n")
+def test_a_file_nobody_staged_is_still_the_work(repo: Path) -> None:
+    """The whole point. A navigator and a driver write code and stage nothing,
+    and the first version of this answered "nothing is staged" to the person
+    who asked it to commit an afternoon of their output."""
+    (repo / "unwork.txt").write_text("written by an agent\n")
 
-    staged = commits.read(repo, "alpha-engine")
+    work = commits.read(repo, "alpha-engine")
 
-    assert staged.blocked is not None
-    assert "Nothing is staged" in staged.blocked
-    assert staged.changes == ()
+    assert work.blocked is None
+    assert [c.path for c in work.changes] == ["unwork.txt"]
+    assert work.changes[0].is_new
+    assert "written by an agent" in work.diff
+
+
+def test_a_clean_branch_is_the_only_nothing_to_commit(repo: Path) -> None:
+    work = commits.read(repo, "alpha-engine")
+
+    assert work.blocked is not None
+    assert "Nothing has changed" in work.blocked
+    assert work.changes == ()
 
 
 def test_a_detached_head_is_refused(repo: Path) -> None:
@@ -163,11 +175,11 @@ def test_a_lockfile_is_listed_but_its_diff_is_not_sent(repo: Path) -> None:
     stage(repo, "uv.lock", "\n".join(f"line {n}" for n in range(500)))
     stage(repo, "loader.py", "def load():\n    return 1\n")
 
-    staged = commits.read(repo, "alpha-engine")
+    work = commits.read(repo, "alpha-engine")
 
-    assert {c.path for c in staged.changes} == {"uv.lock", "loader.py"}
-    assert "def load()" in staged.diff
-    assert "line 499" not in staged.diff
+    assert {c.path for c in work.changes} == {"uv.lock", "loader.py"}
+    assert "def load()" in work.diff
+    assert "line 499" not in work.diff
 
 
 def test_a_commit_of_only_lockfiles_still_works(repo: Path) -> None:
@@ -175,21 +187,23 @@ def test_a_commit_of_only_lockfiles_still_works(repo: Path) -> None:
     carry the message on its own rather than the whole thing failing."""
     stage(repo, "uv.lock", "version = 2\n")
 
-    staged = commits.read(repo, "alpha-engine")
+    work = commits.read(repo, "alpha-engine")
 
-    assert staged.blocked is None
-    assert staged.diff == ""
-    assert [c.path for c in staged.changes] == ["uv.lock"]
+    assert work.blocked is None
+    assert work.diff == ""
+    assert [c.path for c in work.changes] == ["uv.lock"]
 
 
 def test_a_diff_too_large_to_send_is_cut_and_says_so(repo: Path) -> None:
-    stage(repo, "big.py", "\n".join(f"x = {n}" for n in range(20_000)))
+    """Written into a tracked file, so the whole thing reaches `diff HEAD` —
+    a new file is capped at `NEW_FILE_LINES` before it ever gets here."""
+    (repo / "seed.txt").write_text("\n".join(f"x = {n}" for n in range(20_000)))
 
-    staged = commits.read(repo, "alpha-engine")
+    work = commits.read(repo, "alpha-engine")
 
-    assert staged.truncated is True
-    assert len(staged.diff) == commits.DIFF_LIMIT
-    assert "cut short" in commits.prompt(staged)
+    assert work.truncated is True
+    assert len(work.diff) == repository.DIFF_LIMIT
+    assert "cut short" in commits.prompt(work)
 
 
 def test_the_prompt_tells_the_model_not_to_write_the_reference(repo: Path) -> None:

@@ -1,0 +1,131 @@
+"""The commit card, kept apart from the approval cards.
+
+Same channel, different subject. An approval answers a question a session is
+blocked on, carries a nonce and a deadline, and is owned by the approval store.
+A commit answers nothing — it offers something — and is owned by
+`halyard.commits`. Folding them into one module was the first shape, and it put
+two unrelated lifecycles in one file for no gain but proximity.
+
+What the two do share is Telegram's own limits, which is why the escaping,
+the 64-byte `callback_data` cap and the message ceiling still come from
+`cards`.
+"""
+
+from __future__ import annotations
+
+import html
+
+from halyard.channels.telegram.cards import CALLBACK_DATA_LIMIT, _fit
+from halyard.commits import Uncommitted
+
+#: Its own prefix, apart from approvals (`hf`) and preferences (`hc`).
+#:
+#: A commit proposal is answered once and must not be answerable twice, and it
+#: still carries no nonce: what it answers is not a request the approval store
+#: knows about. `Proposals.take` is the guard instead — see that module.
+PREFIX = "hg"
+
+MAKE = "m"
+REWRITE = "w"
+DROP = "x"
+
+#: How many changed files to name on the card. A phone shows about this many
+#: without becoming a scroll, and the count above them is already the honest
+#: summary — `render` says how many were left out.
+FILES_SHOWN = 12
+
+
+def callback_data(handle: str, action: str) -> str:
+    """`hg:<handle>:m` — which proposal, and what to do with it."""
+    data = f"{PREFIX}:{handle}:{action}"
+    if len(data.encode("utf-8")) > CALLBACK_DATA_LIMIT:
+        raise ValueError(f"commit callback exceeds the {CALLBACK_DATA_LIMIT}-byte limit: {data}")
+    return data
+
+
+def parse_callback_data(data: str) -> tuple[str, str] | None:
+    """Decode a commit button into (handle, action), or None if it is not ours."""
+    parts = data.split(":")
+    if len(parts) != 3 or parts[0] != PREFIX:
+        return None
+    _, handle, action = parts
+    if action not in {MAKE, REWRITE, DROP} or not handle:
+        return None
+    return handle, action
+
+
+def _summary(work: Uncommitted) -> list[str]:
+    """What is being committed, without the diff.
+
+    Deliberately not the diff. Reading one on a phone is not a review — it is
+    scrolling — and it would bury the only two things worth checking here: the
+    branch and the message.
+
+    New files get their own line. An edit to a tracked file is almost always
+    the work; a file git has never seen might be the work, or might be
+    something that wandered into the directory, and that is the one thing on
+    this card worth a second look before tapping.
+    """
+    count = len(work.changes)
+    lines = [
+        f"Branch: <code>{html.escape(work.branch)}</code>",
+        f"{count} file{'s' if count != 1 else ''}  +{work.insertions}/-{work.deletions}",
+    ]
+    if new := work.new_files:
+        lines.append(f"{len(new)} of them new")
+    shown = work.changes[:FILES_SHOWN]
+    listed = "\n".join(f"{c.status}  {c.path}" for c in shown)
+    if listed:
+        lines += ["", f"<pre>{html.escape(listed)}</pre>"]
+    if count > len(shown):
+        lines.append(f"…and {count - len(shown)} more")
+    return lines
+
+
+def render(*, project: str, work: Uncommitted, message: str) -> str:
+    """The card: what would be committed, and what it would be called."""
+    return _fit(
+        [
+            f"<b>[COMMIT — {html.escape(project)}]</b>",
+            "",
+            *_summary(work),
+            "",
+            f"<pre>{html.escape(message)}</pre>",
+        ]
+    )
+
+
+def render_resolved(*, project: str, message: str, outcome: str, by: str | None) -> str:
+    """What the card becomes once it has been answered.
+
+    Edited in place, like an approval, so scrolling back shows what happened
+    rather than live-looking buttons on something already decided.
+    """
+    who = f" by {html.escape(by)}" if by else ""
+    return _fit(
+        [
+            f"<b>{outcome}</b>{who}",
+            "",
+            f"Project: <code>{html.escape(project)}</code>",
+            "",
+            f"<pre>{html.escape(message)}</pre>",
+        ]
+    )
+
+
+def keyboard(handle: str) -> dict:
+    """The buttons under a commit card.
+
+    Commit sits alone on the top row. Rewrite and Cancel share the one below,
+    and both leave the repository exactly as it was — so the only button that
+    changes anything has no neighbour to be mistaken for.
+    """
+    return {
+        "inline_keyboard": [
+            [{"text": "✅ Commit", "callback_data": callback_data(handle, MAKE)}],
+            [
+                {"text": "✏️ Rewrite", "callback_data": callback_data(handle, REWRITE)},
+                {"text": "✖️ Cancel", "callback_data": callback_data(handle, DROP)},
+            ],
+        ]
+    }
