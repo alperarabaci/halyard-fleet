@@ -19,16 +19,15 @@ import contextlib
 import html
 import logging
 import re
-import secrets
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+from halyard import commits
 from halyard.agents.base import AgentRunner
-from halyard.channels.telegram import cards
+from halyard.channels.telegram import cards, commit_card
 from halyard.channels.telegram.api import TelegramApi
-from halyard.core import commits
 from halyard.core import prompts as configured_prompts
 from halyard.core.approvals import (
     AlreadyResolvedError,
@@ -93,7 +92,7 @@ POLL_RETRY_MAX_SECONDS = 30.0
 COMMANDS: tuple[tuple[str, str], ...] = (
     ("chat", "Send a message into this seat's session"),
     ("to", "Send a message to another seat by name"),
-    ("commit", "Commit what is staged, with a message to approve"),
+    ("commit", "Commit this branch's work, with a message to approve"),
     ("status", "What is happening right now"),
     ("options", "Models and effort levels this seat accepts"),
     ("model", "Choose what answers, for turns sent from here"),
@@ -129,37 +128,14 @@ HANDOFF_SECONDS = 300
 ASK_FOR_MESSAGE = "Send the commit message for {handle}?"
 _ASKED_MESSAGE = re.compile(r"^Send the commit message for (\S+)\?")
 
-#: How long a proposed commit is worth answering.
-#:
-#: Longer than a hand-off, because reading a file list and deciding is slower
-#: than typing a sentence — but not open-ended: the staging area it describes
-#: is a photograph, and an hour later it may be of something else.
-PROPOSAL_SECONDS = 900
-
 #: The one-shot model that writes the subject line. Named here rather than in
-#: `core` for the same reason every other runtime detail is: this is a Claude
-#: Code alias, and the registry is what knows about runtimes.
+#: `halyard.commits`, which is deliberately ignorant of runtimes: this is a
+#: Claude Code alias, and the channel is what holds the runners.
 MESSAGE_MODEL = "sonnet"
 
 #: How long to wait for it. A commit message is one short line; anything slower
 #: than this has gone wrong, and the phone should hear that rather than hold.
 MESSAGE_TIMEOUT_SECONDS = 120.0
-
-
-@dataclass(frozen=True)
-class _Proposal:
-    """A commit waiting for somebody to say yes.
-
-    Held rather than recomputed on the button press. What the card showed is
-    what gets committed, and reading the repository a second time could quietly
-    commit something the card never displayed.
-    """
-
-    project: str
-    path: Path
-    staged: object
-    message: str
-    at: datetime
 
 
 def _seat_being_asked_for(text: str) -> str | None:
@@ -258,8 +234,6 @@ class TelegramChannel:
         # chat is talking about. Empty is a fine state: the command then says
         # so instead of guessing, and every other command is unaffected.
         self._repositories = dict(repositories or {})
-        #: Commits proposed and not yet answered, by the handle on their buttons.
-        self._proposals: dict[str, _Proposal] = {}
         self._registry = registry
         # One runner per runtime, shared by every seat that uses it.
         self._runners = dict(runners or {})
@@ -276,6 +250,9 @@ class TelegramChannel:
         self._handoffs: dict[tuple[str, int | None, str], tuple[str, datetime]] = {}
         self._authorized = authorized_user_ids
         self._clock = clock
+        #: Commits proposed and not yet answered. Owned by `halyard.commits`,
+        #: which is where taking-once and going-stale are decided.
+        self._proposals = commits.Proposals(self._clock)
         self._poll_retry_seconds = poll_retry_seconds
         # The chat is remembered alongside the message, because a card that
         # was routed to a seat has to be edited in that seat. Keeping only
@@ -847,7 +824,12 @@ class TelegramChannel:
             reply_markup={"force_reply": True},
         )
 
-    # --- committing what is already staged ---------------------------------
+    # --- committing what an agent wrote ------------------------------------
+    #
+    # Thin on purpose. Everything that decides anything — what git is asked,
+    # what may be committed, whether a proposal is still answerable — lives in
+    # `halyard.commits`. This resolves which repository a chat is about, moves
+    # text between that package and Telegram, and nothing else.
 
     def _repository_for(self, chat_id: str) -> tuple[str, Path] | None:
         """The project this chat is about, and where its code is.
@@ -865,45 +847,38 @@ class TelegramChannel:
         return (name, path) if name and path else None
 
     def _message_runner(self, chat_id: str):
-        """Whichever runtime this chat's seat uses, for the one-shot turn."""
+        """Whichever runtime this chat's seat uses, for the one-shot turn.
+
+        The only place the commit flow touches a runtime at all, and it stays
+        on this side of the boundary: `halyard.commits` is handed a finished
+        sentence, never a way to ask for one.
+        """
         seat = for_chat(self._seats, chat_id) if chat_id else None
         if seat and (found := self._runners.get(seat.runtime)):
             return found
         return self._runner
 
-    def _forget_stale_proposals(self) -> None:
-        """Drop proposals nobody answered.
-
-        The card describes a staging area as it was at one moment. Left around,
-        a button tapped tomorrow would commit whatever is staged then, under a
-        message written for something else.
-        """
-        cutoff = self._clock() - timedelta(seconds=PROPOSAL_SECONDS)
-        for handle, proposal in list(self._proposals.items()):
-            if proposal.at < cutoff:
-                del self._proposals[handle]
-
-    async def _write_message(self, chat_id: str, staged) -> str | None:
-        """Have a subject line written for what is staged.
+    async def _write_message(self, chat_id: str, work) -> str | None:
+        """Have a subject line written for the branch's uncommitted work.
 
         Fails soft, on purpose. A model that cannot be reached should not cost
         somebody the commit — the reference computed from the branch is a
-        usable message on its own here, and `Rewrite` is one tap away.
+        usable message on its own, and `Rewrite` is one tap away.
         """
         runner = self._message_runner(chat_id)
         said = None
         if runner is not None and hasattr(runner, "ask"):
             try:
                 said = await asyncio.wait_for(
-                    runner.ask(commits.prompt(staged), model=MESSAGE_MODEL),
+                    runner.ask(commits.prompt(work), model=MESSAGE_MODEL),
                     timeout=MESSAGE_TIMEOUT_SECONDS,
                 )
             except Exception:
                 logger.warning("Could not have a commit message written", exc_info=True)
-        return commits.assemble(staged.reference, said or "") or None
+        return commits.assemble(work.reference, said or "") or None
 
     async def _propose_commit(self, chat_id: str, thread_id: int | None) -> None:
-        """`/commit` — read what is staged and ask whether to commit it."""
+        """`/commit` — read the branch's uncommitted work and ask about it."""
         found = self._repository_for(chat_id)
         if found is None:
             await self._say(
@@ -917,12 +892,12 @@ class TelegramChannel:
 
         # Off the event loop: git is a subprocess, and the poller has approval
         # cards to keep delivering while this reads a repository.
-        staged = await asyncio.to_thread(commits.read, path, project)
-        if staged.blocked:
-            await self._say(f"🚫 {html.escape(staged.blocked)}", chat_id, thread_id)
+        work = await asyncio.to_thread(commits.read, path, project)
+        if work.blocked:
+            await self._say(f"\U0001f6ab {html.escape(work.blocked)}", chat_id, thread_id)
             return
 
-        message = await self._write_message(chat_id, staged)
+        message = await self._write_message(chat_id, work)
         if not message:
             await self._say(
                 "Could not write a commit message, and this branch is not named "
@@ -932,16 +907,12 @@ class TelegramChannel:
             )
             return
 
-        self._forget_stale_proposals()
-        handle = secrets.token_hex(4)
-        self._proposals[handle] = _Proposal(
-            project=project, path=path, staged=staged, message=message, at=self._clock()
-        )
+        handle = self._proposals.add(project, path, work, message)
         await self._say(
-            cards.render_commit(project=project, staged=staged, message=message),
+            commit_card.render(project=project, work=work, message=message),
             chat_id,
             thread_id,
-            reply_markup=cards.commit_keyboard(handle),
+            reply_markup=commit_card.keyboard(handle),
         )
 
     async def _rewrite_commit(
@@ -954,20 +925,25 @@ class TelegramChannel:
         one thing in this flow commits, and it is the Commit button — a typo
         typed on a phone should not be a commit nobody agreed to.
         """
-        proposal = self._proposals.get(handle)
+        proposal = self._proposals.peek(handle)
         if proposal is None:
             await self._say("That commit is no longer open.", chat_id, thread_id)
             return
-        written = commits.assemble(proposal.staged.reference, text)
+        written = commits.assemble(proposal.work.reference, text)
         if not written:
             await self._say("That message is empty.", chat_id, thread_id)
             return
-        self._proposals[handle] = replace(proposal, message=written, at=self._clock())
+        reworded = self._proposals.reword(handle, written)
+        if reworded is None:
+            await self._say("That commit is no longer open.", chat_id, thread_id)
+            return
         await self._say(
-            cards.render_commit(project=proposal.project, staged=proposal.staged, message=written),
+            commit_card.render(
+                project=reworded.project, work=reworded.work, message=reworded.message
+            ),
             chat_id,
             thread_id,
-            reply_markup=cards.commit_keyboard(handle),
+            reply_markup=commit_card.keyboard(handle),
         )
 
     async def _decide_commit(
@@ -987,9 +963,8 @@ class TelegramChannel:
         thread_id = message.get("message_thread_id")
         message_id = message.get("message_id")
 
-        if action == cards.REWRITE:
-            # Kept, not taken: the proposal has to still be here when the
-            # sentence arrives.
+        if action == commit_card.REWRITE:
+            # Left in place: the sentence still has to find it.
             if handle not in self._proposals:
                 await self._dismiss(query_id, "That commit is no longer open.")
                 return
@@ -1002,16 +977,16 @@ class TelegramChannel:
             )
             return
 
-        # Taken rather than read. Dropping it here is what stops a second tap
-        # making a second commit; there is no nonce to check.
-        proposal = self._proposals.pop(handle, None)
+        # Taken rather than read. That is what stops a second tap making a
+        # second commit; there is no nonce to check.
+        proposal = self._proposals.take(handle)
         if proposal is None:
             await self._dismiss(query_id, "That commit is no longer open.")
             return
 
-        if action == cards.DROP:
+        if action == commit_card.DROP:
             await self._dismiss(query_id, "Cancelled.")
-            await self._settle_commit(proposal, "✖️ CANCELLED", user_id, here, message_id)
+            await self._settle_commit(proposal, "\u2716\ufe0f CANCELLED", user_id, here, message_id)
             return
 
         try:
@@ -1019,15 +994,17 @@ class TelegramChannel:
         except Exception as refused:
             logger.warning("A commit from Telegram failed", exc_info=True)
             await self._dismiss(query_id, "git refused.")
-            await self._say(f"🚫 git refused: {html.escape(str(refused))}", here or "", thread_id)
+            await self._say(
+                f"\U0001f6ab git refused: {html.escape(str(refused))}", here or "", thread_id
+            )
             return
 
         await self._dismiss(query_id, f"Committed {sha}")
-        await self._settle_commit(proposal, f"✅ COMMITTED {sha}", user_id, here, message_id)
+        await self._settle_commit(proposal, f"\u2705 COMMITTED {sha}", user_id, here, message_id)
 
     async def _settle_commit(
         self,
-        proposal: _Proposal,
+        proposal,
         outcome: str,
         user_id: str,
         chat_id: str | None,
@@ -1040,7 +1017,7 @@ class TelegramChannel:
             await self._api.edit_message_text(
                 chat_id or self._chat_id,
                 message_id,
-                cards.render_commit_resolved(
+                commit_card.render_resolved(
                     project=proposal.project,
                     message=proposal.message,
                     outcome=outcome,
@@ -1487,7 +1464,7 @@ class TelegramChannel:
             await self._answer_question(asked, user_id, query_id)
             return
 
-        proposed = cards.parse_commit_data(callback.get("data") or "")
+        proposed = commit_card.parse_callback_data(callback.get("data") or "")
         if proposed is not None:
             await self._decide_commit(proposed, user_id, query_id, callback)
             return
