@@ -858,8 +858,12 @@ class TelegramChannel:
             return found
         return self._runner
 
-    async def _write_message(self, chat_id: str, work) -> str | None:
-        """Have a subject line written for the branch's uncommitted work.
+    async def _write_message(self, chat_id: str, work) -> tuple[str | None, tuple[str, ...]]:
+        """Have the work described: a subject line, and what actually changed.
+
+        Both in one turn. The second half is the point of asking at all — the
+        person deciding is away from the desk and has not seen this code, and a
+        list of filenames says where an agent has been rather than what it did.
 
         Fails soft, on purpose. A model that cannot be reached should not cost
         somebody the commit — the reference computed from the branch is a
@@ -875,7 +879,8 @@ class TelegramChannel:
                 )
             except Exception:
                 logger.warning("Could not have a commit message written", exc_info=True)
-        return commits.assemble(work.reference, said or "") or None
+        said = said or ""
+        return commits.assemble(work.reference, said) or None, commits.summary_of(said)
 
     async def _propose_commit(self, chat_id: str, thread_id: int | None) -> None:
         """`/commit` — read the branch's uncommitted work and ask about it."""
@@ -897,7 +902,7 @@ class TelegramChannel:
             await self._say(f"\U0001f6ab {html.escape(work.blocked)}", chat_id, thread_id)
             return
 
-        message = await self._write_message(chat_id, work)
+        message, summary = await self._write_message(chat_id, work)
         if not message:
             await self._say(
                 "Could not write a commit message, and this branch is not named "
@@ -907,9 +912,9 @@ class TelegramChannel:
             )
             return
 
-        handle = self._proposals.add(project, path, work, message)
+        handle = self._proposals.add(project, path, work, message, summary)
         await self._say(
-            commit_card.render(project=project, work=work, message=message),
+            commit_card.render(project=project, work=work, message=message, summary=summary),
             chat_id,
             thread_id,
             reply_markup=commit_card.keyboard(handle),
@@ -939,7 +944,10 @@ class TelegramChannel:
             return
         await self._say(
             commit_card.render(
-                project=reworded.project, work=reworded.work, message=reworded.message
+                project=reworded.project,
+                work=reworded.work,
+                message=reworded.message,
+                summary=reworded.summary,
             ),
             chat_id,
             thread_id,
@@ -999,8 +1007,37 @@ class TelegramChannel:
             )
             return
 
-        await self._dismiss(query_id, f"Committed {sha}")
-        await self._settle_commit(proposal, f"\u2705 COMMITTED {sha}", user_id, here, message_id)
+        # Said out loud, not only by editing the card. A toast disappears and an
+        # edit two screens up is easy to scroll past; the one thing somebody
+        # needs to leave with is that it happened, and what it is called.
+        branch = proposal.work.branch
+        done = [
+            f"\u2705 <b>Committed</b> <code>{html.escape(sha)}</code> "
+            f"on <code>{html.escape(branch)}</code>",
+            "",
+            f"<pre>{html.escape(proposal.message)}</pre>",
+        ]
+        outcome = f"\u2705 COMMITTED {sha}"
+
+        if action == commit_card.SEND:
+            await self._dismiss(query_id, f"Committed {sha}, pushing\u2026")
+            try:
+                where = await asyncio.to_thread(commits.push, proposal.path, branch)
+            except Exception as refused:
+                logger.warning("A push from Telegram failed", exc_info=True)
+                # The commit is made and safe; only the push failed. Saying
+                # which is the difference between "tap it again" and "somebody
+                # else moved the branch, go to a desk".
+                done += ["", f"\U0001f6ab but the push failed: {html.escape(str(refused))}"]
+                outcome = f"\u2705 COMMITTED {sha} \u2014 not pushed"
+            else:
+                done[0] += f"\n\U0001f680 <b>Pushed</b> to <code>{html.escape(where)}</code>"
+                outcome = f"\U0001f680 PUSHED {sha}"
+        else:
+            await self._dismiss(query_id, f"Committed {sha}")
+
+        await self._say("\n".join(done), here or "", thread_id)
+        await self._settle_commit(proposal, outcome, user_id, here, message_id)
 
     async def _settle_commit(
         self,

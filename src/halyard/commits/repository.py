@@ -48,6 +48,16 @@ STYLE_EXAMPLES = 20
 #: through on a phone.
 GIT_TIMEOUT = 30.0
 
+#: Pushing does reach a network, over a link nobody here controls. Generous
+#: enough for a large first push on a slow connection, bounded so a phone is
+#: told something rather than left holding.
+PUSH_TIMEOUT = 180.0
+
+#: How many lines of "what changed" to carry back to the phone. The subject
+#: line says what the commit is called; this says what is in it, which is the
+#: thing somebody away from the desk has no other way of knowing.
+SUMMARY_LINES = 4
+
 #: How much of a new file to show the model. A file nobody has committed before
 #: has no diff of its own, so one is made — bounded here so a generated asset
 #: cannot fill the request on its own.
@@ -347,10 +357,20 @@ def prompt(work: Uncommitted) -> str:
     hard-coded anywhere, and a project that changes its mind changes its own log.
     """
     parts = [
-        "Write the subject line for a git commit of the changes below.",
+        "Describe a git commit of the changes below, for somebody who is away "
+        "from their desk and has not seen any of this code.",
         "",
-        "Answer with that one line and nothing else. No quotes, no code fence, "
-        "no explanation, no trailing full stop.",
+        "Answer in exactly this shape and nothing else:",
+        "",
+        "  <the subject line>",
+        "  ---",
+        f"  - <what changed, one short line>   (at most {SUMMARY_LINES} of these)",
+        "",
+        "The subject line comes first, on its own, with no quotes, no code "
+        "fence and no trailing full stop. Then `---` on its own line. Then the "
+        "lines saying what actually changed and why it matters — plain "
+        "sentences about the work, not a list of filenames, which are already "
+        "on screen.",
     ]
     if work.reference:
         parts += [
@@ -375,13 +395,32 @@ def prompt(work: Uncommitted) -> str:
     return "\n".join(parts)
 
 
+def summary_of(said: str) -> tuple[str, ...]:
+    """The "what changed" lines, from what the model answered.
+
+    Kept out of the commit itself. This repository writes one-line subjects and
+    alpha-engine writes `alpha-engine#281 short thing`; a body neither of them
+    has ever had would be this feature quietly changing how a project's history
+    reads. It goes on the card, which is where the question was asked.
+    """
+    _, marker, rest = (said or "").partition("---")
+    if not marker:
+        return ()
+    lines = []
+    for line in rest.splitlines():
+        cleaned = line.strip().lstrip("-*\u2022").strip()
+        if cleaned:
+            lines.append(cleaned)
+    return tuple(lines[:SUMMARY_LINES])
+
+
 def assemble(reference: str | None, said: str) -> str:
     """The model's line, made into the message that is actually committed.
 
     Tolerant of the model doing what it was asked not to: a line that already
     opens with the reference is not given a second one.
     """
-    line = (said or "").strip().strip("`").strip()
+    line = (said or "").partition("---")[0].strip().strip("`").strip()
     # Models reach for a code fence even when told not to; take the first line
     # that is not one rather than committing "```".
     for candidate in line.splitlines():
@@ -408,3 +447,30 @@ def commit(path: Path, message: str, *, run: Run | None = None) -> str:
     _run(path, "add", "-A", run=run)
     _run(path, "commit", "-m", message, run=run)
     return _run(path, "rev-parse", "--short", "HEAD", run=run).strip()
+
+
+def push(path: Path, branch: str, *, run: Run | None = None) -> str:
+    """Send the branch to `origin`, and say where it landed.
+
+    `--set-upstream` every time. A branch created from a GitLab issue and
+    checked out locally usually has an upstream already, and one an agent made
+    on the machine does not — the flag is harmless where it is redundant and is
+    the difference between working and "no upstream configured" where it is not.
+
+    Never `--force`, and nothing here takes an argument that could become one.
+    A rejected push is a real answer: somebody else moved the branch, and that
+    is not a thing to resolve from a phone.
+    """
+    runner = run or subprocess.run
+    done = runner(
+        ["git", "-C", str(path), "push", "--set-upstream", "origin", branch],
+        capture_output=True,
+        text=True,
+        timeout=PUSH_TIMEOUT,
+        check=False,
+    )
+    if done.returncode != 0:
+        said = (done.stderr or done.stdout or "").strip().splitlines()
+        # git writes the useful part of a rejection last, after the advice.
+        raise GitError(said[-1] if said else "git push failed")
+    return f"origin/{branch}"

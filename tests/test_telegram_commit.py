@@ -399,3 +399,106 @@ def test_commit_is_registered_so_it_appears_when_you_type_a_slash() -> None:
     from halyard.channels.telegram.adapter import COMMANDS
 
     assert ("commit", "Commit this branch's work, with a message to approve") in COMMANDS
+
+
+# --- saying it happened, and pushing ----------------------------------------
+
+
+def a_bare_remote(tmp_path: Path, repo: Path) -> Path:
+    """Somewhere for a push to land, so the test exercises git rather than a
+    double that would agree with whatever this file believes."""
+    remote = tmp_path / "origin.git"
+    subprocess.run(["git", "init", "-q", "--bare", str(remote)], check=True)
+    git(repo, "remote", "add", "origin", str(remote))
+    return remote
+
+
+async def test_committing_says_so_out_loud(wired) -> None:
+    """A toast disappears and an edited card two screens up is easy to scroll
+    past. The thing somebody needs to leave with is that it happened."""
+    channel, api, _, repo = wired
+    wrote(repo, "loader.py", "x = 1\n")
+    await channel._handle_message(typed("/commit"))
+
+    await channel._handle_callback(press(only_handle(channel), commit_card.MAKE))
+
+    said = api.sent[-1]["text"]
+    assert "Committed" in said
+    assert "281-power-gen-minor-fixes" in said
+    assert "alpha-engine#281 loader stub and seed tweak" in said
+
+
+async def test_commit_and_push_sends_the_branch(tmp_path: Path, wired) -> None:
+    channel, api, _, repo = wired
+    remote = a_bare_remote(tmp_path, repo)
+    wrote(repo, "loader.py", "x = 1\n")
+    await channel._handle_message(typed("/commit"))
+
+    await channel._handle_callback(press(only_handle(channel), commit_card.SEND))
+
+    assert "Pushed" in api.sent[-1]["text"]
+    assert "origin/281-power-gen-minor-fixes" in api.sent[-1]["text"]
+    landed = subprocess.run(
+        ["git", "-C", str(remote), "log", "-1", "--format=%s", "281-power-gen-minor-fixes"],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+    assert landed == "alpha-engine#281 loader stub and seed tweak"
+
+
+async def test_plain_commit_does_not_push(tmp_path: Path, wired) -> None:
+    """Two buttons because the two undo differently."""
+    channel, api, _, repo = wired
+    remote = a_bare_remote(tmp_path, repo)
+    wrote(repo, "loader.py", "x = 1\n")
+    await channel._handle_message(typed("/commit"))
+
+    await channel._handle_callback(press(only_handle(channel), commit_card.MAKE))
+
+    assert "Pushed" not in api.sent[-1]["text"]
+    branches = subprocess.run(
+        ["git", "-C", str(remote), "branch", "--list"], capture_output=True, text=True, check=True
+    ).stdout
+    assert branches.strip() == ""
+
+
+async def test_a_push_that_fails_still_reports_the_commit(wired) -> None:
+    """The commit is made and safe. Only the push failed, and conflating the
+    two would send somebody looking for work that is already on disk."""
+    channel, api, _, repo = wired
+    wrote(repo, "loader.py", "x = 1\n")
+    await channel._handle_message(typed("/commit"))
+
+    # No remote at all, so `git push` refuses.
+    await channel._handle_callback(press(only_handle(channel), commit_card.SEND))
+
+    said = api.sent[-1]["text"]
+    assert "Committed" in said
+    assert "push failed" in said
+    assert commit_count(repo) == 2
+
+
+async def test_the_card_says_what_changed_not_only_which_files(wired) -> None:
+    """The filenames say where an agent has been. This says what it did there,
+    which is the question actually being answered by tapping Commit."""
+    channel, api, runner, repo = wired
+    runner.says = (
+        "loader stub and seed tweak\n"
+        "---\n"
+        "- Adds a loader that returns the generated figure\n"
+        "- Leaves the existing callers untouched\n"
+    )
+    wrote(repo, "loader.py", "x = 1\n")
+
+    await channel._handle_message(typed("/commit"))
+
+    card = api.sent[-1]["text"]
+    assert "Adds a loader that returns the generated figure" in card
+    assert "Leaves the existing callers untouched" in card
+    # The summary is for the card. The commit keeps this project's one-line
+    # subjects rather than growing a body nobody's history has ever had.
+    assert "alpha-engine#281 loader stub and seed tweak" in card
+    await channel._handle_callback(press(only_handle(channel), commit_card.MAKE))
+    assert subject(repo) == "alpha-engine#281 loader stub and seed tweak"
+    assert "Adds a loader" not in git(repo, "log", "-1", "--format=%B")
