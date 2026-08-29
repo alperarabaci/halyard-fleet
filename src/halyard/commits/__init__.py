@@ -22,8 +22,10 @@ from halyard.commits.repository import (
     assemble,
     commit,
     prompt,
+    push,
     read,
     reference_for,
+    summary_of,
 )
 
 __all__ = [
@@ -35,6 +37,8 @@ __all__ = [
     "assemble",
     "commit",
     "prompt",
+    "push",
     "read",
     "reference_for",
+    "summary_of",
 ]

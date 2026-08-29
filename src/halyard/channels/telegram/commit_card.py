@@ -26,6 +26,7 @@ from halyard.commits import Uncommitted
 PREFIX = "hg"
 
 MAKE = "m"
+SEND = "s"
 REWRITE = "w"
 DROP = "x"
 
@@ -49,7 +50,7 @@ def parse_callback_data(data: str) -> tuple[str, str] | None:
     if len(parts) != 3 or parts[0] != PREFIX:
         return None
     _, handle, action = parts
-    if action not in {MAKE, REWRITE, DROP} or not handle:
+    if action not in {MAKE, SEND, REWRITE, DROP} or not handle:
         return None
     return handle, action
 
@@ -82,13 +83,21 @@ def _summary(work: Uncommitted) -> list[str]:
     return lines
 
 
-def render(*, project: str, work: Uncommitted, message: str) -> str:
-    """The card: what would be committed, and what it would be called."""
+def render(*, project: str, work: Uncommitted, message: str, summary: tuple[str, ...] = ()) -> str:
+    """The card: what changed, what it would be called, and what it would do.
+
+    `summary` is the part a file list cannot give. Somebody away from their
+    desk has not seen any of this code — the filenames say where an agent has
+    been, and these lines say what it did there, which is the actual question
+    being answered by tapping Commit.
+    """
+    said = [f"• {html.escape(line)}" for line in summary]
     return _fit(
         [
             f"<b>[COMMIT — {html.escape(project)}]</b>",
             "",
             *_summary(work),
+            *(["", *said] if said else []),
             "",
             f"<pre>{html.escape(message)}</pre>",
         ]
@@ -116,13 +125,20 @@ def render_resolved(*, project: str, message: str, outcome: str, by: str | None)
 def keyboard(handle: str) -> dict:
     """The buttons under a commit card.
 
-    Commit sits alone on the top row. Rewrite and Cancel share the one below,
-    and both leave the repository exactly as it was — so the only button that
-    changes anything has no neighbour to be mistaken for.
+    The two that commit share the top row and the two that change nothing share
+    the bottom one. That is the split worth keeping: a mistimed tap lands on
+    something of the same kind. Commit next to Cancel would not be.
+
+    Push has its own button rather than being what Commit does, because the two
+    undo differently — a commit is a local thing to amend, and a push is a
+    branch other people can already see.
     """
     return {
         "inline_keyboard": [
-            [{"text": "✅ Commit", "callback_data": callback_data(handle, MAKE)}],
+            [
+                {"text": "✅ Commit", "callback_data": callback_data(handle, MAKE)},
+                {"text": "🚀 Commit & push", "callback_data": callback_data(handle, SEND)},
+            ],
             [
                 {"text": "✏️ Rewrite", "callback_data": callback_data(handle, REWRITE)},
                 {"text": "✖️ Cancel", "callback_data": callback_data(handle, DROP)},

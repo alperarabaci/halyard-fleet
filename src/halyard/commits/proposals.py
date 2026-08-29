@@ -45,6 +45,10 @@ class Proposal:
     work: Uncommitted
     message: str
     at: datetime
+    #: What the model said actually changed, for the card. Never committed —
+    #: see `repository.summary_of` for why a body nobody's history has ever
+    #: carried does not get invented here.
+    summary: tuple[str, ...] = ()
 
 
 class Proposals:
@@ -61,12 +65,24 @@ class Proposals:
     def __contains__(self, handle: object) -> bool:
         return self.peek(str(handle)) is not None
 
-    def add(self, project: str, path: Path, work: Uncommitted, message: str) -> str:
+    def add(
+        self,
+        project: str,
+        path: Path,
+        work: Uncommitted,
+        message: str,
+        summary: tuple[str, ...] = (),
+    ) -> str:
         """Offer one, and return the handle its buttons will carry."""
         self._forget_stale()
         handle = secrets.token_hex(4)
         self._open[handle] = Proposal(
-            project=project, path=path, work=work, message=message, at=self._clock()
+            project=project,
+            path=path,
+            work=work,
+            message=message,
+            at=self._clock(),
+            summary=summary,
         )
         return handle
 
