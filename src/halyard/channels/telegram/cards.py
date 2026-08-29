@@ -369,3 +369,111 @@ def _fit(lines: list[str]) -> str:
     # The command is already summarised by `Redactor.prepare`, so reaching this
     # means something else grew. Cut rather than let the API reject the card.
     return text[: MESSAGE_LIMIT - 1] + "…"
+
+
+#: A third prefix, apart from approvals and preferences.
+#:
+#: A commit proposal is closer to an approval than to a preference: it is
+#: answered once, and pressing the button twice must not make two commits. It
+#: carries no nonce all the same — what it is answering is not a request the
+#: store knows about, so the adapter holds the proposal and drops it as it is
+#: used. Dropping *is* the guard, and a second press finds nothing.
+COMMIT_PREFIX = "hg"
+
+MAKE = "m"
+REWRITE = "w"
+DROP = "x"
+
+#: How many staged files to name on the card. A phone shows about this many
+#: without becoming a scroll, and the count above them is already the honest
+#: summary — see `render_commit`, which says how many were left out.
+FILES_SHOWN = 12
+
+
+def commit_data(handle: str, action: str) -> str:
+    """`hg:<handle>:m` — which proposal, and what to do with it."""
+    data = f"{COMMIT_PREFIX}:{handle}:{action}"
+    if len(data.encode("utf-8")) > CALLBACK_DATA_LIMIT:
+        raise ValueError(f"commit callback exceeds the {CALLBACK_DATA_LIMIT}-byte limit: {data}")
+    return data
+
+
+def parse_commit_data(data: str) -> tuple[str, str] | None:
+    """Decode a commit button into (handle, action), or None if it is not ours."""
+    parts = data.split(":")
+    if len(parts) != 3 or parts[0] != COMMIT_PREFIX:
+        return None
+    _, handle, action = parts
+    if action not in {MAKE, REWRITE, DROP} or not handle:
+        return None
+    return handle, action
+
+
+def _staged_summary(staged) -> list[str]:
+    """The lines that say what is being committed, without the diff.
+
+    Deliberately not the diff. Reading one on a phone is not a review — it is
+    scrolling — and pretending otherwise would put a wall of text in front of
+    the only two things worth checking: the branch and the message.
+    """
+    count = len(staged.changes)
+    lines = [
+        f"Branch: <code>{html.escape(staged.branch)}</code>",
+        f"{count} file{'s' if count != 1 else ''}  +{staged.insertions}/-{staged.deletions}",
+    ]
+    shown = staged.changes[:FILES_SHOWN]
+    listed = "\n".join(f"{c.status}  {c.path}" for c in shown)
+    if listed:
+        lines += ["", f"<pre>{html.escape(listed)}</pre>"]
+    if len(staged.changes) > len(shown):
+        lines.append(f"…and {len(staged.changes) - len(shown)} more")
+    return lines
+
+
+def render_commit(*, project: str, staged, message: str) -> str:
+    """The commit card: what would be committed, and what it would be called."""
+    return _fit(
+        [
+            f"<b>[COMMIT — {html.escape(project)}]</b>",
+            "",
+            *_staged_summary(staged),
+            "",
+            f"<pre>{html.escape(message)}</pre>",
+        ]
+    )
+
+
+def render_commit_resolved(*, project: str, message: str, outcome: str, by: str | None) -> str:
+    """What the card becomes once it has been answered.
+
+    Edited in place, like an approval, so scrolling back shows what happened
+    rather than live-looking buttons on something already decided.
+    """
+    who = f" by {html.escape(by)}" if by else ""
+    return _fit(
+        [
+            f"<b>{outcome}</b>{who}",
+            "",
+            f"Project: <code>{html.escape(project)}</code>",
+            "",
+            f"<pre>{html.escape(message)}</pre>",
+        ]
+    )
+
+
+def commit_keyboard(handle: str) -> dict:
+    """The buttons under a commit card.
+
+    Commit sits alone on the top row. Rewrite and Cancel share the one below,
+    both of which leave the repository exactly as it was — so the only button
+    that changes anything has no neighbour to be mistaken for.
+    """
+    return {
+        "inline_keyboard": [
+            [{"text": "✅ Commit", "callback_data": commit_data(handle, MAKE)}],
+            [
+                {"text": "✏️ Rewrite", "callback_data": commit_data(handle, REWRITE)},
+                {"text": "✖️ Cancel", "callback_data": commit_data(handle, DROP)},
+            ],
+        ]
+    }
