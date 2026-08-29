@@ -1,0 +1,127 @@
+"""Opening a desktop application, and knowing whether it is already open.
+
+The mechanics only. Which applications exist is `catalogue`'s business, and it
+keeps them in a data file — nothing in this package names an application, which
+is also what keeps `tests/test_runtime_isolation.py` green, since two of those
+names happen to be runtimes as well.
+
+Everything works from a bundle id. A path would have been the obvious way and
+is the wrong one: an application can be renamed, moved into a subfolder, or
+installed somewhere other than `/Applications`, and the id on its `Info.plist`
+survives all three. It also answers a question a filename cannot — Codex ships
+as `ChatGPT.app`, which says nothing about what it is, while
+`com.openai.codex` says it outright.
+
+macOS only, and honestly so: `open` and `osascript` are what this is. A Linux
+control plane simply reports that it cannot open applications, rather than
+pretending with something that would not work.
+"""
+
+from __future__ import annotations
+
+import logging
+import platform
+import subprocess
+from dataclasses import dataclass
+from pathlib import Path
+
+from halyard.applications.catalogue import Application
+
+logger = logging.getLogger(__name__)
+
+#: Long enough for Spotlight to answer on a cold index, short enough that a
+#: phone is not left holding while it does.
+LOOKUP_TIMEOUT = 10.0
+
+#: Launching is asynchronous — `open` returns once the application has been
+#: told, not once it is on screen — so this only bounds the telling.
+OPEN_TIMEOUT = 20.0
+
+
+@dataclass(frozen=True)
+class Status:
+    """Where an application stands right now."""
+
+    #: Where it is installed, or None if it is not on this machine.
+    path: Path | None
+    running: bool
+
+    @property
+    def installed(self) -> bool:
+        return self.path is not None
+
+
+def available() -> bool:
+    """Whether this machine can open applications at all."""
+    return platform.system() == "Darwin"
+
+
+def _ask(*command: str, timeout: float) -> str | None:
+    """Run a command and return its output, or None if it failed in any way.
+
+    Every caller here is answering a question about the desktop, and the honest
+    answer to "could not ask" is "I do not know" rather than an exception on a
+    path that a phone is waiting on.
+    """
+    try:
+        done = subprocess.run(command, capture_output=True, text=True, timeout=timeout, check=False)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return done.stdout if done.returncode == 0 else None
+
+
+def find(app: Application) -> Path | None:
+    """Where this application is installed, or None.
+
+    Spotlight first, because it finds an application wherever somebody put it.
+    The declared fallback second, for a machine with indexing turned off — a
+    real configuration, and one where "not installed" would be a lie.
+    """
+    if not available():
+        return None
+    found = _ask(
+        "mdfind",
+        f"kMDItemCFBundleIdentifier == '{app.bundle_id}'",
+        timeout=LOOKUP_TIMEOUT,
+    )
+    for line in (found or "").splitlines():
+        candidate = Path(line.strip())
+        if line.strip() and candidate.exists():
+            return candidate
+    if app.fallback and app.fallback.exists():
+        return app.fallback
+    return None
+
+
+def running(app: Application) -> bool:
+    """Whether it is open right now.
+
+    Asked of the bundle id, not of the process table. Matching on a path breaks
+    for an application launched from anywhere unexpected, and matching on a name
+    would match a terminal that merely has the name in its command line.
+    """
+    if not available():
+        return False
+    said = _ask(
+        "osascript",
+        "-e",
+        f'application id "{app.bundle_id}" is running',
+        timeout=LOOKUP_TIMEOUT,
+    )
+    return (said or "").strip() == "true"
+
+
+def status(app: Application) -> Status:
+    return Status(path=find(app), running=running(app))
+
+
+def open_(app: Application) -> bool:
+    """Open it, and say whether the request was accepted.
+
+    True means macOS took the request, not that a window is on screen — `open`
+    returns as soon as the application has been told. The phone is told the
+    same thing, in those words, rather than a confidence nothing here has.
+    """
+    if not available():
+        return False
+    return _ask("open", "-b", app.bundle_id, timeout=OPEN_TIMEOUT) is not None

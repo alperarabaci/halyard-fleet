@@ -1,0 +1,38 @@
+# Applications Halyard can open on this machine.
+#
+# Data rather than code, for two reasons. The obvious one is that this list
+# grows without anybody editing Python — a new application is four lines here,
+# and `applications:` in halyard.yaml adds or overrides one without touching
+# the package at all.
+#
+# The other is a boundary. `codex` and `antigravity` are runtime names, and
+# tests/test_runtime_isolation.py fails the build if one appears in Python
+# outside its own package under src/halyard/agents/. That rule is right and
+# this file is not a way around it: an openable application is not a runtime.
+# The two sets only look alike today. Opencode is expected to be openable long
+# before it can be driven, and a runtime can perfectly well be a command with
+# no application at all.
+#
+# `bundle_id` is the key, never a path. An application can be renamed, moved
+# into a subfolder, or installed somewhere other than /Applications, and the id
+# on its Info.plist survives all three. It also settles what a filename cannot:
+# ChatGPT.app carries com.openai.codex, which is how that mapping was
+# established here rather than guessed.
+#
+# Every id below was read off a real machine on 2026-08-29.
+
+claude:
+  bundle_id: com.anthropic.claudefordesktop
+  fallback: /Applications/Claude.app
+
+antigravity:
+  bundle_id: com.google.antigravity
+  fallback: /Applications/Antigravity.app
+  # Gemini is what this is to the person typing. Both names reach it, because
+  # somebody at the end of a day types whichever one they think in.
+  aliases: [gemini]
+
+codex:
+  bundle_id: com.openai.codex
+  fallback: /Applications/ChatGPT.app
+  aliases: [chatgpt]
