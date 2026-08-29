@@ -16,6 +16,7 @@ import asyncio
 import logging
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 from fastapi import FastAPI, Request, Response
 from fastapi.responses import JSONResponse
@@ -255,6 +256,21 @@ def _build_channel(
         logger.warning("Ignoring the `prompts:` block: %s", error)
         prompts = dict(configured_prompts.DEFAULTS)
 
+    def _repositories() -> dict[str, Path]:
+        """Each configured project's checkout, for `/commit`.
+
+        Projects described without a `path:` are simply absent: a project can
+        be named and given seats before anybody decides where its code lives,
+        and `/commit` says it does not know rather than guessing.
+        """
+        from halyard.core.config_file import projects as described
+
+        try:
+            return {p.name: p.path for p in described() if p.path}
+        except Exception:
+            logger.warning("Could not read `projects:` for /commit", exc_info=True)
+            return {}
+
     # `Settings` has already refused to start if any of these are missing.
     return TelegramChannel(
         api=TelegramApi(settings.telegram_bot_token or ""),
@@ -272,6 +288,10 @@ def _build_channel(
         runners=runners,
         seats=seats,
         prompts=prompts,
+        # Where each project's code is, for `/commit`. Read here rather than in
+        # the channel so a malformed `projects:` block cannot take the gate
+        # down — the same reason `prompts:` is loaded defensively above.
+        repositories=_repositories(),
         session_names={
             role: name
             for name, role in (
