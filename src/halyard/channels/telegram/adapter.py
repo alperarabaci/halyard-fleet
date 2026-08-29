@@ -26,6 +26,7 @@ from pathlib import Path
 
 from halyard import commits
 from halyard.agents.base import AgentRunner
+from halyard.applications import catalogue, desktop
 from halyard.channels.telegram import cards, commit_card
 from halyard.channels.telegram.api import TelegramApi
 from halyard.core import prompts as configured_prompts
@@ -93,6 +94,7 @@ COMMANDS: tuple[tuple[str, str], ...] = (
     ("chat", "Send a message into this seat's session"),
     ("to", "Send a message to another seat by name"),
     ("commit", "Commit this branch's work, with a message to approve"),
+    ("open", "Open an agent on the machine — claude, codex, gemini"),
     ("status", "What is happening right now"),
     ("options", "Models and effort levels this seat accepts"),
     ("model", "Choose what answers, for turns sent from here"),
@@ -623,6 +625,9 @@ class TelegramChannel:
         if command == "commit":
             await self._propose_commit(here or "", thread)
             return
+        if command == "open":
+            await self._open_application(argument, here or "", thread)
+            return
         if command == "pause":
             _, changed = await self._gate.pause(actor)
             if changed:
@@ -823,6 +828,82 @@ class TelegramChannel:
             thread_id,
             reply_markup={"force_reply": True},
         )
+
+    # --- opening what is not running ----------------------------------------
+
+    async def _open_application(self, typed: str, chat_id: str, thread_id: int | None) -> None:
+        """`/open claude` — start an agent that is not running.
+
+        No approval card. Opening an application changes nothing that has to be
+        undone, and putting a card in front of it would make the fast thing slow
+        for no safety bought — the gate is for what an agent does once it is
+        open, which is exactly where the cards already are.
+        """
+        if not desktop.available():
+            await self._say(
+                "This machine cannot open applications — that is macOS only.", chat_id, thread_id
+            )
+            return
+
+        catalogued = catalogue.known()
+        if not typed:
+            await self._say(self._openable(catalogued), chat_id, thread_id)
+            return
+
+        app = catalogue.resolve(typed)
+        if app is None:
+            await self._say(
+                f"I do not know an application called <b>{html.escape(typed)}</b>.\n\n"
+                + self._openable(catalogued),
+                chat_id,
+                thread_id,
+            )
+            return
+
+        where = await asyncio.to_thread(desktop.status, app)
+        if not where.installed:
+            await self._say(
+                f"<b>{html.escape(app.name)}</b> is not installed on this machine.",
+                chat_id,
+                thread_id,
+            )
+            return
+        if where.running:
+            await self._say(
+                f"\u2705 <b>{html.escape(app.name)}</b> is already open.", chat_id, thread_id
+            )
+            return
+
+        if await asyncio.to_thread(desktop.open_, app):
+            # "Asked to open", not "open". `open` returns once macOS has taken
+            # the request, and a cold application takes seconds more to appear —
+            # claiming otherwise would be a promise this cannot keep.
+            await self._say(
+                f"\U0001f680 Asked macOS to open <b>{html.escape(app.name)}</b>.",
+                chat_id,
+                thread_id,
+            )
+        else:
+            await self._say(
+                f"\U0001f6ab Could not open <b>{html.escape(app.name)}</b>.", chat_id, thread_id
+            )
+
+    def _openable(self, catalogued: list) -> str:
+        """What this machine can open, and what is already up."""
+        if not catalogued:
+            return "Nothing is listed under <code>applications:</code>."
+        lines = ["<b>Openable here</b>"]
+        for app in catalogued:
+            where = desktop.status(app)
+            if not where.installed:
+                mark = "\u2014 not installed"
+            elif where.running:
+                mark = "\u2705 open"
+            else:
+                mark = "\u25cb closed"
+            also = f"  ({', '.join(app.aliases)})" if app.aliases else ""
+            lines.append(f"<code>{html.escape(app.name)}</code>{html.escape(also)}  {mark}")
+        return "\n".join(lines)
 
     # --- committing what an agent wrote ------------------------------------
     #
