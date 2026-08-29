@@ -136,7 +136,12 @@ NOWHERE = catalogue.Application(name="nowhere", bundle_id="com.example.nowhere")
 
 
 class FakeRun:
-    """Stands in for `subprocess.run`, recording what was asked."""
+    """Stands in for `subprocess.run`, keyed on the command and its subcommand.
+
+    Both questions go to `lsappinfo` now — `find` for whether it is up, `info`
+    for whether it is on screen — so keying on the program alone would answer
+    them with the same string.
+    """
 
     def __init__(self, **answers: tuple[int, str]) -> None:
         self.answers = answers
@@ -144,8 +149,13 @@ class FakeRun:
 
     def __call__(self, command, **kwargs):
         self.commands.append(list(command))
-        code, out = self.answers.get(command[0], (0, ""))
+        key = command[0] if command[0] != "lsappinfo" else f"lsappinfo_{command[1]}"
+        code, out = self.answers.get(key, (0, ""))
         return subprocess.CompletedProcess(command, code, stdout=out, stderr="")
+
+
+#: What Launch Services prints for an application that is up.
+ASN = 'ASN:0x0-0x185c85b-"ChatGPT":'
 
 
 @pytest.fixture
@@ -153,32 +163,48 @@ def on_a_mac(monkeypatch):
     monkeypatch.setattr(desktop, "available", lambda: True)
 
 
-def test_running_is_asked_of_the_bundle_id(monkeypatch, on_a_mac) -> None:
-    """Not of the process table. A path breaks for an application launched from
-    somewhere unexpected, and a name would match a terminal that merely has the
-    name in its command line."""
-    fake = FakeRun(osascript=(0, "true\n"))
+def test_nothing_asks_to_control_an_application(monkeypatch, on_a_mac) -> None:
+    """The measured reason this uses Launch Services and not AppleScript.
+
+    Asking AppleScript whether an application is running reads to macOS as
+    wanting to control it, and it prompts for access to that app's documents
+    and data. That appeared on a desktop the first time somebody opened Codex
+    from a phone — where nobody was to answer it, for a permission far wider
+    than the question.
+    """
+    fake = FakeRun(lsappinfo_find=(0, ASN))
     monkeypatch.setattr(subprocess, "run", fake)
     app = catalogue.resolve("codex")
 
-    assert desktop.running(app) is True
-    assert 'application id "com.openai.codex" is running' in fake.commands[0][-1]
+    desktop.status(app)
+
+    assert fake.commands, "nothing was asked at all"
+    assert not any(command[0] == "osascript" for command in fake.commands)
 
 
-def test_a_closed_application_reads_as_closed(monkeypatch, on_a_mac) -> None:
-    monkeypatch.setattr(subprocess, "run", FakeRun(osascript=(0, "false\n")))
+def test_an_application_with_a_launch_services_record_is_running(monkeypatch, on_a_mac) -> None:
+    fake = FakeRun(lsappinfo_find=(0, ASN))
+    monkeypatch.setattr(subprocess, "run", fake)
+
+    assert desktop.running(catalogue.resolve("codex")) is True
+    assert fake.commands[0] == ["lsappinfo", "find", "bundleid=com.openai.codex"]
+
+
+def test_an_application_with_no_record_is_not_running(monkeypatch, on_a_mac) -> None:
+    """Measured against an application that had never been launched."""
+    monkeypatch.setattr(subprocess, "run", FakeRun(lsappinfo_find=(0, "\n")))
 
     assert desktop.running(catalogue.resolve("codex")) is False
 
 
 def test_a_question_that_could_not_be_asked_is_not_a_yes(monkeypatch, on_a_mac) -> None:
     """Fails towards "not running", which only ever costs an extra open."""
-    monkeypatch.setattr(subprocess, "run", FakeRun(osascript=(1, "")))
+    monkeypatch.setattr(subprocess, "run", FakeRun(lsappinfo_find=(1, "")))
 
     assert desktop.running(catalogue.resolve("codex")) is False
 
 
-def test_a_missing_osascript_is_answered_rather_than_raised(monkeypatch, on_a_mac) -> None:
+def test_a_missing_lsappinfo_is_answered_rather_than_raised(monkeypatch, on_a_mac) -> None:
     def explode(*args, **kwargs):
         raise OSError("no such tool")
 
@@ -186,6 +212,55 @@ def test_a_missing_osascript_is_answered_rather_than_raised(monkeypatch, on_a_ma
 
     assert desktop.running(NOWHERE) is False
     assert desktop.find(NOWHERE) is None
+
+
+def test_a_foreground_application_is_on_screen(monkeypatch, on_a_mac) -> None:
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        FakeRun(lsappinfo_find=(0, ASN), lsappinfo_info=(0, '"ApplicationType"="Foreground"')),
+    )
+
+    assert desktop.on_screen(catalogue.resolve("codex")) is True
+
+
+def test_an_application_that_became_an_accessory_is_not_on_screen(monkeypatch, on_a_mac) -> None:
+    """The bug this exists for. An editor with its last window closed keeps its
+    process and its helpers alive, and macOS moves it to `UIElement` — no Dock
+    icon, nothing to look at. Reading that as open reported an application that
+    was nowhere to be seen."""
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        FakeRun(lsappinfo_find=(0, ASN), lsappinfo_info=(0, '"ApplicationType"="UIElement"')),
+    )
+    app = catalogue.resolve("codex")
+
+    assert desktop.running(app) is True
+    assert desktop.on_screen(app) is False
+
+
+def test_status_answers_all_three_at_once(monkeypatch, on_a_mac, tmp_path) -> None:
+    there = tmp_path / "ChatGPT.app"
+    there.mkdir()
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        FakeRun(
+            mdfind=(0, f"{there}\n"),
+            lsappinfo_find=(0, ASN),
+            lsappinfo_info=(0, '"ApplicationType"="UIElement"'),
+        ),
+    )
+
+    where = desktop.status(catalogue.resolve("codex"))
+
+    assert (where.path, where.installed, where.running, where.on_screen) == (
+        there,
+        True,
+        True,
+        False,
+    )
 
 
 def test_where_it_is_installed_comes_from_spotlight(monkeypatch, on_a_mac, tmp_path) -> None:

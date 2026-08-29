@@ -12,7 +12,20 @@ survives all three. It also answers a question a filename cannot — Codex ships
 as `ChatGPT.app`, which says nothing about what it is, while
 `com.openai.codex` says it outright.
 
-macOS only, and honestly so: `open` and `osascript` are what this is. A Linux
+**Nothing here sends an Apple Event.** Asking AppleScript whether an
+application is running reads as wanting to *control* it, and macOS says so:
+
+    "uv" wants access to control "Codex Computer Use". Allowing control will
+    provide access to documents and data in "Codex Computer Use", and to
+    perform actions within that app.
+
+That prompt appeared the first time somebody opened Codex from a phone — on the
+desktop, where nobody was, for a permission far wider than the question. Denied,
+it would answer "not running" forever; unanswered, it holds the call until it
+times out. Launch Services knows the same thing and asks nothing, so it is the
+only thing consulted.
+
+macOS only, and honestly so: `open` and `lsappinfo` are what this is. A Linux
 control plane simply reports that it cannot open applications, rather than
 pretending with something that would not work.
 """
@@ -113,45 +126,60 @@ def find(app: Application) -> Path | None:
     return None
 
 
-def running(app: Application) -> bool:
-    """Whether it is open right now.
+def _asn(app: Application) -> str | None:
+    """Launch Services' handle for this application, or None if it is not up.
 
-    Asked of the bundle id, not of the process table. Matching on a path breaks
-    for an application launched from anywhere unexpected, and matching on a name
-    would match a terminal that merely has the name in its command line.
+    The whole running check. An application with no record is not running, and
+    one with a record is — measured across all three states, including an
+    application that had never been launched.
     """
-    if not available():
-        return False
-    said = _ask(
-        "osascript",
-        "-e",
-        f'application id "{app.bundle_id}" is running',
-        timeout=LOOKUP_TIMEOUT,
-    )
-    return (said or "").strip() == "true"
+    said = _ask("lsappinfo", "find", f"bundleid={app.bundle_id}", timeout=LOOKUP_TIMEOUT)
+    for line in (said or "").splitlines():
+        if line.strip():
+            return line.strip()
+    return None
+
+
+def _foreground(asn: str) -> bool:
+    said = _ask("lsappinfo", "info", "-only", "ApplicationType", asn, timeout=LOOKUP_TIMEOUT)
+    return FOREGROUND in (said or "")
+
+
+def running(app: Application) -> bool:
+    """Whether its process is up.
+
+    Asked of Launch Services rather than the process table. Matching on a path
+    breaks for an application launched from somewhere unexpected, and matching
+    on a name would match a terminal that merely has the name in its command
+    line.
+    """
+    return available() and _asn(app) is not None
 
 
 def on_screen(app: Application) -> bool:
     """Whether it has a foreground presence, not merely a process.
 
-    Asked of Launch Services, which already knows, rather than by counting
-    windows — that goes through System Events and needs Accessibility
-    permission, which this would have to ask a person to grant at a desk for
-    a feature whose whole point is not being at one. Measured: it refuses with
-    "osascript is not allowed assistive access".
+    Counting windows would be the direct question and cannot be asked: it goes
+    through System Events and needs Accessibility permission, which this would
+    have to ask for at a desk for a feature whose whole point is not being at
+    one. Measured — it refuses with "osascript is not allowed assistive access".
     """
     if not available():
         return False
-    asn = _ask("lsappinfo", "find", f"bundleid={app.bundle_id}", timeout=LOOKUP_TIMEOUT) or ""
-    asn = asn.strip().splitlines()[0].strip() if asn.strip() else ""
-    if not asn:
-        return False
-    said = _ask("lsappinfo", "info", "-only", "ApplicationType", asn, timeout=LOOKUP_TIMEOUT)
-    return FOREGROUND in (said or "")
+    asn = _asn(app)
+    return asn is not None and _foreground(asn)
 
 
 def status(app: Application) -> Status:
-    return Status(path=find(app), running=running(app), on_screen=on_screen(app))
+    """All three questions, asking Launch Services once."""
+    if not available():
+        return Status(path=None, running=False, on_screen=False)
+    asn = _asn(app)
+    return Status(
+        path=find(app),
+        running=asn is not None,
+        on_screen=asn is not None and _foreground(asn),
+    )
 
 
 def open_(app: Application) -> bool:
