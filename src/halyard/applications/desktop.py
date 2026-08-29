@@ -38,13 +38,33 @@ LOOKUP_TIMEOUT = 10.0
 OPEN_TIMEOUT = 20.0
 
 
+#: What macOS calls an application that is on screen, as against one that is
+#: running with no Dock icon and no window.
+FOREGROUND = "Foreground"
+
+
 @dataclass(frozen=True)
 class Status:
-    """Where an application stands right now."""
+    """Where an application stands right now.
+
+    `running` and `on_screen` are genuinely different, and conflating them is
+    what made this report "already open" for an application that was nowhere to
+    be seen. Measured: Antigravity with its last window closed still has a live
+    process, its helpers and its language server — `is running` says true, quite
+    correctly — while macOS has moved it to `UIElement`, which is to say no Dock
+    icon and nothing on screen.
+
+    Neither Antigravity nor Claude declares `LSUIElement` in its `Info.plist`,
+    so that state is one the application entered on its own and is a fair
+    reading of "there is no window".
+    """
 
     #: Where it is installed, or None if it is not on this machine.
     path: Path | None
+    #: The process exists.
     running: bool
+    #: It has a foreground presence — a Dock icon, and something to look at.
+    on_screen: bool = False
 
     @property
     def installed(self) -> bool:
@@ -111,8 +131,27 @@ def running(app: Application) -> bool:
     return (said or "").strip() == "true"
 
 
+def on_screen(app: Application) -> bool:
+    """Whether it has a foreground presence, not merely a process.
+
+    Asked of Launch Services, which already knows, rather than by counting
+    windows — that goes through System Events and needs Accessibility
+    permission, which this would have to ask a person to grant at a desk for
+    a feature whose whole point is not being at one. Measured: it refuses with
+    "osascript is not allowed assistive access".
+    """
+    if not available():
+        return False
+    asn = _ask("lsappinfo", "find", f"bundleid={app.bundle_id}", timeout=LOOKUP_TIMEOUT) or ""
+    asn = asn.strip().splitlines()[0].strip() if asn.strip() else ""
+    if not asn:
+        return False
+    said = _ask("lsappinfo", "info", "-only", "ApplicationType", asn, timeout=LOOKUP_TIMEOUT)
+    return FOREGROUND in (said or "")
+
+
 def status(app: Application) -> Status:
-    return Status(path=find(app), running=running(app))
+    return Status(path=find(app), running=running(app), on_screen=on_screen(app))
 
 
 def open_(app: Application) -> bool:
