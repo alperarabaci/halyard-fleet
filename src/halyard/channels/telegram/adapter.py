@@ -847,17 +847,19 @@ class TelegramChannel:
 
         catalogued = catalogue.known()
         if not typed:
-            await self._say(self._openable(catalogued), chat_id, thread_id)
+            await self._offer_applications(catalogued, chat_id, thread_id)
             return
 
         app = catalogue.resolve(typed)
         if app is None:
+            # Said, then asked. A name nobody knows is usually a name typed from
+            # memory, and the useful reply is the list of real ones as buttons.
             await self._say(
-                f"I do not know an application called <b>{html.escape(typed)}</b>.\n\n"
-                + self._openable(catalogued),
+                f"I do not know an application called <b>{html.escape(typed)}</b>.",
                 chat_id,
                 thread_id,
             )
+            await self._offer_applications(catalogued, chat_id, thread_id)
             return
 
         where = await asyncio.to_thread(desktop.status, app)
@@ -868,18 +870,26 @@ class TelegramChannel:
                 thread_id,
             )
             return
-        if where.running:
+        if where.on_screen:
             await self._say(
                 f"\u2705 <b>{html.escape(app.name)}</b> is already open.", chat_id, thread_id
             )
             return
+
+        # Running but not on screen is the interesting third state, and reading
+        # it as "already open" is what once reported an application that was
+        # nowhere to be seen. An editor whose last window is closed keeps its
+        # process, its helpers and its language server alive, so `is running`
+        # says true and there is still nothing to look at. Opening it is exactly
+        # what somebody wants here.
+        waking = " It was running with no window." if where.running else ""
 
         if await asyncio.to_thread(desktop.open_, app):
             # "Asked to open", not "open". `open` returns once macOS has taken
             # the request, and a cold application takes seconds more to appear —
             # claiming otherwise would be a promise this cannot keep.
             await self._say(
-                f"\U0001f680 Asked macOS to open <b>{html.escape(app.name)}</b>.",
+                f"\U0001f680 Asked macOS to open <b>{html.escape(app.name)}</b>.{waking}",
                 chat_id,
                 thread_id,
             )
@@ -888,22 +898,36 @@ class TelegramChannel:
                 f"\U0001f6ab Could not open <b>{html.escape(app.name)}</b>.", chat_id, thread_id
             )
 
-    def _openable(self, catalogued: list) -> str:
-        """What this machine can open, and what is already up."""
-        if not catalogued:
-            return "Nothing is listed under <code>applications:</code>."
-        lines = ["<b>Openable here</b>"]
-        for app in catalogued:
-            where = desktop.status(app)
-            if not where.installed:
-                mark = "\u2014 not installed"
-            elif where.running:
-                mark = "\u2705 open"
-            else:
-                mark = "\u25cb closed"
-            also = f"  ({', '.join(app.aliases)})" if app.aliases else ""
-            lines.append(f"<code>{html.escape(app.name)}</code>{html.escape(also)}  {mark}")
-        return "\n".join(lines)
+    async def _offer_applications(
+        self, catalogued: list, chat_id: str, thread_id: int | None
+    ) -> None:
+        """Ask which one, with a button each.
+
+        Because `/open` arrives bare. Telegram's own command menu pastes the
+        command and stops, so the useful next thing is the question rather than
+        a list somebody then has to type from — the same reason `/to` offers
+        seats instead of printing them.
+
+        Only what can actually be opened is offered: installed, and not already
+        on screen. A button that answers "it is already open" is a button that
+        wasted a tap.
+        """
+        standing = [(app, await asyncio.to_thread(desktop.status, app)) for app in catalogued]
+        worth = [app.name for app, where in standing if where.installed and not where.on_screen]
+        keyboard = cards.open_choices(tuple(worth))
+
+        if keyboard is None:
+            installed = [app for app, where in standing if where.installed]
+            await self._say(
+                "\u2705 Everything is already open."
+                if installed
+                else "Nothing openable is installed on this machine.",
+                chat_id,
+                thread_id,
+            )
+            return
+
+        await self._say("Open which one?", chat_id, thread_id, reply_markup=keyboard)
 
     # --- committing what an agent wrote ------------------------------------
     #
@@ -1553,6 +1577,9 @@ class TelegramChannel:
             here = str((message.get("chat") or {}).get("id") or "") or None
             what, value = chosen
             await self._dismiss(query_id)
+            if what == "open":
+                await self._open_application(value, here or "", message.get("message_thread_id"))
+                return
             if what == "to":
                 carried = ((message.get("reply_to_message") or {}).get("text") or "").strip()
                 # The anchor may be the command itself, in which case the text

@@ -101,7 +101,7 @@ def parse_choice_data(data: str) -> tuple[str, str] | None:
     if len(parts) != 3 or parts[0] != CHOICE_PREFIX:
         return None
     _, what, value = parts
-    if what not in {"model", "effort", "to"} or not value:
+    if what not in {"model", "effort", "to", "open"} or not value:
         return None
     return what, value
 
@@ -369,3 +369,24 @@ def _fit(lines: list[str]) -> str:
     # The command is already summarised by `Redactor.prepare`, so reaching this
     # means something else grew. Cut rather than let the API reject the card.
     return text[: MESSAGE_LIMIT - 1] + "…"
+
+
+def open_choices(names: tuple[str, ...]) -> dict | None:
+    """A button per application worth opening.
+
+    No `default` row, unlike `choices`: there is no default application, and a
+    button that opened an arbitrary one would be worse than no button.
+
+    `None` when there is nothing to offer, which the caller says in words —
+    "everything is already open" is a good answer and an empty keyboard is not.
+    """
+    buttons = []
+    for name in names:
+        try:
+            buttons.append({"text": name, "callback_data": choice_data("open", name)})
+        except ValueError:
+            continue
+    if not buttons:
+        return None
+    rows = [buttons[index : index + 3] for index in range(0, len(buttons), 3)]
+    return {"inline_keyboard": rows}
