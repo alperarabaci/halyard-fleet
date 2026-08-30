@@ -111,7 +111,7 @@ wheels = [
 
 [[package]]
 name = "halyard-fleet"
-version = "0.6.2"
+version = "0.6.3"
 source = { editable = "." }
 dependencies = [
     { name = "aiosqlite" },
