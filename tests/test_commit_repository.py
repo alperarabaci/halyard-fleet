@@ -41,6 +41,11 @@ def repo(tmp_path: Path) -> Path:
     return place
 
 
+def wrote(repo: Path, name: str, text: str) -> None:
+    """An agent writing a file. Nothing stages it, which is the point."""
+    (repo / name).write_text(text)
+
+
 def stage(repo: Path, name: str, text: str) -> None:
     (repo / name).write_text(text)
     git(repo, "add", name)
@@ -288,3 +293,28 @@ def test_a_commit_that_git_refuses_says_what_git_said(repo: Path) -> None:
     useful than anything this module could invent."""
     with pytest.raises(commits.GitError):
         commits.commit(repo, "nothing to see")
+
+
+def test_git_is_never_allowed_to_ask_a_person_anything(repo: Path, monkeypatch) -> None:
+    """Nothing running this has a terminal.
+
+    Measured in the field: a push to a remote with no stored credential wants a
+    username, and it failed fast only because there was no tty at all — "could
+    not read Username for 'https://gitlab.com': Device not configured". Given a
+    tty it would block, and given an askpass it would put a dialog on a desktop
+    nobody is sitting at. Either way the phone waits out the timeout.
+    """
+    seen: dict[str, str] = {}
+
+    def watching(command, **kwargs):
+        seen.update(kwargs.get("env") or {})
+        return subprocess.run(command, capture_output=True, text=True, check=False)
+
+    wrote(repo, "loader.py", "x = 1\n")
+    commits.read(repo, "alpha-engine", run=watching)
+
+    assert seen["GIT_TERMINAL_PROMPT"] == "0"
+    assert seen["GIT_ASKPASS"] == ""
+    assert seen["SSH_ASKPASS"] == ""
+    # Inherited, not replaced: git needs PATH and HOME to work at all.
+    assert "PATH" in seen

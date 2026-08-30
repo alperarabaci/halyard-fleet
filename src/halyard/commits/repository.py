@@ -27,6 +27,7 @@ correct forever after. That is computed from the branch name.
 
 from __future__ import annotations
 
+import os
 import re
 import subprocess
 from collections.abc import Callable, Sequence
@@ -74,6 +75,22 @@ _NOT_WORTH_READING = ("uv.lock", "package-lock.json", "yarn.lock", "poetry.lock"
 
 #: Git's own mark for a file it has never seen.
 UNTRACKED = "?"
+
+
+#: Git, told never to ask a person anything.
+#:
+#: Nothing here has a terminal, and a `git push` with no stored credential wants
+#: a username. It failed fast the first time this happened — "could not read
+#: Username for 'https://gitlab.com': Device not configured" — but only because
+#: there was no tty at all. Given one it would block, and given an askpass it
+#: would put a dialog on a desktop nobody is sitting at. Either way a phone
+#: waits out the timeout for an answer that was never coming.
+#:
+#: Set here rather than at the push, because a `git` that can prompt is wrong
+#: everywhere in this module.
+def _environment() -> dict[str, str]:
+    return {**os.environ, "GIT_TERMINAL_PROMPT": "0", "GIT_ASKPASS": "", "SSH_ASKPASS": ""}
+
 
 Run = Callable[..., "subprocess.CompletedProcess[str]"]
 
@@ -145,6 +162,7 @@ def _run(path: Path, *args: str, run: Run | None = None) -> str:
         text=True,
         timeout=GIT_TIMEOUT,
         check=False,
+        env=_environment(),
     )
     if done.returncode != 0:
         said = (done.stderr or done.stdout or "").strip().splitlines()
@@ -468,6 +486,7 @@ def push(path: Path, branch: str, *, run: Run | None = None) -> str:
         text=True,
         timeout=PUSH_TIMEOUT,
         check=False,
+        env=_environment(),
     )
     if done.returncode != 0:
         said = (done.stderr or done.stdout or "").strip().splitlines()
