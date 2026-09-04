@@ -46,7 +46,7 @@ from halyard.core.events import Role
 from halyard.core.seats import Seat, _default_runtime, known_runtimes
 
 #: Where a project's own settings live, beside its seats.
-_PROJECT_FIELDS = {"path", "seats", "name"}
+_PROJECT_FIELDS = {"path", "seats", "name", "validate"}
 _SEAT_FIELDS = {"runtime", "session", "chat", "role", "after_compaction", "before_compaction"}
 
 
@@ -59,6 +59,11 @@ class Project:
     #: anybody decides to gate it.
     path: Path | None
     seats: list[Seat]
+    #: What has to pass before a commit is offered from a phone — `make
+    #: test-fast`, or whatever this project calls its quick check. Optional,
+    #: and absent means no check runs rather than some guessed default: a
+    #: command invented for somebody's repository would fail on every commit.
+    validate: str | None = None
 
 
 def _as_text(value: Any) -> str | None:
@@ -167,6 +172,7 @@ def projects_from_yaml(text: str) -> list[Project]:
                 name=project,
                 path=Path(path).expanduser() if path else None,
                 seats=seats,
+                validate=_as_text(body.get("validate")),
             )
         )
     return projects

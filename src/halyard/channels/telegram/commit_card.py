@@ -83,17 +83,41 @@ def _summary(work: Uncommitted) -> list[str]:
     return lines
 
 
-def render(*, project: str, work: Uncommitted, message: str, summary: tuple[str, ...] = ()) -> str:
+def render(
+    *,
+    project: str,
+    work: Uncommitted,
+    message: str,
+    summary: tuple[str, ...] = (),
+    warnings: tuple[str, ...] = (),
+) -> str:
     """The card: what changed, what it would be called, and what it would do.
 
     `summary` is the part a file list cannot give. Somebody away from their
     desk has not seen any of this code — the filenames say where an agent has
     been, and these lines say what it did there, which is the actual question
     being answered by tapping Commit.
+
+    `warnings` go first, above even the heading. Telegram has no colour in
+    message text — bold, italic, underline, strike, code and blockquote are the
+    whole palette — so position carries the weight red would carry elsewhere: a
+    blockquote draws its own rule down the left margin, and sitting before the
+    heading means it is read before anything has been scrolled past.
     """
     said = [f"• {html.escape(line)}" for line in summary]
+    alarm = (
+        [
+            "<blockquote>"
+            + "\n".join(f"⚠️ <b>{html.escape(line)}</b>" for line in warnings)
+            + "</blockquote>",
+            "",
+        ]
+        if warnings
+        else []
+    )
     return _fit(
         [
+            *alarm,
             f"<b>[COMMIT — {html.escape(project)}]</b>",
             "",
             *_summary(work),
