@@ -101,7 +101,7 @@ def parse_choice_data(data: str) -> tuple[str, str] | None:
     if len(parts) != 3 or parts[0] != CHOICE_PREFIX:
         return None
     _, what, value = parts
-    if what not in {"model", "effort", "to", "open"} or not value:
+    if what not in {"model", "effort", "to", "open", "run"} or not value:
         return None
     return what, value
 
@@ -390,3 +390,21 @@ def open_choices(names: tuple[str, ...]) -> dict | None:
         return None
     rows = [buttons[index : index + 3] for index in range(0, len(buttons), 3)]
     return {"inline_keyboard": rows}
+
+
+def command_choices(names: tuple[str, ...]) -> dict | None:
+    """A button per command a project offers.
+
+    The same shape as `open_choices` and for the same reason: no `default` row,
+    because there is no default command and a button that ran an arbitrary one
+    would be the worst button on the phone.
+    """
+    buttons = []
+    for name in names:
+        try:
+            buttons.append({"text": name, "callback_data": choice_data("run", name)})
+        except ValueError:
+            continue
+    if not buttons:
+        return None
+    return {"inline_keyboard": [buttons[i : i + 3] for i in range(0, len(buttons), 3)]}
