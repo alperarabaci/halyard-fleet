@@ -152,24 +152,39 @@ def deny(reason: str, event: str = "PreToolUse", runtime: str = "claude-code") -
     emit(event, "deny", f"Denied by Halyard: {reason}", runtime)
 
 
-#: How much of the agent's own prose to carry onto a card. Long enough for the
-#: paragraph that explains a command, short enough that the command stays the
-#: thing being read — a card whose context scrolls is a card nobody finishes.
+#: How much of the agent's own prose to carry onto a card, when it is all there
+#: is. Long enough for the paragraph that explains a command, short enough that
+#: the command stays the thing being read — a card whose context scrolls is a
+#: card nobody finishes.
 CONTEXT_LIMIT = 600
 
 
 def _context(tool_input: dict, transcript: str | None) -> str | None:
-    """What was being attempted, in the agent's own words."""
+    """Why this call is being made, in the agent's own words.
+
+    The tool's own reason first and, when there is one, alone. This used to
+    append the last thing the agent said in the conversation as well, and that
+    was wrong in a way that only showed up in use: the last assistant message is
+    the agent's report *to a person* — what it found, what it ran, what it
+    thinks — and not a justification for the command about to run.
+
+    Measured on forty real cards: thirty-eight carried both, and the chat text
+    averaged 203 characters against the reason's 45. Four fifths of the card was
+    about something else, on ninety-five per cent of cards, and the one line
+    that answers "should this run" was buried under it.
+
+    The fallback stays because it earns its place where nothing else answers:
+    a tool with no `description` leaves a card with nothing on it but a command.
+    """
     summary = tool_input.get("description") or tool_input.get("justification")
     summary = summary.strip() if isinstance(summary, str) else ""
+    if summary:
+        return summary
 
-    said = last_assistant_text(transcript) or ""
-    if said and said[:CONTEXT_LIMIT] != summary:
-        said = said[:CONTEXT_LIMIT] + ("…" if len(said) > CONTEXT_LIMIT else "")
-    else:
-        said = ""
-
-    return "\n\n".join(part for part in (summary, said) if part) or None
+    said = (last_assistant_text(transcript) or "").strip()
+    if not said:
+        return None
+    return said[:CONTEXT_LIMIT] + ("…" if len(said) > CONTEXT_LIMIT else "")
 
 
 def build_body(payload: dict) -> dict:
