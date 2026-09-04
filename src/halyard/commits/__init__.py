@@ -14,6 +14,7 @@ Three pieces, each testable without the other two:
   apart from the approval cards for the same reason this package exists.
 """
 
+from halyard.commits import confirmation
 from halyard.commits.proposals import Proposal, Proposals
 from halyard.commits.repository import (
     Change,
@@ -21,6 +22,7 @@ from halyard.commits.repository import (
     Uncommitted,
     assemble,
     commit,
+    flag_of,
     prompt,
     push,
     read,
@@ -39,6 +41,8 @@ __all__ = [
     "assemble",
     "check",
     "commit",
+    "confirmation",
+    "flag_of",
     "mentions_task",
     "prompt",
     "push",
