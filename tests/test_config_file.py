@@ -8,6 +8,7 @@ of them — plus the precedence rule between the two files.
 
 from __future__ import annotations
 
+import contextlib
 from pathlib import Path
 
 import pytest
@@ -279,3 +280,27 @@ def test_an_unknown_project_lists_the_ones_there_are(tmp_path: Path) -> None:
 def test_no_configuration_at_all_says_what_to_do_instead(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="Give a directory instead"):
         resolve_project("alpha-engine", tmp_path)
+
+
+def test_a_broken_configuration_says_which_file_and_why(tmp_path, monkeypatch, caplog) -> None:
+    """The measured failure, on a Mac mini being configured for a new release.
+
+    A mistyped line of YAML read as "no configuration at all", and what came
+    next was pydantic reporting `HALYARD_CHANNEL` missing — true, and pointing
+    at the wrong thing entirely. The service restarted 553 times, never started,
+    and said nothing about the file it could not read.
+    """
+    import logging
+
+    from halyard.config import Settings
+
+    (tmp_path / "halyard.yaml").write_text("settings:\n  HALYARD_CHANNEL: telegram\n  x: [1, 2\n")
+    monkeypatch.chdir(tmp_path)
+
+    with caplog.at_level(logging.ERROR), contextlib.suppress(Exception):
+        Settings()
+
+    said = [record.getMessage() for record in caplog.records]
+    assert any("halyard.yaml" in one and "no settings were loaded" in one for one in said)
+    # Once, not once per field: a reason said twenty-eight times is scrolled past.
+    assert sum("no settings were loaded" in one for one in said) == 1
