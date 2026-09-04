@@ -24,36 +24,96 @@ pretend to stop anything determined.
 
 from __future__ import annotations
 
-import re
+import shlex
 
-#: `git commit`, `git push`, and the same with git's own options in front.
-#:
-#: Three things are deliberate, each measured against a command that should not
-#: be refused:
-#:
-#: - It must start a command. Otherwise `echo git commit` — an agent writing
-#:   documentation — is read as a commit.
-#: - Options are matched explicitly rather than with a wildcard, so
-#:   `git log --grep commit` stays a search: after `git` only a flag or
-#:   `-C <path>` may precede the subcommand, and `log` is neither.
-#: - The subcommand may not run on into a hyphen, so `git commit-tree` — a
-#:   plumbing command that moves no branch — is left alone.
-_WRITES_HISTORY = re.compile(
-    r"(?:^|[\n;&|(])\s*(?:sudo\s+)?git\b(?:\s+(?:-[cC]\s+\S+|--\S+|-\w))*"
-    r"\s+(?P<act>commit|push)(?![\w-])",
-    re.IGNORECASE,
-)
+#: Words that stand in front of a command without being it.
+_PREFIXES = frozenset({"sudo", "command", "nohup", "time", "env"})
+
+#: Where one command ends and the next begins, as `shlex` hands them over.
+#: Newlines are not here — they are split off before lexing, because `shlex`
+#: reads one as ordinary whitespace.
+_SEPARATORS = frozenset({";", "&&", "||", "|", "&", "(", ")"})
+
+#: git's own options that take a value, so the value is not read as the
+#: subcommand — `git -C /somewhere commit` must not look like `git /somewhere`.
+_TAKES_A_VALUE = frozenset({"-C", "-c", "--git-dir", "--work-tree", "--namespace", "--exec-path"})
+
+#: What an agent must not do.
+_ACTS = frozenset({"commit", "push"})
 
 
 def writes_history(command: str) -> str | None:
     """`"commit"`, `"push"`, or None if this command does neither.
 
-    Reads the whole command line, so `cd somewhere && git commit -m x` is caught
-    along with the plain form. That is also why this cannot be a list of exact
-    strings: what arrives is a shell line, not an argument list.
+    Tokenised rather than matched. The first version of this was a regular
+    expression and it was wrong twice over: it read `echo git commit` as a
+    commit, and CodeQL found it could be made to backtrack exponentially on a
+    string like `-c -0 -c -0 …`. A command line arriving from an agent is
+    exactly the input nobody should hand to an ambiguous pattern, and a gate
+    that can be made to hang is a gate that stops delivering approval cards.
+
+    `shlex` also settles the quoting for free: `echo "then run git commit"` is
+    one word to it, so documentation about committing stays documentation.
     """
-    found = _WRITES_HISTORY.search(command or "")
-    return found.group("act").lower() if found else None
+    for words in _commands_in(command):
+        act = _act_of(words)
+        if act is not None:
+            return act
+    return None
+
+
+def _commands_in(command: str) -> list[list[str]]:
+    """The command line split into the commands it actually runs.
+
+    A parse failure is treated as one unsplittable command rather than as
+    nothing: unbalanced quotes are not a way past this.
+    """
+    found: list[list[str]] = [[]]
+    # Lines first, because `shlex` reads a newline as ordinary whitespace — so
+    # a two-line script would be one command whose first word is `make`, and the
+    # `git commit` on its second line would go unseen. Agents send multi-line
+    # bash routinely.
+    for line in (command or "").splitlines():
+        try:
+            # `shlex.split` cannot be told about punctuation, and the separators
+            # are the point here: without them `echo hi; git commit` is one
+            # command whose first word is `echo`.
+            lexer = shlex.shlex(line, posix=True, punctuation_chars=True)
+            lexer.whitespace_split = True
+            tokens = list(lexer)
+        except ValueError:
+            # Malformed, so read coarsely and let `_act_of` decide. Being
+            # generous here would make a stray quote a way around the rule.
+            tokens = line.split()
+        found.append([])
+        for token in tokens:
+            if token in _SEPARATORS:
+                found.append([])
+            else:
+                found[-1].append(token)
+    return found
+
+
+def _act_of(words: list[str]) -> str | None:
+    """Which act this one command is, if it is git doing either of them."""
+    index = 0
+    while index < len(words) and words[index] in _PREFIXES:
+        index += 1
+    # `env FOO=1 git …` and the like.
+    while index < len(words) and "=" in words[index] and not words[index].startswith("-"):
+        index += 1
+    if index >= len(words) or words[index] not in {"git", "/usr/bin/git"}:
+        return None
+
+    index += 1
+    while index < len(words) and words[index].startswith("-"):
+        takes_value = words[index] in _TAKES_A_VALUE
+        index += 1
+        if takes_value:
+            index += 1
+    if index >= len(words):
+        return None
+    return words[index] if words[index] in _ACTS else None
 
 
 def writes_history_if(command: str, refusing: bool) -> str | None:

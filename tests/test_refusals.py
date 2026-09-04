@@ -9,6 +9,8 @@ not lift it.
 
 from __future__ import annotations
 
+import time
+
 import pytest
 
 from halyard.core import refusals
@@ -25,7 +27,11 @@ REFUSED = [
     ("make build; git push", "push"),
     ("sudo git push", "push"),
     ("(git commit)", "commit"),
-    ("GIT_TRACE=1 git push\ngit commit", "commit"),
+    # Two commands on two lines; the first one already writes history.
+    ("GIT_TRACE=1 git push\ngit commit", "push"),
+    ("make build\ngit commit -m x", "commit"),
+    ("env FOO=1 git commit", "commit"),
+    ("/usr/bin/git push", "push"),
 ]
 
 # Commands that must survive, each one a way this could have been too eager.
@@ -71,3 +77,27 @@ def test_what_the_agent_is_told_says_what_to_do_instead() -> None:
 
     assert "Halyard commits" in said
     assert "another way" in said
+
+
+def test_a_hostile_command_cannot_make_this_hang() -> None:
+    """The first version of this was a regular expression, and CodeQL found it
+    could be made to backtrack exponentially on `-c -0 -c -0 …`.
+
+    The command line comes from an agent, and a gate that can be made to hang is
+    a gate that stops delivering approval cards — the failure would not look
+    like a refusal, it would look like Halyard being down.
+    """
+    hostile = "git " + "-c -0 " * 20_000
+
+    started = time.perf_counter()
+    refusals.writes_history(hostile)
+    took = time.perf_counter() - started
+
+    # Linear rather than exponential. The old pattern did not finish at 40.
+    assert took < 2.0, f"took {took:.1f}s — something has become superlinear again"
+
+
+def test_an_unbalanced_quote_is_not_a_way_around_it() -> None:
+    """Malformed shell is read coarsely rather than skipped. Being generous
+    with what cannot be parsed would make a stray quote a bypass."""
+    assert refusals.writes_history("git commit -m 'unclosed") == "commit"
