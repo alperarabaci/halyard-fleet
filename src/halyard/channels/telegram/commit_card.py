@@ -29,6 +29,7 @@ MAKE = "m"
 SEND = "s"
 REWRITE = "w"
 DROP = "x"
+CONFIRM = "c"
 
 #: How many changed files to name on the card. A phone shows about this many
 #: without becoming a scroll, and the count above them is already the honest
@@ -50,7 +51,7 @@ def parse_callback_data(data: str) -> tuple[str, str] | None:
     if len(parts) != 3 or parts[0] != PREFIX:
         return None
     _, handle, action = parts
-    if action not in {MAKE, SEND, REWRITE, DROP} or not handle:
+    if action not in {MAKE, SEND, REWRITE, DROP, CONFIRM} or not handle:
         return None
     return handle, action
 
@@ -146,7 +147,7 @@ def render_resolved(*, project: str, message: str, outcome: str, by: str | None)
     )
 
 
-def keyboard(handle: str) -> dict:
+def keyboard(handle: str, *, confirmation: bool = False) -> dict:
     """The buttons under a commit card.
 
     The two that commit share the top row and the two that change nothing share
@@ -156,16 +157,27 @@ def keyboard(handle: str) -> dict:
     Push has its own button rather than being what Commit does, because the two
     undo differently — a commit is a local thing to amend, and a push is a
     branch other people can already see.
+
+    Confirmation sits between them on its own row, because it belongs to
+    neither group: it commits nothing and it is not a dismissal either. It sends
+    the project's round to the navigator and leaves the work exactly where it
+    is. Shown whenever the project has a round to send — the model's flag says
+    where to look, and whether to ask stays a person's call.
     """
-    return {
-        "inline_keyboard": [
-            [
-                {"text": "✅ Commit", "callback_data": callback_data(handle, MAKE)},
-                {"text": "🚀 Commit & push", "callback_data": callback_data(handle, SEND)},
-            ],
-            [
-                {"text": "✏️ Rewrite", "callback_data": callback_data(handle, REWRITE)},
-                {"text": "✖️ Cancel", "callback_data": callback_data(handle, DROP)},
-            ],
+    rows = [
+        [
+            {"text": "✅ Commit", "callback_data": callback_data(handle, MAKE)},
+            {"text": "🚀 Commit & push", "callback_data": callback_data(handle, SEND)},
         ]
-    }
+    ]
+    if confirmation:
+        rows.append(
+            [{"text": "🔍 Confirmation round", "callback_data": callback_data(handle, CONFIRM)}]
+        )
+    rows.append(
+        [
+            {"text": "✏️ Rewrite", "callback_data": callback_data(handle, REWRITE)},
+            {"text": "✖️ Cancel", "callback_data": callback_data(handle, DROP)},
+        ]
+    )
+    return {"inline_keyboard": rows}

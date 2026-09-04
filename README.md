@@ -151,7 +151,22 @@ projects:
       bootstrap: make bootstrap-up
     labels: [andon, rework]           # narrows /label; empty means all of them
     warn_if: [task-id-missing]        # the default; [] turns the warnings off
+    confirmation:                     # the extra round, when a guard cannot catch it
+      inquiry: NOTES/CONFIRMATION_INQUIRY.md
+      review: NOTES/CONFIRMATION_REVIEW.md
 ```
+
+**`confirmation:` buys a round that a guard cannot.** A test proves what it
+tests and a file of invariants proves nothing at all — an agent's attention is
+finite, and past a point more written rules are noise competing with the work.
+So the commit card offers a third answer beside committing and not committing:
+send the round. `inquiry` is put in front of the model while it writes the
+message and asks it one more thing — is *this* change worth another look? — and
+any flag it raises is lifted out of the message and shown above the card.
+`review` is the round itself, and goes to the project's navigator when the
+button is pressed; nothing is committed, and committing afterwards is a fresh
+`/commit` that reads the branch again. Both files belong to the project, because
+what is worth asking again is something a team learns about its own failures.
 
 `/commit` takes the whole working tree, has a message written for it in this
 repository's own style, and shows what changed rather than only which files. A
