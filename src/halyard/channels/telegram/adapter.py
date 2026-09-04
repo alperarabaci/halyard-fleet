@@ -22,12 +22,16 @@ import re
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from functools import partial
+from pathlib import Path
 
 from halyard import commits
 from halyard.agents.base import AgentRunner
 from halyard.applications import catalogue, desktop
 from halyard.channels.telegram import cards, commit_card
 from halyard.channels.telegram.api import TelegramApi
+from halyard.commands import catalogue as commands_offered
+from halyard.commands import running as commands_running
 from halyard.core import prompts as configured_prompts
 from halyard.core.approvals import (
     AlreadyResolvedError,
@@ -95,6 +99,7 @@ COMMANDS: tuple[tuple[str, str], ...] = (
     ("to", "Send a message to another seat by name"),
     ("commit", "Commit this branch's work, with a message to approve"),
     ("open", "Open an agent on the machine — claude, codex, gemini"),
+    ("command", "Run one of this project's own commands"),
     ("status", "What is happening right now"),
     ("options", "Models and effort levels this seat accepts"),
     ("model", "Choose what answers, for turns sent from here"),
@@ -253,6 +258,9 @@ class TelegramChannel:
         self._handoffs: dict[tuple[str, int | None, str], tuple[str, datetime]] = {}
         self._authorized = authorized_user_ids
         self._clock = clock
+        #: Which command is running in which project, so a second one is
+        #: refused rather than started on top of it.
+        self._working: dict[str, str] = {}
         #: Commits proposed and not yet answered. Owned by `halyard.commits`,
         #: which is where taking-once and going-stale are decided.
         self._proposals = commits.Proposals(self._clock)
@@ -629,6 +637,9 @@ class TelegramChannel:
         if command == "open":
             await self._open_application(argument, here or "", thread)
             return
+        if command == "command":
+            await self._run_command(argument, here or "", thread)
+            return
         if command == "pause":
             _, changed = await self._gate.pause(actor)
             if changed:
@@ -930,6 +941,111 @@ class TelegramChannel:
 
         await self._say("Open which one?", chat_id, thread_id, reply_markup=keyboard)
 
+    # --- running a project's own commands -----------------------------------
+
+    def _elapsed(self, seconds: float) -> str:
+        """`3m 12s`. A bare count of seconds stops being readable at about 90."""
+        if seconds < 90:
+            return f"{seconds:.0f}s"
+        return f"{int(seconds // 60)}m {int(seconds % 60):02d}s"
+
+    async def _run_command(self, typed: str, chat_id: str, thread_id: int | None) -> None:
+        """`/command` — offer this project's commands, or start the named one."""
+        found = self._repository_for(chat_id)
+        if found is None:
+            await self._say(
+                "I do not know which repository this chat is about. Give the "
+                "project a <code>path:</code> in <code>halyard.yaml</code>.",
+                chat_id,
+                thread_id,
+            )
+            return
+
+        listed = commands_offered.offered(found.commands)
+        if not listed:
+            await self._say(
+                f"<b>{html.escape(found.name)}</b> lists no commands. Add a "
+                "<code>commands:</code> block to it in <code>halyard.yaml</code>.",
+                chat_id,
+                thread_id,
+            )
+            return
+
+        if not typed:
+            await self._say(
+                "Run which one?",
+                chat_id,
+                thread_id,
+                reply_markup=cards.command_choices(tuple(c.name for c in listed)),
+            )
+            return
+
+        command = commands_offered.resolve(found.commands, typed)
+        if command is None:
+            await self._say(
+                f"<b>{html.escape(found.name)}</b> has no command called "
+                f"<b>{html.escape(typed)}</b>.",
+                chat_id,
+                thread_id,
+            )
+            await self._run_command("", chat_id, thread_id)
+            return
+
+        # One at a time per project. Two `make` runs in one directory fight over
+        # the same build outputs, and the second one's failure is a mystery.
+        if busy := self._working.get(found.name):
+            await self._say(
+                f"\u23f3 <b>{html.escape(busy)}</b> is still running in "
+                f"<b>{html.escape(found.name)}</b>. One at a time.",
+                chat_id,
+                thread_id,
+            )
+            return
+
+        self._working[found.name] = command.name
+        await self._say(
+            f"\u25b6\ufe0f Running <code>{html.escape(command.line)}</code>\u2026",
+            chat_id,
+            thread_id,
+        )
+        # Detached, because this can run for the better part of an hour and the
+        # poller has approval cards to keep delivering while it does.
+        task = asyncio.create_task(
+            self._carry_out(found.name, found.path, command, chat_id, thread_id)
+        )
+        self._sending.add(task)
+        task.add_done_callback(self._sending.discard)
+
+    async def _carry_out(
+        self, project: str, path: Path, command, chat_id: str, thread_id: int | None
+    ) -> None:
+        """Run it to the end, then say what happened."""
+        try:
+            result = await asyncio.to_thread(commands_running.run, command.line, path)
+        except Exception:
+            logger.warning("A command from Telegram could not be run", exc_info=True)
+            await self._say(
+                f"\U0001f6ab <b>{html.escape(command.name)}</b> could not be started.",
+                chat_id,
+                thread_id,
+            )
+            return
+        finally:
+            # Released whatever happened. A project left marked busy by a crash
+            # would refuse every command afterwards for no reason anybody could see.
+            self._working.pop(project, None)
+
+        if result.timed_out:
+            head = f"\u23f1 <b>{html.escape(command.name)}</b> was stopped after "
+        elif result.ok:
+            head = f"\u2705 <b>{html.escape(command.name)}</b> finished in "
+        else:
+            head = f"\U0001f6ab <b>{html.escape(command.name)}</b> failed after "
+        said = head + self._elapsed(result.seconds) + "."
+        if result.output:
+            said += f"\n\n<pre>{html.escape(result.output)}</pre>"
+        await self._say(said, chat_id, thread_id)
+
     # --- committing what an agent wrote ------------------------------------
     #
     # Thin on purpose. Everything that decides anything — what git is asked,
@@ -1016,7 +1132,9 @@ class TelegramChannel:
                 chat_id,
                 thread_id,
             )
-        checked = await asyncio.to_thread(commits.check, work, path, found.validate)
+        checked = await asyncio.to_thread(
+            partial(commits.check, work, path, found.validate, warn_if=found.warn_if)
+        )
         if checked.refused:
             # No card at all. A failing check is a fact rather than a judgement,
             # so there is nothing here for somebody to weigh.
@@ -1606,6 +1724,9 @@ class TelegramChannel:
             here = str((message.get("chat") or {}).get("id") or "") or None
             what, value = chosen
             await self._dismiss(query_id)
+            if what == "run":
+                await self._run_command(value, here or "", message.get("message_thread_id"))
+                return
             if what == "open":
                 await self._open_application(value, here or "", message.get("message_thread_id"))
                 return
