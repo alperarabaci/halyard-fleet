@@ -36,7 +36,7 @@ That is handled here rather than left to whoever writes the file.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -46,7 +46,7 @@ from halyard.core.events import Role
 from halyard.core.seats import Seat, _default_runtime, known_runtimes
 
 #: Where a project's own settings live, beside its seats.
-_PROJECT_FIELDS = {"path", "seats", "name", "validate"}
+_PROJECT_FIELDS = {"path", "seats", "name", "validate", "warn_if", "commands"}
 _SEAT_FIELDS = {"runtime", "session", "chat", "role", "after_compaction", "before_compaction"}
 
 
@@ -64,6 +64,39 @@ class Project:
     #: and absent means no check runs rather than some guessed default: a
     #: command invented for somebody's repository would fail on every commit.
     validate: str | None = None
+    #: Which of the named warnings apply here. `None` means the default set;
+    #: an empty list means none, which is how somebody who does not share this
+    #: project's conventions turns them all off. See `commits.validation`.
+    warn_if: tuple[str, ...] | None = None
+    #: Named commands this project offers to `/command` — `test-all: make
+    #: test-all`. Empty by default: these run whatever they are given on the
+    #: machine the control plane is on, so the list is what somebody wrote down
+    #: and never a guess about what a project probably supports.
+    commands: dict[str, str] = field(default_factory=dict)
+
+
+def _commands_from(project: str, value: Any) -> dict[str, str]:
+    """`commands:` as a mapping of name to command line."""
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        raise ValueError(f"Project {project!r}: `commands:` must be a mapping of name to command.")
+    return {str(name): str(line) for name, line in value.items()}
+
+
+def _warnings_from(project: str, value: Any) -> tuple[str, ...] | None:
+    """`warn_if:` as a tuple, or None when it was not written at all.
+
+    None and `[]` mean different things and both are wanted: unwritten takes
+    the default set, empty turns every warning off.
+    """
+    if value is None:
+        return None
+    if isinstance(value, str):
+        value = [value]
+    if not isinstance(value, list):
+        raise ValueError(f"Project {project!r}: `warn_if:` must be a list of names.")
+    return tuple(str(name).strip() for name in value if str(name).strip())
 
 
 def _as_text(value: Any) -> str | None:
@@ -173,6 +206,8 @@ def projects_from_yaml(text: str) -> list[Project]:
                 path=Path(path).expanduser() if path else None,
                 seats=seats,
                 validate=_as_text(body.get("validate")),
+                warn_if=_warnings_from(project, body.get("warn_if")),
+                commands=_commands_from(project, body.get("commands")),
             )
         )
     return projects

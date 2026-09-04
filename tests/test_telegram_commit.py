@@ -616,3 +616,29 @@ async def test_the_warning_survives_rewording_the_message(wired) -> None:
     await channel._handle_message(replying("power gen fixes", api.sent[-1]["text"]))
 
     assert "281 appears nowhere" in api.sent[-1]["text"]
+
+
+async def test_a_project_can_turn_the_warnings_off(wired) -> None:
+    """The task-id check is this project's house style, not a truth about
+    software. Somebody who does not share it says `warn_if: []`."""
+    channel, api, _, repo = wired
+    found = channel._repositories["alpha-engine"]
+    channel._repositories["alpha-engine"] = replace(found, warn_if=())
+    wrote(repo, "loader.py", "x = 1\n")
+
+    await channel._handle_message(typed("/commit"))
+
+    assert "appears nowhere" not in api.sent[-1]["text"]
+    assert len(channel._proposals) == 1
+
+
+async def test_a_warning_nobody_recognises_is_skipped_not_fatal(wired) -> None:
+    """A typo in a list of opinions must not cost the ability to commit."""
+    channel, _, _, repo = wired
+    found = channel._repositories["alpha-engine"]
+    channel._repositories["alpha-engine"] = replace(found, warn_if=("no-such-check",))
+    wrote(repo, "loader.py", "x = 1\n")
+
+    await channel._handle_message(typed("/commit"))
+
+    assert len(channel._proposals) == 1
