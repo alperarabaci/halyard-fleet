@@ -111,6 +111,31 @@ async def finished(channel: TelegramChannel) -> None:
             return
 
 
+async def settled(channel: TelegramChannel) -> None:
+    """Wait for whatever the command detached.
+
+    `/commit`, `/label` and the commit buttons run off the poll loop on purpose
+    — a project's test suite must not stop everybody else's approvals being
+    answered — so a test has to wait for them the way a person does.
+    """
+    for _ in range(400):
+        pending = [task for task in channel._sending if not task.done()]
+        if not pending:
+            await asyncio.sleep(0.02)
+            return
+        await asyncio.gather(*pending, return_exceptions=True)
+
+
+async def deliver(channel: TelegramChannel, update: dict) -> None:
+    await channel._handle_message(update)
+    await settled(channel)
+
+
+async def tap(channel: TelegramChannel, callback: dict) -> None:
+    await channel._handle_callback(callback)
+    await settled(channel)
+
+
 # --- what is offered --------------------------------------------------------
 
 
@@ -119,7 +144,7 @@ async def test_a_bare_command_asks_which_one(wired) -> None:
     the question rather than a list to type from."""
     channel, api, _ = wired
 
-    await channel._handle_message(typed("/command"))
+    await deliver(channel, typed("/command"))
 
     assert "Run which one?" in api.sent[-1]["text"]
     offered = {
@@ -132,7 +157,7 @@ async def test_a_project_with_no_commands_says_so(wired) -> None:
     channel, api, _ = wired
     teach(channel)
 
-    await channel._handle_message(typed("/command"))
+    await deliver(channel, typed("/command"))
 
     assert "lists no commands" in api.sent[-1]["text"]
 
@@ -140,7 +165,7 @@ async def test_a_project_with_no_commands_says_so(wired) -> None:
 async def test_a_name_nobody_knows_says_so_and_then_asks(wired) -> None:
     channel, api, _ = wired
 
-    await channel._handle_message(typed("/command deploy-to-production"))
+    await deliver(channel, typed("/command deploy-to-production"))
 
     assert "no command called" in api.sent[-2]["text"]
     assert "Run which one?" in api.sent[-1]["text"]
@@ -153,7 +178,7 @@ async def test_a_command_that_passes_reports_its_tail(wired) -> None:
     channel, api, _ = wired
     teach(channel, greet="echo one; echo two; echo three")
 
-    await channel._handle_message(typed("/command greet"))
+    await deliver(channel, typed("/command greet"))
     await finished(channel)
 
     assert "Running" in api.sent[0]["text"]
@@ -166,7 +191,7 @@ async def test_a_command_that_fails_says_so_and_shows_more(wired) -> None:
     channel, api, _ = wired
     teach(channel, broken="echo 'FAILED tests/test_thing.py::test_one'; exit 2")
 
-    await channel._handle_message(typed("/command broken"))
+    await deliver(channel, typed("/command broken"))
     await finished(channel)
 
     assert "failed after" in api.sent[-1]["text"]
@@ -178,7 +203,7 @@ async def test_it_runs_inside_the_project(wired) -> None:
     (place / "Makefile").write_text("all:\n\techo hi\n")
     teach(channel, here="test -f Makefile && echo found-it")
 
-    await channel._handle_message(typed("/command here"))
+    await deliver(channel, typed("/command here"))
     await finished(channel)
 
     assert "found-it" in api.sent[-1]["text"]
@@ -188,7 +213,7 @@ async def test_pressing_a_button_runs_that_command(wired) -> None:
     channel, api, _ = wired
     teach(channel, greet="echo pressed")
 
-    await channel._handle_callback(pressed("greet"))
+    await tap(channel, pressed("greet"))
     await finished(channel)
 
     assert "pressed" in api.sent[-1]["text"]
@@ -198,7 +223,7 @@ async def test_somebody_else_pressing_it_runs_nothing(wired) -> None:
     channel, _, place = wired
     teach(channel, touch=f"touch {place / 'ran'}")
 
-    await channel._handle_callback(pressed("touch", user=INTRUDER))
+    await tap(channel, pressed("touch", user=INTRUDER))
     await finished(channel)
 
     assert not (place / "ran").exists()
@@ -213,6 +238,8 @@ async def test_a_second_command_is_refused_while_one_runs(wired) -> None:
     channel, api, _ = wired
     teach(channel, slow="sleep 0.4", quick="echo quick")
 
+    # Deliberately not waiting for the first: the second arrives *while* it
+    # runs, which is the whole case.
     await channel._handle_message(typed("/command slow"))
     await channel._handle_message(typed("/command quick"))
 
@@ -224,11 +251,11 @@ async def test_the_project_is_free_again_once_it_finishes(wired) -> None:
     channel, api, _ = wired
     teach(channel, quick="echo done")
 
-    await channel._handle_message(typed("/command quick"))
+    await deliver(channel, typed("/command quick"))
     await finished(channel)
     assert channel._working == {}
 
-    await channel._handle_message(typed("/command quick"))
+    await deliver(channel, typed("/command quick"))
     await finished(channel)
     assert "finished in" in api.sent[-1]["text"]
 
@@ -243,7 +270,7 @@ async def test_a_command_that_could_not_start_frees_the_project(wired, monkeypat
         raise RuntimeError("no shell today")
 
     monkeypatch.setattr(running, "run", explode)
-    await channel._handle_message(typed("/command boom"))
+    await deliver(channel, typed("/command boom"))
     await finished(channel)
 
     assert channel._working == {}
@@ -390,7 +417,7 @@ async def test_label_names_the_task_and_offers_what_is_not_on_it(wired, monkeypa
     channel, api, _ = wired
     on_a_task(channel, monkeypatch, FakeForge())
 
-    await channel._handle_message(typed("/label"))
+    await deliver(channel, typed("/label"))
 
     said = api.sent[-1]["text"]
     assert "#320" in said and "RAG v4 PDF report" in said
@@ -409,7 +436,7 @@ async def test_a_project_can_narrow_which_labels_are_offered(wired, monkeypatch)
     found = channel._repositories["alpha-engine"]
     channel._repositories["alpha-engine"] = _replace(found, labels=("andon", "rework"))
 
-    await channel._handle_message(typed("/label"))
+    await deliver(channel, typed("/label"))
 
     offered = {
         button["text"] for row in api.sent[-1]["reply_markup"]["inline_keyboard"] for button in row
@@ -421,7 +448,7 @@ async def test_pressing_a_label_adds_exactly_that_one(wired, monkeypatch) -> Non
     channel, api, _ = wired
     forge = on_a_task(channel, monkeypatch, FakeForge())
 
-    await channel._handle_callback(label_pressed("andon"))
+    await tap(channel, label_pressed("andon"))
 
     assert forge.added == [(320, "andon")]
     assert "andon" in api.sent[-1]["text"]
@@ -432,7 +459,7 @@ async def test_somebody_else_pressing_a_label_adds_nothing(wired, monkeypatch) -
     channel, _, _ = wired
     forge = on_a_task(channel, monkeypatch, FakeForge())
 
-    await channel._handle_callback(label_pressed("andon", user=INTRUDER))
+    await tap(channel, label_pressed("andon", user=INTRUDER))
 
     assert forge.added == []
 
@@ -441,7 +468,7 @@ async def test_a_branch_not_named_for_a_task_says_so(wired, monkeypatch) -> None
     channel, api, _ = wired
     on_a_task(channel, monkeypatch, FakeForge(), branch="feat/runtime-isolation")
 
-    await channel._handle_message(typed("/label"))
+    await deliver(channel, typed("/label"))
 
     assert "not named for a task" in api.sent[-1]["text"]
 
@@ -450,7 +477,7 @@ async def test_a_task_with_every_label_already_on_it_says_so(wired, monkeypatch)
     channel, api, _ = wired
     on_a_task(channel, monkeypatch, FakeForge(on_task=("andon", "rework", "backend")))
 
-    await channel._handle_message(typed("/label"))
+    await deliver(channel, typed("/label"))
 
     assert "Nothing left to add" in api.sent[-1]["text"]
     assert api.sent[-1].get("reply_markup") is None
@@ -464,7 +491,7 @@ async def test_what_the_forge_refused_is_what_the_phone_is_told(wired, monkeypat
     forge.refuse = ForgeError("GitLab refused the token.")
     on_a_task(channel, monkeypatch, forge)
 
-    await channel._handle_message(typed("/label"))
+    await deliver(channel, typed("/label"))
 
     assert "refused the token" in api.sent[-1]["text"]
 
@@ -482,6 +509,6 @@ async def test_no_token_configured_says_which_problem_that_is(wired, monkeypatch
     )
     channel._forge_token = None
 
-    await channel._handle_message(typed("/label"))
+    await deliver(channel, typed("/label"))
 
     assert "No token" in api.sent[-1]["text"]
