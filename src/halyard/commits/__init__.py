@@ -27,15 +27,19 @@ from halyard.commits.repository import (
     reference_for,
     summary_of,
 )
+from halyard.commits.validation import Checked, check, mentions_task
 
 __all__ = [
     "Change",
+    "Checked",
     "GitError",
     "Proposal",
     "Proposals",
     "Uncommitted",
     "assemble",
+    "check",
     "commit",
+    "mentions_task",
     "prompt",
     "push",
     "read",

@@ -22,7 +22,6 @@ import re
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from pathlib import Path
 
 from halyard import commits
 from halyard.agents.base import AgentRunner
@@ -47,6 +46,7 @@ from halyard.core.audit import (
     unauthorized_callback,
     user_message,
 )
+from halyard.core.config_file import Project
 from halyard.core.events import Role
 from halyard.core.gate import Gate
 from halyard.core.questions import (
@@ -210,7 +210,7 @@ class TelegramChannel:
         seats: list[Seat] | None = None,
         session_names: dict[Role, str] | None = None,
         prompts: Mapping[str, str] | None = None,
-        repositories: Mapping[str, Path] | None = None,
+        repositories: Mapping[str, Project] | None = None,
     ) -> None:
         self._api = api
         self._gate = gate or Gate()
@@ -232,9 +232,10 @@ class TelegramChannel:
         # at the moment of sending; the configuration decides, as it did
         # before, and there is simply more of it.
         self._seats = list(seats or [])
-        # Where each project's code is, so `/commit` knows which repository a
-        # chat is talking about. Empty is a fine state: the command then says
-        # so instead of guessing, and every other command is unaffected.
+        # Each project as configured — where its code is, and what has to pass
+        # before a commit is offered from it. Empty is a fine state: `/commit`
+        # then says it does not know rather than guessing, and every other
+        # command is unaffected.
         self._repositories = dict(repositories or {})
         self._registry = registry
         # One runner per runtime, shared by every seat that uses it.
@@ -936,7 +937,7 @@ class TelegramChannel:
     # `halyard.commits`. This resolves which repository a chat is about, moves
     # text between that package and Telegram, and nothing else.
 
-    def _repository_for(self, chat_id: str) -> tuple[str, Path] | None:
+    def _repository_for(self, chat_id: str) -> Project | None:
         """The project this chat is about, and where its code is.
 
         No configuration of its own: the chat already names a seat and a seat
@@ -948,8 +949,8 @@ class TelegramChannel:
         name = seat.project if seat and seat.project else None
         if name is None and len(self._repositories) == 1:
             name = next(iter(self._repositories))
-        path = self._repositories.get(name or "")
-        return (name, path) if name and path else None
+        found = self._repositories.get(name or "")
+        return found if found and found.path else None
 
     def _message_runner(self, chat_id: str):
         """Whichever runtime this chat's seat uses, for the one-shot turn.
@@ -998,13 +999,34 @@ class TelegramChannel:
                 thread_id,
             )
             return
-        project, path = found
+        project, path = found.name, found.path
 
         # Off the event loop: git is a subprocess, and the poller has approval
         # cards to keep delivering while this reads a repository.
         work = await asyncio.to_thread(commits.read, path, project)
         if work.blocked:
             await self._say(f"\U0001f6ab {html.escape(work.blocked)}", chat_id, thread_id)
+            return
+
+        # Said before it starts, not after. A project's own check can run for
+        # minutes, and silence for minutes reads as nothing having happened.
+        if found.validate:
+            await self._say(
+                f"\u23f3 Running <code>{html.escape(found.validate)}</code>\u2026",
+                chat_id,
+                thread_id,
+            )
+        checked = await asyncio.to_thread(commits.check, work, path, found.validate)
+        if checked.refused:
+            # No card at all. A failing check is a fact rather than a judgement,
+            # so there is nothing here for somebody to weigh.
+            said = (
+                f"\U0001f6ab <code>{html.escape(checked.refused)}</code> failed. "
+                "Nothing was committed."
+            )
+            if checked.output:
+                said += f"\n\n<pre>{html.escape(checked.output)}</pre>"
+            await self._say(said, chat_id, thread_id)
             return
 
         message, summary = await self._write_message(chat_id, work)
@@ -1017,9 +1039,15 @@ class TelegramChannel:
             )
             return
 
-        handle = self._proposals.add(project, path, work, message, summary)
+        handle = self._proposals.add(project, path, work, message, summary, checked.warnings)
         await self._say(
-            commit_card.render(project=project, work=work, message=message, summary=summary),
+            commit_card.render(
+                project=project,
+                work=work,
+                message=message,
+                summary=summary,
+                warnings=checked.warnings,
+            ),
             chat_id,
             thread_id,
             reply_markup=commit_card.keyboard(handle),
@@ -1053,6 +1081,7 @@ class TelegramChannel:
                 work=reworded.work,
                 message=reworded.message,
                 summary=reworded.summary,
+                warnings=reworded.warnings,
             ),
             chat_id,
             thread_id,

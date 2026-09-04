@@ -20,6 +20,7 @@ from halyard.channels.telegram import commit_card
 from halyard.channels.telegram.adapter import TelegramChannel
 from halyard.core.approvals import ApprovalStore
 from halyard.core.audit import AuditLog, JsonlAuditSink
+from halyard.core.config_file import Project
 from halyard.core.seats import Seat
 
 CHAT = "-100777"
@@ -103,7 +104,7 @@ async def wired(tmp_path: Path, repo: Path):
         authorized_user_ids=frozenset({APPROVER}),
         seats=[Seat(label="nav", runtime="claude-code", chat=CHAT, project="alpha-engine")],
         runners={"claude-code": runner},
-        repositories={"alpha-engine": repo},
+        repositories={"alpha-engine": Project(name="alpha-engine", path=repo, seats=[])},
         poll_retry_seconds=0.01,
     )
     try:
@@ -502,3 +503,116 @@ async def test_the_card_says_what_changed_not_only_which_files(wired) -> None:
     await channel._handle_callback(press(only_handle(channel), commit_card.MAKE))
     assert subject(repo) == "alpha-engine#281 loader stub and seed tweak"
     assert "Adds a loader" not in git(repo, "log", "-1", "--format=%B")
+
+
+# --- what has to hold before a card is offered -------------------------------
+
+
+def demands(channel: TelegramChannel, command: str | None) -> None:
+    """Give the project a check to run, as `halyard.yaml` would."""
+    found = channel._repositories["alpha-engine"]
+    channel._repositories["alpha-engine"] = replace(found, validate=command)
+
+
+async def test_a_project_with_no_check_configured_runs_nothing(wired) -> None:
+    """Absent means absent. A command invented on a project's behalf would fail
+    on every commit."""
+    channel, api, _, repo = wired
+    wrote(repo, "loader.py", "x = 1\n")
+
+    await channel._handle_message(typed("/commit"))
+
+    assert "Running" not in " ".join(m["text"] for m in api.sent)
+    assert len(channel._proposals) == 1
+
+
+async def test_a_failing_check_offers_no_card_at_all(wired) -> None:
+    """A failing check is a fact, not a judgement — there is nothing here for
+    somebody to weigh, so nothing is put in front of them."""
+    channel, api, runner, repo = wired
+    demands(channel, "echo 'FAIL: two tests broke' && exit 1")
+    wrote(repo, "loader.py", "x = 1\n")
+
+    await channel._handle_message(typed("/commit"))
+
+    assert len(channel._proposals) == 0
+    assert commit_count(repo) == 1
+    assert "failed" in api.sent[-1]["text"]
+    assert "FAIL: two tests broke" in api.sent[-1]["text"]
+    # And the model was never asked, because the answer could not be used.
+    assert runner.asked == []
+
+
+async def test_it_says_the_check_is_running_before_it_starts(wired) -> None:
+    """A project's own check can run for minutes, and silence for minutes reads
+    as nothing having happened."""
+    channel, api, _, repo = wired
+    demands(channel, "true")
+    wrote(repo, "loader.py", "x = 1\n")
+
+    await channel._handle_message(typed("/commit"))
+
+    assert "Running" in api.sent[0]["text"]
+    assert "true" in api.sent[0]["text"]
+
+
+async def test_a_passing_check_leads_to_an_ordinary_card(wired) -> None:
+    channel, api, _, repo = wired
+    demands(channel, "true")
+    wrote(repo, "loader.py", "x = 1\n")
+
+    await channel._handle_message(typed("/commit"))
+
+    assert len(channel._proposals) == 1
+    assert "alpha-engine#281" in api.sent[-1]["text"]
+
+
+async def test_the_check_runs_in_the_project_and_sees_its_files(wired) -> None:
+    channel, _, _, repo = wired
+    demands(channel, "test -f loader.py")
+    wrote(repo, "loader.py", "x = 1\n")
+
+    await channel._handle_message(typed("/commit"))
+
+    assert len(channel._proposals) == 1
+
+
+async def test_a_task_id_missing_from_the_code_warns_without_blocking(wired) -> None:
+    """A guess, treated like one. An agent that has lost the thread leaves
+    references to its own conversation in the code; the branch's number showing
+    up in what was written is a cheap sign it did not. A rename or a .gitignore
+    fix will never mention it and is perfectly good, so this warns."""
+    channel, api, _, repo = wired
+    wrote(repo, "loader.py", "x = 1\n")
+
+    await channel._handle_message(typed("/commit"))
+
+    card = api.sent[-1]["text"]
+    assert "281 appears nowhere" in card
+    assert card.index("281 appears nowhere") < card.index("COMMIT")  # above the heading
+    assert len(channel._proposals) == 1
+
+    await channel._handle_callback(press(only_handle(channel), commit_card.MAKE))
+    assert commit_count(repo) == 2
+
+
+async def test_work_that_names_its_task_is_not_flagged(wired) -> None:
+    channel, api, _, repo = wired
+    wrote(repo, "loader.py", "# alpha-engine#281 — the loader this task asked for\nx = 1\n")
+
+    await channel._handle_message(typed("/commit"))
+
+    assert "appears nowhere" not in api.sent[-1]["text"]
+
+
+async def test_the_warning_survives_rewording_the_message(wired) -> None:
+    """A warning that disappears when you type is a warning nobody heeds twice."""
+    channel, api, _, repo = wired
+    wrote(repo, "loader.py", "x = 1\n")
+    await channel._handle_message(typed("/commit"))
+    handle = only_handle(channel)
+    await channel._handle_callback(press(handle, commit_card.REWRITE))
+
+    await channel._handle_message(replying("power gen fixes", api.sent[-1]["text"]))
+
+    assert "281 appears nowhere" in api.sent[-1]["text"]

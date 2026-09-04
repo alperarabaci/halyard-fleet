@@ -16,7 +16,6 @@ import asyncio
 import logging
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
-from pathlib import Path
 
 from fastapi import FastAPI, Request, Response
 from fastapi.responses import JSONResponse
@@ -256,7 +255,7 @@ def _build_channel(
         logger.warning("Ignoring the `prompts:` block: %s", error)
         prompts = dict(configured_prompts.DEFAULTS)
 
-    def _repositories() -> dict[str, Path]:
+    def _repositories() -> dict:
         """Each configured project's checkout, for `/commit`.
 
         Projects described without a `path:` are simply absent: a project can
@@ -266,7 +265,7 @@ def _build_channel(
         from halyard.core.config_file import projects as described
 
         try:
-            return {p.name: p.path for p in described() if p.path}
+            return {p.name: p for p in described() if p.path}
         except Exception:
             logger.warning("Could not read `projects:` for /commit", exc_info=True)
             return {}
