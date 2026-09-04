@@ -291,6 +291,7 @@ def _build_channel(
         # the channel so a malformed `projects:` block cannot take the gate
         # down — the same reason `prompts:` is loaded defensively above.
         repositories=_repositories(),
+        forge_token=settings.forge_token,
         session_names={
             role: name
             for name, role in (

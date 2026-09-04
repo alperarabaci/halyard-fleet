@@ -67,6 +67,11 @@ NEW_FILE_LINES = 400
 #: A branch named for the issue it closes. GitLab writes these when a branch is
 #: created from an issue — `281-power-gen-minor-fixes` — and the number is the
 #: only part worth keeping.
+#:
+#: `tasks.branches.number_of` reads the same convention and is deliberately not
+#: called from here: this module needs only git and reaches no network, and
+#: depending on the package that talks to an issue tracker would be the wrong
+#: direction. If one of these changes, so must the other.
 _ISSUE = re.compile(r"^(\d+)[-_]")
 
 #: Files whose diffs say nothing a message could use, and cost the most to

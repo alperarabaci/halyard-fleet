@@ -264,6 +264,15 @@ class Settings(BaseSettings):
     claude_oauth_token: str | None = Field(
         default=None, validation_alias="HALYARD_CLAUDE_OAUTH_TOKEN"
     )
+    #: For reaching an issue tracker — today only to add a label to the task a
+    #: branch is for. Named for the idea rather than for GitLab, because the
+    #: provider is chosen by the repository's remote and a second one is a
+    #: module rather than a rename. Absent means `/label` says so and every
+    #: other command is unaffected.
+    #:
+    #: GitLab has no scope narrower than `api` for writing a label onto an
+    #: issue, so a *project* access token is the way to make that mean less.
+    forge_token: str | None = Field(default=None, validation_alias="HALYARD_FORGE_TOKEN")
 
     @model_validator(mode="after")
     def _timeouts_must_be_ordered(self) -> Settings:

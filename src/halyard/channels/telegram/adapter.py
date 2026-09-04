@@ -26,6 +26,7 @@ from functools import partial
 from pathlib import Path
 
 from halyard import commits
+from halyard import tasks as task_tracker
 from halyard.agents.base import AgentRunner
 from halyard.applications import catalogue, desktop
 from halyard.channels.telegram import cards, commit_card
@@ -100,6 +101,7 @@ COMMANDS: tuple[tuple[str, str], ...] = (
     ("commit", "Commit this branch's work, with a message to approve"),
     ("open", "Open an agent on the machine — claude, codex, gemini"),
     ("command", "Run one of this project's own commands"),
+    ("label", "Put a label on the task this branch is for"),
     ("status", "What is happening right now"),
     ("options", "Models and effort levels this seat accepts"),
     ("model", "Choose what answers, for turns sent from here"),
@@ -216,6 +218,7 @@ class TelegramChannel:
         session_names: dict[Role, str] | None = None,
         prompts: Mapping[str, str] | None = None,
         repositories: Mapping[str, Project] | None = None,
+        forge_token: str | None = None,
     ) -> None:
         self._api = api
         self._gate = gate or Gate()
@@ -258,6 +261,9 @@ class TelegramChannel:
         self._handoffs: dict[tuple[str, int | None, str], tuple[str, datetime]] = {}
         self._authorized = authorized_user_ids
         self._clock = clock
+        #: For reaching an issue tracker. Absent means `/label` says so and
+        #: nothing else notices.
+        self._forge_token = forge_token
         #: Which command is running in which project, so a second one is
         #: refused rather than started on top of it.
         self._working: dict[str, str] = {}
@@ -640,6 +646,9 @@ class TelegramChannel:
         if command == "command":
             await self._run_command(argument, here or "", thread)
             return
+        if command == "label":
+            await self._label_task(argument, here or "", thread)
+            return
         if command == "pause":
             _, changed = await self._gate.pause(actor)
             if changed:
@@ -940,6 +949,85 @@ class TelegramChannel:
             return
 
         await self._say("Open which one?", chat_id, thread_id, reply_markup=keyboard)
+
+    # --- labelling the task a branch is for ----------------------------------
+
+    async def _reach_task(self, chat_id: str, thread_id: int | None):
+        """The forge and the task this chat's branch is for, or None after
+        having said what was missing.
+
+        Every answer here is a configuration problem with a different fix, so
+        each says which one it is rather than a single "cannot label".
+        """
+        found = self._repository_for(chat_id)
+        if found is None:
+            await self._say(
+                "I do not know which repository this chat is about. Give the "
+                "project a <code>path:</code> in <code>halyard.yaml</code>.",
+                chat_id,
+                thread_id,
+            )
+            return None
+
+        branch = await asyncio.to_thread(task_tracker.current_branch, found.path)
+        number = task_tracker.number_of(branch or "")
+        if number is None:
+            await self._say(
+                f"<code>{html.escape(branch or 'HEAD')}</code> is not named for a task, "
+                "so there is nothing to label.",
+                chat_id,
+                thread_id,
+            )
+            return None
+
+        origin = await asyncio.to_thread(task_tracker.origin_of, found.path)
+        if origin is None:
+            await self._say(
+                "That repository has no <code>origin</code> to ask.", chat_id, thread_id
+            )
+            return None
+
+        try:
+            forge = task_tracker.build(origin, self._forge_token or "", declared=found.forge)
+        except task_tracker.ForgeError as refused:
+            await self._say(f"\U0001f6ab {html.escape(str(refused))}", chat_id, thread_id)
+            return None
+        return found, forge, number
+
+    async def _label_task(self, typed: str, chat_id: str, thread_id: int | None) -> None:
+        """`/label` — offer what could go on this branch's task, or add one."""
+        reached = await self._reach_task(chat_id, thread_id)
+        if reached is None:
+            return
+        project, forge, number = reached
+
+        try:
+            if typed:
+                task = await task_tracker.put_on(forge, number, typed)
+                await self._say(
+                    f"\U0001f3f7 <b>{html.escape(typed.strip())}</b> added to "
+                    f"#{task.number} \u2014 {html.escape(task.title)}",
+                    chat_id,
+                    thread_id,
+                )
+                return
+            choice = await task_tracker.to_offer(forge, number, project.labels)
+        except task_tracker.ForgeError as refused:
+            await self._say(f"\U0001f6ab {html.escape(str(refused))}", chat_id, thread_id)
+            return
+
+        head = f"<b>#{choice.task.number}</b> \u2014 {html.escape(choice.task.title)}"
+        if choice.task.labels:
+            head += f"\n\nAlready: <code>{html.escape(', '.join(choice.task.labels))}</code>"
+        if not choice.anything_left:
+            await self._say(f"{head}\n\nNothing left to add.", chat_id, thread_id)
+            return
+        await self._say(
+            f"{head}\n\nWhich label?",
+            chat_id,
+            thread_id,
+            reply_markup=cards.label_choices(choice.offer),
+        )
 
     # --- running a project's own commands -----------------------------------
 
@@ -1724,6 +1812,9 @@ class TelegramChannel:
             here = str((message.get("chat") or {}).get("id") or "") or None
             what, value = chosen
             await self._dismiss(query_id)
+            if what == "label":
+                await self._label_task(value, here or "", message.get("message_thread_id"))
+                return
             if what == "run":
                 await self._run_command(value, here or "", message.get("message_thread_id"))
                 return
