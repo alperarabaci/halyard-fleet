@@ -56,6 +56,11 @@ class AuditAction(StrEnum):
     #: it. Recorded for the same reason as the line above: this and `writes:`
     #: are the only two things permitted without a person.
     TOOL_PREAUTHORIZED = "tool.preauthorized"
+    #: A call a standing rule refuses, with nobody asked and no card sent. Its
+    #: own action rather than a denial: a denial is what a person chose, and
+    #: counting the two together would make a Tuesday look like a series of
+    #: refusals somebody never made.
+    REFUSED_OUTRIGHT = "call.refused"
     #: An agent asked a person to choose between options, and a card went out.
     QUESTION_ASKED = "question.asked"
     #: A question was answered, or left to the terminal by the deadline.
@@ -196,6 +201,33 @@ def tool_preauthorized(
         agent_id=agent_id,
         project=project,
         detail={"tool": tool, "pattern": pattern},
+    )
+
+
+def refused_outright(
+    *,
+    session_id: str,
+    agent_id: str,
+    project: str,
+    tool: str,
+    act: str,
+    now: datetime | None = None,
+) -> AuditRecord:
+    """A call refused by a standing rule, with nobody asked.
+
+    Its own action rather than a denial, because a denial is what a person
+    chose and this is what the configuration says. Counting the two together
+    would make somebody's Tuesday look like a series of refusals they never
+    made.
+    """
+    return AuditRecord(
+        action=AuditAction.REFUSED_OUTRIGHT,
+        recorded_at=now or _default_clock(),
+        actor="config",
+        session_id=session_id,
+        agent_id=agent_id,
+        project=project,
+        detail={"tool": tool, "act": act},
     )
 
 
