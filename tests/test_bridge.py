@@ -798,16 +798,31 @@ def test_a_card_carries_the_tool_calls_own_summary() -> None:
     assert _context({"description": "Stop the stack"}, None) == "Stop the stack"
 
 
-def test_a_card_carries_what_the_agent_said_before_asking(tmp_path) -> None:
-    """The paragraph above the command is the context a person has on screen."""
+def test_the_tools_own_reason_is_the_whole_card(tmp_path) -> None:
+    """And the conversation is left out of it.
+
+    This used to carry both. Measured on forty real cards: thirty-eight had the
+    agent's last message appended, averaging 203 characters against the
+    reason's 45 — four fifths of the card about something else, on ninety-five
+    per cent of cards. The last assistant message is a report to a person, not
+    a justification for the command about to run.
+    """
+    from hook_bridge import _context
+
+    said = "E2E 5/0, test-fast EXIT=0 (guards 825, contracts 362). The report is correct."
+    found = _context({"description": "Stop the stack"}, transcript_saying(tmp_path, said))
+
+    assert found == "Stop the stack"
+
+
+def test_what_the_agent_said_answers_when_the_tool_gives_no_reason(tmp_path) -> None:
+    """The fallback earns its place: a tool with no `description` would leave a
+    card with nothing on it but a command."""
     from hook_bridge import _context
 
     said = "Removing the stale containers first, so the rebuild starts clean."
-    found = _context({"description": "Stop the stack"}, transcript_saying(tmp_path, said))
 
-    assert found is not None
-    assert found.startswith("Stop the stack")
-    assert said in found
+    assert _context({}, transcript_saying(tmp_path, said)) == said
 
 
 def test_the_prose_is_bounded(tmp_path) -> None:
@@ -815,7 +830,7 @@ def test_the_prose_is_bounded(tmp_path) -> None:
     has to stay the thing being read."""
     from hook_bridge import CONTEXT_LIMIT, _context
 
-    found = _context({"description": "d"}, transcript_saying(tmp_path, "x" * 5000))
+    found = _context({}, transcript_saying(tmp_path, "x" * 5000))
 
     assert found is not None
     assert len(found) < CONTEXT_LIMIT + 100
