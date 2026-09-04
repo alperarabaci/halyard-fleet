@@ -323,3 +323,165 @@ def test_terminal_colour_is_stripped_from_what_the_phone_sees(tmp_path: Path) ->
 
     assert result.output == "green line"
     assert "\x1b" not in result.output
+
+
+# --- /label ------------------------------------------------------------------
+
+
+class FakeForge:
+    """A forge that answers from memory, recording what it was asked to add."""
+
+    name = "GitLab"
+
+    def __init__(self, *, on_task=("backend",), defined=("andon", "rework", "backend")) -> None:
+        self.on_task = tuple(on_task)
+        self.defined = tuple(defined)
+        self.added: list[tuple[int, str]] = []
+        self.refuse: Exception | None = None
+
+    async def task(self, number: int):
+        from halyard.tasks.spec import Task
+
+        if self.refuse:
+            raise self.refuse
+        return Task(number=number, title="RAG v4 PDF report", labels=self.on_task)
+
+    async def labels(self) -> tuple[str, ...]:
+        if self.refuse:
+            raise self.refuse
+        return self.defined
+
+    async def add_label(self, number: int, label: str):
+        from halyard.tasks.spec import Task
+
+        if self.refuse:
+            raise self.refuse
+        self.added.append((number, label))
+        return Task(number=number, title="RAG v4 PDF report", labels=(*self.on_task, label))
+
+
+def on_a_task(channel: TelegramChannel, monkeypatch, forge: FakeForge, *, branch="320-thing"):
+    """Put the project on a task-named branch with a forge behind it."""
+    from halyard import tasks as tracker
+    from halyard.channels.telegram import adapter as under_test
+
+    monkeypatch.setattr(under_test.task_tracker, "current_branch", lambda path: branch)
+    monkeypatch.setattr(
+        under_test.task_tracker,
+        "origin_of",
+        lambda path: tracker.Origin(host="gitlab.com", path="a/b"),
+    )
+    monkeypatch.setattr(under_test.task_tracker, "build", lambda *a, **k: forge)
+    channel._forge_token = "glpat-x"
+    return forge
+
+
+def label_pressed(name: str, *, user: str = APPROVER) -> dict:
+    return {
+        "id": "cb1",
+        "from": {"id": int(user)},
+        "data": cards.choice_data("label", name),
+        "message": {"message_id": 5, "chat": {"id": CHAT}},
+    }
+
+
+async def test_label_names_the_task_and_offers_what_is_not_on_it(wired, monkeypatch) -> None:
+    """A button for a label the task already has is a wasted tap."""
+    channel, api, _ = wired
+    on_a_task(channel, monkeypatch, FakeForge())
+
+    await channel._handle_message(typed("/label"))
+
+    said = api.sent[-1]["text"]
+    assert "#320" in said and "RAG v4 PDF report" in said
+    assert "backend" in said  # said as already on it
+    offered = {
+        button["text"] for row in api.sent[-1]["reply_markup"]["inline_keyboard"] for button in row
+    }
+    assert offered == {"andon", "rework"}
+
+
+async def test_a_project_can_narrow_which_labels_are_offered(wired, monkeypatch) -> None:
+    from dataclasses import replace as _replace
+
+    channel, api, _ = wired
+    on_a_task(channel, monkeypatch, FakeForge(defined=("andon", "rework", "wontfix", "duplicate")))
+    found = channel._repositories["alpha-engine"]
+    channel._repositories["alpha-engine"] = _replace(found, labels=("andon", "rework"))
+
+    await channel._handle_message(typed("/label"))
+
+    offered = {
+        button["text"] for row in api.sent[-1]["reply_markup"]["inline_keyboard"] for button in row
+    }
+    assert offered == {"andon", "rework"}
+
+
+async def test_pressing_a_label_adds_exactly_that_one(wired, monkeypatch) -> None:
+    channel, api, _ = wired
+    forge = on_a_task(channel, monkeypatch, FakeForge())
+
+    await channel._handle_callback(label_pressed("andon"))
+
+    assert forge.added == [(320, "andon")]
+    assert "andon" in api.sent[-1]["text"]
+    assert "#320" in api.sent[-1]["text"]
+
+
+async def test_somebody_else_pressing_a_label_adds_nothing(wired, monkeypatch) -> None:
+    channel, _, _ = wired
+    forge = on_a_task(channel, monkeypatch, FakeForge())
+
+    await channel._handle_callback(label_pressed("andon", user=INTRUDER))
+
+    assert forge.added == []
+
+
+async def test_a_branch_not_named_for_a_task_says_so(wired, monkeypatch) -> None:
+    channel, api, _ = wired
+    on_a_task(channel, monkeypatch, FakeForge(), branch="feat/runtime-isolation")
+
+    await channel._handle_message(typed("/label"))
+
+    assert "not named for a task" in api.sent[-1]["text"]
+
+
+async def test_a_task_with_every_label_already_on_it_says_so(wired, monkeypatch) -> None:
+    channel, api, _ = wired
+    on_a_task(channel, monkeypatch, FakeForge(on_task=("andon", "rework", "backend")))
+
+    await channel._handle_message(typed("/label"))
+
+    assert "Nothing left to add" in api.sent[-1]["text"]
+    assert api.sent[-1].get("reply_markup") is None
+
+
+async def test_what_the_forge_refused_is_what_the_phone_is_told(wired, monkeypatch) -> None:
+    from halyard.tasks.spec import ForgeError
+
+    channel, api, _ = wired
+    forge = FakeForge()
+    forge.refuse = ForgeError("GitLab refused the token.")
+    on_a_task(channel, monkeypatch, forge)
+
+    await channel._handle_message(typed("/label"))
+
+    assert "refused the token" in api.sent[-1]["text"]
+
+
+async def test_no_token_configured_says_which_problem_that_is(wired, monkeypatch) -> None:
+    from halyard import tasks as tracker
+    from halyard.channels.telegram import adapter as under_test
+
+    channel, api, _ = wired
+    monkeypatch.setattr(under_test.task_tracker, "current_branch", lambda path: "320-thing")
+    monkeypatch.setattr(
+        under_test.task_tracker,
+        "origin_of",
+        lambda path: tracker.Origin(host="gitlab.com", path="a/b"),
+    )
+    channel._forge_token = None
+
+    await channel._handle_message(typed("/label"))
+
+    assert "No token" in api.sent[-1]["text"]

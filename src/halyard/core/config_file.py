@@ -46,7 +46,16 @@ from halyard.core.events import Role
 from halyard.core.seats import Seat, _default_runtime, known_runtimes
 
 #: Where a project's own settings live, beside its seats.
-_PROJECT_FIELDS = {"path", "seats", "name", "validate", "warn_if", "commands"}
+_PROJECT_FIELDS = {
+    "path",
+    "seats",
+    "name",
+    "validate",
+    "warn_if",
+    "commands",
+    "forge",
+    "labels",
+}
 _SEAT_FIELDS = {"runtime", "session", "chat", "role", "after_compaction", "before_compaction"}
 
 
@@ -73,6 +82,14 @@ class Project:
     #: machine the control plane is on, so the list is what somebody wrote down
     #: and never a guess about what a project probably supports.
     commands: dict[str, str] = field(default_factory=dict)
+    #: Which kind of issue tracker this project's remote points at. Only needed
+    #: for a host that does not name itself — `gitlab.com` does, and
+    #: `git.example.com` cannot.
+    forge: str | None = None
+    #: Which labels `/label` offers. Empty means every label the project has,
+    #: which is the right default until a project has more of them than a phone
+    #: keyboard can show.
+    labels: tuple[str, ...] = ()
 
 
 def _commands_from(project: str, value: Any) -> dict[str, str]:
@@ -208,6 +225,8 @@ def projects_from_yaml(text: str) -> list[Project]:
                 validate=_as_text(body.get("validate")),
                 warn_if=_warnings_from(project, body.get("warn_if")),
                 commands=_commands_from(project, body.get("commands")),
+                forge=_as_text(body.get("forge")),
+                labels=_warnings_from(project, body.get("labels")) or (),
             )
         )
     return projects
