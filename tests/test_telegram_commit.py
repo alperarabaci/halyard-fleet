@@ -9,6 +9,7 @@ The repository is real, so a passing test here means a commit actually landed.
 
 from __future__ import annotations
 
+import asyncio
 import subprocess
 from dataclasses import replace
 from datetime import timedelta
@@ -16,11 +17,14 @@ from pathlib import Path
 
 import pytest
 
+from halyard.agents.base import SessionRef
 from halyard.channels.telegram import commit_card
 from halyard.channels.telegram.adapter import TelegramChannel
 from halyard.core.approvals import ApprovalStore
 from halyard.core.audit import AuditLog, JsonlAuditSink
 from halyard.core.config_file import Project
+from halyard.core.events import Role
+from halyard.core.registry import SessionRegistry
 from halyard.core.seats import Seat
 
 CHAT = "-100777"
@@ -62,6 +66,9 @@ class FakeRunner:
         self.says = says
         self.asked: list[str] = []
         self.models: list[str | None] = []
+        self.sent: list[tuple[str, str]] = []
+        #: Session names this runtime claims to know, as the real one would.
+        self.sessions: dict[str, object] = {}
 
     async def ask(self, text: str, *, model: str | None = None, **kwargs) -> str | None:
         self.asked.append(text)
@@ -69,6 +76,21 @@ class FakeRunner:
         if self.says is None:
             raise RuntimeError("no model today")
         return self.says
+
+    def resolve(self, name: str):
+        """What the channel asks its seat's runtime a session name means."""
+        return self.sessions.get(name)
+
+    def busy(self, session_id: str) -> bool:
+        return False
+
+    def preferences(self, session_id: str) -> tuple[str | None, str | None]:
+        return (None, None)
+
+    async def send(self, session_id: str, text: str, cwd: str | None = None) -> bool:
+        """What reaches a session, as against what reaches the chat."""
+        self.sent.append((session_id, text))
+        return True
 
 
 def git(repo: Path, *args: str) -> str:
@@ -96,14 +118,29 @@ async def wired(tmp_path: Path, repo: Path):
     await audit.open()
     api = FakeApi()
     runner = FakeRunner()
+    # The seat's session, as the runtime would report it. Without this the
+    # channel has a seat it cannot reach and says so instead of delivering.
+    runner.sessions["alpha-engine-navigator"] = SessionRef(
+        "id-nav", "alpha-engine-navigator", str(repo), None, None
+    )
     channel = TelegramChannel(
         api=api,
         store=ApprovalStore(ttl=timedelta(minutes=5)),
         audit=audit,
         chat_id=CHAT,
         authorized_user_ids=frozenset({APPROVER}),
-        seats=[Seat(label="nav", runtime="claude-code", chat=CHAT, project="alpha-engine")],
+        seats=[
+            Seat(
+                label="nav",
+                runtime="claude-code",
+                chat=CHAT,
+                project="alpha-engine",
+                role=Role.NAVIGATOR,
+                session="alpha-engine-navigator",
+            )
+        ],
         runners={"claude-code": runner},
+        registry=SessionRegistry(),
         repositories={"alpha-engine": Project(name="alpha-engine", path=repo, seats=[])},
         poll_retry_seconds=0.01,
     )
@@ -642,3 +679,172 @@ async def test_a_warning_nobody_recognises_is_skipped_not_fatal(wired) -> None:
     await channel._handle_message(typed("/commit"))
 
     assert len(channel._proposals) == 1
+
+
+# --- the round some work needs before it is committed ------------------------
+
+
+def asks_a_round(channel: TelegramChannel, repo: Path, *, inquiry: str, review: str) -> None:
+    """Give the project its two files, as `halyard.yaml` would."""
+    from halyard.core.config_file import Confirmation
+
+    notes = repo / "NOTES"
+    notes.mkdir(exist_ok=True)
+    (notes / "INQUIRY.md").write_text(inquiry)
+    (notes / "REVIEW.md").write_text(review)
+    found = channel._repositories["alpha-engine"]
+    channel._repositories["alpha-engine"] = replace(
+        found,
+        confirmation=Confirmation(inquiry=Path("NOTES/INQUIRY.md"), review=Path("NOTES/REVIEW.md")),
+    )
+
+
+async def test_a_project_without_a_round_is_offered_none(wired) -> None:
+    channel, api, _, repo = wired
+    wrote(repo, "loader.py", "x = 1\n")
+
+    await channel._handle_message(typed("/commit"))
+
+    buttons = {
+        button["text"] for row in api.sent[-1]["reply_markup"]["inline_keyboard"] for button in row
+    }
+    assert not any("Confirmation" in text for text in buttons)
+
+
+async def test_the_round_is_offered_whether_or_not_the_model_flagged_it(wired) -> None:
+    """The flag says where to look; whether to ask stays a person's call. They
+    ask fishing questions on purpose, and those find bugs."""
+    channel, api, _, repo = wired
+    asks_a_round(channel, repo, inquiry="Raise a flag if...", review="# The round")
+    wrote(repo, "loader.py", "x = 1\n")
+
+    await channel._handle_message(typed("/commit"))
+
+    buttons = {
+        button["text"] for row in api.sent[-1]["reply_markup"]["inline_keyboard"] for button in row
+    }
+    assert any("Confirmation" in text for text in buttons)
+
+
+async def test_the_project_own_question_reaches_the_model(wired) -> None:
+    """Sent whole, because it is the project's writing about its own failures
+    and summarising it would be Halyard having an opinion about a judgement
+    that is deliberately not its own."""
+    channel, _, runner, repo = wired
+    asks_a_round(channel, repo, inquiry="RAISE IT WHEN A DATA FILE SHRINKS", review="# The round")
+    wrote(repo, "loader.py", "x = 1\n")
+
+    await channel._handle_message(typed("/commit"))
+
+    assert "RAISE IT WHEN A DATA FILE SHRINKS" in runner.asked[0]
+
+
+async def test_a_flag_is_shown_and_never_committed(wired) -> None:
+    """The model is told to put it at the top of the message. Left there it
+    would be committed — and the flag is a question asked *instead* of
+    committing."""
+    channel, api, runner, repo = wired
+    asks_a_round(channel, repo, inquiry="ask", review="# The round")
+    runner.says = (
+        "⚠ worth a confirmation round — 6 records deleted from plants.json\n"
+        "drop the null rows from the report\n"
+        "---\n"
+        "- Skips None entries\n"
+    )
+    wrote(repo, "loader.py", "x = 1\n")
+
+    await channel._handle_message(typed("/commit"))
+    card = api.sent[-1]["text"]
+
+    assert "6 records deleted from plants.json" in card
+    assert "alpha-engine#281 drop the null rows from the report" in card
+
+    await channel._handle_callback(press(only_handle(channel), commit_card.MAKE))
+    assert subject(repo) == "alpha-engine#281 drop the null rows from the report"
+    assert "confirmation" not in git(repo, "log", "-1", "--format=%B")
+
+
+async def test_pressing_the_round_sends_it_and_commits_nothing(wired) -> None:
+    """The whole point. The work stays where it is, the navigator is asked, and
+    committing afterwards is a fresh `/commit` that reads the branch again."""
+    channel, api, runner, repo = wired
+    asks_a_round(channel, repo, inquiry="ask", review="# Seven items of evidence")
+    wrote(repo, "loader.py", "x = 1\n")
+    await channel._handle_message(typed("/commit"))
+
+    await channel._handle_callback(press(only_handle(channel), commit_card.CONFIRM))
+
+    assert commit_count(repo) == 1
+    assert len(channel._proposals) == 0
+    await asyncio.sleep(0.05)
+    # Into the navigator's session, not into this chat: the round is work for an
+    # agent, and it stays readable in that seat's own conversation.
+    assert any("Seven items of evidence" in text for _, text in runner.sent)
+    assert "CONFIRMATION ROUND" in api.edits[-1]["text"]
+
+
+async def test_the_round_goes_to_the_navigator_not_to_whoever_asked(wired) -> None:
+    channel, api, runner, repo = wired
+    channel._seats = [
+        Seat(
+            label="nav",
+            runtime="claude-code",
+            chat=CHAT,
+            project="alpha-engine",
+            role=Role.NAVIGATOR,
+            session="alpha-engine-navigator",
+        ),
+        Seat(
+            label="drv",
+            runtime="claude-code",
+            chat=CHAT,
+            project="alpha-engine",
+            role=Role.DRIVER,
+            session="alpha-engine-driver",
+        ),
+    ]
+    asks_a_round(channel, repo, inquiry="ask", review="# The round")
+    wrote(repo, "loader.py", "x = 1\n")
+    await channel._handle_message(typed("/commit"))
+
+    await channel._handle_callback(press(only_handle(channel), commit_card.CONFIRM))
+    await asyncio.sleep(0.05)
+
+    # The navigator's own session, resolved by the runtime — not the driver's,
+    # and not the chat the command was typed in.
+    assert [session for session, _ in runner.sent] == ["id-nav"]
+    assert "nav" in api.edits[-1]["text"]
+
+
+async def test_a_project_with_no_navigator_says_so(wired) -> None:
+    channel, api, _, repo = wired
+    channel._seats = [
+        Seat(
+            label="drv", runtime="claude-code", chat=CHAT, project="alpha-engine", role=Role.DRIVER
+        )
+    ]
+    asks_a_round(channel, repo, inquiry="ask", review="# The round")
+    wrote(repo, "loader.py", "x = 1\n")
+    await channel._handle_message(typed("/commit"))
+
+    await channel._handle_callback(press(only_handle(channel), commit_card.CONFIRM))
+
+    assert "no navigator" in api.sent[-1]["text"]
+    assert commit_count(repo) == 1
+
+
+async def test_a_round_file_that_is_not_there_says_so_rather_than_committing(wired) -> None:
+    from halyard.core.config_file import Confirmation
+
+    channel, api, _, repo = wired
+    found = channel._repositories["alpha-engine"]
+    channel._repositories["alpha-engine"] = replace(
+        found, confirmation=Confirmation(review=Path("NOTES/GONE.md"))
+    )
+    wrote(repo, "loader.py", "x = 1\n")
+    await channel._handle_message(typed("/commit"))
+
+    await channel._handle_callback(press(only_handle(channel), commit_card.CONFIRM))
+
+    assert "no confirmation round" in api.sent[-1]["text"]
+    assert commit_count(repo) == 1

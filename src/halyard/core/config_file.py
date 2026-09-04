@@ -55,8 +55,29 @@ _PROJECT_FIELDS = {
     "commands",
     "forge",
     "labels",
+    "confirmation",
 }
 _SEAT_FIELDS = {"runtime", "session", "chat", "role", "after_compaction", "before_compaction"}
+
+
+@dataclass(frozen=True)
+class Confirmation:
+    """An extra round before a commit, for what a guard cannot catch.
+
+    Two files, both belonging to the project rather than to Halyard, because
+    what is worth asking again is a thing a team learns about itself. Paths are
+    read relative to the project.
+
+    `inquiry` is put in front of the model while it writes the commit message,
+    and asks it for one more judgement: is this change worth a round? `review`
+    is what that round consists of, and goes to the navigator when somebody
+    presses the button.
+    """
+
+    #: What the model is asked, on top of writing the message.
+    inquiry: Path | None = None
+    #: What the navigator is sent when the round is asked for.
+    review: Path | None = None
 
 
 @dataclass(frozen=True)
@@ -90,6 +111,29 @@ class Project:
     #: which is the right default until a project has more of them than a phone
     #: keyboard can show.
     labels: tuple[str, ...] = ()
+    #: The extra round this project asks for before closing a piece of work.
+    #: `None` means no such round exists here, and `/commit` is unchanged.
+    confirmation: Confirmation | None = None
+
+
+def _confirmation_from(project: str, value: Any) -> Confirmation | None:
+    """`confirmation:` as two paths, or None when the block is absent."""
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        raise ValueError(f"Project {project!r}: `confirmation:` must be a mapping.")
+    unknown = set(value) - {"inquiry", "review"}
+    if unknown:
+        raise ValueError(
+            f"Project {project!r}: `confirmation:` has unknown field(s) "
+            f"{', '.join(sorted(unknown))}"
+        )
+    inquiry = _as_text(value.get("inquiry"))
+    review = _as_text(value.get("review"))
+    return Confirmation(
+        inquiry=Path(inquiry).expanduser() if inquiry else None,
+        review=Path(review).expanduser() if review else None,
+    )
 
 
 def _commands_from(project: str, value: Any) -> dict[str, str]:
@@ -227,6 +271,7 @@ def projects_from_yaml(text: str) -> list[Project]:
                 commands=_commands_from(project, body.get("commands")),
                 forge=_as_text(body.get("forge")),
                 labels=_warnings_from(project, body.get("labels")) or (),
+                confirmation=_confirmation_from(project, body.get("confirmation")),
             )
         )
     return projects

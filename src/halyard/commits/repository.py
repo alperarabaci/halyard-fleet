@@ -54,6 +54,13 @@ GIT_TIMEOUT = 30.0
 #: told something rather than left holding.
 PUSH_TIMEOUT = 180.0
 
+#: How the model marks a change worth another look before it is committed.
+#:
+#: Its own line, before the subject, so it can be lifted out — the project's own
+#: instructions ask for it "at the top of the commit message", and left there it
+#: would become part of the message and be committed with it.
+FLAG = "\u26a0"
+
 #: How many lines of "what changed" to carry back to the phone. The subject
 #: line says what the commit is called; this says what is in it, which is the
 #: thing somebody away from the desk has no other way of knowing.
@@ -367,7 +374,22 @@ def read(path: Path, project: str, *, run: Run | None = None) -> Uncommitted:
     )
 
 
-def prompt(work: Uncommitted) -> str:
+def flag_of(said: str) -> str | None:
+    """The model's "worth another look" line, without its marker, or None.
+
+    Read before the subject and removed from it. A flag that stayed in the
+    message would be committed, and the whole point of it is that it is a
+    question asked *instead* of committing.
+    """
+    for line in (said or "").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        return line.lstrip(FLAG).lstrip("!").strip() if line.startswith(FLAG) else None
+    return None
+
+
+def prompt(work: Uncommitted, inquiry: str = "") -> str:
     """What to ask a model for.
 
     It is asked for the description only, and told the reference will be put in
@@ -379,11 +401,20 @@ def prompt(work: Uncommitted) -> str:
     `alpha-engine#281 short thing` and this repository writes prose; neither is
     hard-coded anywhere, and a project that changes its mind changes its own log.
     """
+    flagging = (
+        [
+            "",
+            f"  {FLAG} <one line, only if the section at the end says to raise it>",
+        ]
+        if inquiry
+        else []
+    )
     parts = [
         "Describe a git commit of the changes below, for somebody who is away "
         "from their desk and has not seen any of this code.",
         "",
         "Answer in exactly this shape and nothing else:",
+        *flagging,
         "",
         "  <the subject line>",
         "  ---",
@@ -415,6 +446,11 @@ def prompt(work: Uncommitted) -> str:
         parts += ["", "The changes:", "", work.diff]
         if work.truncated:
             parts += ["", "(The diff was cut short here; the file list above is complete.)"]
+    if inquiry:
+        # Last, and whole. It is the project's own writing about its own
+        # failures, and summarising it here would be this file having an opinion
+        # about a judgement that is deliberately not ours.
+        parts += ["", "---", "", inquiry.strip()]
     return "\n".join(parts)
 
 
@@ -445,12 +481,16 @@ def assemble(reference: str | None, said: str) -> str:
     """
     line = (said or "").partition("---")[0].strip().strip("`").strip()
     # Models reach for a code fence even when told not to; take the first line
-    # that is not one rather than committing "```".
+    # that is not one rather than committing "```". A flag line is skipped for a
+    # different reason: it is a question, not a description, and committing it
+    # would be committing the doubt instead of raising it.
     for candidate in line.splitlines():
         candidate = candidate.strip().strip("`").strip()
-        if candidate:
+        if candidate and not candidate.startswith(FLAG):
             line = candidate
             break
+    else:
+        line = ""
     if not reference:
         return line
     if line.lower().startswith(reference.lower()):

@@ -1168,7 +1168,9 @@ class TelegramChannel:
             return found
         return self._runner
 
-    async def _write_message(self, chat_id: str, work) -> tuple[str | None, tuple[str, ...]]:
+    async def _write_message(
+        self, chat_id: str, work, inquiry: str = ""
+    ) -> tuple[str | None, tuple[str, ...], str | None]:
         """Have the work described: a subject line, and what actually changed.
 
         Both in one turn. The second half is the point of asking at all — the
@@ -1184,13 +1186,17 @@ class TelegramChannel:
         if runner is not None and hasattr(runner, "ask"):
             try:
                 said = await asyncio.wait_for(
-                    runner.ask(commits.prompt(work), model=MESSAGE_MODEL),
+                    runner.ask(commits.prompt(work, inquiry), model=MESSAGE_MODEL),
                     timeout=MESSAGE_TIMEOUT_SECONDS,
                 )
             except Exception:
                 logger.warning("Could not have a commit message written", exc_info=True)
         said = said or ""
-        return commits.assemble(work.reference, said) or None, commits.summary_of(said)
+        return (
+            commits.assemble(work.reference, said) or None,
+            commits.summary_of(said),
+            commits.flag_of(said),
+        )
 
     async def _propose_commit(self, chat_id: str, thread_id: int | None) -> None:
         """`/commit` — read the branch's uncommitted work and ask about it."""
@@ -1235,7 +1241,8 @@ class TelegramChannel:
             await self._say(said, chat_id, thread_id)
             return
 
-        message, summary = await self._write_message(chat_id, work)
+        asked = commits.confirmation.inquiry(found.confirmation, path)
+        message, summary, flag = await self._write_message(chat_id, work, asked)
         if not message:
             await self._say(
                 "Could not write a commit message, and this branch is not named "
@@ -1245,18 +1252,24 @@ class TelegramChannel:
             )
             return
 
-        handle = self._proposals.add(project, path, work, message, summary, checked.warnings)
+        # The model's flag rides with Halyard's own warnings. Both say the same
+        # thing to a person — look here before tapping — and splitting them into
+        # two blocks would make the card an argument between two authors.
+        alarms = (*checked.warnings, *((flag,) if flag else ()))
+        handle = self._proposals.add(project, path, work, message, summary, alarms)
         await self._say(
             commit_card.render(
                 project=project,
                 work=work,
                 message=message,
                 summary=summary,
-                warnings=checked.warnings,
+                warnings=alarms,
             ),
             chat_id,
             thread_id,
-            reply_markup=commit_card.keyboard(handle),
+            reply_markup=commit_card.keyboard(
+                handle, confirmation=commits.confirmation.offered(found.confirmation)
+            ),
         )
 
     async def _rewrite_commit(
@@ -1291,8 +1304,14 @@ class TelegramChannel:
             ),
             chat_id,
             thread_id,
-            reply_markup=commit_card.keyboard(handle),
+            reply_markup=commit_card.keyboard(
+                handle, confirmation=self._offers_confirmation(reworded.project)
+            ),
         )
+
+    def _offers_confirmation(self, project: str) -> bool:
+        found = self._repositories.get(project)
+        return commits.confirmation.offered(found.confirmation) if found else False
 
     async def _decide_commit(
         self, proposed: tuple[str, str], user_id: str, query_id: str, callback: dict
@@ -1330,6 +1349,11 @@ class TelegramChannel:
         proposal = self._proposals.take(handle)
         if proposal is None:
             await self._dismiss(query_id, "That commit is no longer open.")
+            return
+
+        if action == commit_card.CONFIRM:
+            await self._dismiss(query_id, "Sending the round…")
+            await self._send_confirmation(proposal, here or "", thread_id, user_id, message_id)
             return
 
         if action == commit_card.DROP:
@@ -1378,6 +1402,59 @@ class TelegramChannel:
 
         await self._say("\n".join(done), here or "", thread_id)
         await self._settle_commit(proposal, outcome, user_id, here, message_id)
+
+    async def _send_confirmation(
+        self,
+        proposal,
+        chat_id: str,
+        thread_id: int | None,
+        user_id: str,
+        message_id: int | None,
+    ) -> None:
+        """Hand the project's round to its navigator, and commit nothing.
+
+        The proposal is already taken by the time this runs, and stays taken.
+        A round exists to change something — another look, a fix, another turn
+        with the driver — so the card it came from describes a working tree that
+        is about to be out of date. Committing afterwards is a fresh `/commit`,
+        which reads the branch again.
+        """
+        found = self._repositories.get(proposal.project)
+        round_text = commits.confirmation.review(
+            found.confirmation if found else None, proposal.path
+        )
+        if not round_text:
+            await self._say("That project has no confirmation round to send.", chat_id, thread_id)
+            return
+
+        seat = next(
+            (
+                one
+                for one in self._seats
+                if one.project == proposal.project and one.role is Role.NAVIGATOR
+            ),
+            None,
+        )
+        if seat is None:
+            await self._say(
+                f"<b>{html.escape(proposal.project)}</b> has no navigator to ask.",
+                chat_id,
+                thread_id,
+            )
+            return
+
+        await self._settle_commit(
+            proposal,
+            f"\U0001f50d CONFIRMATION ROUND \u2014 sent to {seat.label}",
+            user_id,
+            chat_id,
+            message_id,
+        )
+        # Through the same path a person uses, so the round lands in the
+        # navigator's own conversation and is readable there afterwards.
+        await self._forward_to_seat(
+            f"{seat.label} {round_text}", f"tg:{user_id}", chat_id, thread_id
+        )
 
     async def _settle_commit(
         self,
