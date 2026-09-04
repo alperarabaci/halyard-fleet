@@ -79,7 +79,17 @@ def _check_available(claude_binary=None, claude_oauth_token=None, **_) -> list[t
         lines.append(("", f'mint one that lasts a year:  "{found}" setup-token'))
         lines.append(("", "then set HALYARD_CLAUDE_OAUTH_TOKEN in halyard.yaml"))
 
+    # `auth status` reports on the desktop login, and asks without the token —
+    # so with one configured it is answering about a credential these turns do
+    # not use. Saying "nothing can be delivered" there is a false alarm, and it
+    # was a loud one: a machine delivering perfectly well failed `make doctor`
+    # on two seats at once. A red light that is wrong twice is a red light
+    # nobody looks at.
     match signed_in(claude_binary):
+        case False if claude_oauth_token:
+            lines.append(
+                ("", "that CLI has no desktop login of its own, which these turns do not need")
+            )
         case False:
             lines.append(("fail", "that CLI is not signed in, so nothing can be delivered"))
             # Quoted, because the path that gets printed here is usually

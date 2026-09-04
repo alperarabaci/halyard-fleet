@@ -238,12 +238,30 @@ def test_a_cli_that_cannot_sign_in_is_a_failure(monkeypatch) -> None:
     The binary was there and `doctor` reported it, while every message failed
     with the CLI's own "Not logged in · Please run /login" — a line that was
     being written to stdout and thrown away. Present is not the same as usable.
-    """
-    found = _claude_check(monkeypatch, found="/bin/claude", signed=False)
 
-    assert [level for level, _ in found] == ["ok", "ok", "fail", ""]
-    assert "not signed in" in found[2][1]
-    assert "auth login" in found[3][1], "say the command, not just the problem"
+    No token, said explicitly: with one configured the desktop login is not the
+    credential these turns use, and this stops being a failure. See below.
+    """
+    found = _claude_check(monkeypatch, found="/bin/claude", signed=False, token=None)
+
+    assert any(level == "fail" and "not signed in" in said for level, said in found)
+    assert any("auth login" in said for _, said in found), "say the command, not just the problem"
+
+
+def test_a_configured_token_makes_the_desktop_login_beside_the_point(monkeypatch) -> None:
+    """`auth status` reports on the desktop login and asks without the token,
+    so with one configured it answers about a credential these turns never use.
+
+    Measured on a Mac mini that was delivering perfectly well — the commit
+    message it had just written proved the CLI ran — while `make doctor` failed
+    on two seats for not being signed in. A red light that is wrong twice is a
+    red light nobody looks at.
+    """
+    found = _claude_check(monkeypatch, found="/bin/claude", signed=False, token="glpat-x")
+
+    assert "fail" not in [level for level, _ in found]
+    assert any("long-lived token" in said for _, said in found)
+    assert any("does not need" in said or "do not need" in said for _, said in found)
 
 
 def test_the_command_it_prints_can_be_pasted(monkeypatch) -> None:
@@ -255,10 +273,16 @@ def test_the_command_it_prints_can_be_pasted(monkeypatch) -> None:
     bundle, which is how Halyard finds it and why the shell does not.
     """
     found = _claude_check(
-        monkeypatch, found="/Users/x/Library/Application Support/Claude/claude", signed=False
+        monkeypatch,
+        found="/Users/x/Library/Application Support/Claude/claude",
+        signed=False,
+        token=None,
     )
 
-    assert '"/Users/x/Library/Application Support/Claude/claude" auth login' in found[3][1]
+    assert any(
+        '"/Users/x/Library/Application Support/Claude/claude" auth login' in said
+        for _, said in found
+    )
 
 
 def test_a_signed_in_cli_says_nothing_extra(monkeypatch) -> None:
