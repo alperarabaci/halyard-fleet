@@ -19,6 +19,7 @@ import contextlib
 import html
 import logging
 import re
+import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -638,7 +639,10 @@ class TelegramChannel:
             )
             return
         if command == "commit":
-            await self._propose_commit(here or "", thread)
+            # Detached: this reads a repository, may run the project's whole
+            # gate, and asks a model for a sentence. None of that may hold the
+            # poller, which is what answers everybody else's buttons.
+            self._detach(self._propose_commit(here or "", thread), "/commit")
             return
         if command == "open":
             await self._open_application(argument, here or "", thread)
@@ -647,7 +651,9 @@ class TelegramChannel:
             await self._run_command(argument, here or "", thread)
             return
         if command == "label":
-            await self._label_task(argument, here or "", thread)
+            # Detached for the same reason: two calls to an issue tracker over
+            # somebody else's network.
+            self._detach(self._label_task(argument, here or "", thread), "/label")
             return
         if command == "pause":
             _, changed = await self._gate.pause(actor)
@@ -796,6 +802,29 @@ class TelegramChannel:
                 destination_thread,
             )
         await self._forward_to_session(text, actor, destination, destination_thread)
+
+    def _detach(self, work, what: str) -> None:
+        """Run something slow without holding the poll loop.
+
+        Updates are handled one at a time, in the loop that fetches them — which
+        is right for everything that answers in milliseconds and wrong for
+        anything that shells out. A `/commit` running a project's test suite
+        parked the poller for minutes: cards kept arriving, because those are
+        sent from the HTTP side, and not one of them could be *answered*. From a
+        phone that is indistinguishable from Halyard being down, and it is worse,
+        because the approvals expire while it looks alive.
+        """
+        task = asyncio.create_task(work, name=what)
+        self._sending.add(task)
+        task.add_done_callback(self._sending.discard)
+        task.add_done_callback(lambda done: self._said_if_it_broke(done, what))
+
+    @staticmethod
+    def _said_if_it_broke(done: asyncio.Task, what: str) -> None:
+        """A detached failure is silent unless somebody looks at it."""
+        with contextlib.suppress(asyncio.CancelledError):
+            if (failed := done.exception()) is not None:
+                logger.error("%s failed", what, exc_info=failed)
 
     def _remember_handoff(self, seat: str, chat_id: str, thread_id: int | None, user: str) -> None:
         """Note that this person picked a seat and owes us a sentence."""
@@ -1213,21 +1242,66 @@ class TelegramChannel:
 
         # Off the event loop: git is a subprocess, and the poller has approval
         # cards to keep delivering while this reads a repository.
+        reading = time.monotonic()
         work = await asyncio.to_thread(commits.read, path, project)
+        logger.info(
+            "commit %s: read the working tree in %.1fs", project, time.monotonic() - reading
+        )
         if work.blocked:
             await self._say(f"\U0001f6ab {html.escape(work.blocked)}", chat_id, thread_id)
             return
 
         # Said before it starts, not after. A project's own check can run for
         # minutes, and silence for minutes reads as nothing having happened.
-        if found.validate:
+        skipping = commits.validation.only_documentation(work)
+        if found.validate and not skipping:
             await self._say(
                 f"\u23f3 Running <code>{html.escape(found.validate)}</code>\u2026",
                 chat_id,
                 thread_id,
             )
+        elif found.validate:
+            await self._say(
+                f"\U0001f4c4 Documentation only \u2014 not running "
+                f"<code>{html.escape(found.validate)}</code>.",
+                chat_id,
+                thread_id,
+            )
+
+        # Progress from the worker thread, put back on the loop. Somebody who
+        # pressed `/commit` is waiting for a card and cannot do anything else
+        # with that thread, so a run that says nothing for three minutes reads
+        # as Halyard having died rather than as a test suite working.
+        loop = asyncio.get_running_loop()
+
+        def progress(seconds: float, latest: str) -> None:
+            asyncio.run_coroutine_threadsafe(
+                self._say(
+                    f"\u2026 {self._elapsed(seconds)} \u2014 "
+                    f"<code>{html.escape(latest[:150])}</code>",
+                    chat_id,
+                    thread_id,
+                ),
+                loop,
+            )
+
+        started = time.monotonic()
         checked = await asyncio.to_thread(
-            partial(commits.check, work, path, found.validate, warn_if=found.warn_if)
+            partial(
+                commits.check,
+                work,
+                path,
+                found.validate,
+                warn_if=found.warn_if,
+                on_progress=progress,
+            )
+        )
+        logger.info(
+            "commit %s: %d files, checks %s in %.1fs",
+            project,
+            len(work.changes),
+            "skipped (documentation)" if checked.documentation_only else "ran",
+            time.monotonic() - started,
         )
         if checked.refused:
             # No card at all. A failing check is a fact rather than a judgement,
@@ -1242,7 +1316,14 @@ class TelegramChannel:
             return
 
         asked = commits.confirmation.inquiry(found.confirmation, path)
+        writing = time.monotonic()
         message, summary, flag = await self._write_message(chat_id, work, asked)
+        logger.info(
+            "commit %s: message written in %.1fs (flag: %s)",
+            project,
+            time.monotonic() - writing,
+            "yes" if flag else "no",
+        )
         if not message:
             await self._say(
                 "Could not write a commit message, and this branch is not named "
@@ -1353,7 +1434,10 @@ class TelegramChannel:
 
         if action == commit_card.CONFIRM:
             await self._dismiss(query_id, "Sending the round…")
-            await self._send_confirmation(proposal, here or "", thread_id, user_id, message_id)
+            self._detach(
+                self._send_confirmation(proposal, here or "", thread_id, user_id, message_id),
+                "confirmation round",
+            )
             return
 
         if action == commit_card.DROP:
@@ -1929,7 +2013,11 @@ class TelegramChannel:
 
         proposed = commit_card.parse_callback_data(callback.get("data") or "")
         if proposed is not None:
-            await self._decide_commit(proposed, user_id, query_id, callback)
+            # Detached like the command that made the card: `Commit & push`
+            # reaches a network, and a poller waiting on that answers nobody.
+            self._detach(
+                self._decide_commit(proposed, user_id, query_id, callback), "commit button"
+            )
             return
 
         parsed = cards.parse_callback_data(callback.get("data") or "")

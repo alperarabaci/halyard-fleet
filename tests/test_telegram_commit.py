@@ -192,6 +192,31 @@ def commit_count(repo: Path) -> int:
     return len(git(repo, "log", "--format=%h").splitlines())
 
 
+async def settled(channel: TelegramChannel) -> None:
+    """Wait for whatever the command detached.
+
+    `/commit`, `/label` and the commit buttons run off the poll loop on purpose
+    — a project's test suite must not stop everybody else's approvals being
+    answered — so a test has to wait for them the way a person does.
+    """
+    for _ in range(400):
+        pending = [task for task in channel._sending if not task.done()]
+        if not pending:
+            await asyncio.sleep(0.02)
+            return
+        await asyncio.gather(*pending, return_exceptions=True)
+
+
+async def deliver(channel: TelegramChannel, update: dict) -> None:
+    await channel._handle_message(update)
+    await settled(channel)
+
+
+async def tap(channel: TelegramChannel, callback: dict) -> None:
+    await channel._handle_callback(callback)
+    await settled(channel)
+
+
 # --- proposing --------------------------------------------------------------
 
 
@@ -199,7 +224,7 @@ async def test_a_card_offers_the_message_and_what_it_would_commit(wired) -> None
     channel, api, _, repo = wired
     wrote(repo, "loader.py", "def load():\n    return 1\n")
 
-    await channel._handle_message(typed("/commit"))
+    await deliver(channel, typed("/commit"))
 
     card = api.sent[-1]
     assert "alpha-engine#281 loader stub and seed tweak" in card["text"]
@@ -214,7 +239,7 @@ async def test_the_model_is_asked_with_the_house_style_and_the_cheap_model(wired
     channel, _, runner, repo = wired
     wrote(repo, "loader.py", "x = 1\n")
 
-    await channel._handle_message(typed("/commit"))
+    await deliver(channel, typed("/commit"))
 
     assert runner.models == ["sonnet"]
     assert "alpha-engine#279 p2" in runner.asked[0]
@@ -226,7 +251,7 @@ async def test_what_an_agent_wrote_without_staging_is_offered(wired) -> None:
     channel, api, _, repo = wired
     (repo / "written_by_an_agent.py").write_text("def load():\n    return 1\n")
 
-    await channel._handle_message(typed("/commit"))
+    await deliver(channel, typed("/commit"))
 
     assert "written_by_an_agent.py" in api.sent[-1]["text"]
     assert "1 of them new" in api.sent[-1]["text"]
@@ -236,7 +261,7 @@ async def test_what_an_agent_wrote_without_staging_is_offered(wired) -> None:
 async def test_a_clean_branch_says_there_is_nothing_to_commit(wired) -> None:
     channel, api, _, repo = wired
 
-    await channel._handle_message(typed("/commit"))
+    await deliver(channel, typed("/commit"))
 
     assert "Nothing has changed" in api.sent[-1]["text"]
     assert len(channel._proposals) == 0
@@ -256,7 +281,7 @@ async def test_a_chat_with_no_repository_says_so(tmp_path: Path) -> None:
         poll_retry_seconds=0.01,
     )
     try:
-        await channel._handle_message(typed("/commit"))
+        await deliver(channel, typed("/commit"))
         assert "do not know which repository" in api.sent[-1]["text"]
     finally:
         await audit.close()
@@ -269,7 +294,7 @@ async def test_a_model_that_cannot_be_reached_still_offers_the_reference(wired) 
     runner.says = None
     wrote(repo, "loader.py", "x = 1\n")
 
-    await channel._handle_message(typed("/commit"))
+    await deliver(channel, typed("/commit"))
 
     assert "alpha-engine#281" in api.sent[-1]["text"]
     assert len(channel._proposals) == 1
@@ -281,9 +306,9 @@ async def test_a_model_that_cannot_be_reached_still_offers_the_reference(wired) 
 async def test_pressing_commit_makes_the_commit(wired) -> None:
     channel, api, _, repo = wired
     wrote(repo, "loader.py", "x = 1\n")
-    await channel._handle_message(typed("/commit"))
+    await deliver(channel, typed("/commit"))
 
-    await channel._handle_callback(press(only_handle(channel), commit_card.MAKE))
+    await tap(channel, press(only_handle(channel), commit_card.MAKE))
 
     assert subject(repo) == "alpha-engine#281 loader stub and seed tweak"
     assert commit_count(repo) == 2
@@ -295,11 +320,11 @@ async def test_pressing_commit_twice_makes_one_commit(wired) -> None:
     is what a second tap runs into."""
     channel, api, _, repo = wired
     wrote(repo, "loader.py", "x = 1\n")
-    await channel._handle_message(typed("/commit"))
+    await deliver(channel, typed("/commit"))
     handle = only_handle(channel)
 
-    await channel._handle_callback(press(handle, commit_card.MAKE))
-    await channel._handle_callback(press(handle, commit_card.MAKE))
+    await tap(channel, press(handle, commit_card.MAKE))
+    await tap(channel, press(handle, commit_card.MAKE))
 
     assert commit_count(repo) == 2
     assert api.answers[-1]["text"] == "That commit is no longer open."
@@ -308,9 +333,9 @@ async def test_pressing_commit_twice_makes_one_commit(wired) -> None:
 async def test_cancel_leaves_the_repository_alone(wired) -> None:
     channel, api, _, repo = wired
     wrote(repo, "loader.py", "x = 1\n")
-    await channel._handle_message(typed("/commit"))
+    await deliver(channel, typed("/commit"))
 
-    await channel._handle_callback(press(only_handle(channel), commit_card.DROP))
+    await tap(channel, press(only_handle(channel), commit_card.DROP))
 
     assert commit_count(repo) == 1
     assert "CANCELLED" in api.edits[-1]["text"]
@@ -321,9 +346,9 @@ async def test_somebody_else_pressing_commit_commits_nothing(wired) -> None:
     """The card is visible to a whole group. Checked exactly as an approval is."""
     channel, api, _, repo = wired
     wrote(repo, "loader.py", "x = 1\n")
-    await channel._handle_message(typed("/commit"))
+    await deliver(channel, typed("/commit"))
 
-    await channel._handle_callback(press(only_handle(channel), commit_card.MAKE, user=INTRUDER))
+    await tap(channel, press(only_handle(channel), commit_card.MAKE, user=INTRUDER))
 
     assert commit_count(repo) == 1
     assert len(channel._proposals) == 1
@@ -335,13 +360,13 @@ async def test_a_proposal_left_too_long_is_not_committable(wired) -> None:
     would commit whatever is staged then, under a message written for this."""
     channel, api, _, repo = wired
     wrote(repo, "loader.py", "x = 1\n")
-    await channel._handle_message(typed("/commit"))
+    await deliver(channel, typed("/commit"))
     handle = only_handle(channel)
 
     channel._proposals._open[handle] = replace(
         channel._proposals._open[handle], at=channel._clock() - timedelta(hours=2)
     )
-    await channel._handle_callback(press(handle, commit_card.MAKE))
+    await tap(channel, press(handle, commit_card.MAKE))
 
     assert commit_count(repo) == 1
     assert api.answers[-1]["text"] == "That commit is no longer open."
@@ -350,12 +375,12 @@ async def test_a_proposal_left_too_long_is_not_committable(wired) -> None:
 async def test_git_refusing_is_reported_rather_than_swallowed(wired) -> None:
     channel, api, _, repo = wired
     wrote(repo, "loader.py", "x = 1\n")
-    await channel._handle_message(typed("/commit"))
+    await deliver(channel, typed("/commit"))
     handle = only_handle(channel)
     # Taken away behind the card's back, so there is nothing left to commit.
     (repo / "loader.py").unlink()
 
-    await channel._handle_callback(press(handle, commit_card.MAKE))
+    await tap(channel, press(handle, commit_card.MAKE))
 
     assert commit_count(repo) == 1
     assert "git refused" in api.sent[-1]["text"]
@@ -367,10 +392,10 @@ async def test_git_refusing_is_reported_rather_than_swallowed(wired) -> None:
 async def test_rewrite_asks_for_a_message_and_commits_nothing(wired) -> None:
     channel, api, _, repo = wired
     wrote(repo, "loader.py", "x = 1\n")
-    await channel._handle_message(typed("/commit"))
+    await deliver(channel, typed("/commit"))
     handle = only_handle(channel)
 
-    await channel._handle_callback(press(handle, commit_card.REWRITE))
+    await tap(channel, press(handle, commit_card.REWRITE))
 
     assert api.sent[-1]["reply_markup"] == {"force_reply": True}
     assert handle in api.sent[-1]["text"]
@@ -384,18 +409,18 @@ async def test_a_typed_message_replaces_the_wording_without_committing(wired) ->
     typed on a phone must not be a commit nobody agreed to."""
     channel, api, _, repo = wired
     wrote(repo, "loader.py", "x = 1\n")
-    await channel._handle_message(typed("/commit"))
+    await deliver(channel, typed("/commit"))
     handle = only_handle(channel)
-    await channel._handle_callback(press(handle, commit_card.REWRITE))
+    await tap(channel, press(handle, commit_card.REWRITE))
     asked = api.sent[-1]["text"]
 
-    await channel._handle_message(replying("power gen minor fixes", asked))
+    await deliver(channel, replying("power gen minor fixes", asked))
 
     assert commit_count(repo) == 1
     assert channel._proposals.peek(handle).message == "alpha-engine#281 power gen minor fixes"
     assert "alpha-engine#281 power gen minor fixes" in api.sent[-1]["text"]
 
-    await channel._handle_callback(press(handle, commit_card.MAKE))
+    await tap(channel, press(handle, commit_card.MAKE))
     assert subject(repo) == "alpha-engine#281 power gen minor fixes"
 
 
@@ -404,13 +429,13 @@ async def test_a_reply_to_a_commit_prompt_never_reaches_a_session(wired) -> None
     one — which is how `/to` sent two messages to an agent nobody chose."""
     channel, api, runner, repo = wired
     wrote(repo, "loader.py", "x = 1\n")
-    await channel._handle_message(typed("/commit"))
+    await deliver(channel, typed("/commit"))
     handle = only_handle(channel)
-    await channel._handle_callback(press(handle, commit_card.REWRITE))
+    await tap(channel, press(handle, commit_card.REWRITE))
     asked = api.sent[-1]["text"]
     before = len(runner.asked)
 
-    await channel._handle_message(replying("power gen minor fixes", asked))
+    await deliver(channel, replying("power gen minor fixes", asked))
 
     assert len(runner.asked) == before
 
@@ -418,13 +443,13 @@ async def test_a_reply_to_a_commit_prompt_never_reaches_a_session(wired) -> None
 async def test_a_rewrite_of_a_proposal_that_expired_says_so(wired) -> None:
     channel, api, _, repo = wired
     wrote(repo, "loader.py", "x = 1\n")
-    await channel._handle_message(typed("/commit"))
+    await deliver(channel, typed("/commit"))
     handle = only_handle(channel)
-    await channel._handle_callback(press(handle, commit_card.REWRITE))
+    await tap(channel, press(handle, commit_card.REWRITE))
     asked = api.sent[-1]["text"]
     channel._proposals._open.clear()
 
-    await channel._handle_message(replying("anything", asked))
+    await deliver(channel, replying("anything", asked))
 
     assert "no longer open" in api.sent[-1]["text"]
     assert commit_count(repo) == 1
@@ -456,9 +481,9 @@ async def test_committing_says_so_out_loud(wired) -> None:
     past. The thing somebody needs to leave with is that it happened."""
     channel, api, _, repo = wired
     wrote(repo, "loader.py", "x = 1\n")
-    await channel._handle_message(typed("/commit"))
+    await deliver(channel, typed("/commit"))
 
-    await channel._handle_callback(press(only_handle(channel), commit_card.MAKE))
+    await tap(channel, press(only_handle(channel), commit_card.MAKE))
 
     said = api.sent[-1]["text"]
     assert "Committed" in said
@@ -470,9 +495,9 @@ async def test_commit_and_push_sends_the_branch(tmp_path: Path, wired) -> None:
     channel, api, _, repo = wired
     remote = a_bare_remote(tmp_path, repo)
     wrote(repo, "loader.py", "x = 1\n")
-    await channel._handle_message(typed("/commit"))
+    await deliver(channel, typed("/commit"))
 
-    await channel._handle_callback(press(only_handle(channel), commit_card.SEND))
+    await tap(channel, press(only_handle(channel), commit_card.SEND))
 
     assert "Pushed" in api.sent[-1]["text"]
     assert "origin/281-power-gen-minor-fixes" in api.sent[-1]["text"]
@@ -490,9 +515,9 @@ async def test_plain_commit_does_not_push(tmp_path: Path, wired) -> None:
     channel, api, _, repo = wired
     remote = a_bare_remote(tmp_path, repo)
     wrote(repo, "loader.py", "x = 1\n")
-    await channel._handle_message(typed("/commit"))
+    await deliver(channel, typed("/commit"))
 
-    await channel._handle_callback(press(only_handle(channel), commit_card.MAKE))
+    await tap(channel, press(only_handle(channel), commit_card.MAKE))
 
     assert "Pushed" not in api.sent[-1]["text"]
     branches = subprocess.run(
@@ -506,10 +531,10 @@ async def test_a_push_that_fails_still_reports_the_commit(wired) -> None:
     two would send somebody looking for work that is already on disk."""
     channel, api, _, repo = wired
     wrote(repo, "loader.py", "x = 1\n")
-    await channel._handle_message(typed("/commit"))
+    await deliver(channel, typed("/commit"))
 
     # No remote at all, so `git push` refuses.
-    await channel._handle_callback(press(only_handle(channel), commit_card.SEND))
+    await tap(channel, press(only_handle(channel), commit_card.SEND))
 
     said = api.sent[-1]["text"]
     assert "Committed" in said
@@ -529,7 +554,7 @@ async def test_the_card_says_what_changed_not_only_which_files(wired) -> None:
     )
     wrote(repo, "loader.py", "x = 1\n")
 
-    await channel._handle_message(typed("/commit"))
+    await deliver(channel, typed("/commit"))
 
     card = api.sent[-1]["text"]
     assert "Adds a loader that returns the generated figure" in card
@@ -537,7 +562,7 @@ async def test_the_card_says_what_changed_not_only_which_files(wired) -> None:
     # The summary is for the card. The commit keeps this project's one-line
     # subjects rather than growing a body nobody's history has ever had.
     assert "alpha-engine#281 loader stub and seed tweak" in card
-    await channel._handle_callback(press(only_handle(channel), commit_card.MAKE))
+    await tap(channel, press(only_handle(channel), commit_card.MAKE))
     assert subject(repo) == "alpha-engine#281 loader stub and seed tweak"
     assert "Adds a loader" not in git(repo, "log", "-1", "--format=%B")
 
@@ -557,7 +582,7 @@ async def test_a_project_with_no_check_configured_runs_nothing(wired) -> None:
     channel, api, _, repo = wired
     wrote(repo, "loader.py", "x = 1\n")
 
-    await channel._handle_message(typed("/commit"))
+    await deliver(channel, typed("/commit"))
 
     assert "Running" not in " ".join(m["text"] for m in api.sent)
     assert len(channel._proposals) == 1
@@ -570,7 +595,7 @@ async def test_a_failing_check_offers_no_card_at_all(wired) -> None:
     demands(channel, "echo 'FAIL: two tests broke' && exit 1")
     wrote(repo, "loader.py", "x = 1\n")
 
-    await channel._handle_message(typed("/commit"))
+    await deliver(channel, typed("/commit"))
 
     assert len(channel._proposals) == 0
     assert commit_count(repo) == 1
@@ -587,7 +612,7 @@ async def test_it_says_the_check_is_running_before_it_starts(wired) -> None:
     demands(channel, "true")
     wrote(repo, "loader.py", "x = 1\n")
 
-    await channel._handle_message(typed("/commit"))
+    await deliver(channel, typed("/commit"))
 
     assert "Running" in api.sent[0]["text"]
     assert "true" in api.sent[0]["text"]
@@ -598,7 +623,7 @@ async def test_a_passing_check_leads_to_an_ordinary_card(wired) -> None:
     demands(channel, "true")
     wrote(repo, "loader.py", "x = 1\n")
 
-    await channel._handle_message(typed("/commit"))
+    await deliver(channel, typed("/commit"))
 
     assert len(channel._proposals) == 1
     assert "alpha-engine#281" in api.sent[-1]["text"]
@@ -609,7 +634,7 @@ async def test_the_check_runs_in_the_project_and_sees_its_files(wired) -> None:
     demands(channel, "test -f loader.py")
     wrote(repo, "loader.py", "x = 1\n")
 
-    await channel._handle_message(typed("/commit"))
+    await deliver(channel, typed("/commit"))
 
     assert len(channel._proposals) == 1
 
@@ -622,14 +647,14 @@ async def test_a_task_id_missing_from_the_code_warns_without_blocking(wired) -> 
     channel, api, _, repo = wired
     wrote(repo, "loader.py", "x = 1\n")
 
-    await channel._handle_message(typed("/commit"))
+    await deliver(channel, typed("/commit"))
 
     card = api.sent[-1]["text"]
     assert "281 appears nowhere" in card
     assert card.index("281 appears nowhere") < card.index("COMMIT")  # above the heading
     assert len(channel._proposals) == 1
 
-    await channel._handle_callback(press(only_handle(channel), commit_card.MAKE))
+    await tap(channel, press(only_handle(channel), commit_card.MAKE))
     assert commit_count(repo) == 2
 
 
@@ -637,7 +662,7 @@ async def test_work_that_names_its_task_is_not_flagged(wired) -> None:
     channel, api, _, repo = wired
     wrote(repo, "loader.py", "# alpha-engine#281 — the loader this task asked for\nx = 1\n")
 
-    await channel._handle_message(typed("/commit"))
+    await deliver(channel, typed("/commit"))
 
     assert "appears nowhere" not in api.sent[-1]["text"]
 
@@ -646,11 +671,11 @@ async def test_the_warning_survives_rewording_the_message(wired) -> None:
     """A warning that disappears when you type is a warning nobody heeds twice."""
     channel, api, _, repo = wired
     wrote(repo, "loader.py", "x = 1\n")
-    await channel._handle_message(typed("/commit"))
+    await deliver(channel, typed("/commit"))
     handle = only_handle(channel)
-    await channel._handle_callback(press(handle, commit_card.REWRITE))
+    await tap(channel, press(handle, commit_card.REWRITE))
 
-    await channel._handle_message(replying("power gen fixes", api.sent[-1]["text"]))
+    await deliver(channel, replying("power gen fixes", api.sent[-1]["text"]))
 
     assert "281 appears nowhere" in api.sent[-1]["text"]
 
@@ -663,7 +688,7 @@ async def test_a_project_can_turn_the_warnings_off(wired) -> None:
     channel._repositories["alpha-engine"] = replace(found, warn_if=())
     wrote(repo, "loader.py", "x = 1\n")
 
-    await channel._handle_message(typed("/commit"))
+    await deliver(channel, typed("/commit"))
 
     assert "appears nowhere" not in api.sent[-1]["text"]
     assert len(channel._proposals) == 1
@@ -676,7 +701,7 @@ async def test_a_warning_nobody_recognises_is_skipped_not_fatal(wired) -> None:
     channel._repositories["alpha-engine"] = replace(found, warn_if=("no-such-check",))
     wrote(repo, "loader.py", "x = 1\n")
 
-    await channel._handle_message(typed("/commit"))
+    await deliver(channel, typed("/commit"))
 
     assert len(channel._proposals) == 1
 
@@ -703,7 +728,7 @@ async def test_a_project_without_a_round_is_offered_none(wired) -> None:
     channel, api, _, repo = wired
     wrote(repo, "loader.py", "x = 1\n")
 
-    await channel._handle_message(typed("/commit"))
+    await deliver(channel, typed("/commit"))
 
     buttons = {
         button["text"] for row in api.sent[-1]["reply_markup"]["inline_keyboard"] for button in row
@@ -718,7 +743,7 @@ async def test_the_round_is_offered_whether_or_not_the_model_flagged_it(wired) -
     asks_a_round(channel, repo, inquiry="Raise a flag if...", review="# The round")
     wrote(repo, "loader.py", "x = 1\n")
 
-    await channel._handle_message(typed("/commit"))
+    await deliver(channel, typed("/commit"))
 
     buttons = {
         button["text"] for row in api.sent[-1]["reply_markup"]["inline_keyboard"] for button in row
@@ -734,7 +759,7 @@ async def test_the_project_own_question_reaches_the_model(wired) -> None:
     asks_a_round(channel, repo, inquiry="RAISE IT WHEN A DATA FILE SHRINKS", review="# The round")
     wrote(repo, "loader.py", "x = 1\n")
 
-    await channel._handle_message(typed("/commit"))
+    await deliver(channel, typed("/commit"))
 
     assert "RAISE IT WHEN A DATA FILE SHRINKS" in runner.asked[0]
 
@@ -753,13 +778,13 @@ async def test_a_flag_is_shown_and_never_committed(wired) -> None:
     )
     wrote(repo, "loader.py", "x = 1\n")
 
-    await channel._handle_message(typed("/commit"))
+    await deliver(channel, typed("/commit"))
     card = api.sent[-1]["text"]
 
     assert "6 records deleted from plants.json" in card
     assert "alpha-engine#281 drop the null rows from the report" in card
 
-    await channel._handle_callback(press(only_handle(channel), commit_card.MAKE))
+    await tap(channel, press(only_handle(channel), commit_card.MAKE))
     assert subject(repo) == "alpha-engine#281 drop the null rows from the report"
     assert "confirmation" not in git(repo, "log", "-1", "--format=%B")
 
@@ -770,9 +795,9 @@ async def test_pressing_the_round_sends_it_and_commits_nothing(wired) -> None:
     channel, api, runner, repo = wired
     asks_a_round(channel, repo, inquiry="ask", review="# Seven items of evidence")
     wrote(repo, "loader.py", "x = 1\n")
-    await channel._handle_message(typed("/commit"))
+    await deliver(channel, typed("/commit"))
 
-    await channel._handle_callback(press(only_handle(channel), commit_card.CONFIRM))
+    await tap(channel, press(only_handle(channel), commit_card.CONFIRM))
 
     assert commit_count(repo) == 1
     assert len(channel._proposals) == 0
@@ -805,9 +830,9 @@ async def test_the_round_goes_to_the_navigator_not_to_whoever_asked(wired) -> No
     ]
     asks_a_round(channel, repo, inquiry="ask", review="# The round")
     wrote(repo, "loader.py", "x = 1\n")
-    await channel._handle_message(typed("/commit"))
+    await deliver(channel, typed("/commit"))
 
-    await channel._handle_callback(press(only_handle(channel), commit_card.CONFIRM))
+    await tap(channel, press(only_handle(channel), commit_card.CONFIRM))
     await asyncio.sleep(0.05)
 
     # The navigator's own session, resolved by the runtime — not the driver's,
@@ -825,9 +850,9 @@ async def test_a_project_with_no_navigator_says_so(wired) -> None:
     ]
     asks_a_round(channel, repo, inquiry="ask", review="# The round")
     wrote(repo, "loader.py", "x = 1\n")
-    await channel._handle_message(typed("/commit"))
+    await deliver(channel, typed("/commit"))
 
-    await channel._handle_callback(press(only_handle(channel), commit_card.CONFIRM))
+    await tap(channel, press(only_handle(channel), commit_card.CONFIRM))
 
     assert "no navigator" in api.sent[-1]["text"]
     assert commit_count(repo) == 1
@@ -842,9 +867,35 @@ async def test_a_round_file_that_is_not_there_says_so_rather_than_committing(wir
         found, confirmation=Confirmation(review=Path("NOTES/GONE.md"))
     )
     wrote(repo, "loader.py", "x = 1\n")
-    await channel._handle_message(typed("/commit"))
+    await deliver(channel, typed("/commit"))
 
-    await channel._handle_callback(press(only_handle(channel), commit_card.CONFIRM))
+    await tap(channel, press(only_handle(channel), commit_card.CONFIRM))
 
     assert "no confirmation round" in api.sent[-1]["text"]
     assert commit_count(repo) == 1
+
+
+async def test_a_slow_commit_does_not_stop_anything_else_being_answered(wired) -> None:
+    """The defect this was built for.
+
+    Updates are handled one at a time in the loop that fetches them, so a
+    `/commit` running a project's test suite parked the poller for minutes.
+    Cards kept arriving — those are sent from the HTTP side — and not one of
+    them could be answered. From a phone that is indistinguishable from Halyard
+    being down, and worse, because the approvals expire while it looks alive.
+    """
+    channel, api, _, repo = wired
+    found = channel._repositories["alpha-engine"]
+    channel._repositories["alpha-engine"] = replace(found, validate="sleep 5")
+    wrote(repo, "loader.py", "x = 1\n")
+
+    # Not awaited: this is the poll loop handing the update over and moving on.
+    await channel._handle_message(typed("/commit"))
+
+    # And the very next update is answered while that is still going.
+    await channel._handle_message(typed("/status"))
+
+    assert any("seat" in m["text"].lower() or "nav" in m["text"] for m in api.sent[-2:])
+    assert [task for task in channel._sending if not task.done()], "the commit finished too soon"
+    for task in list(channel._sending):
+        task.cancel()

@@ -36,6 +36,7 @@ import logging
 import re
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
+from fnmatch import fnmatch
 from pathlib import Path
 
 from halyard.commands.running import run as commands_run
@@ -51,6 +52,29 @@ VALIDATE_TIMEOUT = 600.0
 #: How much of a failing run to send. The last lines, because that is where a
 #: test runner puts what failed; the rest is a phone-shaped wall of dots.
 FAILURE_LINES = 25
+
+#: Changes that cannot break a test suite, so nothing is run for them.
+#:
+#: A `/commit` of one edited note used to start the project's whole gate and
+#: leave somebody watching a phone for minutes, for a change no test in it could
+#: have an opinion about.
+#:
+#: Only the command is skipped. The warnings still run, and the task-id one in
+#: particular is *not* a false positive here: prompts and standards live in
+#: markdown in the project this was built for, and those files carry the task id
+#: like any other. It is searched in what was added, whatever the file is.
+#:
+#: Matched with `fnmatch`, whose `*` crosses directory separators, so `NOTES/*`
+#: covers everything under it however deep.
+DOCUMENTATION: tuple[str, ...] = (
+    "*.md",
+    "*.rst",
+    "*.txt",
+    "*.adoc",
+    "LICENSE",
+    "NOTES/*",
+    "docs/*",
+)
 
 #: Where a diff says a line was added. Only additions are searched: the task id
 #: disappearing from a line somebody deleted says nothing about the new work.
@@ -77,6 +101,25 @@ class Checked:
     #: What ran and passed, so the card can say so. Silence about a check that
     #: passed would leave somebody wondering whether it ran at all.
     passed: str | None = None
+    #: True when nothing ran because there was nothing a check could tell us.
+    #: Said on the card: a check that was skipped and a check that passed look
+    #: the same from a phone, and they are not the same.
+    documentation_only: bool = False
+
+
+def only_documentation(work: Uncommitted, patterns: Sequence[str] = DOCUMENTATION) -> bool:
+    """Whether everything this would commit is prose.
+
+    All of it, not most: one `.py` beside four notes is a code change with
+    documentation attached, and the check that would have caught it is exactly
+    the one worth running.
+
+    An empty change is not documentation — there is nothing to say about it —
+    but that case is refused earlier anyway.
+    """
+    if not work.changes:
+        return False
+    return all(any(fnmatch(c.path, one) for one in patterns) for c in work.changes)
 
 
 def mentions_task(work: Uncommitted, reference: str | None) -> bool:
@@ -130,13 +173,19 @@ def _tail(text: str, lines: int = FAILURE_LINES) -> str:
     return "\n".join(kept)
 
 
-def run(command: str, path: Path, *, timeout: float = VALIDATE_TIMEOUT) -> tuple[bool, str]:
+def run(
+    command: str,
+    path: Path,
+    *,
+    timeout: float = VALIDATE_TIMEOUT,
+    on_progress=None,
+) -> tuple[bool, str]:
     """Run the project's check, through the one runner both callers share.
 
     Kept as a function here rather than calling `commands.run` from `check`
     directly, so a test can substitute it without reaching into another package.
     """
-    result = commands_run(command, path, timeout=timeout)
+    result = commands_run(command, path, timeout=timeout, on_progress=on_progress)
     return result.ok, result.output
 
 
@@ -146,7 +195,9 @@ def check(
     command: str | None,
     *,
     warn_if: Sequence[str] | None = None,
+    documentation: Sequence[str] = DOCUMENTATION,
     timeout: float = VALIDATE_TIMEOUT,
+    on_progress=None,
     run_check=run,
 ) -> Checked:
     """Everything that has to hold, in the order that wastes the least.
@@ -169,10 +220,17 @@ def check(
         if (said := found(work)) is not None:
             warnings.append(said)
 
+    # Nothing a test suite could say anything about, so it is not started. The
+    # warnings above still stand: they read what was written, and what was
+    # written is where a task id lives in a repository whose standards are
+    # markdown.
+    if only_documentation(work, documentation):
+        return Checked(warnings=tuple(warnings), documentation_only=True)
+
     if not command:
         return Checked(warnings=tuple(warnings))
 
-    passed, said = run_check(command, path, timeout=timeout)
+    passed, said = run_check(command, path, timeout=timeout, on_progress=on_progress)
     if not passed:
         return Checked(refused=command, output=said, warnings=tuple(warnings))
     return Checked(warnings=tuple(warnings), passed=command)
