@@ -100,6 +100,7 @@ COMMANDS: tuple[tuple[str, str], ...] = (
     ("chat", "Send a message into this seat's session"),
     ("to", "Send a message to another seat by name"),
     ("commit", "Commit this branch's work, with a message to approve"),
+    ("review_and_commit", "The same, with this project's checks and its review round"),
     ("open", "Open an agent on the machine — claude, codex, gemini"),
     ("command", "Run one of this project's own commands"),
     ("label", "Put a label on the task this branch is for"),
@@ -645,11 +646,14 @@ class TelegramChannel:
                 argument, actor, here or "", thread, replied=replied, anchor_id=anchor
             )
             return
-        if command == "commit":
+        if command in ("commit", "review_and_commit"):
             # Detached: this reads a repository, may run the project's whole
             # gate, and asks a model for a sentence. None of that may hold the
             # poller, which is what answers everybody else's buttons.
-            self._detach(self._propose_commit(here or "", thread), "/commit")
+            self._detach(
+                self._propose_commit(here or "", thread, full=command != "commit"),
+                f"/{command}",
+            )
             return
         if command == "open":
             await self._open_application(argument, here or "", thread)
@@ -1234,8 +1238,22 @@ class TelegramChannel:
             commits.flag_of(said),
         )
 
-    async def _propose_commit(self, chat_id: str, thread_id: int | None) -> None:
-        """`/commit` — read the branch's uncommitted work and ask about it."""
+    async def _propose_commit(
+        self, chat_id: str, thread_id: int | None, *, full: bool = False
+    ) -> None:
+        """Read the branch's uncommitted work and offer to commit it.
+
+        Two commands, one path. `/commit` proposes a message and stops there —
+        which is what most changes want, and what a change to `scripts/` wants
+        every time. `/review_and_commit` adds whatever the project has asked
+        for: its own check, its warnings, and the round it offers instead of
+        committing.
+
+        Split by command rather than by a list of exceptions. A rule that says
+        *these paths skip the gate* has to be maintained against a repository
+        that keeps growing, and gets it wrong quietly; a second command is
+        chosen at the moment somebody already knows which of the two they meant.
+        """
         found = self._repository_for(chat_id)
         if found is None:
             await self._say(
@@ -1260,69 +1278,71 @@ class TelegramChannel:
 
         # Said before it starts, not after. A project's own check can run for
         # minutes, and silence for minutes reads as nothing having happened.
-        skipping = commits.validation.only_documentation(work)
-        if found.validate and not skipping:
-            await self._say(
-                f"\u23f3 Running <code>{html.escape(found.validate)}</code>\u2026",
-                chat_id,
-                thread_id,
-            )
-        elif found.validate:
-            await self._say(
-                f"\U0001f4c4 Documentation only \u2014 not running "
-                f"<code>{html.escape(found.validate)}</code>.",
-                chat_id,
-                thread_id,
-            )
-
-        # Progress from the worker thread, put back on the loop. Somebody who
-        # pressed `/commit` is waiting for a card and cannot do anything else
-        # with that thread, so a run that says nothing for three minutes reads
-        # as Halyard having died rather than as a test suite working.
-        loop = asyncio.get_running_loop()
-
-        def progress(seconds: float, latest: str) -> None:
-            asyncio.run_coroutine_threadsafe(
-                self._say(
-                    f"\u2026 {self._elapsed(seconds)} \u2014 "
-                    f"<code>{html.escape(latest[:150])}</code>",
+        checked = commits.Checked()
+        if full:
+            skipping = commits.validation.only_documentation(work)
+            if found.validate and not skipping:
+                await self._say(
+                    f"\u23f3 Running <code>{html.escape(found.validate)}</code>\u2026",
                     chat_id,
                     thread_id,
-                ),
-                loop,
-            )
+                )
+            elif found.validate:
+                await self._say(
+                    f"\U0001f4c4 Documentation only \u2014 not running "
+                    f"<code>{html.escape(found.validate)}</code>.",
+                    chat_id,
+                    thread_id,
+                )
 
-        started = time.monotonic()
-        checked = await asyncio.to_thread(
-            partial(
-                commits.check,
-                work,
-                path,
-                found.validate,
-                warn_if=found.warn_if,
-                on_progress=progress,
-            )
-        )
-        logger.info(
-            "commit %s: %d files, checks %s in %.1fs",
-            project,
-            len(work.changes),
-            "skipped (documentation)" if checked.documentation_only else "ran",
-            time.monotonic() - started,
-        )
-        if checked.refused:
-            # No card at all. A failing check is a fact rather than a judgement,
-            # so there is nothing here for somebody to weigh.
-            said = (
-                f"\U0001f6ab <code>{html.escape(checked.refused)}</code> failed. "
-                "Nothing was committed."
-            )
-            if checked.output:
-                said += f"\n\n<pre>{html.escape(checked.output)}</pre>"
-            await self._say(said, chat_id, thread_id)
-            return
+            # Progress from the worker thread, put back on the loop. Somebody
+            # who pressed this is waiting for a card and cannot do anything else
+            # with that thread, so a run that says nothing for three minutes
+            # reads as Halyard having died rather than as a test suite working.
+            loop = asyncio.get_running_loop()
 
-        asked = commits.confirmation.inquiry(found.confirmation, path)
+            def progress(seconds: float, latest: str) -> None:
+                asyncio.run_coroutine_threadsafe(
+                    self._say(
+                        f"\u2026 {self._elapsed(seconds)} \u2014 "
+                        f"<code>{html.escape(latest[:150])}</code>",
+                        chat_id,
+                        thread_id,
+                    ),
+                    loop,
+                )
+
+            started = time.monotonic()
+            checked = await asyncio.to_thread(
+                partial(
+                    commits.check,
+                    work,
+                    path,
+                    found.validate,
+                    warn_if=found.warn_if,
+                    on_progress=progress,
+                )
+            )
+            logger.info(
+                "commit %s: %d files, checks %s in %.1fs",
+                project,
+                len(work.changes),
+                "skipped (documentation)" if checked.documentation_only else "ran",
+                time.monotonic() - started,
+            )
+            if checked.refused:
+                # No card at all. A failing check is a fact rather than a
+                # judgement, so there is nothing here for somebody to weigh.
+                said = (
+                    f"\U0001f6ab <code>{html.escape(checked.refused)}</code> failed. "
+                    "Nothing was committed."
+                )
+                if checked.output:
+                    said += f"\n\n<pre>{html.escape(checked.output)}</pre>"
+                await self._say(said, chat_id, thread_id)
+                return
+
+        asked = commits.confirmation.inquiry(found.confirmation, path) if full else ""
         writing = time.monotonic()
         message, summary, flag = await self._write_message(chat_id, work, asked)
         logger.info(
@@ -1344,7 +1364,10 @@ class TelegramChannel:
         # thing to a person — look here before tapping — and splitting them into
         # two blocks would make the card an argument between two authors.
         alarms = (*checked.warnings, *((flag,) if flag else ()))
-        handle = self._proposals.add(project, path, work, message, summary, alarms)
+        offers_round = full and commits.confirmation.offered(found.confirmation)
+        handle = self._proposals.add(
+            project, path, work, message, summary, alarms, reviewed=offers_round
+        )
         await self._say(
             commit_card.render(
                 project=project,
@@ -1355,9 +1378,7 @@ class TelegramChannel:
             ),
             chat_id,
             thread_id,
-            reply_markup=commit_card.keyboard(
-                handle, confirmation=commits.confirmation.offered(found.confirmation)
-            ),
+            reply_markup=commit_card.keyboard(handle, confirmation=offers_round),
         )
 
     async def _rewrite_commit(
@@ -1392,14 +1413,8 @@ class TelegramChannel:
             ),
             chat_id,
             thread_id,
-            reply_markup=commit_card.keyboard(
-                handle, confirmation=self._offers_confirmation(reworded.project)
-            ),
+            reply_markup=commit_card.keyboard(handle, confirmation=reworded.reviewed),
         )
-
-    def _offers_confirmation(self, project: str) -> bool:
-        found = self._repositories.get(project)
-        return commits.confirmation.offered(found.confirmation) if found else False
 
     async def _decide_commit(
         self, proposed: tuple[str, str], user_id: str, query_id: str, callback: dict
