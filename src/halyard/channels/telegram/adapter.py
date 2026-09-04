@@ -617,6 +617,13 @@ class TelegramChannel:
         command = command.lstrip("/").split("@")[0].lower()
         argument = argument.strip()
 
+        # Every command, as it arrives. Nothing on this path was logged at all,
+        # which is why a `/commit` that seemed to do nothing left no trace to
+        # look at afterwards — on either machine, by either of us. A command
+        # that reached Halyard and a command that never did are the first two
+        # things to tell apart, and the log could not tell them apart.
+        logger.info("Command /%s from %s in %s", command, actor, here or "the default chat")
+
         if command == "chat":
             # An explicit way to say the same thing as plain text. Worth having:
             # a bot in a group sees only commands while privacy mode is on, and

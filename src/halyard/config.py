@@ -15,6 +15,7 @@ interface; reach it over Tailscale or WireGuard instead.
 
 from __future__ import annotations
 
+import logging
 from enum import StrEnum
 from pathlib import Path
 from typing import Annotated, Any
@@ -28,6 +29,8 @@ from pydantic_settings import (
     PydanticBaseSettingsSource,
     SettingsConfigDict,
 )
+
+logger = logging.getLogger(__name__)
 
 
 class ChannelKind(StrEnum):
@@ -67,8 +70,22 @@ class YamlSettings(PydanticBaseSettingsSource):
     def __init__(self, settings_cls: type[BaseSettings], path: Path | None = None) -> None:
         super().__init__(settings_cls)
         self._path = path
+        self._read: dict[str, Any] | None = None
 
     def _values(self) -> dict[str, Any]:
+        """The `settings:` block, read once.
+
+        Cached because `get_field_value` asks per field, and every field used to
+        re-read and re-parse the file — which for an unreadable one meant the
+        same error logged twenty-eight times over. A reason said once is read;
+        said twenty-eight times it is scrolled past.
+        """
+        if self._read is not None:
+            return self._read
+        self._read = self._load()
+        return self._read
+
+    def _load(self) -> dict[str, Any]:
         from halyard.core.config_file import find_config
 
         path = self._path or find_config()
@@ -76,10 +93,21 @@ class YamlSettings(PydanticBaseSettingsSource):
             return {}
         try:
             document = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
-        except (OSError, yaml.YAMLError):
-            # A file that cannot be read is reported by `halyard doctor`, which
-            # says which file and why. Refusing to start here would turn one
-            # bad line into a control plane that cannot say what is wrong.
+        except (OSError, yaml.YAMLError) as unreadable:
+            # Said loudly, because silence here is worse than the fault.
+            #
+            # This used to return an empty configuration without a word, and
+            # what came next was pydantic reporting `HALYARD_CHANNEL` missing —
+            # true, and pointing at the wrong thing entirely. One mistyped line
+            # of YAML became a service that restarted 553 times, never started,
+            # and said nothing about the file it could not read. Measured on a
+            # Mac mini that had just been configured for a new release.
+            #
+            # Still not a refusal to start: `halyard doctor` has to stay
+            # runnable, and the environment dialect is a complete way to
+            # configure this. But the reason belongs in the log, above the
+            # error it causes.
+            logger.error("Could not read %s, so no settings were loaded: %s", path, unreadable)
             return {}
         block = document.get("settings") if isinstance(document, dict) else None
         return {str(k): v for k, v in block.items()} if isinstance(block, dict) else {}
