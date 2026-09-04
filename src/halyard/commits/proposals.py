@@ -49,6 +49,10 @@ class Proposal:
     #: see `repository.summary_of` for why a body nobody's history has ever
     #: carried does not get invented here.
     summary: tuple[str, ...] = ()
+    #: Whether this card offers the project's review round. Held rather than
+    #: recomputed, because it is a fact about which command made the card:
+    #: rewording a plain `/commit` must not grow a button it never had.
+    reviewed: bool = False
     #: What was worth flagging but not worth refusing over. Held so rewording
     #: the message redraws the card with the warning still on it — a warning
     #: that disappears when you type is a warning nobody heeds twice.
@@ -77,6 +81,7 @@ class Proposals:
         message: str,
         summary: tuple[str, ...] = (),
         warnings: tuple[str, ...] = (),
+        reviewed: bool = False,
     ) -> str:
         """Offer one, and return the handle its buttons will carry."""
         self._forget_stale()
@@ -89,6 +94,7 @@ class Proposals:
             at=self._clock(),
             summary=summary,
             warnings=warnings,
+            reviewed=reviewed,
         )
         return handle
 

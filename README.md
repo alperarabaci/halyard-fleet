@@ -95,6 +95,7 @@ reading configuration.
 | `/to` | hand a message to another seat by name |
 | `/md` | *(configurable)* have the agent write its answer to a file and pass the path |
 | `/commit` | commit this branch's work, with a message to approve — and push |
+| `/review_and_commit` | the same, plus this project's own checks and its review round |
 | `/command` | run one of the project's own commands, and hear how it went |
 | `/label` | put a label on the task this branch is for |
 | `/open` | start an agent that is not running — `claude`, `codex`, `gemini` |
@@ -169,8 +170,14 @@ button is pressed; nothing is committed, and committing afterwards is a fresh
 what is worth asking again is something a team learns about its own failures.
 
 `/commit` takes the whole working tree, has a message written for it in this
-repository's own style, and shows what changed rather than only which files. A
-failing `validate:` means no card at all. `/command` runs in the background and
+repository's own style, and shows what changed rather than only which files —
+and stops there, which is what most changes want. `/review_and_commit` is the
+same command with everything the project asked for: `validate:` runs, the
+warnings apply, and the round is offered. A failing `validate:` means no card at
+all. Two commands rather than a list of paths that skip the gate: such a list
+has to be maintained against a repository that keeps growing and gets it wrong
+quietly, while a command is chosen by somebody who already knows which they
+meant. `/command` runs in the background and
 reports the tail when it finishes, one at a time per project. `/label` reads
 the task number off the branch and asks its issue tracker — `HALYARD_FORGE_TOKEN`
 is the only thing it needs, and only a host that cannot name itself needs
