@@ -91,6 +91,8 @@ def build_service(
     store: ApprovalStore | None = None,
     audit: AuditLog | None = None,
     ttl: timedelta = timedelta(minutes=5),
+    gate: Gate | None = None,
+    refuse_agent_commits: bool = False,
 ) -> tuple[ApprovalService, ApprovalStore, JsonlAuditSink]:
     store = store or ApprovalStore(ttl=ttl)
     sink = JsonlAuditSink(tmp_path / "audit.jsonl")
@@ -103,6 +105,8 @@ def build_service(
         registry=SessionRegistry(),
         channel=channel if channel is not None else StubChannel(store, Decision.ALLOW),
         project="alpha-engine",
+        **({"gate": gate} if gate is not None else {}),
+        refuse_agent_commits=refuse_agent_commits,
     )
     return service, store, sink
 
@@ -338,6 +342,7 @@ async def test_a_request_without_a_project_dir_keeps_the_configured_name(
 # --- questions: the fail-open twin of the approval path ----------------------
 
 import asyncio  # noqa: E402
+import json  # noqa: E402
 
 from halyard.core.gate import Gate  # noqa: E402
 from halyard.core.questions import Choice, QuestionStore  # noqa: E402
@@ -647,3 +652,75 @@ async def test_an_unnamed_tool_still_asks(tmp_path: Path) -> None:
 
     assert not outcome.allowed
     assert AuditAction.APPROVAL_REQUESTED in {r.action for r in await sink.read_all()}
+
+
+# --- what is refused before anybody is asked --------------------------------
+
+
+async def test_an_agents_commit_is_refused_when_that_is_switched_on(tmp_path: Path) -> None:
+    """Halyard commits on request from a phone, with the diff summarised and a
+    message to approve. An agent deciding on its own that now is the moment to
+    write history is a different act."""
+    service, store, sink = build_service(tmp_path, refuse_agent_commits=True)
+    await sink.open()
+
+    outcome = await ask(service, "git commit -m 'wip'")
+
+    assert outcome.decision is BridgeDecision.DENY
+    assert "agents do not commit" in outcome.reason
+    # Nothing was asked: no card, no request anybody has to answer.
+    assert await store.list_open() == []
+    await sink.close()
+
+
+async def test_it_is_off_unless_somebody_asks_for_it(tmp_path: Path) -> None:
+    """Nothing changes for anybody who has not switched it on."""
+    service, _, sink = build_service(tmp_path)
+    await sink.open()
+
+    assert (await ask(service, "git commit -m 'wip'")).decision is BridgeDecision.ALLOW
+    await sink.close()
+
+
+async def test_a_pause_does_not_lift_it(tmp_path: Path) -> None:
+    """Pausing means "stop asking me", and hands each call back to the runtime's
+    own permission list — the right answer for a question and the wrong one for
+    a rule. A guard a pause switches off is a guard nobody can rely on."""
+    gate = Gate()
+    service, _, sink = build_service(tmp_path, gate=gate, refuse_agent_commits=True)
+    await sink.open()
+    await gate.pause("tg:1")
+
+    outcome = await ask(service, "git push")
+
+    assert outcome.decision is BridgeDecision.DENY
+    # And an ordinary command still defers, so pause otherwise means what it did.
+    assert (await ask(service, "git status")).decision is BridgeDecision.DEFER
+    await sink.close()
+
+
+async def test_it_cannot_be_configured_around(tmp_path: Path) -> None:
+    """Checked before the allow-lists, so naming `Bash` under `tools:` cannot
+    turn a refusal into a grant."""
+    service, _, sink = build_service(tmp_path, refuse_agent_commits=True)
+    service._tools = ("Bash",)
+    await sink.open()
+
+    assert (await ask(service, "git push")).decision is BridgeDecision.DENY
+    await sink.close()
+
+
+async def test_a_refusal_is_recorded_as_its_own_thing(tmp_path: Path) -> None:
+    """Not as a denial: a denial is what a person chose, and counting the two
+    together would make a Tuesday look like refusals somebody never made."""
+    service, _, sink = build_service(tmp_path, refuse_agent_commits=True)
+    await sink.open()
+
+    await ask(service, "git commit -m x")
+    await sink.close()
+
+    written = [json.loads(line) for line in (tmp_path / "audit.jsonl").read_text().splitlines()]
+    refused = [one for one in written if one["action"] == "call.refused"]
+    assert len(refused) == 1
+    assert refused[0]["detail"]["act"] == "commit"
+    assert refused[0]["actor"] == "config"

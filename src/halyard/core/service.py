@@ -18,7 +18,7 @@ import logging
 from dataclasses import dataclass
 from enum import StrEnum
 
-from halyard.core import tools, writes
+from halyard.core import refusals, tools, writes
 from halyard.core.approvals import (
     ApprovalRequest,
     ApprovalStore,
@@ -32,6 +32,7 @@ from halyard.core.audit import (
     bridge_error,
     question_answered,
     question_asked,
+    refused_outright,
     tool_preauthorized,
     write_preauthorized,
 )
@@ -419,12 +420,16 @@ class ApprovalService:
         seats: dict[str, Role] | None = None,
         allowed_writes: tuple[str, ...] = (),
         allowed_tools: tuple[str, ...] = (),
+        refuse_agent_commits: bool = False,
     ) -> None:
         self._seats = seats or {}
         self._store = store
         self._gate = gate or Gate()
         self._policy = policy
         # Paths a write may reach without a card. Empty unless configured.
+        #: Off unless somebody says otherwise, so nothing changes for anybody
+        #: who has not asked for it. See `core/refusals.py`.
+        self._refuse_agent_commits = refuse_agent_commits
         self._writes = tuple(allowed_writes)
         # Tools that may run without a card, by name. Also empty by default.
         self._tools = tuple(allowed_tools)
@@ -498,6 +503,22 @@ class ApprovalService:
         declared_risk: RiskLevel | None,
         file_path: str | None = None,
     ) -> ApprovalOutcome:
+        # Before everything, including the pause. This is not an approval that
+        # somebody could be asked for and it is not a grant that could be
+        # configured around — it is a standing answer, and a guard a pause
+        # quietly switches off is a guard nobody can rely on.
+        if act := refusals.writes_history_if(command, self._refuse_agent_commits):
+            await self._try_to_record(
+                refused_outright(
+                    session_id=session_id,
+                    agent_id=agent_id,
+                    project=project_name(project_dir, cwd, self._project),
+                    tool=tool,
+                    act=act,
+                )
+            )
+            return ApprovalOutcome(decision=BridgeDecision.DENY, reason=refusals.why(act))
+
         # Redaction first, before the command is copied anywhere. Everything
         # downstream — policy, the store, the audit log, the card — sees only
         # what comes out of here.

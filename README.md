@@ -94,6 +94,10 @@ reading configuration.
 | `/model`, `/effort` | what answers, and how hard it thinks |
 | `/to` | hand a message to another seat by name |
 | `/md` | *(configurable)* have the agent write its answer to a file and pass the path |
+| `/commit` | commit this branch's work, with a message to approve — and push |
+| `/command` | run one of the project's own commands, and hear how it went |
+| `/label` | put a label on the task this branch is for |
+| `/open` | start an agent that is not running — `claude`, `codex`, `gemini` |
 | `/status` | what each seat is, and what is running |
 | `/pause`, `/resume` | step out of the way, and come back |
 
@@ -133,6 +137,29 @@ tools:
 One pattern covers the same tool on a local server and a production one. `Bash`
 and the file tools cannot be granted here — the first is what the gate is for,
 and the second is granted by destination under `writes:`.
+
+**The last four commands are per-project**, and each is one line under the
+project in `halyard.yaml`:
+
+```yaml
+projects:
+  alpha-engine:
+    path: ~/code/alpha-engine
+    validate: make test-fast          # /commit runs this first, every time
+    commands:                         # what /command offers, by name
+      test-all: make test-all
+      bootstrap: make bootstrap-up
+    labels: [andon, rework]           # narrows /label; empty means all of them
+    warn_if: [task-id-missing]        # the default; [] turns the warnings off
+```
+
+`/commit` takes the whole working tree, has a message written for it in this
+repository's own style, and shows what changed rather than only which files. A
+failing `validate:` means no card at all. `/command` runs in the background and
+reports the tail when it finishes, one at a time per project. `/label` reads
+the task number off the branch and asks its issue tracker — `HALYARD_FORGE_TOKEN`
+is the only thing it needs, and only a host that cannot name itself needs
+`forge:` as well.
 
 When Claude Code asks a **multiple-choice question** (its `AskUserQuestion`
 tool), the options arrive on your phone as buttons — tap one, or reply with your
@@ -195,6 +222,18 @@ what they say. macOS only — on Linux, run `halyard serve` under a systemd unit
   that cannot start at all, both let the command through. `doctor` checks for the
   second.
 - **One bot token per machine.** Telegram's `getUpdates` has a single consumer.
+- **`/commit` reads the whole working tree, not the staging area.** Agents write
+  code and stage nothing, so a control plane that answered "nothing is staged"
+  would be refusing the only thing it was asked for. What `.gitignore` excludes
+  is excluded, and the card names the files that are new.
+- **A commit runs the project's own check first, when there is one.** `validate:`
+  under a project — `make test-fast` — runs on every `/commit`, and a failing
+  check means no card at all rather than a question nobody can usefully answer.
+- **Agents can be stopped from committing at all.** `HALYARD_REFUSE_AGENT_COMMITS`
+  refuses an agent's own `git commit` or `git push` before anybody is asked. Off
+  by default. Unlike everything else the gate does, `/pause` does not lift it: a
+  pause means "stop asking me", and a guard a pause switches off is a guard
+  nobody can rely on.
 - **`/pause` steps aside rather than denying.** The runtime's own permission list
   then decides, with no card and no audit entry.
 - **The gate covers what the matcher covers** — Bash, the file tools, the

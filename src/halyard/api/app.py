@@ -395,6 +395,7 @@ def create_app(settings: Settings, *, channel=None) -> FastAPI:
         seats=seats,
         allowed_writes=allowed_writes,
         allowed_tools=allowed_tools,
+        refuse_agent_commits=settings.refuse_agent_commits,
     )
     questions = QuestionService(
         store=question_store,

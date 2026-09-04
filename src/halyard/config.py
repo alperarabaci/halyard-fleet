@@ -273,6 +273,13 @@ class Settings(BaseSettings):
     #: GitLab has no scope narrower than `api` for writing a label onto an
     #: issue, so a *project* access token is the way to make that mean less.
     forge_token: str | None = Field(default=None, validation_alias="HALYARD_FORGE_TOKEN")
+    #: When true, an agent's own `git commit` or `git push` is refused before
+    #: anybody is asked. Off by default, so nothing changes for anybody who has
+    #: not asked for it. See `core/refusals.py` — including why `/pause` does
+    #: not lift it.
+    refuse_agent_commits: bool = Field(
+        default=False, validation_alias="HALYARD_REFUSE_AGENT_COMMITS"
+    )
 
     @model_validator(mode="after")
     def _timeouts_must_be_ordered(self) -> Settings:
