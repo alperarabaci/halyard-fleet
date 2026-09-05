@@ -124,7 +124,9 @@ HALYARD_CLAUDE_DEFAULT_MODEL=sonnet
 
 An explicit `HALYARD_CLAUDE_BINARY` similarly overrides the selected
 executable. `/status` shows the session model and any Halyard override
-separately.
+separately — "at the desk" is what the session itself is on, "from here" is what
+a turn sent from the phone would use. A Codex seat also shows how full its usage
+windows are; Claude Code publishes no such number, so its seats show none.
 
 ### Optional: keep a navigator and a driver apart
 

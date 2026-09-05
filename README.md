@@ -99,7 +99,7 @@ reading configuration.
 | `/command` | run one of the project's own commands, and hear how it went |
 | `/label` | put a label on the task this branch is for |
 | `/open` | start an agent that is not running — `claude`, `codex`, `gemini` |
-| `/status` | what each seat is, and what is running |
+| `/status` | what each seat is, what is running, and how full its limits are |
 | `/doctor` | the same check as `halyard doctor`, read from a phone |
 | `/pause`, `/resume` | step out of the way, and come back |
 
@@ -249,9 +249,10 @@ what they say. macOS only — on Linux, run `halyard serve` under a systemd unit
   code and stage nothing, so a control plane that answered "nothing is staged"
   would be refusing the only thing it was asked for. What `.gitignore` excludes
   is excluded, and the card names the files that are new.
-- **A commit runs the project's own check first, when there is one.** `validate:`
-  under a project — `make test-fast` — runs on every `/commit`, and a failing
+- **The project's own check belongs to `/review_and_commit`, not `/commit`.**
+  `validate:` under a project — `make test-fast` — runs there, and a failing
   check means no card at all rather than a question nobody can usefully answer.
+  Plain `/commit` writes a message and stops, which is what most changes want.
 - **Agents can be stopped from committing at all.** `HALYARD_REFUSE_AGENT_COMMITS`
   refuses an agent's own `git commit` or `git push` before anybody is asked. Off
   by default. Unlike everything else the gate does, `/pause` does not lift it: a
@@ -268,6 +269,17 @@ what they say. macOS only — on Linux, run `halyard serve` under a systemd unit
   turn you started over Telegram.** A Telegram-initiated turn runs headless, where
   Claude Code does not load `AskUserQuestion` — so it asks in prose you can just reply
   to, rather than as buttons.
+- **Only Codex says how full its limits are.** It writes its accounting into its
+  own transcript on every turn, so `/status` can read it back. Claude Code
+  publishes nothing to read — measured on 2.1.246: no usage command on the CLI,
+  and per-turn token counts with no limit anywhere among them — so its seats show
+  no standing rather than a guess.
+- **Nothing reports when the control plane's own token expires.** `claude auth
+  status` answers with eight fields and not one of them is a date, and the token
+  itself is opaque. So Halyard notes when it first saw the token and says so a
+  month before the year is up, in words that admit it is an estimate. Minting a
+  replacement starts the clock again on its own; the token is never written down,
+  only a salted derivation of it.
 - **Only macOS has been run.** Nothing here is deliberately macOS-only and the
   Linux paths exist, but they have not been exercised: the CLIs are found by
   looking in places a Mac keeps them, and holding the machine awake uses
