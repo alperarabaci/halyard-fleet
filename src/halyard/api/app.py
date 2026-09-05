@@ -22,6 +22,7 @@ from fastapi import FastAPI, Request, Response
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
 
+from halyard import __version__
 from halyard.agents import registry as runtimes
 from halyard.channels.stub import StubChannel
 from halyard.channels.telegram import TelegramApi, TelegramChannel
@@ -502,7 +503,7 @@ def create_app(settings: Settings, *, channel=None) -> FastAPI:
     app = FastAPI(
         title="Halyard Fleet",
         description="A control plane for orchestrating coding agents remotely.",
-        version="0.7.1",
+        version=__version__,
         lifespan=lifespan,
     )
     app.state.settings = settings
