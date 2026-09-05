@@ -24,4 +24,4 @@
 #: metadata kept answering `0.7.1` until an explicit `--reinstall-package`. One
 #: copy that is permanently stale is not an improvement on two copies a test
 #: keeps together.
-__version__ = "0.7.1"
+__version__ = "0.7.2"
