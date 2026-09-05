@@ -179,3 +179,68 @@ def test_a_configuration_from_before_seats_still_routes(
 
     assert channel._route(Role.NAVIGATOR)[0] == "-1001"
     assert channel._route(Role.DRIVER)[0] == "-1002"
+
+
+#: The same chain for a runtime whose sessions cannot be named. Two projects,
+#: because the point is that the codebase is what tells the seats apart.
+WITHOUT_SESSION_NAMES = """\
+settings:
+  HALYARD_CHANNEL: telegram
+  TELEGRAM_BOT_TOKEN: "123:not-a-real-token"
+  TELEGRAM_CHAT_ID: "-9999"
+  TELEGRAM_AUTHORIZED_USER_IDS: "4242"
+  HALYARD_DB_PATH: {db}
+  HALYARD_AUDIT_LOG: {audit}
+
+projects:
+  a-project:
+    seats:
+      onav: {{runtime: opencode, chat: "-2001", role: navigator}}
+      nav: {{runtime: claude-code, session: a-nav, chat: "-1001", role: navigator}}
+  another-project:
+    seats:
+      onav2: {{runtime: opencode, chat: "-2002", role: navigator}}
+"""
+
+
+@pytest.fixture
+def app_without_session_names(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "halyard.yaml").write_text(
+        WITHOUT_SESSION_NAMES.format(db=tmp_path / "halyard.db", audit=tmp_path / "audit.jsonl")
+    )
+    return create_app(Settings())
+
+
+def test_a_seat_with_no_session_name_is_reached_by_its_project(
+    app_without_session_names,
+) -> None:
+    """opencode writes its own session titles from the conversation and hands
+    out ids nobody types, so a seat there is written without a `session:`. The
+    codebase is what places the card — and it has to place it in the right one
+    of two, which routing by role could not do."""
+    channel = app_without_session_names.state.channel
+
+    assert channel._route(None, None, "opencode", "ses_abc", "a-project")[0] == "-2001"
+    assert channel._route(None, None, "opencode", "ses_xyz", "another-project")[0] == "-2002"
+
+
+def test_the_project_does_not_outrank_a_session_name(app_without_session_names) -> None:
+    """A seat that can be addressed by name still is. The project is what is
+    tried when nothing else identifies the seat, not instead of it."""
+    channel = app_without_session_names.state.channel
+
+    assert channel._route(None, "a-nav", "claude-code", None, "a-project")[0] == "-1001"
+
+
+def test_an_unconfigured_project_falls_back_rather_than_guessing(
+    app_without_session_names,
+) -> None:
+    """It reaches the bot's own chat, which is visible and wrong-looking. A
+    guess would reach somebody's group and look right."""
+    channel = app_without_session_names.state.channel
+
+    assert (
+        channel._route(None, None, "opencode", "ses_abc", "a-project-nobody-configured")[0]
+        == "-9999"
+    )
