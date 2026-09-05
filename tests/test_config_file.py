@@ -304,3 +304,91 @@ def test_a_broken_configuration_says_which_file_and_why(tmp_path, monkeypatch, c
     assert any("halyard.yaml" in one and "no settings were loaded" in one for one in said)
     # Once, not once per field: a reason said twenty-eight times is scrolled past.
     assert sum("no settings were loaded" in one for one in said) == 1
+
+
+# --- the files a configuration names ----------------------------------------
+
+
+def a_project(tmp_path, **body) -> list:
+    """One project on disk, configured as the YAML would write it."""
+    from halyard.core.config_file import projects_from_yaml
+
+    code = tmp_path / "alpha-engine"
+    code.mkdir(exist_ok=True)
+    written = "\n".join(f"    {line}" for line in body.pop("lines", []))
+    return projects_from_yaml(
+        f"projects:\n  alpha-engine:\n    path: {code}\n{written}\n"
+        "    seats:\n      nav: {runtime: claude-code}\n"
+    )
+
+
+def test_a_configuration_whose_files_are_all_there_says_nothing(tmp_path) -> None:
+    """Empty is the answer worth being able to get in one look."""
+    from halyard.core.config_file import missing_files
+
+    (tmp_path / "alpha-engine").mkdir()
+    (tmp_path / "alpha-engine" / "REVIEW.md").write_text("# the round")
+
+    found = a_project(tmp_path, lines=["confirmation:", "  review: REVIEW.md"])
+
+    assert missing_files(found) == []
+
+
+def test_a_file_that_is_not_there_is_named_with_its_setting(tmp_path) -> None:
+    """The measured failure: a Mac mini ran for weeks with none of its prompt
+    files present. They were named in `halyard.yaml`, read at the moment they
+    were needed, and their absence produced a warning nobody was reading."""
+    from halyard.core.config_file import missing_files
+
+    found = a_project(tmp_path, lines=["confirmation:", "  review: NOTES/GONE.md"])
+
+    said = missing_files(found)
+    assert len(said) == 1
+    assert "alpha-engine" in said[0]
+    assert "confirmation.review" in said[0]
+    assert "NOTES/GONE.md" in said[0]
+
+
+def test_a_seat_prompt_file_is_checked_too(tmp_path) -> None:
+    from halyard.core.config_file import missing_files, projects_from_yaml
+
+    code = tmp_path / "alpha-engine"
+    code.mkdir()
+    found = projects_from_yaml(
+        f"projects:\n  alpha-engine:\n    path: {code}\n    seats:\n"
+        "      nav: {runtime: claude-code, after_compaction: NOTES/orient.md}\n"
+    )
+
+    said = missing_files(found)
+    assert said and "nav's after_compaction" in said[0]
+
+    (code / "NOTES").mkdir()
+    (code / "NOTES" / "orient.md").write_text("here")
+    assert missing_files(found) == []
+
+
+def test_paths_are_read_against_the_project(tmp_path) -> None:
+    """Where these files live, and the whole reason the check exists: the ones
+    that went missing were relative to somewhere else entirely."""
+    from halyard.core.config_file import missing_files
+
+    code = tmp_path / "alpha-engine"
+    code.mkdir()
+    (tmp_path / "REVIEW.md").write_text("beside the project, not in it")
+
+    found = a_project(tmp_path, lines=["confirmation:", "  review: REVIEW.md"])
+
+    assert missing_files(found), "a file beside the project is not a file in it"
+
+
+def test_a_project_with_no_path_is_not_guessed_at(tmp_path) -> None:
+    """A project can be named and given seats before anybody decides where its
+    code lives."""
+    from halyard.core.config_file import missing_files, projects_from_yaml
+
+    found = projects_from_yaml(
+        "projects:\n  alpha-engine:\n    confirmation: {review: NOTES/GONE.md}\n"
+        "    seats:\n      nav: {runtime: claude-code}\n"
+    )
+
+    assert missing_files(found) == []

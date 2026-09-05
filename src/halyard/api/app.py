@@ -36,6 +36,7 @@ from halyard.core.audit import (
     JsonlAuditSink,
     SqliteAuditSink,
 )
+from halyard.core.config_file import missing_files
 from halyard.core.events import RiskLevel, Role
 from halyard.core.gate import Gate
 from halyard.core.policy import Policy
@@ -52,6 +53,25 @@ from halyard.core.service import (
 from halyard.core.transcripts import TranscriptWatcher
 
 logger = logging.getLogger(__name__)
+
+
+def configured_projects() -> dict:
+    """Each configured project by name, or nothing if the file cannot be read.
+
+    Read defensively for the same reason `prompts:` is: a mistake in the part of
+    the configuration a person edits often must not take the gate down with it.
+
+    Projects without a `path:` are dropped — a project can be named and given
+    seats before anybody decides where its code lives, and everything that uses
+    this needs somewhere to look.
+    """
+    from halyard.core.config_file import projects as described
+
+    try:
+        return {p.name: p for p in described() if p.path}
+    except Exception:
+        logger.warning("Could not read `projects:`", exc_info=True)
+        return {}
 
 
 class ApprovalRequestBody(BaseModel):
@@ -255,21 +275,6 @@ def _build_channel(
         logger.warning("Ignoring the `prompts:` block: %s", error)
         prompts = dict(configured_prompts.DEFAULTS)
 
-    def _repositories() -> dict:
-        """Each configured project's checkout, for `/commit`.
-
-        Projects described without a `path:` are simply absent: a project can
-        be named and given seats before anybody decides where its code lives,
-        and `/commit` says it does not know rather than guessing.
-        """
-        from halyard.core.config_file import projects as described
-
-        try:
-            return {p.name: p for p in described() if p.path}
-        except Exception:
-            logger.warning("Could not read `projects:` for /commit", exc_info=True)
-            return {}
-
     # `Settings` has already refused to start if any of these are missing.
     return TelegramChannel(
         api=TelegramApi(settings.telegram_bot_token or ""),
@@ -290,7 +295,7 @@ def _build_channel(
         # Where each project's code is, for `/commit`. Read here rather than in
         # the channel so a malformed `projects:` block cannot take the gate
         # down — the same reason `prompts:` is loaded defensively above.
-        repositories=_repositories(),
+        repositories=configured_projects(),
         forge_token=settings.forge_token,
         session_names={
             role: name
@@ -412,8 +417,21 @@ def create_app(settings: Settings, *, channel=None) -> FastAPI:
     watcher = TranscriptWatcher(channel=resolved_channel, gate=gate)
     # Writes the record a compaction is about to make unrecoverable, in a turn
     # of its own so the session it is about is never resumed or forked.
+    known_projects = configured_projects()
+    # Prompt files live in the codebase they describe, so they are looked for
+    # there rather than beside Halyard. See `compaction.in_project`.
+    project_paths = {name: found.path for name, found in known_projects.items() if found.path}
+
+    # Said at startup, because nothing said it before: a file named in the
+    # configuration and not on disk produced a warning at the moment it was
+    # needed, in a log nobody was reading, and a compaction that carried
+    # nothing. One machine ran that way for weeks.
+    for line in missing_files(list(known_projects.values())):
+        logger.warning("%s", line)
+
     recorder = after_compaction.Recorder(
         seats=configured_seats,
+        projects=project_paths,
         runners=by_runtime,
         model=settings.compaction_model,
         limit=settings.compaction_record_limit,
@@ -604,6 +622,7 @@ def create_app(settings: Settings, *, channel=None) -> FastAPI:
             agent_id=body.agent_id,
             session_name=body.session_name,
             session_id=body.session_id,
+            projects=project_paths,
         )
         record = await recorder.take(
             body.session_id, agent_id=body.agent_id, session_name=body.session_name

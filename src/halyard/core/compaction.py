@@ -37,6 +37,7 @@ import html
 import json
 import logging
 import time
+from collections.abc import Mapping
 from pathlib import Path
 
 from halyard.core.seats import Seat, for_session
@@ -56,10 +57,15 @@ AFTER_COMPACTION = "compact"
 def read(path: str | Path, root: Path | None = None) -> str | None:
     """The text to inject, or None if there is nothing to inject.
 
-    Relative paths are resolved against the Halyard checkout rather than the
-    working directory, because the hook that asks for this runs inside somebody
-    else's process tree and its working directory is a fact about that session,
-    not about where the file was written.
+    Relative paths are resolved against `root` rather than the working
+    directory, because the hook that asks for this runs inside somebody else's
+    process tree and its working directory is a fact about that session, not
+    about where the file was written.
+
+    `root` is the seat's own project — see `for_seat`. It used to be the Halyard
+    checkout, which is how a Mac mini came to be running for weeks with none of
+    these files: they sat in a gitignored directory that nothing carried
+    anywhere, and no check looked for them.
     """
     try:
         wanted = Path(path).expanduser()
@@ -80,6 +86,25 @@ def read(path: str | Path, root: Path | None = None) -> str | None:
     return text
 
 
+def in_project(seat: Seat, projects: Mapping[str, Path] | None) -> Path | None:
+    """Where this seat's files live: its project, if it has one.
+
+    One rule, and the project is it. A prompt file describes how a *codebase* is
+    worked on, so it belongs in that codebase — where it is versioned with what
+    it describes, reviewed like anything else, and carried to every machine that
+    clones it. The alternative was a gitignored directory in the Halyard
+    checkout, which is not carried anywhere at all.
+
+    `None` when a seat has no project or its project has no path — the
+    environment dialect describes exactly one project and never names it — and
+    the caller falls back to where Halyard is running, which is what that
+    dialect always meant.
+    """
+    if not seat.project or not projects:
+        return None
+    return projects.get(seat.project)
+
+
 def for_seat(
     seats: list[Seat],
     *,
@@ -87,6 +112,7 @@ def for_seat(
     session_name: str | None,
     session_id: str | None,
     root: Path | None = None,
+    projects: Mapping[str, Path] | None = None,
 ) -> str | None:
     """What this session should be told, if its seat says anything at all.
 
@@ -97,7 +123,7 @@ def for_seat(
     seat = for_session(seats, agent_id, session_name, session_id)
     if seat is None or not seat.after_compaction:
         return None
-    return read(seat.after_compaction, root)
+    return read(seat.after_compaction, in_project(seat, projects) or root)
 
 
 #: How much of a transcript's tail the one-shot turn reads. This never enters
@@ -219,6 +245,7 @@ class Recorder:
         seats: list[Seat],
         runners: dict,
         root: Path | None = None,
+        projects: Mapping[str, Path] | None = None,
         model: str | None = RECORD_MODEL,
         limit: int = RECORD_LIMIT,
         clock=time.monotonic,
@@ -235,6 +262,9 @@ class Recorder:
         self._gate = gate
         self._runners = dict(runners or {})
         self._root = root or Path.cwd()
+        #: Where each project's code is, so a seat's prompt files are found in
+        #: the codebase they describe rather than beside Halyard.
+        self._projects = dict(projects or {})
         self._model = model or RECORD_MODEL
         self._limit = limit or RECORD_LIMIT
         self._clock = clock
@@ -299,7 +329,7 @@ class Recorder:
             # runtime is left alone rather than reached for with a method it
             # does not have.
             return False
-        instructions = read(seat.before_compaction, self._root)
+        instructions = read(seat.before_compaction, in_project(seat, self._projects) or self._root)
         if instructions is None:
             return False
 

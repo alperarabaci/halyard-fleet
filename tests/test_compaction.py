@@ -604,3 +604,69 @@ async def test_records_nobody_collects_do_not_pile_up(tmp_path: Path) -> None:
 
     assert kept == [f"record-{i}" for i in range(2, compaction.MAX_WAITING + 2)]
     assert await recorder.take(**session) is None
+
+
+# --- where a seat's prompt files live ----------------------------------------
+
+
+def test_a_seats_orientation_is_read_from_its_own_project(tmp_path) -> None:
+    """The rule, and the reason for it.
+
+    These used to be read against the Halyard checkout, where they sat in a
+    gitignored directory that nothing carried anywhere — which is how one
+    machine came to be running for weeks with none of them. A prompt file
+    describes how a codebase is worked on, so it lives in that codebase and
+    travels with every clone of it.
+    """
+    project = tmp_path / "alpha-engine"
+    (project / "NOTES").mkdir(parents=True)
+    (project / "NOTES" / "orient.md").write_text("what you were doing")
+    beside_halyard = tmp_path / "halyard"
+    beside_halyard.mkdir()
+
+    seats = [
+        Seat(
+            label="nav",
+            runtime="claude-code",
+            session="nav-session",
+            project="alpha-engine",
+            after_compaction="NOTES/orient.md",
+        )
+    ]
+
+    assert (
+        for_seat(
+            seats,
+            agent_id="claude-code",
+            session_name="nav-session",
+            session_id=None,
+            root=beside_halyard,
+            projects={"alpha-engine": project},
+        )
+        == "what you were doing"
+    )
+
+
+def test_without_a_project_it_still_reads_where_halyard_runs(tmp_path) -> None:
+    """The environment dialect describes exactly one project and never names
+    it, so those installations keep the meaning they always had."""
+    (tmp_path / "orient.md").write_text("still found")
+    seats = [
+        Seat(
+            label="nav",
+            runtime="claude-code",
+            session="nav-session",
+            after_compaction="orient.md",
+        )
+    ]
+
+    assert (
+        for_seat(
+            seats,
+            agent_id="claude-code",
+            session_name="nav-session",
+            session_id=None,
+            root=tmp_path,
+        )
+        == "still found"
+    )
