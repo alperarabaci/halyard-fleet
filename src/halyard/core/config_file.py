@@ -372,3 +372,44 @@ def load(directory: Path | None = None) -> list[Seat]:
         return from_yaml(text)
     except ValueError as error:
         raise ValueError(f"{path}: {error}") from None
+
+
+def missing_files(projects: list[Project]) -> list[str]:
+    """Every configured file that is not where the configuration says it is.
+
+    Checked because nothing checked before. A Mac mini ran for weeks with none
+    of its prompt files present: they were named in `halyard.yaml`, they were
+    read at the moment they were needed, and a file that was not there produced
+    a warning nobody was looking at and a compaction that quietly carried
+    nothing. `doctor` did not look either, though a comment in the code claimed
+    it did.
+
+    Returns lines meant to be read by a person, each naming the project, the
+    setting and the path. Empty when everything is where it should be — which is
+    the answer worth being able to get in one look.
+
+    Paths are relative to the project, because that is where these files live.
+    """
+    said: list[str] = []
+    for project in projects:
+        if project.path is None:
+            continue
+
+        def under(path: Path, root: Path = project.path) -> Path:
+            return path if path.is_absolute() else root / path
+
+        wanted: list[tuple[str, Path]] = []
+        if project.confirmation:
+            if project.confirmation.inquiry:
+                wanted.append(("confirmation.inquiry", project.confirmation.inquiry))
+            if project.confirmation.review:
+                wanted.append(("confirmation.review", project.confirmation.review))
+        for seat in project.seats:
+            for key in ("before_compaction", "after_compaction"):
+                if written := getattr(seat, key, None):
+                    wanted.append((f"{seat.label}'s {key}", Path(written)))
+
+        for setting, path in wanted:
+            if not under(path).is_file():
+                said.append(f"{project.name}: {setting} points at {path}, which is not there")
+    return said

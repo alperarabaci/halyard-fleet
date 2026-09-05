@@ -544,6 +544,23 @@ def run() -> int:
         problems += found
         for line in lines:
             print(line)
+
+    # Every file the configuration names, and whether it is there. Nothing
+    # checked this before: a machine ran for weeks with none of its prompt
+    # files present, because a missing one produces a warning at the moment it
+    # is needed — in a log nobody is reading — and then a compaction that
+    # quietly carries nothing.
+    from halyard.core.config_file import missing_files
+
+    try:
+        absent = missing_files(described_projects())
+    except ValueError:
+        absent = []
+    for line in absent:
+        problems += 1
+        print(f"{FAIL}{line}")
+    if seats and not absent:
+        print(f"{OK}every file the configuration names is where it says")
     if seats:
         print()
 
