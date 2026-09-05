@@ -80,6 +80,10 @@ class Hooks:
     #: `named` is `{"<hook name>": {Event: ...}}`, which is Antigravity's: the
     #: top level is a namespace, and every name contributing to an event is
     #: merged and run in turn.
+    #: `plugin` is not a hooks document at all — the gate is a module the
+    #: runtime loads, and `settings` names that file so the rest of core can go
+    #: on asking where a project's gate lives. Nothing parses it; a runtime
+    #: saying `plugin` carries its own `install` and is wired by that.
     #: Other files this runtime also reads hooks from, checked but never
     #: written. Claude Code is the case: a committed `settings.json` beside the
     #: gitignored `settings.local.json`, and a gate may be in either.
@@ -245,6 +249,43 @@ class RuntimeSpec:
     #: one field it does not recognise. Called with the hooks file and the
     #: project, by both `wire` and `doctor`.
     check_wired: Callable[..., list[tuple[str, str]]] | None = field(default=None)
+    #: How to put the gate on a project, for a runtime where that does not mean
+    #: writing hooks into a JSON file.
+    #:
+    #: `wiring.py` knows one shape — a settings document with a `hooks` key —
+    #: in two dialects, and that was enough for three runtimes because all
+    #: three are hook-driven. opencode is not: its gate is a plugin module
+    #: dropped in a directory, plus a `permission` block in the project's own
+    #: config without which the runtime never asks anything and the plugin is
+    #: wired and dead. Neither half is a hook entry, and expressing them as one
+    #: would mean a third dialect that only ever describes one runtime.
+    #:
+    #: So a runtime that does not fit brings its own. Called with the project
+    #: root and the directory this install keeps its bridges in; returns
+    #: `(level, text)` lines to print, the same shape every other check here
+    #: uses. Two levels carry meaning beyond how the line is printed: `fail`
+    #: means the project was left ungated, and `ok` means something was
+    #: actually written or removed — `unwire` counts those, so that "nothing
+    #: was wired here" is said once rather than by every runtime in turn.
+    #:
+    #: Checked for presence rather than by name: `wiring` and `doctor` ask
+    #: whether a runtime installs itself, never which runtime it is.
+    install: Callable[..., list[tuple[str, str]]] | None = None
+    #: The other half, and required with it — a gate that cannot be removed is
+    #: worse than one that was never added. Same arguments, same return.
+    uninstall: Callable[..., list[tuple[str, str]]] | None = None
+    #: What becomes of a call this gate cannot get an answer for — the control
+    #: plane down, or nobody replying in time. Empty means the rules `wire`
+    #: prints are already right for this runtime.
+    #:
+    #: Those rules say it is denied, and that is true of every runtime driven
+    #: by a blocking hook: something is waiting on a verdict, and a gate that
+    #: lets a call through when it has none is not a gate. It is not true of a
+    #: runtime whose gate answers a question the runtime has already put on the
+    #: screen — there, saying nothing leaves it for whoever is at the desk.
+    #: Nothing runs unapproved either way, and the difference is worth printing
+    #: because the person reading it is deciding whether to walk away.
+    when_unanswered: str = ""
     #: How `halyard verify` drives this runtime, when it can at all.
     verify: Verification | None = None
     #: How to watch this runtime's transcript for what it never reports. `None`
@@ -254,6 +295,15 @@ class RuntimeSpec:
 
     def on_this_machine(self) -> bool:
         return self.present() if self.present else bool(shutil.which(self.binary))
+
+    def installs_itself(self) -> bool:
+        """Whether wiring this runtime is its own job rather than `wiring.py`'s.
+
+        Both halves or neither. A runtime that could be wired and not unwired
+        would leave a gate nothing can take off, and the failure would show up
+        as `halyard unwire` reporting success while changing nothing.
+        """
+        return self.install is not None and self.uninstall is not None
 
     def settings_path(self, project_root: Path) -> Path:
         return project_root / self.hooks.settings

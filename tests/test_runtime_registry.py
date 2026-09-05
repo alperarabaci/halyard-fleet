@@ -25,7 +25,7 @@ from halyard.agents import registry
 from halyard.agents.spec import RuntimeSpec
 
 #: Every runtime this build ships. Growing this set is the point of the edit.
-EXPECTED = {"claude-code", "codex", "antigravity"}
+EXPECTED = {"claude-code", "codex", "antigravity", "opencode"}
 
 
 def test_exactly_the_expected_runtimes_are_found() -> None:
@@ -58,10 +58,18 @@ def test_a_runtime_describes_everything_core_would_otherwise_guess(name: str) ->
     assert spec.binary, "installed() has to have something to look for"
     assert spec.hooks.settings, "wiring has to know which file to merge into"
     assert spec.hooks.matcher, "a hook with no matcher gates nothing"
-    assert spec.hooks.dialect in {"wrapped", "named"}
+    assert spec.hooks.dialect in {"wrapped", "named", "plugin"}
     assert callable(spec.runner)
     assert callable(spec.find_session)
     assert callable(spec.list_sessions)
+    # Both halves or neither. A runtime wired by its own code and unwired by
+    # the hooks path would have its plugin left behind by `halyard unwire`,
+    # which would report success and change nothing.
+    assert (spec.install is None) == (spec.uninstall is None)
+    if spec.install is not None:
+        assert spec.check_wired is not None, (
+            "core skips its own wiring check for these, so this is the only thing left"
+        )
 
 
 def test_the_order_is_stable() -> None:

@@ -320,6 +320,25 @@ def _check_gated_project(label: str, ref, seat, directory: str) -> tuple[list[st
     from halyard.agents import registry
 
     spec = registry.get(seat.runtime)
+    # A runtime that wires itself is checked by itself. Everything below reads
+    # a JSON settings document and insists on a `PreToolUse` and a `Stop`
+    # entry, which is the right check for three runtimes and nonsense for a
+    # fourth whose gate is a plugin module and whose events have other names —
+    # it would parse TypeScript as JSON, find no hooks, and report a project
+    # with a working gate as ungated.
+    if spec is not None and spec.installs_itself():
+        if spec.check_wired is None:
+            lines.append(f"{WARN}        nothing here can say whether that gate is on")
+            return lines, 0
+        reported, fatal = _render(
+            spec.check_wired,
+            "",
+            indent=True,
+            hooks_file=project_dir / spec.hooks.settings,
+            project_dir=project_dir,
+        )
+        return lines + reported, 1 if fatal else 0
+
     # The runtime says where its hooks live. Claude Code is the one with two
     # candidates: a shared `settings.json` that is committed and a
     # `settings.local.json` that is not, and a gate may be written into either.
