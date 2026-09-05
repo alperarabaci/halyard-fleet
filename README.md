@@ -100,6 +100,7 @@ reading configuration.
 | `/label` | put a label on the task this branch is for |
 | `/open` | start an agent that is not running — `claude`, `codex`, `gemini` |
 | `/status` | what each seat is, and what is running |
+| `/doctor` | the same check as `halyard doctor`, read from a phone |
 | `/pause`, `/resume` | step out of the way, and come back |
 
 `/md` is one of the `prompts:` in `halyard.yaml` — a sentence you say often

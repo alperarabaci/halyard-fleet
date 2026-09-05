@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import html
+import io
 import logging
 import re
 import time
@@ -105,6 +106,7 @@ COMMANDS: tuple[tuple[str, str], ...] = (
     ("command", "Run one of this project's own commands"),
     ("label", "Put a label on the task this branch is for"),
     ("status", "What is happening right now"),
+    ("doctor", "Check the configuration and say what is wrong with it"),
     ("options", "Models and effort levels this seat accepts"),
     ("model", "Choose what answers, for turns sent from here"),
     ("effort", "Choose how hard it thinks"),
@@ -661,6 +663,11 @@ class TelegramChannel:
         if command == "command":
             await self._run_command(argument, here or "", thread)
             return
+        if command == "doctor":
+            # Detached: it shells out to every runtime's CLI and reads two
+            # repositories, which is seconds rather than milliseconds.
+            self._detach(self._report_health(here or "", thread), "/doctor")
+            return
         if command == "label":
             # Detached for the same reason: two calls to an issue tracker over
             # somebody else's network.
@@ -989,6 +996,45 @@ class TelegramChannel:
             return
 
         await self._say("Open which one?", chat_id, thread_id, reply_markup=keyboard)
+
+    # --- saying what is wrong with this machine ------------------------------
+
+    async def _report_health(self, chat_id: str, thread_id: int | None) -> None:
+        """`/doctor` — the same check as at the desk, read from a phone.
+
+        Run in-process and captured rather than shelled out, so it is the same
+        code and cannot drift from what `halyard doctor` prints. Somebody was
+        told to "check doctor" while away from the machine and could not; a
+        check nobody can reach is a check nobody runs.
+        """
+
+        def look() -> tuple[str, int]:
+            said = io.StringIO()
+            with contextlib.redirect_stdout(said):
+                try:
+                    from halyard.doctor import run as check
+
+                    problems = check()
+                except Exception:
+                    logger.warning("doctor failed", exc_info=True)
+                    return ("", -1)
+            return said.getvalue(), problems
+
+        printed, problems = await asyncio.to_thread(look)
+        if problems < 0:
+            await self._say("\U0001f6ab The check itself failed. See the log.", chat_id, thread_id)
+            return
+
+        head = (
+            "\u2705 <b>Nothing wrong here.</b>"
+            if problems == 0
+            else f"\u26a0\ufe0f <b>{problems} problem{'s' if problems != 1 else ''}.</b>"
+        )
+        await self._say(head, chat_id, thread_id)
+        # Its own splitter, because this is a wall of aligned text and Telegram
+        # takes 4096 bytes at a time. `<pre>` keeps the columns lined up.
+        for chunk in cards.split_for_telegram(printed.rstrip()):
+            await self._say(f"<pre>{html.escape(chunk)}</pre>", chat_id, thread_id)
 
     # --- labelling the task a branch is for ----------------------------------
 

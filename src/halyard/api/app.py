@@ -13,6 +13,7 @@ does not raise; the middleware below catches whatever still could.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
@@ -26,6 +27,7 @@ from halyard.channels.stub import StubChannel
 from halyard.channels.telegram import TelegramApi, TelegramChannel
 from halyard.config import ChannelKind, Settings
 from halyard.core import compaction as after_compaction
+from halyard.core import credentials
 from halyard.core import tools as configured_tools
 from halyard.core import writes as configured_writes
 from halyard.core.approvals import ApprovalStore, Decision
@@ -443,6 +445,22 @@ def create_app(settings: Settings, *, channel=None) -> FastAPI:
     async def lifespan(app: FastAPI):
         await audit.open()
         await resolved_channel.start()
+
+        # How old the control plane's own credential is getting. Nothing
+        # reports when a token expires — `claude auth status` answers with
+        # eight fields and not one of them is a date — so this is an estimate
+        # from when Halyard first saw it, and it says so in those words.
+        #
+        # Sent to the navigator rather than only logged: the failure it exists
+        # to prevent happens while nobody is at the machine, and a warning in a
+        # log is a warning for afterwards.
+        aged = credentials.remember(
+            settings.claude_oauth_token, settings.db_path.parent / "credential-seen.json"
+        )
+        if aged and aged.worth_saying(_now()):
+            logger.warning("%s", aged.wording(_now()))
+            with contextlib.suppress(Exception):
+                await resolved_channel.send_message("halyard", aged.wording(_now()), Role.NAVIGATOR)
         # The watcher's own loop, alongside the channel's. A best-effort courier,
         # so a failure to start it is logged and shrugged off rather than kept
         # from serving.
