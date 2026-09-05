@@ -502,7 +502,7 @@ def create_app(settings: Settings, *, channel=None) -> FastAPI:
     app = FastAPI(
         title="Halyard Fleet",
         description="A control plane for orchestrating coding agents remotely.",
-        version="0.7.0",
+        version="0.7.1",
         lifespan=lifespan,
     )
     app.state.settings = settings
