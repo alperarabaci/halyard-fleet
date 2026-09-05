@@ -2,7 +2,7 @@
 name = "halyard-fleet"
 # Kept in step with `halyard.__version__` by `tests/test_version.py`, which is
 # the point: a copy nobody checks is a copy that rots. See the note there.
-version = "0.7.1"
+version = "0.7.2"
 description = "A control plane for orchestrating coding agents remotely."
 readme = "README.md"
 requires-python = ">=3.12"
