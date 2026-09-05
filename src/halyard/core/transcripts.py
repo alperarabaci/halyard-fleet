@@ -203,6 +203,16 @@ class TranscriptWatcher:
         cutoff = self._clock() - self._idle_ttl
         for session_id, watched in list(self._watched.items()):
             if watched.last_noted < cutoff:
+                # Said out loud, because "nothing was sent" and "nothing was
+                # watched" look identical from a phone. When a usage limit
+                # filled up unannounced there was no way to tell which had
+                # happened without reading this module.
+                logger.info(
+                    "No longer watching %s: nothing appended to %s for %s",
+                    session_id,
+                    watched.transcript.name,
+                    self._idle_ttl,
+                )
                 del self._watched[session_id]
                 continue
             try:
@@ -227,6 +237,23 @@ class TranscriptWatcher:
         lines = self._read_new_lines(watched)
         if not lines:
             return
+        # A transcript being appended to is a session that is working, and that
+        # is what "still active" has to mean here.
+        #
+        # It used to mean "asked Halyard something in the last half hour",
+        # because `last_noted` was only ever set by the approval and message
+        # endpoints. A session whose runtime lets most calls through without a
+        # card says nothing to either for long stretches, so it aged out while
+        # running — and then the thing this watcher exists for happened to it
+        # unwatched. Measured on a second machine: a Codex session ran past its
+        # usage limit and stopped, and no warning was sent, because half an
+        # hour of quiet work had already dropped it.
+        #
+        # Which was self-defeating in the exact way that is easy to miss. This
+        # watcher is here for the turns that report nothing; keying its own
+        # attention to a session reporting something meant the sessions it was
+        # written for were the ones it stopped looking at.
+        watched.last_noted = self._clock()
         watching = watching_for(watched.agent_id)
         if watching is None:
             return
