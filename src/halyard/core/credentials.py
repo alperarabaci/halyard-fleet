@@ -18,9 +18,20 @@ first time it starts with one, and every warning afterwards says so in those
 words rather than pretending to know a deadline. Minting a new one starts a new
 clock on its own, because a different token has a different fingerprint.
 
-The token is never stored. What is written is a short SHA-256 of it, which is
-enough to tell "still the same one" from "somebody replaced it" and is not
-enough to be anything else.
+The token is never stored. What is written is a salted, slow derivation of it —
+enough to tell "still the same one" from "somebody replaced it", and not enough
+to be anything else.
+
+A plain SHA-256 would have done the same job and CodeQL objected to it, under a
+rule written for password storage. It is arguably wrong here: the input is a
+high-entropy random token, not a password anybody could guess through, and the
+digest sits in a file beside the `halyard.yaml` that holds the token in plain
+text — so anyone who can read one can already read the other. It was changed
+anyway, because an alert left standing on a public repository teaches people to
+scroll past alerts, and this one costs a hundred milliseconds once at startup.
+
+The salt is random per machine and kept in the same file. It is not a secret;
+it is what stops the derivation being a lookup.
 """
 
 from __future__ import annotations
@@ -28,6 +39,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import secrets
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -44,8 +56,17 @@ ASSUMED_LIFE = timedelta(days=365)
 #: month" has to still be true when they get there.
 WARN_WITHIN = timedelta(days=30)
 
-#: Enough of the digest to tell one token from another, and no more.
-FINGERPRINT = 12
+#: Enough of the derivation to tell one token from another, and no more.
+FINGERPRINT = 16
+
+#: How hard the derivation is made to repeat. Modest on purpose: what makes
+#: this safe is the salt and the entropy of what is being hashed, not the count,
+#: and this runs at every start and every `doctor`.
+ROUNDS = 200_000
+
+#: Bytes of randomness per machine. Not a secret — it is written beside the
+#: derivation — but without it the derivation is a lookup.
+SALT_BYTES = 16
 
 
 @dataclass(frozen=True)
@@ -85,9 +106,10 @@ class Age:
         )
 
 
-def fingerprint(token: str) -> str:
-    """A short digest, so a token can be recognised without being kept."""
-    return hashlib.sha256(token.encode("utf-8")).hexdigest()[:FINGERPRINT]
+def fingerprint(token: str, salt: str) -> str:
+    """A short derivation, so a token can be recognised without being kept."""
+    derived = hashlib.pbkdf2_hmac("sha256", token.encode("utf-8"), bytes.fromhex(salt), ROUNDS)
+    return derived.hex()[:FINGERPRINT]
 
 
 def remember(token: str | None, where: Path, *, now: datetime | None = None) -> Age | None:
@@ -103,29 +125,38 @@ def remember(token: str | None, where: Path, *, now: datetime | None = None) -> 
     if not token:
         return None
     now = now or datetime.now(UTC)
-    mark = fingerprint(token)
 
-    seen: dict[str, str] = {}
+    noted: dict = {}
     try:
         if where.is_file():
             loaded = json.loads(where.read_text(encoding="utf-8"))
-            seen = loaded if isinstance(loaded, dict) else {}
+            noted = loaded if isinstance(loaded, dict) else {}
     except (OSError, ValueError) as unreadable:
         logger.warning("Could not read %s: %s", where, unreadable)
 
-    written = seen.get(mark)
+    salt = noted.get("salt")
+    if not isinstance(salt, str) or not salt:
+        salt = secrets.token_hex(SALT_BYTES)
+        noted = {}
+
+    mark = fingerprint(token, salt)
+    written = noted.get("first_seen") if noted.get("fingerprint") == mark else None
+
     if written:
         try:
-            first = datetime.fromisoformat(written)
+            first = datetime.fromisoformat(str(written))
         except ValueError:
             first = now
     else:
         first = now
-        # Only this token's own line is kept. A record of every credential ever
+        # Only the token in use is kept. A record of every credential ever
         # configured is a list nobody wants and nobody asked for.
         try:
             where.parent.mkdir(parents=True, exist_ok=True)
-            where.write_text(json.dumps({mark: now.isoformat()}), encoding="utf-8")
+            where.write_text(
+                json.dumps({"salt": salt, "fingerprint": mark, "first_seen": now.isoformat()}),
+                encoding="utf-8",
+            )
         except OSError as unwritable:
             logger.warning("Could not note when the token was first seen: %s", unwritable)
 

@@ -61,9 +61,12 @@ def test_the_token_is_never_written_down(tmp_path: Path) -> None:
     credentials.remember(TOKEN, where, now=NOW)
 
     written = where.read_text()
+    noted = json.loads(written)
+
     assert TOKEN not in written
     assert "oat01" not in written
-    assert list(json.loads(written)) == [credentials.fingerprint(TOKEN)]
+    assert set(noted) == {"salt", "fingerprint", "first_seen"}
+    assert noted["fingerprint"] == credentials.fingerprint(TOKEN, noted["salt"])
 
 
 def test_only_the_token_in_use_is_remembered(tmp_path: Path) -> None:
@@ -72,7 +75,43 @@ def test_only_the_token_in_use_is_remembered(tmp_path: Path) -> None:
     credentials.remember(TOKEN, where, now=NOW)
     credentials.remember("sk-ant-oat01-second", where, now=NOW)
 
-    assert len(json.loads(where.read_text())) == 1
+    noted = json.loads(where.read_text())
+    assert noted["fingerprint"] == credentials.fingerprint("sk-ant-oat01-second", noted["salt"])
+
+
+def test_the_salt_is_kept_so_the_same_token_still_matches(tmp_path: Path) -> None:
+    """A new salt every start would read as a new token every start, and the
+    warning would never fire because the clock would never get old."""
+    where = tmp_path / "seen.json"
+    credentials.remember(TOKEN, where, now=NOW)
+    salt = json.loads(where.read_text())["salt"]
+
+    credentials.remember(TOKEN, where, now=NOW + timedelta(days=1))
+
+    assert json.loads(where.read_text())["salt"] == salt
+
+
+def test_the_salt_differs_between_machines(tmp_path: Path) -> None:
+    """It is not a secret, and it is what stops the derivation being a lookup."""
+    one, two = tmp_path / "a.json", tmp_path / "b.json"
+    credentials.remember(TOKEN, one, now=NOW)
+    credentials.remember(TOKEN, two, now=NOW)
+
+    assert json.loads(one.read_text())["salt"] != json.loads(two.read_text())["salt"]
+
+
+def test_a_derivation_is_not_a_plain_digest_of_the_token(tmp_path: Path) -> None:
+    """CodeQL objected to the plain digest under a rule written for password
+    storage. Arguably wrong here — the input is a high-entropy token and the
+    file sits beside the plaintext one — but an alert left standing teaches
+    people to scroll past alerts."""
+    import hashlib
+
+    where = tmp_path / "seen.json"
+    credentials.remember(TOKEN, where, now=NOW)
+
+    noted = json.loads(where.read_text())
+    assert not hashlib.sha256(TOKEN.encode()).hexdigest().startswith(noted["fingerprint"])
 
 
 def test_nothing_is_said_until_it_is_nearly_a_year_old(tmp_path: Path) -> None:
