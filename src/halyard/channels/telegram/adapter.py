@@ -68,7 +68,7 @@ from halyard.core.questions import (
     InvalidNonceError as QuestionInvalidNonceError,
 )
 from halyard.core.registry import SessionRegistry
-from halyard.core.seats import Seat, find, for_chat, for_session
+from halyard.core.seats import Seat, find, for_chat, for_project, for_session
 from halyard.core.seats import _default_runtime as default_runtime
 from halyard.core.transcripts import watching_for
 
@@ -338,6 +338,7 @@ class TelegramChannel:
         session_name: str | None = None,
         agent_id: str | None = None,
         session_id: str | None = None,
+        project: str | None = None,
     ) -> tuple[str, int | None]:
         """Where this seat's traffic goes.
 
@@ -361,6 +362,14 @@ class TelegramChannel:
         so a setup with two seats keeps behaving exactly as it did.
         """
         owner = for_session(self._seats, agent_id, session_name, session_id)
+        if owner is None:
+            # A runtime whose sessions have no name it could be addressed by.
+            # opencode is the case: an id nobody types and a title it writes
+            # from the conversation, so what identifies the seat is the
+            # codebase. Answers nothing when two seats of one runtime share a
+            # project, because guessing between them is the mistake the
+            # paragraph above is about.
+            owner = for_project(self._seats, agent_id, project)
         if owner is not None and owner.chat:
             return parse_destination(owner.chat) or (self._chat_id, None)
         # Only when a role was actually declared. Falling back on `None`
@@ -392,7 +401,11 @@ class TelegramChannel:
             request, include_full=request.command_full != request.command_summary
         )
         chat_id, thread_id = self._route(
-            request.role, request.session_name, request.agent_id, request.session_id
+            request.role,
+            request.session_name,
+            request.agent_id,
+            request.session_id,
+            request.project,
         )
         message = await self._api.send_message(
             chat_id, text, reply_markup=markup, message_thread_id=thread_id
@@ -423,7 +436,11 @@ class TelegramChannel:
         text = cards.render_question(request, now=self._clock())
         markup = cards.question_keyboard(request)
         chat_id, thread_id = self._route(
-            request.role, request.session_name, request.agent_id, request.session_id
+            request.role,
+            request.session_name,
+            request.agent_id,
+            request.session_id,
+            request.project,
         )
         message = await self._api.send_message(
             chat_id, text, reply_markup=markup, message_thread_id=thread_id

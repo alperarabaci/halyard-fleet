@@ -260,6 +260,39 @@ def for_session(seats: list[Seat], runtime: str | None, *identifiers: str | None
     return None
 
 
+def for_project(seats: list[Seat], runtime: str | None, project: str | None) -> Seat | None:
+    """The seat a runtime works this codebase from, when no name can address it.
+
+    Every seat above is found by the name its runtime knows the session by.
+    opencode has no such name: a session there has an id nobody types and a
+    title the runtime writes from the content of the conversation, changing as
+    the work does. A seat pinned to either would come loose — the id on the
+    next session, the title on the next paragraph.
+
+    What is stable is which project the session is in, and that is also how it
+    is actually used: one opencode per codebase, resumed from where it was.
+
+    **Only when the pair is unambiguous.** Two seats of one runtime in one
+    project cannot be told apart by this, and guessing between them is the
+    failure `for_session` is written to prevent — a reply delivered to the
+    wrong group, with nothing in it saying so. Nothing is returned instead,
+    and the caller falls back to routing by role.
+    """
+    if not project:
+        return None
+    wanted = project.strip().casefold()
+    if not wanted:
+        return None
+    found = [
+        seat
+        for seat in seats
+        if (runtime is None or seat.runtime == runtime)
+        and seat.project
+        and seat.project.strip().casefold() == wanted
+    ]
+    return found[0] if len(found) == 1 else None
+
+
 def for_chat(seats: list[Seat], chat_id: str) -> Seat | None:
     """The seat that owns a chat, if any owns it.
 
