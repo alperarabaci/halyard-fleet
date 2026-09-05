@@ -142,6 +142,16 @@ class Watching:
     #: What is worth saying about lines just appended, given what has already
     #: been said. Pure: no reading, no sending, so it can be tested as a table.
     alerts: Callable[[list[str], set[str]], list[Alert]]
+    #: How full this runtime's usage windows are, in a few words, for a status
+    #: screen somebody asked for. `None` for a runtime that does not say — and
+    #: Claude Code is one: measured on 2.1.246, its CLI has no usage command and
+    #: its transcript carries per-turn token counts and no limit at all.
+    #:
+    #: Separate from `alerts` because the two answer different questions. An
+    #: alert fires once, when something changed, and has to be worth
+    #: interrupting for; this is asked, repeatedly, by somebody who wants a
+    #: number and is not being interrupted by anything.
+    usage: Callable[[list[str]], tuple[str, ...]] | None = None
 
 
 @dataclass(frozen=True)
