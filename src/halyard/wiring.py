@@ -356,8 +356,35 @@ def _unwire_antigravity(directory: Path, runtime: RuntimeSpec) -> int:
     return 1
 
 
+def _by_itself(directory: Path, runtime: RuntimeSpec, doing) -> tuple[int, int]:
+    """Hand wiring to a runtime that does not keep its gate in a hooks file.
+
+    Everything below this function writes a settings document with a `hooks`
+    key. A runtime whose gate is not that shape says so by carrying its own
+    `install`, and this is the whole of what core does about it: call it and
+    print what it says.
+
+    Returns `(failed, changed)`, because the two callers want different halves.
+    `wire` stops on a failure; `unwire` totals up how many runtimes it actually
+    took something off, so that "nothing was wired here" can be said once
+    rather than by each runtime in turn. A line at level `ok` is the runtime
+    saying it changed something.
+    """
+    failed = changed = 0
+    for level, text in doing(project_root(directory), BRIDGE_DIR):
+        if level == "fail":
+            failed = 1
+        if level == "ok":
+            changed += 1
+        print(f"  {runtime.name}: {text}" if level else f"    {text}")
+    return failed, changed
+
+
 def _wire_one(directory: Path, runtime: RuntimeSpec) -> int:
     """Add one runtime's hooks, keeping everything already in its file."""
+    if runtime.installs_itself():
+        failed, _ = _by_itself(directory, runtime, runtime.install)
+        return failed
     if runtime.hooks.dialect == "named":
         return _wire_antigravity(directory, runtime)
     path = settings_path(directory, runtime)
@@ -488,11 +515,21 @@ def wire(directory: Path, runtimes: tuple[RuntimeSpec, ...] | None = None) -> in
                 print(f"\n  {runtime.human}: {text}")
 
     print(f"\nRestart the session — hooks are read at startup.\n\n{RULES}")
+    # Rules 1 and 3 describe a gate that blocks, which is what three of these
+    # runtimes have. A runtime whose gate answers a question already on the
+    # screen corrects them here rather than leaving somebody to read a warning
+    # that does not apply to the project they just wired.
+    for runtime in chosen:
+        if runtime.when_unanswered:
+            print(f"Not so for {runtime.human}:\n  {runtime.when_unanswered}\n")
     return 0
 
 
 def _unwire_one(directory: Path, runtime: RuntimeSpec) -> int:
     """Remove only this install's hooks, and nothing else."""
+    if runtime.installs_itself():
+        _, changed = _by_itself(directory, runtime, runtime.uninstall)
+        return 1 if changed else 0
     if runtime.hooks.dialect == "named":
         return _unwire_antigravity(directory, runtime)
     path = settings_path(directory, runtime)
