@@ -53,23 +53,22 @@ For a group, add the bot to it first and send a message there instead — group 
 it possible to keep separate conversations later, since a bot can only hold one private chat with
 you.
 
-### 4. Optional: a command menu
+### 4. The command menu
 
-Approvals work without this. It only makes the commands discoverable instead of remembered.
+Nothing to do here — this one arrives on its own.
 
-Send BotFather `/setcommands`, choose your bot, and paste:
+Once the control plane has started, it publishes its command list to Telegram, and typing `/` in
+the chat then offers them as a menu. Approvals never needed this. What it changes is that a command
+is picked rather than remembered, which on a phone is most of the difference.
 
-```
-chat - Send a message into the session
-options - Every model and effort level you can pick
-model - What answers, for turns sent from here
-effort - How hard it thinks
-status - What is happening right now
-pause - Step out of the way; Claude Code decides on its own
-resume - Start sending here again
-```
+The published list is the one the bot actually answers, and it includes every entry under
+`prompts:` in `halyard.yaml` — name a prompt there and it appears in the menu with the rest.
+`/help` prints the same list.
 
-Typing `/` in the chat then offers them as a menu.
+Publishing it is best-effort. A refusal from Telegram is logged and the control plane starts
+anyway, because the menu is the label rather than the thing: the bot answers every command whether
+Telegram has been told about it or not. So a command that works when typed but never showed up in
+the menu is not a fault to chase — the next start publishes the list again.
 
 `/options` is the one to remember, because it lists the rest:
 
