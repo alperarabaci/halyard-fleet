@@ -239,6 +239,50 @@ async def test_an_idle_session_is_dropped(tmp_path: Path) -> None:
     assert not w._watched
 
 
+async def test_a_session_still_writing_is_not_dropped(tmp_path: Path) -> None:
+    """The bug this replaced, and the one worth a test of its own.
+
+    Idleness used to mean "has not asked Halyard anything in half an hour",
+    because the clock was only touched by the approval and message endpoints. A
+    runtime that lets most calls through without a card says nothing to either
+    for long stretches — so a session that was working the whole time aged out,
+    and then a usage limit filled up with nobody watching the file. Measured on
+    a second machine, and the sign of it was no sign at all: somebody waiting
+    on a phone for a message that was never going to come.
+    """
+    clock = ManualClock()
+    w = watcher(clock=clock, roots=(tmp_path,))
+    tx = tmp_path / "9f1c2b3a-0000-0000-0000-000000000000.jsonl"
+    tx.write_text("")
+    w.note(session_id=tx.stem, agent_id="claude-code")
+
+    # Half an hour of work, and not one word of it said to Halyard.
+    for _ in range(4):
+        clock.advance(timedelta(minutes=10).total_seconds())
+        append(tx, normal_line("still going"))
+        await w.poll_once()
+
+    assert w._watched, "a session that never stopped writing was dropped as idle"
+
+
+async def test_a_session_that_stopped_writing_is_still_dropped(tmp_path: Path) -> None:
+    """The other half. Watching every session that ever existed would mean a
+    directory of stale files scanned every fifteen seconds forever."""
+    clock = ManualClock()
+    w = watcher(clock=clock, roots=(tmp_path,))
+    tx = tmp_path / "9f1c2b3a-0000-0000-0000-000000000000.jsonl"
+    tx.write_text("")
+    w.note(session_id=tx.stem, agent_id="claude-code")
+
+    append(tx, normal_line())
+    clock.advance(timedelta(minutes=10).total_seconds())
+    await w.poll_once()
+    clock.advance(timedelta(minutes=31).total_seconds())
+    await w.poll_once()
+
+    assert not w._watched
+
+
 # --- the path never comes from the payload ----------------------------------
 
 
