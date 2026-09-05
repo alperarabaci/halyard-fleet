@@ -16,6 +16,7 @@ import os
 import sys
 import urllib.error
 import urllib.request
+from datetime import UTC, datetime
 from pathlib import Path
 
 from pydantic import ValidationError
@@ -534,7 +535,7 @@ def run() -> int:
     except ValueError:
         where = {}
 
-    for seat in seats:
+    for seat in seats if settings_ok else []:
         lines, found = _check_seat(
             seat,
             settings.claude_binary,
@@ -544,6 +545,30 @@ def run() -> int:
         problems += found
         for line in lines:
             print(line)
+
+    # How old the credential is getting. Said here as well as at startup,
+    # because this is the screen somebody looks at when they are wondering what
+    # is wrong, and "the token is nearly a year old" is an answer to that.
+    from halyard.core import credentials
+
+    # Only when the configuration parsed at all. `settings` is bound inside a
+    # `try` above, and a machine whose YAML is broken reaches here without it —
+    # which is exactly the machine most likely to be running this command. That
+    # happened on a Mac mini the night before this was written.
+    aged = (
+        credentials.remember(
+            settings.claude_oauth_token, settings.db_path.parent / "credential-seen.json"
+        )
+        if settings_ok
+        else None
+    )
+    if aged is None:
+        pass
+    elif aged.worth_saying(datetime.now(UTC)):
+        problems += 1
+        print(f"{WARN}{aged.wording(datetime.now(UTC))}")
+    else:
+        print(f"{OK}the token has been in use since {aged.first_seen.date()}")
 
     # Every file the configuration names, and whether it is there. Nothing
     # checked this before: a machine ran for weeks with none of its prompt

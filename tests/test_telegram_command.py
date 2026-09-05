@@ -512,3 +512,65 @@ async def test_no_token_configured_says_which_problem_that_is(wired, monkeypatch
     await deliver(channel, typed("/label"))
 
     assert "No token" in api.sent[-1]["text"]
+
+
+# --- /doctor -----------------------------------------------------------------
+
+
+async def test_doctor_brings_the_same_check_to_the_phone(wired, monkeypatch) -> None:
+    """Somebody was told to "check doctor" while away from the machine and
+    could not. A check nobody can reach is a check nobody runs."""
+    channel, api, _ = wired
+
+    def clean() -> int:
+        print("ok    everything is fine")
+        print("ok    and the columns line up")
+        return 0
+
+    monkeypatch.setattr("halyard.doctor.run", clean)
+    await deliver(channel, typed("/doctor"))
+
+    assert "Nothing wrong here" in api.sent[-2]["text"]
+    assert "the columns line up" in api.sent[-1]["text"]
+
+
+async def test_doctor_says_how_many_problems_there_are(wired, monkeypatch) -> None:
+    channel, api, _ = wired
+
+    def unhappy() -> int:
+        print("FAIL  two things")
+        return 2
+
+    monkeypatch.setattr("halyard.doctor.run", unhappy)
+    await deliver(channel, typed("/doctor"))
+
+    assert "2 problems" in api.sent[-2]["text"]
+
+
+async def test_a_check_that_itself_fails_says_so(wired, monkeypatch) -> None:
+    """Rather than an empty message, which reads as everything being fine."""
+    channel, api, _ = wired
+
+    def explode() -> int:
+        raise RuntimeError("no")
+
+    monkeypatch.setattr("halyard.doctor.run", explode)
+    await deliver(channel, typed("/doctor"))
+
+    assert "check itself failed" in api.sent[-1]["text"]
+
+
+async def test_the_output_is_escaped_so_telegram_does_not_refuse_it(wired, monkeypatch) -> None:
+    """`doctor` prints paths and command lines, and one `<` in the wrong place
+    makes Telegram reject the whole message."""
+    channel, api, _ = wired
+
+    def angular() -> int:
+        print("ok    reads <halyard.yaml> & friends")
+        return 0
+
+    monkeypatch.setattr("halyard.doctor.run", angular)
+    await deliver(channel, typed("/doctor"))
+
+    assert "&lt;halyard.yaml&gt;" in api.sent[-1]["text"]
+    assert "&amp;" in api.sent[-1]["text"]

@@ -13,6 +13,9 @@
 
 # Runtime state (never committed)
 halyard.db
+# When this machine first saw its token — a hash and a date, no secret,
+# but machine state all the same.
+credential-seen.json
 halyard.db-shm
 halyard.db-wal
 audit.jsonl
