@@ -81,16 +81,12 @@ def _reset_wording(resets_at: object) -> str:
     return f", resets {when.strftime('%H:%M')}"
 
 
-def alerts(lines: Iterable[str], seen: set[str]) -> list[Alert]:
-    """What is worth saying about the usage windows in these lines.
+def _last_reading(lines: Iterable[str]) -> dict | None:
+    """The newest `rate_limits` in these lines, or None.
 
-    Only the *last* reading in a batch is considered. The event is written on
-    every turn, so a poll that catches up on twenty of them holds twenty
-    readings of the same window, and only the newest is true.
-
-    The key carries the window, the threshold and the reset time, so each is
-    said once per window and again after it rolls over — a window that has
-    reset is a new fact, not a repeat.
+    Only the last one. The event is written on every turn, so a poll catching
+    up on twenty of them holds twenty readings of the same window and nineteen
+    are stale.
     """
     latest: dict | None = None
     for line in lines:
@@ -106,6 +102,21 @@ def alerts(lines: Iterable[str], seen: set[str]) -> list[Alert]:
         )
         if isinstance(limits, dict):
             latest = limits
+    return latest
+
+
+def alerts(lines: Iterable[str], seen: set[str]) -> list[Alert]:
+    """What is worth saying about the usage windows in these lines.
+
+    Only the *last* reading in a batch is considered. The event is written on
+    every turn, so a poll that catches up on twenty of them holds twenty
+    readings of the same window, and only the newest is true.
+
+    The key carries the window, the threshold and the reset time, so each is
+    said once per window and again after it rolls over — a window that has
+    reset is a new fact, not a repeat.
+    """
+    latest = _last_reading(lines)
     if latest is None:
         return []
 
@@ -135,4 +146,31 @@ def alerts(lines: Iterable[str], seen: set[str]) -> list[Alert]:
     return found
 
 
-WATCHING = Watching(home=home(), transcript=transcript, alerts=alerts)
+def usage(lines: Iterable[str]) -> tuple[str, ...]:
+    """How full each window is right now, in a few words.
+
+    The same last-reading rule as `alerts`, and for the same reason: the event
+    is written every turn, so a file holds hundreds of readings and only the
+    newest is true.
+
+    Every window, not only the alarming ones. This is asked by somebody who
+    wants to know where they stand — "45% of the weekly" is the answer to that
+    question, and saying nothing until it is nearly full is the answer to a
+    different one.
+    """
+    latest = _last_reading(lines)
+    if latest is None:
+        return ()
+    said: list[str] = []
+    for which in ("primary", "secondary"):
+        window = latest.get(which)
+        if not isinstance(window, dict):
+            continue
+        used = window.get("used_percent")
+        if not isinstance(used, int | float):
+            continue
+        said.append(f"{_window_name(window.get('window_minutes'))} {used:.0f}%")
+    return tuple(said)
+
+
+WATCHING = Watching(home=home(), transcript=transcript, alerts=alerts, usage=usage)

@@ -291,3 +291,45 @@ class TranscriptWatcher:
             return path.stat().st_size
         except OSError:
             return None
+
+
+#: How much of a transcript's end to read when somebody asks where they stand.
+#:
+#: The reading is written on every turn, so the newest one is near the end and
+#: this never needs the whole file — which for a long session is megabytes, read
+#: while somebody waits for a status screen.
+USAGE_TAIL = 256_000
+
+
+def usage_for(
+    session_id: str | None, watching, roots: tuple[Path, ...] | None = None
+) -> tuple[str, ...]:
+    """How full this session's usage windows are, in the runtime's own words.
+
+    Empty for a runtime that does not say — Claude Code is one, measured on
+    2.1.246: no usage command on the CLI, and a transcript carrying per-turn
+    token counts with no limit anywhere in them. Codex writes its accounting
+    into every turn, so it can answer.
+
+    Never raises. This is a line on a status screen; a session whose file has
+    been rotated away should cost that line and nothing else.
+    """
+    if watching is None or getattr(watching, "usage", None) is None:
+        return ()
+    found = find_transcript(session_id, watching, roots)
+    if found is None:
+        return ()
+    try:
+        with found.open("rb") as reading:
+            reading.seek(0, 2)
+            reading.seek(max(0, reading.tell() - USAGE_TAIL))
+            # The first line is very likely cut in half by the seek; the parser
+            # skips what it cannot read, so it costs nothing to hand it over.
+            lines = reading.read().decode("utf-8", errors="replace").splitlines()
+    except OSError:
+        return ()
+    try:
+        return tuple(watching.usage(lines))
+    except Exception:
+        logger.warning("Could not read usage from %s", found, exc_info=True)
+        return ()

@@ -18,7 +18,7 @@ from pathlib import Path
 
 import pytest
 
-from halyard.agents.codex.watching import WATCHING, _window_name, alerts, transcript
+from halyard.agents.codex.watching import WATCHING, _window_name, alerts, transcript, usage
 
 #: Two timestamps that are not the same window. Fixed rather than computed, so
 #: the reset wording is checked against a value and not against itself.
@@ -183,3 +183,40 @@ def test_the_registry_gets_a_watcher_pointed_at_codexs_own_home() -> None:
     assert WATCHING.home.name == ".codex"
     assert WATCHING.alerts is alerts
     assert WATCHING.transcript is transcript
+
+
+# --- where a seat stands, asked rather than announced -------------------------
+
+
+def test_every_window_is_reported_not_only_the_alarming_ones() -> None:
+    """A different question from an alert. Somebody asking where they stand
+    wants "45% of the weekly"; saying nothing until it is nearly full answers
+    something else."""
+    assert usage([reading(primary=30.0, secondary=45.0)]) == ("5h 30%", "weekly 45%")
+
+
+def test_only_the_last_reading_counts_here_too() -> None:
+    catching_up = [reading(primary=p) for p in (10.0, 40.0, 91.0)]
+
+    assert usage(catching_up) == ("5h 91%",)
+
+
+def test_a_file_with_no_reading_says_nothing() -> None:
+    assert usage(["not json", "", '{"payload": {}}']) == ()
+
+
+def test_a_window_without_a_percentage_is_left_out() -> None:
+    said = usage([reading(primary=30.0)])
+
+    assert said == ("5h 30%",)
+
+
+def test_the_registry_offers_it_and_claude_code_does_not() -> None:
+    """Claude Code has nothing to answer with. Measured on 2.1.246: no usage
+    command on the CLI, and a transcript carrying per-turn token counts with no
+    limit anywhere in them."""
+    from halyard.agents import registry
+
+    found = registry.discover()
+    assert found["codex"].watching.usage is usage
+    assert found["claude-code"].watching.usage is None

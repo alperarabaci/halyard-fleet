@@ -36,6 +36,7 @@ from halyard.channels.telegram.api import TelegramApi
 from halyard.commands import catalogue as commands_offered
 from halyard.commands import running as commands_running
 from halyard.core import prompts as configured_prompts
+from halyard.core import transcripts
 from halyard.core.approvals import (
     AlreadyResolvedError,
     ApprovalExpiredError,
@@ -69,6 +70,7 @@ from halyard.core.questions import (
 from halyard.core.registry import SessionRegistry
 from halyard.core.seats import Seat, find, for_chat, for_session
 from halyard.core.seats import _default_runtime as default_runtime
+from halyard.core.transcripts import watching_for
 
 logger = logging.getLogger(__name__)
 
@@ -1991,6 +1993,12 @@ class TelegramChannel:
             seat_runner = self._runner_for(seat)
             busy = " · ⏳ working" if seat_runner and seat_runner.busy(ref.session_id) else ""
             lines.append(f"  {label}\n     at the desk: {html.escape(details) or 'unknown'}{busy}")
+            # Where this seat stands against its usage windows, when its runtime
+            # keeps that. Asked of the registry, which asks the runtime — this
+            # module has never known what a rate limit looks like and should not
+            # start now.
+            if standing := transcripts.usage_for(ref.session_id, watching_for(seat.runtime)):
+                lines.append(f"     used: {html.escape(' · '.join(standing))}")
             if seat_runner is not None:
                 model, effort = seat_runner.preferences(ref.session_id)
                 mine = " · ".join(filter(None, [model, effort and f"effort {effort}"]))
