@@ -594,19 +594,36 @@ def test_a_failed_command_is_logged_with_where_it_ran(tmp_path, caplog) -> None:
     assert any(str(tmp_path) in r.getMessage() for r in caplog.records)
 
 
-def test_a_missing_tool_gets_the_path_it_was_looked_for_on(tmp_path, caplog) -> None:
-    """The failure that cost an evening. `make: uv: No such file or directory`
-    reads as a broken command and is a broken environment — the launchd agent's
-    PATH did not include where uv was installed, while the shell running it by
-    hand did. The two are indistinguishable from the output alone, so the PATH
-    goes in the log beside it.
+def test_a_shell_that_cannot_find_the_program_gets_the_path(tmp_path, caplog) -> None:
+    """By exit code, not by wording. Every shell phrases this differently —
+    zsh puts the colon after "not found", dash puts it before — and the first
+    version of this check was written from macOS and logged nothing on Linux.
+    127 is POSIX and says the same thing everywhere.
     """
     import logging
 
     from halyard.commands import running
 
     with caplog.at_level(logging.WARNING, logger="halyard.commands.running"):
-        running.run("halyard-no-such-tool-anywhere", tmp_path)
+        result = running.run("halyard-no-such-tool-anywhere", tmp_path)
+
+    assert result.ok is False
+    said = "\n".join(r.getMessage() for r in caplog.records)
+    assert "PATH this ran with" in said
+
+
+def test_the_make_shaped_failure_gets_the_path_too(tmp_path, caplog) -> None:
+    """The one that cost an evening, and the one the exit code does not catch:
+    `make` finds the missing tool itself, says so, and exits 2 of its own
+    accord. The output is written out here rather than run through a real make,
+    so this asserts the behaviour and not whether the CI image has one.
+    """
+    import logging
+
+    from halyard.commands import running
+
+    with caplog.at_level(logging.WARNING, logger="halyard.commands.running"):
+        running.run("echo 'make: uv: No such file or directory' && exit 2", tmp_path)
 
     said = "\n".join(r.getMessage() for r in caplog.records)
     assert "PATH this ran with" in said

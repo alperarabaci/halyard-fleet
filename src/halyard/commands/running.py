@@ -57,12 +57,29 @@ logger = logging.getLogger(__name__)
 #: output is cleaned rather than politely asked to be clean.
 _ANSI = re.compile(r"\x1b(?:\[[0-9;?]*[ -/]*[@-~]|\][^\x07\x1b]*(?:\x07|\x1b\\))")
 
-#: What a shell says when it cannot find a program. Several spellings, because
-#: `make`, `sh` and `zsh` each phrase it their own way, and the log line this
-#: guards is only worth having if it fires on all of them.
-_LOOKS_MISSING = re.compile(
-    r"(No such file or directory|command not found|not found: )", re.IGNORECASE
-)
+#: What a shell says when it cannot find a program.
+#:
+#: Every shell phrases it differently, and the first version of this was
+#: written from macOS alone and would have logged nothing on Linux — CI caught
+#: it, which is the argument for CI running somewhere other than the machine
+#: the code was written on:
+#:
+#:     zsh:1: command not found: uv
+#:     /bin/sh: 1: uv: not found
+#:     make: uv: No such file or directory
+#:
+#: So `not found` bare, rather than either of the two spellings that put a
+#: colon on a different side of it. It over-matches a little — a test suite
+#: whose output says "fixture not found" gets one extra log line — and that is
+#: the cheaper error by a wide margin: under-matching costs the whole point of
+#: the line, on the platform nobody here is testing on by hand.
+_LOOKS_MISSING = re.compile(r"(no such file or directory|not found)", re.IGNORECASE)
+
+#: What a shell exits with when it could not find the program at all. POSIX,
+#: and the same everywhere — where the wording is not. It does not cover the
+#: case this was written for, because `make` catches the failure and exits 2 on
+#: its own, which is why both tests are needed rather than either.
+NOT_FOUND = 127
 
 
 @dataclass(frozen=True)
@@ -196,7 +213,7 @@ def run(
     # — so nothing anywhere was broken except the environment handed to the
     # things it ran. `halyard doctor` checks that now; this is what makes the
     # next one diagnosable from the log alone.
-    if _LOOKS_MISSING.search(whole):
+    if process.returncode == NOT_FOUND or _LOOKS_MISSING.search(whole):
         logger.warning(
             "That reads like something was not on PATH. The PATH this ran with was: %s",
             environment.get("PATH", "(unset)"),
