@@ -413,3 +413,113 @@ def missing_files(projects: list[Project]) -> list[str]:
             if not under(path).is_file():
                 said.append(f"{project.name}: {setting} points at {path}, which is not there")
     return said
+
+
+@dataclass(frozen=True)
+class RuntimeSettings:
+    """What one runtime is configured with, under `runtimes:` in the file.
+
+    Everything here belongs to a runtime rather than to a project or a seat,
+    and there was nowhere for that before. Model lists lived in the `settings:`
+    block as `HALYARD_CLAUDE_MODELS=opus,sonnet,…`, which works for a
+    comma-separated string and stops working the moment a runtime needs two
+    settings of its own.
+    """
+
+    name: str
+    #: Where this runtime's local server is, when it has one to talk to.
+    #:
+    #: opencode is the case, and the reason this exists. Its TUI serves an HTTP
+    #: API — but only when started with `--port`, and its default is to pick
+    #: nothing reachable. Measured: with `opencode` alone the process listens on
+    #: no TCP port at all and the gate can deliver a question and never answer
+    #: it; with `opencode --port 4096` both directions work.
+    port: int | None = None
+    #: Which models this runtime's seats may be switched between, in the order
+    #: they should be offered. Empty means whatever the runtime itself says.
+    models: tuple[str, ...] = ()
+    #: Which of them to reach for when a provider says the quota is gone.
+    #: Offered on a card rather than switched to: the other model costs
+    #: different money, and that is not a decision to make on somebody's behalf.
+    on_quota: str | None = None
+
+
+def runtimes_from_yaml(text: str) -> dict[str, RuntimeSettings]:
+    """The `runtimes:` block, by runtime name.
+
+    Absent is the ordinary case and means nothing is configured — every runtime
+    that predates this block works without one.
+    """
+    try:
+        loaded = yaml.safe_load(text)
+    except yaml.YAMLError as error:
+        raise ValueError(f"Could not read the configuration: {error}") from None
+    if not isinstance(loaded, dict):
+        return {}
+
+    raw = loaded.get("runtimes")
+    if raw is None:
+        return {}
+    if not isinstance(raw, dict):
+        raise ValueError("`runtimes:` must be a mapping of runtime name to its settings.")
+
+    from halyard.agents import registry
+
+    known = set(registry.names())
+    found: dict[str, RuntimeSettings] = {}
+    for name, body in raw.items():
+        text_name = str(name).strip()
+        if text_name not in known:
+            # Refused rather than ignored. A misspelling here is a block of
+            # settings that silently applies to nothing, and the way somebody
+            # finds out is that the thing they configured does not happen.
+            raise ValueError(
+                f"`runtimes: {text_name}:` is not a runtime. Use one of: "
+                f"{', '.join(sorted(known))}."
+            )
+        body = body or {}
+        if not isinstance(body, dict):
+            raise ValueError(f"`runtimes: {text_name}:` must be a mapping.")
+        unknown = set(body) - {"port", "models", "on_quota"}
+        if unknown:
+            raise ValueError(
+                f"`runtimes: {text_name}:` does not take {', '.join(sorted(unknown))}."
+            )
+
+        port = body.get("port")
+        if port is not None and (not isinstance(port, int) or not 1 <= port <= 65535):
+            raise ValueError(f"`runtimes: {text_name}: port:` must be a port number.")
+
+        models = body.get("models") or ()
+        if isinstance(models, str) or not isinstance(models, list | tuple):
+            raise ValueError(f"`runtimes: {text_name}: models:` must be a list.")
+
+        on_quota = _as_text(body.get("on_quota"))
+        if on_quota and models and on_quota not in [str(m) for m in models]:
+            # Otherwise the card offers a model this configuration has not said
+            # is usable here, and finding out costs a turn.
+            raise ValueError(
+                f"`runtimes: {text_name}: on_quota:` is {on_quota!r}, which is not in its "
+                f"`models:` list."
+            )
+
+        found[text_name] = RuntimeSettings(
+            name=text_name,
+            port=port,
+            models=tuple(str(m) for m in models),
+            on_quota=on_quota,
+        )
+    return found
+
+
+def runtime_settings(directory: Path | None = None) -> dict[str, RuntimeSettings]:
+    """The `runtimes:` block from the configuration on disk."""
+    path = find_config(directory)
+    if path is None:
+        return {}
+    try:
+        return runtimes_from_yaml(path.read_text(encoding="utf-8"))
+    except OSError as error:
+        raise ValueError(f"Could not open {path}: {error}") from None
+    except ValueError as error:
+        raise ValueError(f"{path}: {error}") from None

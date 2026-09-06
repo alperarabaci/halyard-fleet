@@ -392,3 +392,67 @@ def test_a_project_with_no_path_is_not_guessed_at(tmp_path) -> None:
     )
 
     assert missing_files(found) == []
+
+
+# --- the `runtimes:` block ----------------------------------------------------
+
+
+def test_a_runtime_can_carry_settings_of_its_own() -> None:
+    """Model lists used to live in `settings:` as a comma-separated string,
+    which works for one setting and stops working at two."""
+    from halyard.core.config_file import runtimes_from_yaml
+
+    found = runtimes_from_yaml(
+        """
+runtimes:
+  opencode:
+    port: 4096
+    models: [a-model, another-model]
+    on_quota: another-model
+"""
+    )
+
+    assert found["opencode"].port == 4096
+    assert found["opencode"].models == ("a-model", "another-model")
+    assert found["opencode"].on_quota == "another-model"
+
+
+def test_no_runtimes_block_is_the_ordinary_case() -> None:
+    """Every runtime that predates this works without one."""
+    from halyard.core.config_file import runtimes_from_yaml
+
+    assert runtimes_from_yaml("projects: {}") == {}
+
+
+def test_a_misspelled_runtime_is_refused_rather_than_ignored() -> None:
+    """A block that silently applies to nothing is found out by the thing you
+    configured not happening."""
+    from halyard.core.config_file import runtimes_from_yaml
+
+    with pytest.raises(ValueError, match="is not a runtime"):
+        runtimes_from_yaml("runtimes:\n  opencde:\n    port: 4096")
+
+
+def test_an_unknown_field_is_refused(monkeypatch) -> None:
+    from halyard.core.config_file import runtimes_from_yaml
+
+    with pytest.raises(ValueError, match="does not take"):
+        runtimes_from_yaml("runtimes:\n  opencode:\n    prt: 4096")
+
+
+def test_a_port_that_is_not_a_port_is_refused() -> None:
+    from halyard.core.config_file import runtimes_from_yaml
+
+    with pytest.raises(ValueError, match="port number"):
+        runtimes_from_yaml("runtimes:\n  opencode:\n    port: 99999")
+
+
+def test_a_fallback_model_has_to_be_one_of_the_offered_ones() -> None:
+    """Otherwise the card offers something this configuration never said was
+    usable here, and finding out costs a turn."""
+    from halyard.core.config_file import runtimes_from_yaml
+
+    with pytest.raises(ValueError, match="not in its `models:` list"):
+        runtimes_from_yaml(
+            "runtimes:\n  opencode:\n    models: [a-model]\n    on_quota: something-else"
+        )
