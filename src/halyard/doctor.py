@@ -246,10 +246,11 @@ def _check_seat(
     lines: list[str] = []
     label = f"{seat.label} ({seat.runtime})"
 
-    if not seat.session:
-        return [f"{WARN}{label}: no session name, so nothing can be sent to it"], 0
-
     spec = registry.get(seat.runtime)
+    if spec is None and not seat.session:
+        return [f"{WARN}{label}: no session name, so nothing can be sent to it"], 0
+    if spec is not None and spec.sessions_are_named and not seat.session:
+        return [f"{WARN}{label}: no session name, so nothing can be sent to it"], 0
     if spec is None:
         # A seat naming a runtime this build does not have. Said plainly rather
         # than skipped: it is a seat somebody believes in and cannot reach.
@@ -267,6 +268,29 @@ def _check_seat(
     lines += reported
     if fatal:
         return lines, 1
+
+    if not spec.sessions_are_named:
+        # There is no name to look up, so looking one up would fail every time
+        # and send somebody hunting for a name to copy that never existed.
+        # Which is what happened: a seat written the way the other three are
+        # written was reported as pointing at a session that is not there.
+        if seat.session:
+            lines.append(f"{WARN}{label}: `session: {seat.session}` is ignored here")
+            lines.append(f"        {spec.sessions_hint or 'this runtime names no sessions'}")
+            lines.append("        remove that line — the seat is found by its project")
+        if not seat.project:
+            lines.append(f"{FAIL}{label}: no project, and that is what binds a seat here")
+            lines.append("        put this seat under a project in halyard.yaml")
+            return lines, 1
+        lines.append(f"{OK}{label}: bound to {seat.project}")
+        if not seat.chat:
+            lines.append(f"{WARN}        no chat, so it has nowhere of its own to speak")
+        if not project_path:
+            lines.append(f"{WARN}        {seat.project} has no `path:`, so the gate cannot")
+            lines.append("                be checked")
+            return lines, 0
+        gate_lines, gate_problems = _check_gated_project(label, None, seat, str(project_path))
+        return lines + gate_lines, gate_problems
 
     ref = spec.find_session(seat.session)
     if ref is None:

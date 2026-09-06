@@ -14,6 +14,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from halyard import doctor
 
 
@@ -448,3 +450,83 @@ def test_no_service_log_still_says_where_it_would_be(tmp_path: Path) -> None:
 
     assert problems == 0
     assert any(str(missing) in line for line in lines)
+
+
+# --- a runtime whose sessions have no names -----------------------------------
+
+
+def _opencode_seat(**rest):
+    from halyard.core.seats import Seat
+
+    return Seat(label="opendrv", runtime="opencode", **rest)
+
+
+@pytest.fixture
+def opencode_is_here(monkeypatch):
+    """Stand the runtime up, so these tests are about the seat and not the box.
+
+    Written without this first, and it passed here and failed on CI — where
+    opencode is not installed, so `check_available` returns a `fail`,
+    `_check_seat` stops there, and the branch under test is never reached. A
+    test that asserts something downstream while depending on an environment
+    check upstream is only testing the machine it was written on.
+    """
+    from halyard.agents import opencode
+
+    monkeypatch.setattr(opencode, "_binary", lambda: "/somewhere/opencode")
+    monkeypatch.setattr(opencode, "_version", lambda binary: "1.18.29")
+    monkeypatch.setattr(opencode, "reachable", lambda port: (True, "answered 200"))
+    monkeypatch.setattr(
+        "halyard.core.config_file.runtime_settings", lambda *a, **k: {}, raising=False
+    )
+
+
+def test_a_seat_bound_to_its_project_is_not_reported_as_broken(
+    monkeypatch, opencode_is_here
+) -> None:
+    """It was. A seat written the way this runtime needs — no `session:` —
+    came back as "no session name, so nothing can be sent to it", which is the
+    right sentence for the other three and wrong for this one."""
+    from halyard import doctor
+
+    monkeypatch.setattr(doctor, "_check_gated_project", lambda *a, **k: ([], 0))
+    lines, problems = doctor._check_seat(
+        _opencode_seat(chat="-100", project="a-project"), Path("/tmp/x"), None, None
+    )
+
+    assert problems == 0
+    assert any("bound to a-project" in line for line in lines)
+
+
+def test_a_session_name_here_is_called_out_rather_than_hunted_for(
+    monkeypatch, opencode_is_here
+) -> None:
+    """The other half, and the one that wasted an evening: a seat copied from
+    another runtime's shape was reported as pointing at a session that does not
+    exist, which sends somebody looking for a name to copy that never existed.
+    """
+    from halyard import doctor
+
+    monkeypatch.setattr(doctor, "_check_gated_project", lambda *a, **k: ([], 0))
+    lines, _ = doctor._check_seat(
+        _opencode_seat(session="alpha-engine-opencode-driver", chat="-100", project="a-project"),
+        Path("/tmp/x"),
+        None,
+        None,
+    )
+
+    said = "\n".join(lines)
+    assert "is ignored here" in said
+    assert "remove that line" in said
+    assert "no session named" not in said, "there is no name to be missing"
+
+
+def test_a_seat_with_no_project_here_has_nothing_to_bind_to(opencode_is_here) -> None:
+    """The project is what addresses it, so its absence is the real failure —
+    where for the other three it is only a missing convenience."""
+    from halyard import doctor
+
+    lines, problems = doctor._check_seat(_opencode_seat(chat="-100"), None, None, None)
+
+    assert problems == 1
+    assert any("no project" in line for line in lines)

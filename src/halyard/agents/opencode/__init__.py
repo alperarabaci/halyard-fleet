@@ -194,6 +194,7 @@ RUNTIME = RuntimeSpec(
     human="opencode",
     binary="opencode",
     prefix="o",
+    sessions_are_named=False,
     hooks=Hooks(
         # Not a hooks file. `settings` is what core reads when it needs to name
         # the file in the project that carries this runtime's gate, and for
