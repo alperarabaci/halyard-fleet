@@ -119,14 +119,55 @@ def _serve_command(repo: Path, git: str, uv: str) -> str:
     )
 
 
+def _path_for(uv: str, git: str) -> str:
+    """What the service's children get to look in.
+
+    launchd's own `PATH` is `/usr/bin:/bin`, so this was a fixed list of the
+    places a Mac keeps things. That was enough for the service itself, which is
+    started by absolute path and never consults it — and not enough for
+    anything the service *runs*.
+
+    Measured: a project's `make` target calling `uv sync` failed with
+    `make: uv: No such file or directory` on a machine where `uv` was perfectly
+    installed, because it was installed to `~/.local/bin` — which is where
+    uv's own installer puts it, and which was not on this list. Halyard itself
+    started fine on that machine, which is what made it confusing: the binary
+    the service is launched with was found, and the same binary by name was
+    not.
+
+    So the directories of the tools this service was installed with go first.
+    They are resolved paths on this machine, which is what a plist is anyway —
+    generated per machine, by `install`, from what it found here.
+    """
+    # Not resolved. `/opt/homebrew/bin/uv` is a symlink into a versioned Cellar
+    # directory, and following it would write `…/uv/0.11.7/bin` into a file that
+    # outlives the next `brew upgrade` — a PATH that breaks on a day nobody
+    # touched Halyard.
+    wanted = [
+        str(Path(uv).expanduser().parent),
+        str(Path(git).expanduser().parent),
+        # Where user-installed tools land, and where uv's own installer puts it.
+        str(Path.home() / ".local" / "bin"),
+        "/opt/homebrew/bin",
+        "/usr/local/bin",
+        "/usr/bin",
+        "/bin",
+        "/usr/sbin",
+        "/sbin",
+    ]
+    seen: set[str] = set()
+    ordered = [d for d in wanted if d and not (d in seen or seen.add(d))]
+    return ":".join(ordered)
+
+
 def render_plist(repo: Path, git: str, uv: str, log: Path) -> bytes:
     """The LaunchAgent, as launchd expects it.
 
     `KeepAlive` so a crash — or a machine waking to find it gone — brings it
     back. `RunAtLoad` so it is up after a reboot without anybody logging in and
-    starting it. A `PATH` that includes the usual homebrew and user-local
-    directories, because launchd's own is `/usr/bin:/bin` and neither `uv` nor a
-    git installed by homebrew is on it.
+    starting it. A `PATH` built by `_path_for`, because launchd's own is
+    `/usr/bin:/bin` and nothing this service or the commands it runs need is
+    on it.
     """
     document = {
         "Label": LABEL,
@@ -137,7 +178,7 @@ def render_plist(repo: Path, git: str, uv: str, log: Path) -> bytes:
         "StandardOutPath": str(log),
         "StandardErrorPath": str(log),
         "EnvironmentVariables": {
-            "PATH": "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin",
+            "PATH": _path_for(uv, git),
         },
     }
     return plistlib.dumps(document)

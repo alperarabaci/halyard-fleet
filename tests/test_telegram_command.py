@@ -574,3 +574,53 @@ async def test_the_output_is_escaped_so_telegram_does_not_refuse_it(wired, monke
 
     assert "&lt;halyard.yaml&gt;" in api.sent[-1]["text"]
     assert "&amp;" in api.sent[-1]["text"]
+
+
+# --- what the log says when a command fails ----------------------------------
+
+
+def test_a_failed_command_is_logged_with_where_it_ran(tmp_path, caplog) -> None:
+    """A phone gets the tail of the output and nothing else. Which project it
+    was, how long it took and what the exit code was belong in the log, where
+    somebody diagnosing it afterwards is looking."""
+    import logging
+
+    from halyard.commands import running
+
+    with caplog.at_level(logging.WARNING, logger="halyard.commands.running"):
+        running.run("exit 3", tmp_path)
+
+    assert any("exit 3" in r.getMessage() for r in caplog.records)
+    assert any(str(tmp_path) in r.getMessage() for r in caplog.records)
+
+
+def test_a_missing_tool_gets_the_path_it_was_looked_for_on(tmp_path, caplog) -> None:
+    """The failure that cost an evening. `make: uv: No such file or directory`
+    reads as a broken command and is a broken environment — the launchd agent's
+    PATH did not include where uv was installed, while the shell running it by
+    hand did. The two are indistinguishable from the output alone, so the PATH
+    goes in the log beside it.
+    """
+    import logging
+
+    from halyard.commands import running
+
+    with caplog.at_level(logging.WARNING, logger="halyard.commands.running"):
+        running.run("halyard-no-such-tool-anywhere", tmp_path)
+
+    said = "\n".join(r.getMessage() for r in caplog.records)
+    assert "PATH this ran with" in said
+
+
+def test_a_command_that_merely_fails_does_not_get_the_path(tmp_path, caplog) -> None:
+    """A failing test suite is not an environment problem, and a PATH printed
+    after every red build is noise that teaches people to skip the line."""
+    import logging
+
+    from halyard.commands import running
+
+    with caplog.at_level(logging.WARNING, logger="halyard.commands.running"):
+        running.run("echo 'assertion failed' && exit 1", tmp_path)
+
+    said = "\n".join(r.getMessage() for r in caplog.records)
+    assert "PATH this ran with" not in said

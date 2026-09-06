@@ -54,6 +54,47 @@ def test_the_agent_carries_a_path_that_finds_uv(tmp_path: Path) -> None:
     assert "/opt/homebrew/bin" in document["EnvironmentVariables"]["PATH"]
 
 
+def test_the_path_finds_a_uv_installed_where_uv_installs_itself() -> None:
+    """The fixed list did not include `~/.local/bin`, which is where uv's own
+    installer puts it — and a project's `make` target calling `uv sync` failed
+    with `make: uv: No such file or directory` on a machine where uv was
+    perfectly installed. Halyard itself started fine there, because the service
+    is launched by absolute path and never consults this. Only what it *runs*
+    was affected, which is what made it hard to see.
+    """
+    where = service._path_for("/Users/someone/.local/bin/uv", "/usr/bin/git").split(":")
+
+    assert "/Users/someone/.local/bin" in where
+    assert where[0] == "/Users/someone/.local/bin", "the uv this service uses comes first"
+
+
+def test_the_path_keeps_the_places_a_mac_puts_things() -> None:
+    """Widening it must not narrow it: a Makefile reaching for something in
+    /opt/homebrew/bin has to go on working."""
+    where = service._path_for("/Users/someone/.local/bin/uv", "/usr/bin/git").split(":")
+
+    for usual in ("/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin"):
+        assert usual in where
+
+
+def test_the_path_does_not_follow_a_symlink_into_a_versioned_directory() -> None:
+    """`/opt/homebrew/bin/uv` points into a Cellar directory named for the
+    version. Resolving it would write a path that the next `brew upgrade`
+    deletes, and the service would break on a day nobody touched it.
+    """
+    where = service._path_for("/opt/homebrew/bin/uv", "/usr/bin/git")
+
+    assert "/opt/homebrew/bin" in where.split(":")
+    assert "Cellar" not in where
+
+
+def test_no_directory_is_listed_twice() -> None:
+    """Both tools in one directory is the ordinary case."""
+    where = service._path_for("/usr/local/bin/uv", "/usr/local/bin/git").split(":")
+
+    assert len(where) == len(set(where))
+
+
 def test_off_macos_it_refuses_rather_than_pretends(monkeypatch, capsys) -> None:
     monkeypatch.setattr(service, "_is_macos", lambda: False)
 
@@ -319,3 +360,86 @@ def test_stop_keeps_the_agent_installed(macos, monkeypatch, tmp_path) -> None:
     service.stop()
 
     assert plist.exists()
+
+
+# --- what the service can find, as opposed to what this shell can -------------
+
+
+def _agent_with(path_value: str, where: Path) -> Path:
+    plist = where / "com.halyard.fleet.plist"
+    plist.write_bytes(plistlib.dumps({"EnvironmentVariables": {"PATH": path_value}}))
+    return plist
+
+
+def _tool(directory: Path, name: str) -> None:
+    directory.mkdir(parents=True, exist_ok=True)
+    made = directory / name
+    made.write_text("#!/bin/sh\n")
+    made.chmod(0o755)
+
+
+def test_doctor_says_nothing_when_there_is_no_service(tmp_path: Path) -> None:
+    """`halyard serve` by hand inherits a shell's PATH, which is somebody
+    else's business."""
+    from halyard import doctor
+
+    lines, problems = doctor.check_service_path(tmp_path / "not-installed.plist")
+
+    assert lines == []
+    assert problems == 0
+
+
+def test_doctor_passes_when_the_agent_can_find_its_tools(tmp_path: Path) -> None:
+    from halyard import doctor
+
+    bin_dir = tmp_path / "bin"
+    for tool in doctor.SERVICE_NEEDS:
+        _tool(bin_dir, tool)
+
+    lines, problems = doctor.check_service_path(_agent_with(str(bin_dir), tmp_path))
+
+    assert problems == 0
+    assert any("can find" in line for line in lines)
+
+
+def test_doctor_catches_the_tool_the_agent_cannot_find(tmp_path: Path) -> None:
+    """The failure this exists for. `make bootstrap-up` came back as
+    `make: uv: No such file or directory` on a machine where uv was installed —
+    to `~/.local/bin`, which the agent's PATH did not include. Halyard itself
+    ran perfectly throughout, because it is started by absolute path and never
+    reads this.
+    """
+    from halyard import doctor
+
+    bin_dir = tmp_path / "bin"
+    _tool(bin_dir, "git")  # git yes, uv no — which is exactly how it happened
+
+    lines, problems = doctor.check_service_path(_agent_with(str(bin_dir), tmp_path))
+
+    assert problems == 1
+    assert any("cannot find uv" in line for line in lines)
+    assert any("halyard service install" in line for line in lines), "say what fixes it"
+
+
+def test_doctor_reports_where_this_shell_finds_it_instead(tmp_path: Path) -> None:
+    """The difference between the two PATHs is the whole diagnosis, and a
+    person reading `doctor` in a terminal has the other one in front of them.
+    """
+    from halyard import doctor
+
+    lines, _ = doctor.check_service_path(_agent_with(str(tmp_path / "empty"), tmp_path))
+
+    assert any("this shell finds" in line for line in lines)
+
+
+def test_doctor_survives_a_plist_it_cannot_parse(tmp_path: Path) -> None:
+    """Nothing in the gate depends on this check."""
+    from halyard import doctor
+
+    broken = tmp_path / "com.halyard.fleet.plist"
+    broken.write_bytes(b"not a plist at all")
+
+    lines, problems = doctor.check_service_path(broken)
+
+    assert problems == 0
+    assert lines and "could not read" in lines[0]
