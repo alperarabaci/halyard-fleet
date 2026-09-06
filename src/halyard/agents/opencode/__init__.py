@@ -43,6 +43,13 @@ _EPOCH = datetime.fromtimestamp(0, tz=UTC)
 TIMEOUT = 10.0
 
 
+def _runner(settings=None):
+    """Takes nothing from settings; the argument is the shared shape."""
+    from halyard.agents.opencode.runner import OpencodeRunner
+
+    return OpencodeRunner()
+
+
 def _binary() -> str | None:
     return shutil.which("opencode")
 
@@ -308,7 +315,7 @@ RUNTIME = RuntimeSpec(
         matcher="|".join(sorted(wiring.ASK)),
         dialect="plugin",
     ),
-    runner=lambda *_args, **_kwargs: None,
+    runner=_runner,
     find_session=find_session,
     list_sessions=list_sessions,
     sessions_hint="the session titles this machine's opencode has, `halyard sessions`",
