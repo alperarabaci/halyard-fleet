@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import sys
 import urllib.error
 import urllib.request
@@ -428,6 +429,66 @@ def _megabytes(size: int) -> str:
     return f"{size / 1_000_000:.0f} MB"
 
 
+#: What the commands a project lists are entitled to find. `git` because
+#: `/commit` is built on it; `uv` because a Makefile's first line is usually
+#: `uv sync` or `uv run`.
+SERVICE_NEEDS = ("uv", "git")
+
+
+def check_service_path(plist: Path) -> tuple[list[str], int]:
+    """Whether the installed service can find the tools it runs.
+
+    The agent is started by absolute path and never reads this, so a `PATH`
+    missing everything would still leave Halyard running perfectly. What it
+    breaks is what Halyard *runs*: a project's command goes looking by name.
+
+    Measured, on the machine it happened to: `make bootstrap-up` from a phone
+    failed with `make: uv: No such file or directory` while `uv` sat in
+    `~/.local/bin`, which is where its own installer puts it and which the
+    agent's fixed list did not include. `/commit` kept working the whole time,
+    because git was on the list — so it read as an intermittent fault in the
+    command rather than a constant one in the environment.
+
+    Checked against the agent's own `PATH` rather than this shell's, which is
+    the entire point: the shell running `doctor` has a profile and the service
+    does not, so asking `which uv` here answers a question nobody has.
+
+    A plist is written at install time and never updated. `uv self update` can
+    move the binary, and nothing would say so until a command failed.
+    """
+    try:
+        import plistlib
+
+        document = plistlib.loads(plist.read_bytes())
+    except FileNotFoundError:
+        # Not installed as a service. `halyard serve` by hand inherits a shell's
+        # PATH, and that is somebody else's business.
+        return [], 0
+    except Exception as unreadable:
+        return [f"{WARN}could not read {plist}: {unreadable}"], 0
+
+    where = (document.get("EnvironmentVariables") or {}).get("PATH") or ""
+    directories = [Path(part) for part in where.split(":") if part]
+
+    missing = []
+    for tool in SERVICE_NEEDS:
+        if not any((d / tool).is_file() and os.access(d / tool, os.X_OK) for d in directories):
+            missing.append(tool)
+
+    if not missing:
+        return [f"{OK}the service can find {', '.join(SERVICE_NEEDS)} on its own PATH"], 0
+
+    lines = [f"{FAIL}the service cannot find {', '.join(missing)} on its own PATH"]
+    lines.append("        Halyard runs anyway — it is started by absolute path — but every")
+    lines.append("        command it runs that reaches for one of these fails.")
+    for tool in missing:
+        found = shutil.which(tool)
+        lines.append(f"        this shell finds {tool} at {found or 'nowhere either'}")
+    lines.append(f"        the agent's PATH is {where}")
+    lines.append("        halyard service install     (rewrites it from what is here now)")
+    return lines, 1
+
+
 def check_service_log(path: Path) -> tuple[list[str], int]:
     """Say something useful about launchd's copy of the console output.
 
@@ -635,6 +696,12 @@ def run() -> int:
         )
 
     from halyard.service import log_path as service_log_path
+    from halyard.service import plist_path as service_plist_path
+
+    lines, found = check_service_path(service_plist_path())
+    problems += found
+    for line in lines:
+        print(line)
 
     lines, found = check_service_log(service_log_path())
     problems += found

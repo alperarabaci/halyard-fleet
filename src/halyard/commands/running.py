@@ -14,6 +14,7 @@ where the code is.
 
 from __future__ import annotations
 
+import logging
 import os
 import re
 import subprocess
@@ -46,6 +47,8 @@ PROGRESS_EVERY = 45.0
 #: promptly, long enough that waiting costs nothing.
 POLL_EVERY = 0.2
 
+logger = logging.getLogger(__name__)
+
 #: Terminal colour, which a phone renders as litter.
 #:
 #: `CI=1` in the environment silences most tools, and does nothing for a
@@ -53,6 +56,30 @@ POLL_EVERY = 0.2
 #: built for, whose `make help` came back as `\x1b[36mtest-web\x1b[0m`. So the
 #: output is cleaned rather than politely asked to be clean.
 _ANSI = re.compile(r"\x1b(?:\[[0-9;?]*[ -/]*[@-~]|\][^\x07\x1b]*(?:\x07|\x1b\\))")
+
+#: What a shell says when it cannot find a program.
+#:
+#: Every shell phrases it differently, and the first version of this was
+#: written from macOS alone and would have logged nothing on Linux — CI caught
+#: it, which is the argument for CI running somewhere other than the machine
+#: the code was written on:
+#:
+#:     zsh:1: command not found: uv
+#:     /bin/sh: 1: uv: not found
+#:     make: uv: No such file or directory
+#:
+#: So `not found` bare, rather than either of the two spellings that put a
+#: colon on a different side of it. It over-matches a little — a test suite
+#: whose output says "fixture not found" gets one extra log line — and that is
+#: the cheaper error by a wide margin: under-matching costs the whole point of
+#: the line, on the platform nobody here is testing on by hand.
+_LOOKS_MISSING = re.compile(r"(no such file or directory|not found)", re.IGNORECASE)
+
+#: What a shell exits with when it could not find the program at all. POSIX,
+#: and the same everywhere — where the wording is not. It does not cover the
+#: case this was written for, because `make` catches the failure and exits 2 on
+#: its own, which is why both tests are needed rather than either.
+NOT_FOUND = 127
 
 
 @dataclass(frozen=True)
@@ -122,6 +149,7 @@ def run(
     and "it could not be started" is an answer where a traceback is not.
     """
     started = time.monotonic()
+    environment = _environment()
     try:
         # A command line from this machine's own configuration, run as written.
         process = subprocess.Popen(
@@ -131,7 +159,7 @@ def run(
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
-            env=_environment(),
+            env=environment,
         )
     except OSError as refused:
         return Result(ok=False, output=str(refused), seconds=time.monotonic() - started)
@@ -165,5 +193,29 @@ def run(
     seconds = time.monotonic() - started
     whole = "\n".join(lines)
     if process.returncode == 0:
+        logger.info("Command finished in %.1fs: %s", seconds, command)
         return Result(ok=True, output=_tail(whole, LINES_WHEN_IT_PASSED), seconds=seconds)
+
+    logger.warning(
+        "Command failed (exit %s) after %.1fs in %s: %s",
+        process.returncode,
+        seconds,
+        path,
+        command,
+    )
+    # A tool the shell could not find is an environment fault, not a command
+    # fault, and the two read identically on a phone: `make: uv: No such file
+    # or directory` says nothing about *which* uv was looked for or where.
+    #
+    # This happened, and cost an evening. Halyard ran as a launchd agent whose
+    # PATH was a fixed list that did not include `~/.local/bin`, where uv's own
+    # installer puts it. The service was fine — it is started by absolute path
+    # — so nothing anywhere was broken except the environment handed to the
+    # things it ran. `halyard doctor` checks that now; this is what makes the
+    # next one diagnosable from the log alone.
+    if process.returncode == NOT_FOUND or _LOOKS_MISSING.search(whole):
+        logger.warning(
+            "That reads like something was not on PATH. The PATH this ran with was: %s",
+            environment.get("PATH", "(unset)"),
+        )
     return Result(ok=False, output=_tail(whole, LINES_WHEN_IT_FAILED), seconds=seconds)
