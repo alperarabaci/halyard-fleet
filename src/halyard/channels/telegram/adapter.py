@@ -1909,7 +1909,25 @@ class TelegramChannel:
         # closed set worth checking; models are not, and refusing one released
         # this morning because it is missing from a list written months ago
         # would be worse than passing it through.
-        allowed, enforced = runner.options(session_id).get(what, ((), False))
+        offered = runner.options(session_id)
+        if what not in offered:
+            # A runtime that does not have this setting at all. Left to fall
+            # through, `/effort high` on an opencode seat answered "turns from
+            # here will use high" and set nothing, because its messages carry a
+            # model and nothing about how hard it thinks. A confirmation for
+            # something that did not happen is worse than a refusal.
+            await self._say(
+                f"{seat.runtime if seat else 'This runtime'} has no <b>{what}</b> setting"
+                + (
+                    f" — it takes {', '.join(sorted(offered))}."
+                    if offered
+                    else ", and nothing here can be chosen."
+                ),
+                chat_id,
+                thread_id,
+            )
+            return
+        allowed, enforced = offered.get(what, ((), False))
         if value and enforced and value.lower() not in allowed:
             await self._say(
                 f"{what.capitalize()} is one of: <code>{' '.join(allowed)}</code>",

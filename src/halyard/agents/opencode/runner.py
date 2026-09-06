@@ -13,6 +13,11 @@ not a limitation to work around, it is the shape: `set_model` here records what
 you start at the keyboard is unaffected, which is honest — Halyard has no way
 to reach into the interface you are typing in.
 
+The *variant* — opencode's name for the axis reasoning is lowered on — is one
+of those things the interface keeps. Measured in 1.18.29: the binary carries
+`command.model.variant.cycle` as a keybinding, and the message body has no
+field for it. So it is chosen at the desk and left alone here.
+
 Nothing here starts opencode. If it is not running there is no session to write
 into, and starting one would produce a second instance holding a different
 conversation from the one somebody meant.
@@ -72,11 +77,15 @@ class OpencodeRunner:
         return {"model": (models, False)} if models else {}
 
     def preferences(self, session_id: str) -> tuple[str | None, str | None]:
-        """The model this runner would send with, and no effort setting.
+        """The model this runner would send with, and nothing about effort.
 
-        Effort is a Claude Code and Codex idea. opencode's message carries a
-        model and nothing about how hard it thinks, so the honest answer is
-        None rather than a level that would be dropped on the way.
+        Not because opencode has no such idea — it has one, called a *variant*,
+        and somebody using it lowers reasoning that way. It is a choice made in
+        the interface: measured in 1.18.29, the binary carries
+        `command.model.variant.cycle` as a keybinding and the message body this
+        runner posts to has no field for it. So a variant is set at the desk
+        and stays set, and reporting one from here would be reporting a setting
+        this code cannot reach.
         """
         return self._models.get(session_id), None
 
@@ -87,7 +96,14 @@ class OpencodeRunner:
             self._models.pop(session_id, None)
 
     def set_effort(self, session_id: str, effort: str | None) -> None:
-        """Accepted and ignored, because there is nowhere to put it."""
+        """Accepted and dropped, because the message has nowhere to carry it.
+
+        The channel refuses `/effort` for this runtime before reaching here —
+        `options()` does not offer it, and a confirmation for something that
+        did not happen is worse than a refusal. This stays because the protocol
+        has it, and silently doing nothing is the honest implementation of a
+        setting that cannot be sent.
+        """
         return None
 
     # --- finding and sending ------------------------------------------------
