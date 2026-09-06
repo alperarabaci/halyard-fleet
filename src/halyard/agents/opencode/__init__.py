@@ -53,8 +53,8 @@ def _version(binary: str) -> str | None:
     return done.stdout.strip().splitlines()[-1].strip() if done.returncode == 0 else None
 
 
-def check_available(**_context) -> list[tuple[str, str]]:
-    """Whether this machine can run it at all."""
+def _available_binary() -> list[tuple[str, str]]:
+    """Whether this machine has the CLI at all."""
     found = _binary()
     if not found:
         return [
@@ -102,6 +102,74 @@ def check_wired(hooks_file: Path, project_dir: Path, **_context) -> list[tuple[s
         lines.append(("", f"halyard wire {project_dir}"))
     else:
         lines.append(("ok", f"{wiring.CONFIG} asks about {', '.join(sorted(wiring.ASK))}"))
+    return lines
+
+
+def reachable(port: int | None) -> tuple[bool, str]:
+    """Whether a server is answering on this port, and what it said.
+
+    Nothing else in this package needs the network. This does, because the
+    thing it is checking for cannot be seen any other way: the gate looks
+    perfectly wired and delivers questions it can never answer.
+    """
+    if not port:
+        return False, "no port configured"
+    import urllib.error
+    import urllib.request
+
+    try:
+        # A literal loopback URL, built here rather than taken from anywhere.
+        with urllib.request.urlopen(f"http://127.0.0.1:{port}/config", timeout=3) as answered:
+            return answered.status == 200, f"answered {answered.status}"
+    except urllib.error.HTTPError as refused:
+        # Answering at all is what is being tested. A 404 means something is
+        # listening, which is the question.
+        return True, f"answered {refused.code}"
+    except Exception as unreachable:
+        return False, str(unreachable)
+
+
+def check_available(**_context) -> list[tuple[str, str]]:
+    """Whether this machine can run it, and whether it can be reached.
+
+    **The second half is not optional here.** This runtime's gate answers an
+    approval by calling back into opencode's own HTTP API, and that API is
+    served only when the TUI is started with `--port`. Its default is to serve
+    nothing reachable — measured: `opencode` alone leaves a process listening
+    on no TCP port at all, and `opencode --port 4096` answers immediately.
+
+    A gate in that state is the worst shape this project knows: the question
+    reaches the phone, the button does nothing, and every part of `wire` and
+    every file on disk says the project is gated.
+    """
+    lines = list(_available_binary())
+    if any(level == "fail" for level, _ in lines):
+        return lines
+
+    from halyard.core.config_file import runtime_settings
+
+    try:
+        configured = runtime_settings().get("opencode")
+    except Exception:
+        # A configuration that will not parse is somebody else's report to
+        # make; this check is not the place to raise it a second time.
+        configured = None
+    port = configured.port if configured else None
+
+    if not port:
+        lines.append(("warn", "no `runtimes: opencode: port:` in halyard.yaml"))
+        lines.append(("", "without one nothing here can tell whether the gate can answer"))
+        lines.append(("", "add `port: 4096`, and start it with `opencode --port 4096`"))
+        return lines
+
+    answering, said = reachable(port)
+    if answering:
+        lines.append(("ok", f"opencode is answering on port {port}"))
+    else:
+        lines.append(("warn", f"nothing is answering on port {port} ({said})"))
+        lines.append(("", "that is normal when it is not running. When it is, start it with"))
+        lines.append(("", f"`opencode --port {port}` — without it the gate can ask and"))
+        lines.append(("", "never answer, and everything else will look correct"))
     return lines
 
 

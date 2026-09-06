@@ -215,3 +215,71 @@ def test_a_config_that_cannot_be_parsed_stops_before_overwriting_it(
     assert "fail" in levels(said)
     assert (project / wiring.CONFIG).read_text() == "{ not json at all"
     assert (project / wiring.PLUGINS / wiring.PLUGIN).is_file()
+
+
+# --- the port, without which the gate can ask and never answer ----------------
+
+
+def test_a_running_opencode_is_reported_as_reachable(monkeypatch) -> None:
+    from halyard.agents import opencode
+
+    monkeypatch.setattr(opencode, "reachable", lambda port: (True, "answered 200"))
+    monkeypatch.setattr(opencode, "_available_binary", lambda: [("ok", "opencode at /x")])
+    monkeypatch.setattr(
+        "halyard.core.config_file.runtime_settings",
+        lambda *a, **k: {"opencode": _settings(port=4096)},
+    )
+
+    said = opencode.check_available()
+
+    assert any(level == "ok" and "answering on port 4096" in text for level, text in said)
+
+
+def test_an_opencode_started_without_a_port_is_called_out(monkeypatch) -> None:
+    """The failure this check exists for. Measured: `opencode` alone listens on
+    no TCP port, so the plugin delivers the question and cannot answer it —
+    while every file on disk says the project is gated.
+    """
+    from halyard.agents import opencode
+
+    monkeypatch.setattr(opencode, "reachable", lambda port: (False, "connection refused"))
+    monkeypatch.setattr(opencode, "_available_binary", lambda: [("ok", "opencode at /x")])
+    monkeypatch.setattr(
+        "halyard.core.config_file.runtime_settings",
+        lambda *a, **k: {"opencode": _settings(port=4096)},
+    )
+
+    said = opencode.check_available()
+
+    assert any(level == "warn" for level, _ in said)
+    assert any("--port 4096" in text for _, text in said)
+
+
+def test_no_configured_port_says_what_to_add(monkeypatch) -> None:
+    from halyard.agents import opencode
+
+    monkeypatch.setattr(opencode, "_available_binary", lambda: [("ok", "opencode at /x")])
+    monkeypatch.setattr("halyard.core.config_file.runtime_settings", lambda *a, **k: {})
+
+    said = opencode.check_available()
+
+    assert any("runtimes: opencode: port:" in text for _, text in said)
+
+
+def test_a_missing_cli_stops_before_asking_about_ports(monkeypatch) -> None:
+    """Nothing to reach, and a second complaint about a port would bury the
+    one that matters."""
+    from halyard.agents import opencode
+
+    monkeypatch.setattr(opencode, "_binary", lambda: None)
+
+    said = opencode.check_available()
+
+    assert said[0][0] == "fail"
+    assert not any("port" in text for _, text in said)
+
+
+def _settings(**rest):
+    from halyard.core.config_file import RuntimeSettings
+
+    return RuntimeSettings(name="opencode", **rest)
