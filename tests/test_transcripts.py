@@ -8,9 +8,14 @@ itself.
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import json
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
 
 from halyard.agents.claude_code.watching import WATCHING
 from halyard.agents.claude_code.watching import alerts as claude_alerts
@@ -319,3 +324,144 @@ async def test_the_watcher_watches_nothing_it_cannot_find(tmp_path: Path) -> Non
     w.note(session_id="9f1c2b3a-0000-0000-0000-000000000000", agent_id="claude-code")
 
     assert not w._watched
+
+
+# --- the sessions the configuration names ------------------------------------
+
+
+class FakeSeat:
+    """Only what `adopt` reads, so this does not depend on `Seat`'s validation
+    of runtime names that vary by build."""
+
+    def __init__(self, label: str, runtime: str, session: str | None) -> None:
+        self.label = label
+        self.runtime = runtime
+        self.session = session
+        self.role = None
+
+
+def test_a_configured_seat_is_watched_without_ever_calling_in(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The failure this exists for, and the one the idle fix does not reach.
+
+    A Codex session resumed since July ran past both its usage limits and no
+    warning was sent. Its transcript held the readings the whole time, at a
+    hundred per cent on both windows. Nothing was watching it, because
+    `_watched` is held in memory and that session had said nothing to Halyard
+    since the last restart — and the longest-running sessions are exactly the
+    ones that go longest without saying anything.
+
+    The configuration already knows which sessions are Halyard's. It just was
+    not being asked.
+    """
+    import halyard.agents.claude_code as runtime
+    from halyard.core import transcripts
+
+    tx = tmp_path / "9f1c2b3a-0000-0000-0000-000000000000.jsonl"
+    tx.write_text("")
+    # The spec binds this with `late`, which resolves the module attribute when
+    # it is called — so this is the seam that exists for exactly this.
+    monkeypatch.setattr(runtime, "find_session", lambda name: SimpleNamespace(session_id=tx.stem))
+
+    w = transcripts.TranscriptWatcher(
+        channel=RecordingChannel(), gate=Gate(), clock=ManualClock(), roots=(tmp_path,)
+    )
+    w.adopt([FakeSeat("nav", "claude-code", "a-named-session")])
+
+    assert tx.stem in w._watched, "a session named in the configuration was not watched"
+
+
+def test_a_seat_with_no_session_named_is_skipped(tmp_path: Path) -> None:
+    """opencode's seats are written without one, and there is nothing here to
+    resolve. They are reached by their project instead."""
+    from halyard.core import transcripts
+
+    w = transcripts.TranscriptWatcher(
+        channel=RecordingChannel(), gate=Gate(), clock=ManualClock(), roots=(tmp_path,)
+    )
+    w.adopt([FakeSeat("onav", "claude-code", None)])
+
+    assert not w._watched
+
+
+async def test_adopting_again_does_not_replay_what_was_already_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """It runs on a timer, and it resolves the name every pass on purpose — a
+    name is not a session, and somebody starting a new one under the same name
+    is how a seat comes to point somewhere else.
+
+    What must not happen is the offset rewinding. A seat re-adopted every five
+    minutes that re-read its transcript from the start would send the same
+    warning about the same full window over and over.
+    """
+    import halyard.agents.claude_code as runtime
+    from halyard.core import transcripts
+
+    tx = tmp_path / "9f1c2b3a-0000-0000-0000-000000000000.jsonl"
+    tx.write_text("")
+    monkeypatch.setattr(runtime, "find_session", lambda name: SimpleNamespace(session_id=tx.stem))
+    channel = RecordingChannel()
+    w = transcripts.TranscriptWatcher(
+        channel=channel, gate=Gate(), clock=ManualClock(), roots=(tmp_path,)
+    )
+    seats = [FakeSeat("nav", "claude-code", "a-named-session")]
+
+    w.adopt(seats)
+    append(tx, error_line("overloaded_error", "the model is overloaded"))
+    await w.poll_once()
+    said_once = len(channel.messages)
+
+    w.adopt(seats)
+    await w.poll_once()
+
+    assert said_once == 1, "the error should have been relayed once"
+    assert len(channel.messages) == 1, "re-adopting replayed the transcript"
+
+
+def test_a_seat_naming_a_session_that_does_not_exist_is_not_an_error(tmp_path: Path) -> None:
+    """The ordinary case on a machine where nobody has started it yet."""
+    from halyard.core import transcripts
+
+    w = transcripts.TranscriptWatcher(
+        channel=RecordingChannel(), gate=Gate(), clock=ManualClock(), roots=(tmp_path,)
+    )
+    w.adopt([FakeSeat("nav", "claude-code", "nothing-with-this-name")])
+
+    assert not w._watched
+
+
+async def test_the_poll_loop_adopts_before_it_waits(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The join, not the piece. `adopt` being right is worth nothing if nothing
+    calls it, and that join is the whole bug: watching was bootstrapped by
+    traffic, so a machine that restarts often spent most of its time watching
+    nothing at all.
+
+    Adopting happens before the first sleep on purpose — a control plane that
+    waited a poll interval first would be blind across exactly the moment it is
+    least useful to be.
+    """
+    import halyard.agents.claude_code as runtime
+    from halyard.core import transcripts
+
+    tx = tmp_path / "9f1c2b3a-0000-0000-0000-000000000000.jsonl"
+    tx.write_text("")
+    monkeypatch.setattr(runtime, "find_session", lambda name: SimpleNamespace(session_id=tx.stem))
+    w = transcripts.TranscriptWatcher(
+        channel=RecordingChannel(),
+        gate=Gate(),
+        clock=ManualClock(),
+        poll_seconds=3600,  # long, so nothing but the startup adopt can run
+        roots=(tmp_path,),
+    )
+
+    task = asyncio.create_task(w.run([FakeSeat("nav", "claude-code", "a-named-session")]))
+    await asyncio.sleep(0)  # let it reach its first await
+    task.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await task
+
+    assert tx.stem in w._watched, "the loop never adopted the configured seats"

@@ -465,7 +465,9 @@ def create_app(settings: Settings, *, channel=None) -> FastAPI:
         # The watcher's own loop, alongside the channel's. A best-effort courier,
         # so a failure to start it is logged and shrugged off rather than kept
         # from serving.
-        watch_task = asyncio.create_task(watcher.run(), name="transcript-watch")
+        # Given the seats, so the sessions the configuration names are watched
+        # from the start rather than from whenever one of them next calls in.
+        watch_task = asyncio.create_task(watcher.run(configured_seats), name="transcript-watch")
         await audit.record(
             AuditRecord(
                 action=AuditAction.CONTROL_PLANE_STARTED,

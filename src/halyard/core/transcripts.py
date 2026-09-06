@@ -52,6 +52,12 @@ DEFAULT_POLL_SECONDS = 15.0
 #: session is not about to surprise anybody.
 DEFAULT_IDLE_TTL = timedelta(minutes=30)
 
+#: How often the configured seats' own sessions are looked up again. Each one
+#: is a directory walk, so not every poll; often enough that a session started
+#: after the control plane is watched within a few minutes of somebody opening
+#: it.
+ADOPT_EVERY = timedelta(minutes=5)
+
 #: Most bytes to read from one transcript per poll. A backlog is worked through
 #: over several polls rather than in one blocking read.
 MAX_READ_BYTES = 512 * 1024
@@ -185,6 +191,14 @@ class TranscriptWatcher:
             # replayed and the first read is not a scan of the whole transcript.
             found = find_transcript(session_id, watching, self._roots)
             if found is None:
+                # The quietest of the failures: nothing is watched, nothing is
+                # wrong anywhere else, and the first sign is a limit filling up
+                # with no warning. Said once, when the session is first seen.
+                logger.info(
+                    "No transcript for %s under %s, so it cannot be watched",
+                    session_id,
+                    watching.home,
+                )
                 return
             offset = self._size(found)
             self._watched[session_id] = _Watched(
@@ -222,12 +236,67 @@ class TranscriptWatcher:
                 # and nothing here is worth interrupting anything over.
                 logger.debug("Transcript scan failed for %s", session_id, exc_info=True)
 
-    async def run(self) -> None:
+    def adopt(self, seats) -> None:
+        """Watch the sessions the configuration names, without being asked to.
+
+        Everything else here learns about a session because that session called
+        in — an approval, or a reply being relayed. That was the whole of it,
+        and it left the longest-running sessions least watched: one resumed
+        since July ran past both its usage limits with no warning sent, because
+        it had said nothing to Halyard since the last restart and `_watched` is
+        held in memory. The readings were in its transcript the whole time,
+        reaching a hundred per cent on both windows.
+
+        A seat's `session:` is the configuration saying "this one is mine".
+        Resolving it costs a directory walk per seat, so this is called at
+        startup and on a slow timer rather than on every poll.
+
+        Best-effort throughout. A seat naming a session that does not exist yet
+        is the ordinary case on a machine where nobody has started it, and it
+        resolves on a later pass.
+        """
+        from halyard.agents import registry
+
+        for seat in seats or ():
+            if not getattr(seat, "session", None):
+                continue
+            try:
+                spec = registry.get(seat.runtime)
+                if spec is None or spec.watching is None:
+                    continue
+                if (found := spec.find_session(seat.session)) is None:
+                    continue
+                # Resolved every pass rather than once, because a name is not a
+                # session: somebody starting a new one under the same name is
+                # how a seat comes to point somewhere else. `note` keeps the
+                # offset for a session already being read, so this costs a
+                # directory walk and never replays history — and it refreshes
+                # the clock, so a configured seat is not dropped for being
+                # quiet. It is named in the configuration; that is enough.
+                self.note(
+                    session_id=found.session_id,
+                    agent_id=seat.runtime,
+                    role=seat.role,
+                    session_name=seat.session,
+                )
+            except Exception:
+                logger.debug("Could not adopt the session for seat %s", seat.label, exc_info=True)
+
+    async def run(self, seats=None) -> None:
         """Poll forever. Cancelled on shutdown, like the channel's own loop."""
+        self.adopt(seats)
+        since_adopting = 0.0
         while True:
             await asyncio.sleep(self._poll_seconds)
             try:
                 await self.poll_once()
+                since_adopting += self._poll_seconds
+                if since_adopting >= ADOPT_EVERY.total_seconds():
+                    since_adopting = 0.0
+                    # Again, because a seat's session can be started long after
+                    # the control plane was, and because a resumed one may have
+                    # a different id than it had at startup.
+                    self.adopt(seats)
             except asyncio.CancelledError:
                 raise
             except Exception:
@@ -298,7 +367,17 @@ class TranscriptWatcher:
         if self._gate.paused:
             # Paused means the phone is off — the same reason the reply relay
             # stays quiet then. An alert is still a buzz nobody asked for.
+            #
+            # Logged, because from a phone this is indistinguishable from the
+            # alert never having been found, and somebody who paused an hour
+            # ago has usually stopped thinking about it.
+            logger.info("Paused, so not relaying for %s: %s", session_id, text)
             return
+        # Every other outcome on this path used to be silent — sent, suppressed,
+        # never watched, never found — and when a usage limit filled up with no
+        # warning there was no way to tell which of them had happened. An alert
+        # is rare by construction, so saying so costs nothing.
+        logger.info("Relaying for %s: %s", session_id, text)
         where = watched.session_name or "A session"
         try:
             await self._channel.send_message(
