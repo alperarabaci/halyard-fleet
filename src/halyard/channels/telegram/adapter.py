@@ -1677,37 +1677,6 @@ class TelegramChannel:
             reply_to_message_id=anchor_id,
         )
 
-    def _why_nothing_to_send_to(self, seat: Seat) -> str:
-        """Why a chat with a seat still has nowhere to put a message.
-
-        Two different answers, and giving the wrong one costs an evening. For
-        three of these runtimes it is a configuration mistake: the seat names a
-        session that runtime does not know, and `doctor` will say so.
-
-        For a runtime whose sessions have no names it is not a mistake at all —
-        there is nothing to correct, because typing into one is simply not
-        built yet. Saying "no session named None" there sends somebody to
-        `doctor` for a fault that is not on their machine, and then to invent a
-        session name to make it go away, which cannot work and leaves a seat
-        that reads as misconfigured forever.
-        """
-        from halyard.agents import registry
-
-        spec = registry.get(seat.runtime)
-        if spec is not None and not spec.sessions_are_named:
-            return (
-                f"The <b>{html.escape(seat.label)}</b> seat owns this chat, but Halyard "
-                f"cannot type into a {html.escape(seat.runtime)} session yet — its sessions "
-                "have no names to address, and the part that reaches one by its project is "
-                "not written. Approvals and alerts from this seat do work."
-            )
-        return (
-            f"The <b>{html.escape(seat.label)}</b> seat owns this chat, but "
-            f"{html.escape(seat.runtime)} has no session named "
-            f"<code>{html.escape(str(seat.session))}</code>. Check it with "
-            "<code>halyard doctor</code>."
-        )
-
     async def _forward_to_session(
         self, text: str, actor: str, chat_id: str, thread_id: int | None = None
     ) -> None:
@@ -1753,7 +1722,12 @@ class TelegramChannel:
                     "restart — seats are read at startup."
                 )
                 if seat is None
-                else self._why_nothing_to_send_to(seat),
+                else (
+                    f"The <b>{seat.label}</b> seat owns this chat, but "
+                    f"{seat.runtime} has no session named "
+                    f"<code>{seat.session}</code>. Check it with "
+                    "<code>halyard doctor</code>."
+                ),
                 chat_id,
                 thread_id,
             )

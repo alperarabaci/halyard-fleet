@@ -29,11 +29,15 @@ from __future__ import annotations
 
 import shutil
 import subprocess
+from datetime import UTC, datetime
 from pathlib import Path
 
 from halyard.agents.base import SessionRef
 from halyard.agents.opencode import wiring
 from halyard.agents.spec import Hooks, RuntimeSpec
+
+#: Older than anything, for sorting a session that records no time at all.
+_EPOCH = datetime.fromtimestamp(0, tz=UTC)
 
 #: Long enough for a cold start, short enough that `doctor` stays answerable.
 TIMEOUT = 10.0
@@ -165,28 +169,129 @@ def check_available(**_context) -> list[tuple[str, str]]:
     answering, said = reachable(port)
     if answering:
         lines.append(("ok", f"opencode is answering on port {port}"))
-    else:
-        lines.append(("warn", f"nothing is answering on port {port} ({said})"))
-        lines.append(("", "that is normal when it is not running. When it is, start it with"))
-        lines.append(("", f"`opencode --port {port}` — without it the gate can ask and"))
-        lines.append(("", "never answer, and everything else will look correct"))
+        return lines
+
+    # A failure, not a warning, and the reason is what happens next. Everything
+    # after this asks opencode something — which session a seat means, whether
+    # it is where it says it is — and with nobody answering, every one of those
+    # comes back empty. Reported as a warning once, and the line underneath it
+    # read "no session named alpha-engine-opencode-driver", which sent somebody
+    # looking for a session that was there the whole time behind a server that
+    # was not running.
+    lines.append(("fail", f"nothing is answering on port {port} ({said})"))
+    lines.append(("", "so nothing here can be asked which session a seat means"))
+    lines.append(("", f"start it with `opencode --port {port}`, or leave a headless one"))
+    lines.append(("", f"running with `opencode serve --port {port}` and attach to that"))
+    lines.append(("", f"from a terminal with `opencode attach http://127.0.0.1:{port}`"))
     return lines
 
 
-def find_session(name: str) -> SessionRef | None:
-    """Nothing, always — and honestly rather than by failing to look.
+DEFAULT_PORT = 4096
 
-    Sessions here have an id and a title the runtime writes from the content of
-    the conversation. Neither is a name somebody chose, and the title changes as
-    the work does, so matching on it would bind a seat to a session that stops
-    being that session. A seat for this runtime is bound to its project instead.
+
+def _port() -> int:
+    """Where this machine's opencode answers.
+
+    A default rather than a requirement: 4096 is what opencode's own
+    documentation uses and what the one other tool doing this expects, so a
+    configuration that says nothing still works.
     """
+    from halyard.core.config_file import runtime_settings
+
+    try:
+        configured = runtime_settings().get("opencode")
+    except Exception:
+        configured = None
+    return (configured.port if configured and configured.port else None) or DEFAULT_PORT
+
+
+def _sessions(directory: str | None = None) -> list[dict] | None:
+    """Every session this server knows, or None when it cannot be asked.
+
+    The distinction is the point. An empty list means opencode answered and has
+    nothing; None means nobody answered, which is a different sentence and was
+    once given as the first — a seat was reported as naming a session that does
+    not exist, when the truth was that opencode was not running.
+    """
+    import json
+    import urllib.error
+    import urllib.request
+    from urllib.parse import quote
+
+    where = f"http://127.0.0.1:{_port()}/session"
+    if directory:
+        where += f"?directory={quote(directory, safe='')}"
+    try:
+        with urllib.request.urlopen(where, timeout=5) as answered:
+            loaded = json.loads(answered.read().decode("utf-8"))
+    except (urllib.error.URLError, OSError, ValueError, TimeoutError):
+        return None
+    return loaded if isinstance(loaded, list) else []
+
+
+def _as_ref(session: dict, *, chosen: bool) -> SessionRef:
+    def when(value) -> datetime | None:
+        # Milliseconds since the epoch, which is what this runtime writes.
+        try:
+            return datetime.fromtimestamp(float(value) / 1000, tz=UTC)
+        except (TypeError, ValueError, OSError):
+            return None
+
+    times = session.get("time") or {}
+    return SessionRef(
+        session_id=str(session.get("id") or ""),
+        name=str(session.get("title") or ""),
+        cwd=str(session.get("directory") or "") or None,
+        named_by_a_person=chosen,
+        started_at=when(times.get("created")),
+        last_active=when(times.get("updated")),
+    )
+
+
+def find_session(name: str) -> SessionRef | None:
+    """The session with this title, asked of the running opencode.
+
+    Sessions here are addressed by their title. opencode writes one from the
+    content of a conversation and rewrites it as that content moves, so a seat
+    pointed at a generated title comes loose — but a title somebody set stays,
+    and that is how this is used: one long-lived session, named to match the
+    seat.
+
+    Measured on a real project, where the difference is plain to read:
+
+        alpha-engine-opencode-driver                    ← set by a person
+        Kalan kapatma promptu — capstone-ekran          ← written by opencode
+        Quarter lens comparison chart inflation prompt  ← written by opencode
+
+    A match against a title the configuration asked for is taken as chosen by a
+    person, because it is: somebody wrote that name in two places.
+    """
+    wanted = (name or "").strip().casefold()
+    if not wanted:
+        return None
+    listed = _sessions()
+    if not listed:
+        return None
+    for session in listed:
+        if str(session.get("title") or "").strip().casefold() == wanted:
+            return _as_ref(session, chosen=True)
+        if str(session.get("id") or "").strip() == (name or "").strip():
+            # An id is unreadable and permanent, and somebody holding one
+            # should not be told to go and find a title for it first.
+            return _as_ref(session, chosen=False)
     return None
 
 
 def list_sessions() -> list[SessionRef]:
-    """Nothing to offer `halyard init`, for the same reason."""
-    return []
+    """What this machine's opencode has, newest first, for `halyard init`.
+
+    Whether a title was chosen or generated is not recorded anywhere, so this
+    does not claim to know. `find_session` can say, because a match against a
+    configured name is evidence in itself; a bare listing has none.
+    """
+    listed = _sessions() or []
+    refs = [_as_ref(session, chosen=False) for session in listed]
+    return sorted(refs, key=lambda ref: ref.last_active or ref.started_at or _EPOCH, reverse=True)
 
 
 RUNTIME = RuntimeSpec(
@@ -194,7 +299,6 @@ RUNTIME = RuntimeSpec(
     human="opencode",
     binary="opencode",
     prefix="o",
-    sessions_are_named=False,
     hooks=Hooks(
         # Not a hooks file. `settings` is what core reads when it needs to name
         # the file in the project that carries this runtime's gate, and for
@@ -207,7 +311,7 @@ RUNTIME = RuntimeSpec(
     runner=lambda *_args, **_kwargs: None,
     find_session=find_session,
     list_sessions=list_sessions,
-    sessions_hint="opencode keeps sessions per project, and names none of them",
+    sessions_hint="the session titles this machine's opencode has, `halyard sessions`",
     check_available=check_available,
     check_wired=check_wired,
     install=wiring.install,
