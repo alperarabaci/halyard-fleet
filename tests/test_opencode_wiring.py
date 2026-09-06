@@ -251,7 +251,10 @@ def test_an_opencode_started_without_a_port_is_called_out(monkeypatch) -> None:
 
     said = opencode.check_available()
 
-    assert any(level == "warn" for level, _ in said)
+    # A failure rather than a warning: everything after this asks opencode
+    # which session a seat means, and with nobody answering each of those comes
+    # back empty and is reported as a session that does not exist.
+    assert any(level == "fail" for level, _ in said)
     assert any("--port 4096" in text for _, text in said)
 
 
@@ -283,3 +286,94 @@ def _settings(**rest):
     from halyard.core.config_file import RuntimeSettings
 
     return RuntimeSettings(name="opencode", **rest)
+
+
+# --- finding the session a seat names -----------------------------------------
+
+
+def _listed(*sessions):
+    return list(sessions)
+
+
+def _session(id_: str, title: str, updated: int = 1_000_000):
+    return {
+        "id": id_,
+        "title": title,
+        "directory": "/a/project",
+        "time": {"created": 500_000, "updated": updated},
+    }
+
+
+def test_a_seat_finds_the_session_it_names(monkeypatch) -> None:
+    """Sessions here are addressed by their title, and a long-lived one is
+    titled to match the seat. Measured on a real project, where the chosen name
+    and the generated ones are plain to tell apart by eye."""
+    from halyard.agents import opencode
+
+    monkeypatch.setattr(
+        opencode,
+        "_sessions",
+        lambda directory=None: _listed(
+            _session("ses_1", "Kalan kapatma promptu — capstone-ekran"),
+            _session("ses_2", "alpha-engine-opencode-driver"),
+        ),
+    )
+
+    found = opencode.find_session("alpha-engine-opencode-driver")
+
+    assert found is not None
+    assert found.session_id == "ses_2"
+    assert found.cwd == "/a/project"
+    assert found.named_by_a_person, "the configuration and the runtime agree on this name"
+
+
+def test_an_id_is_accepted_as_well_as_a_title(monkeypatch) -> None:
+    """An id is unreadable and permanent, and somebody holding one should not
+    be told to go and find a title for it first."""
+    from halyard.agents import opencode
+
+    monkeypatch.setattr(
+        opencode, "_sessions", lambda directory=None: _listed(_session("ses_1", "some title"))
+    )
+
+    found = opencode.find_session("ses_1")
+
+    assert found is not None
+    assert not found.named_by_a_person, "an id says nothing about who chose the title"
+
+
+def test_an_unreachable_opencode_finds_nothing_rather_than_raising(monkeypatch) -> None:
+    """`_sessions` answers None when nobody answered, and every caller here is
+    somewhere a person is waiting."""
+    from halyard.agents import opencode
+
+    monkeypatch.setattr(opencode, "_sessions", lambda directory=None: None)
+
+    assert opencode.find_session("anything") is None
+    assert opencode.list_sessions() == []
+
+
+def test_the_title_is_matched_the_way_people_type_it(monkeypatch) -> None:
+    from halyard.agents import opencode
+
+    monkeypatch.setattr(
+        opencode, "_sessions", lambda directory=None: _listed(_session("ses_1", "Alpha-Driver"))
+    )
+
+    assert opencode.find_session("  alpha-driver ") is not None
+
+
+def test_sessions_are_listed_newest_first(monkeypatch) -> None:
+    """What `halyard init` offers, and the order it offers them in."""
+    from halyard.agents import opencode
+
+    monkeypatch.setattr(
+        opencode,
+        "_sessions",
+        lambda directory=None: _listed(
+            _session("ses_old", "older", updated=1),
+            _session("ses_new", "newer", updated=9_999_999),
+        ),
+    )
+
+    assert [ref.session_id for ref in opencode.list_sessions()] == ["ses_new", "ses_old"]

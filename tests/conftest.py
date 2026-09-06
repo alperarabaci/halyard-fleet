@@ -39,6 +39,14 @@ def _away_from_the_real_configuration(
         if name.startswith(("HALYARD_", "TELEGRAM_", "CLAUDE_")):
             monkeypatch.delenv(name, raising=False)
 
+    # And off the machine's own agents. One runtime answers "which sessions are
+    # there" over HTTP rather than by reading a file, so a suite run on a
+    # workstation with it open listed that person's real work and failed a test
+    # about auto-generated titles. Tests that want sessions say so.
+    from halyard.agents import opencode
+
+    monkeypatch.setattr(opencode, "_sessions", lambda directory=None: None)
+
 
 @pytest.fixture
 def anywhere(tmp_path: Path) -> Path:
