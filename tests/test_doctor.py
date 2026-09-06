@@ -448,3 +448,59 @@ def test_no_service_log_still_says_where_it_would_be(tmp_path: Path) -> None:
 
     assert problems == 0
     assert any(str(missing) in line for line in lines)
+
+
+# --- a runtime whose sessions have no names -----------------------------------
+
+
+def _opencode_seat(**rest):
+    from halyard.core.seats import Seat
+
+    return Seat(label="opendrv", runtime="opencode", **rest)
+
+
+def test_a_seat_bound_to_its_project_is_not_reported_as_broken(monkeypatch) -> None:
+    """It was. A seat written the way this runtime needs — no `session:` —
+    came back as "no session name, so nothing can be sent to it", which is the
+    right sentence for the other three and wrong for this one."""
+    from halyard import doctor
+
+    monkeypatch.setattr(doctor, "_check_gated_project", lambda *a, **k: ([], 0))
+    lines, problems = doctor._check_seat(
+        _opencode_seat(chat="-100", project="a-project"), Path("/tmp/x"), None, None
+    )
+
+    assert problems == 0
+    assert any("bound to a-project" in line for line in lines)
+
+
+def test_a_session_name_here_is_called_out_rather_than_hunted_for(monkeypatch) -> None:
+    """The other half, and the one that wasted an evening: a seat copied from
+    another runtime's shape was reported as pointing at a session that does not
+    exist, which sends somebody looking for a name to copy that never existed.
+    """
+    from halyard import doctor
+
+    monkeypatch.setattr(doctor, "_check_gated_project", lambda *a, **k: ([], 0))
+    lines, _ = doctor._check_seat(
+        _opencode_seat(session="alpha-engine-opencode-driver", chat="-100", project="a-project"),
+        Path("/tmp/x"),
+        None,
+        None,
+    )
+
+    said = "\n".join(lines)
+    assert "is ignored here" in said
+    assert "remove that line" in said
+    assert "no session named" not in said, "there is no name to be missing"
+
+
+def test_a_seat_with_no_project_here_has_nothing_to_bind_to(monkeypatch) -> None:
+    """The project is what addresses it, so its absence is the real failure —
+    where for the other three it is only a missing convenience."""
+    from halyard import doctor
+
+    lines, problems = doctor._check_seat(_opencode_seat(chat="-100"), None, None, None)
+
+    assert problems == 1
+    assert any("no project" in line for line in lines)

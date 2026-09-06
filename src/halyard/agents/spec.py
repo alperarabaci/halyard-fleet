@@ -222,6 +222,20 @@ class RuntimeSpec:
     #: not all `drv1`. Matches what people were already writing by hand:
     #: `nav`/`drv`, `xnav`/`xdrv`, `gnav`/`gdrv`.
     prefix: str = ""
+    #: Whether a session here has a name a seat can be written with.
+    #:
+    #: Three of these runtimes let somebody name a session and address it by
+    #: that name. opencode does not: a session has an id nobody types and a
+    #: title it writes from the content of the conversation, rewritten as that
+    #: content changes. A seat for it is bound to its project instead.
+    #:
+    #: Said out loud because everything that reads a seat has to know. Without
+    #: it `doctor` reports a seat correctly written for this runtime as broken
+    #: — "no session name, so nothing can be sent to it" — and a seat wrongly
+    #: given one as merely pointing at a session that does not exist, which
+    #: sends somebody looking for a name to copy that was never going to work.
+    #: Both happened within a minute of the first one being configured.
+    sessions_are_named: bool = True
     #: Whether this runtime is on the machine, when a PATH lookup is not the
     #: answer. Antigravity's application bundles its binaries inside the `.app`
     #: and puts nothing on PATH, so `which` reports it missing on the one
