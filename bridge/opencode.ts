@@ -64,6 +64,30 @@ const log = (what: string, detail: Record<string, unknown> = {}) => {
   }
 }
 
+/**
+ * What a failed turn looks like. Measured, on a real one:
+ *
+ *     { name: "APIError", data: {
+ *         message: "Usage limit reached for 5 hour. Your limit will reset at …",
+ *         statusCode: 429, isRetryable: true,
+ *         metadata: { url: "https://api.z.ai/api/coding/paas/v4/chat/completions" } } }
+ *
+ * The same event carries `MessageAbortedError` when somebody presses escape,
+ * which is why this is not simply "relay session errors": a phone that buzzed
+ * every time a turn was interrupted at the desk would be muted within a day.
+ */
+type Failed = {
+  sessionID?: string
+  error?: {
+    name?: string
+    data?: {
+      message?: string
+      statusCode?: number
+      metadata?: { url?: string }
+    }
+  }
+}
+
 type Asked = {
   id: string
   sessionID: string
@@ -137,13 +161,65 @@ export const HalyardGate = async ({ client, directory, worktree }: any) => {
     }
   }
 
+  /**
+   * A turn that stopped for a reason worth knowing about, on the phone.
+   *
+   * Nothing reports this otherwise. The session simply goes quiet, and the
+   * person who started it goes on believing work is happening — which is how
+   * an evening was spent waiting on a run that had stopped in its first
+   * minute.
+   *
+   * Only what a person can act on. `statusCode` is the test rather than the
+   * wording: a provider that rephrases its message should not silence this,
+   * and 429 means the same thing at every one of them. An interrupt at the
+   * desk arrives on this same event and is not news to anybody.
+   */
+  const report = async (failure: Failed) => {
+    const code = failure.error?.data?.statusCode
+    const said = failure.error?.data?.message
+    if (!said || typeof code !== "number" || code < 400) return
+
+    // The provider, from the endpoint it was talking to — "api.z.ai" says more
+    // about which limit was reached than any name this file could invent.
+    let host = ""
+    try {
+      host = new URL(failure.error?.data?.metadata?.url ?? "").host
+    } catch {
+      host = ""
+    }
+    const text = code === 429 ? `⛔️ ${said}${host ? ` (${host})` : ""}` : `⚠️ ${said} [${code}]`
+
+    try {
+      await fetch(`${HALYARD}/v1/messages`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          session_id: failure.sessionID,
+          agent_id: "opencode",
+          text,
+          cwd: directory,
+          project_dir: worktree ?? directory,
+        }),
+        signal: AbortSignal.timeout(TIMEOUT_MS),
+      })
+      log("reported", { code, host })
+    } catch (unreachable) {
+      log("could not report", { code, why: String(unreachable) })
+    }
+  }
+
   return {
     event: async ({ event }: { event: { type?: string; properties?: unknown } }) => {
-      if (event?.type !== "permission.asked") return
-      // Not awaited: this handler is called for every event opencode emits,
-      // and holding it open for the length of an approval would stop the rest
-      // of them being delivered.
-      void answer(event.properties as Asked)
+      // Not awaited, either of them: this handler is called for every event
+      // opencode emits, and holding it open for the length of an approval
+      // would stop the rest of them being delivered.
+      if (event?.type === "permission.asked") {
+        void answer(event.properties as Asked)
+        return
+      }
+      if (event?.type === "session.error") {
+        void report(event.properties as Failed)
+      }
     },
   }
 }
