@@ -40,7 +40,7 @@ async def test_a_message_lands_in_the_session_it_was_addressed_to(sent) -> None:
     await OpencodeRunner().send("ses_1", "carry on")
 
     where, body = sent[0]
-    assert "/session/ses_1/message" in where
+    assert "/session/ses_1/prompt_async" in where
     assert body["parts"] == [{"type": "text", "text": "carry on"}]
 
 
@@ -184,3 +184,17 @@ def test_effort_is_refused_by_the_channel_rather_than_pretended_here() -> None:
     `/effort` instead of confirming a setting that went nowhere.
     """
     assert "effort" not in OpencodeRunner().options()
+
+
+async def test_it_does_not_wait_for_the_turn_to_finish(sent) -> None:
+    """`/session/{id}/message` runs the turn and answers when it is done.
+    Measured: a message from a phone reached the session, opencode started
+    working, and thirty seconds later this reported "that did not reach" while
+    the reply was appearing on the screen. The reply comes back through the
+    plugin like every other one; nothing here is waiting for it.
+    """
+    await OpencodeRunner().send("ses_1", "carry on")
+
+    where, _ = sent[0]
+    assert where.endswith("/prompt_async") or "/prompt_async?" in where
+    assert "/message" not in where

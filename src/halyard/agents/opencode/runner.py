@@ -35,9 +35,22 @@ from halyard.agents.base import SessionRef
 
 logger = logging.getLogger(__name__)
 
-#: Long enough for a slow first token, short enough that a phone is told
-#: something. A turn itself runs far longer than this — the POST returns when
-#: the message is accepted, not when the work is done.
+#: Where a message goes in without waiting for the answer.
+#:
+#: `/session/{id}/message` is the obvious one and it is the wrong one: it runs
+#: the turn and answers when the turn is done. Measured — a message sent from a
+#: phone reached the session, opencode began working, and thirty seconds later
+#: this reported "that did not reach" while the reply was appearing on the
+#: screen. The worst kind of wrong answer: the thing happened and the person
+#: was told it had not.
+#:
+#: Nothing here wants the reply anyway. It arrives the way every other reply
+#: does — through the plugin, as an event — and a runner that waited for it
+#: would be holding a chat message open for the length of a turn.
+PROMPT = "prompt_async"
+
+#: Long enough for a busy server to accept a message, and no longer. What is
+#: being waited for now is acceptance, not work.
 TIMEOUT = 30.0
 
 
@@ -137,7 +150,7 @@ class OpencodeRunner:
             if model:
                 body["model"] = {"providerID": provider, "modelID": model}
 
-        where = f"http://127.0.0.1:{opencode._port()}/session/{session_id}/message"
+        where = f"http://127.0.0.1:{opencode._port()}/session/{session_id}/{PROMPT}"
         if cwd:
             from urllib.parse import quote
 
