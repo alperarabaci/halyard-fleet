@@ -172,3 +172,15 @@ def test_json_is_what_goes_on_the_wire(sent) -> None:
     asyncio.run(OpencodeRunner().send("ses_1", "carry on"))
 
     assert json.dumps(sent[0][1])
+
+
+def test_effort_is_refused_by_the_channel_rather_than_pretended_here() -> None:
+    """opencode does have this axis — it calls it a variant, and lowering
+    reasoning is done that way. It is a choice the interface keeps: measured in
+    1.18.29, `command.model.variant.cycle` is a keybinding and the message body
+    has no field for it.
+
+    So the runner offers no effort, which is what makes the channel refuse
+    `/effort` instead of confirming a setting that went nowhere.
+    """
+    assert "effort" not in OpencodeRunner().options()
