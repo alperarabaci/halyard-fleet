@@ -56,6 +56,7 @@ class AuditAction(StrEnum):
     #: it. Recorded for the same reason as the line above: this and `writes:`
     #: are the only two things permitted without a person.
     TOOL_PREAUTHORIZED = "tool.preauthorized"
+    RISK_PREAUTHORIZED = "risk.preauthorized"
     #: A call a standing rule refuses, with nobody asked and no card sent. Its
     #: own action rather than a denial: a denial is what a person chose, and
     #: counting the two together would make a Tuesday look like a series of
@@ -180,6 +181,32 @@ def write_preauthorized(
         agent_id=agent_id,
         project=project,
         detail={"tool": tool, "path": file_path, "pattern": pattern},
+    )
+
+
+def risk_preauthorized(
+    *,
+    session_id: str,
+    agent_id: str,
+    project: str,
+    tool: str,
+    matched: tuple[str, ...],
+    now: datetime | None = None,
+) -> AuditRecord:
+    """A command let through because the rules called it low risk.
+
+    Recorded with the rules that said so, for the same reason the other two
+    grants record their pattern: this is a path where nobody was asked, and
+    afterwards the only way to know why is what was written down here.
+    """
+    return AuditRecord(
+        action=AuditAction.RISK_PREAUTHORIZED,
+        recorded_at=now or _default_clock(),
+        actor="policy",
+        session_id=session_id,
+        agent_id=agent_id,
+        project=project,
+        detail={"tool": tool, "matched": list(matched)},
     )
 
 

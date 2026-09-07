@@ -136,6 +136,32 @@ DEFAULT_RULES: tuple[PolicyRule, ...] = (
 #: What an unmatched command is worth. See the module docstring.
 DEFAULT_RISK = RiskLevel.MEDIUM
 
+#: A `cd` into the project, which every command from one runtime is wrapped in.
+#:
+#: Measured over two weeks of real use: 1005 of 1406 shell approvals from Claude
+#: Code began `cd /path/to/project && …`. The command after it is usually a
+#: `grep`, and every rule that would have called that low is anchored at the
+#: start of the line — so the prefix hid it, and a fortnight of `grep` was rated
+#: the same as a fortnight of anything else nobody had a rule for.
+#:
+#: Deliberately narrow. One `cd`, one path, no quotes, no metacharacters, no
+#: second `&&`. What is stripped has to be provably inert, because everything
+#: after it is what gets judged — and if a `;` could hide in here, so could a
+#: command.
+_JUST_A_CD = re.compile(r"^\s*cd\s+(?P<where>[^\s;|&<>$`'\"()]+)\s*&&\s*(?P<rest>\S.*)$", re.S)
+
+
+def without_a_leading_cd(command: str) -> str:
+    """The command a `cd` prefix was only there to position.
+
+    Stripping rather than adding `cd` to the read rules, which was the shorter
+    fix and a hole: `cd /project && python3 whatever.py` would then have matched
+    a low-risk rule and nothing else, and been called low. What follows the `cd`
+    is the command, and it is what should be judged.
+    """
+    found = _JUST_A_CD.match(command or "")
+    return found.group("rest") if found else (command or "")
+
 
 @dataclass(frozen=True)
 class PolicyDecision:
@@ -172,7 +198,9 @@ class Policy:
         information worth keeping, while an agent reassuring us about itself is
         the thing this whole system exists to not rely on.
         """
-        matched = tuple(rule.name for rule in self._rules if rule.pattern.search(command))
+        # What is being judged is the command, not the directory it runs in.
+        judged = without_a_leading_cd(command)
+        matched = tuple(rule.name for rule in self._rules if rule.pattern.search(judged))
         risks = [rule.risk for rule in self._rules if rule.name in matched]
 
         if risks:

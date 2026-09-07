@@ -33,12 +33,13 @@ from halyard.core.audit import (
     question_answered,
     question_asked,
     refused_outright,
+    risk_preauthorized,
     tool_preauthorized,
     write_preauthorized,
 )
 from halyard.core.events import RiskLevel, Role
 from halyard.core.gate import Gate
-from halyard.core.policy import Policy
+from halyard.core.policy import _SEVERITY, Policy
 from halyard.core.questions import Choice, QuestionStore
 from halyard.core.redaction import Redactor
 from halyard.core.registry import SessionRegistry
@@ -424,6 +425,7 @@ class ApprovalService:
         allowed_writes: tuple[str, ...] = (),
         allowed_tools: tuple[str, ...] = (),
         refuse_agent_commits: bool = False,
+        allow_risk_at_or_below: RiskLevel | None = None,
     ) -> None:
         self._seats = seats or {}
         self._store = store
@@ -436,6 +438,10 @@ class ApprovalService:
         self._writes = tuple(allowed_writes)
         # Tools that may run without a card, by name. Also empty by default.
         self._tools = tuple(allowed_tools)
+        #: The level at which a command stops being worth asking about.
+        #: None means every one of them is, which is how this shipped and
+        #: is still the default.
+        self._allow_at_or_below = allow_risk_at_or_below
         self._redactor = redactor
         self._audit = audit
         self._registry = registry
@@ -557,6 +563,38 @@ class ApprovalService:
             return ApprovalOutcome(
                 decision=BridgeDecision.ALLOW,
                 reason=f"Allowed without asking: {tool} matches {by_name!r} under `tools:`.",
+                risk=classification.risk,
+            )
+
+        # Let through because the rules recognised it and called it low. Third
+        # of the three grants, and the only one that reads the command rather
+        # than a name or a destination — which is why it leans entirely on
+        # `policy.py` taking the *highest* risk of everything it matches. A
+        # command is low here only when nothing in it is anything else.
+        #
+        # `defaulted` is excluded on purpose. Nothing matching is not a quiet
+        # kind of low; it is a command no rule has an opinion about, and those
+        # are the ones worth a person.
+        if (
+            self._allow_at_or_below
+            and not classification.defaulted
+            and _SEVERITY[classification.risk] <= _SEVERITY[self._allow_at_or_below]
+        ):
+            await self._try_to_record(
+                risk_preauthorized(
+                    session_id=session_id,
+                    agent_id=agent_id,
+                    project=project,
+                    tool=tool,
+                    matched=classification.matched,
+                )
+            )
+            return ApprovalOutcome(
+                decision=BridgeDecision.ALLOW,
+                reason=(
+                    f"Allowed without asking: {classification.risk.value} risk "
+                    f"({', '.join(classification.matched)})."
+                ),
                 risk=classification.risk,
             )
 

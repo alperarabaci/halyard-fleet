@@ -309,6 +309,39 @@ class Settings(BaseSettings):
         default=False, validation_alias="HALYARD_REFUSE_AGENT_COMMITS"
     )
 
+    #: Let a command through without asking when the rules call it low risk.
+    #:
+    #: Off by default, and `low` is the only thing it accepts. Everything above
+    #: that changes the machine — `git commit`, `mv`, `docker compose up` are
+    #: all medium — and a setting that could be turned up to medium would be a
+    #: switch for disabling the gate, written to look like a preference.
+    #:
+    #: What it buys, measured over two weeks of real use: 1406 shell approvals
+    #: from one runtime, of which the great majority were a `grep`, an `ls` or a
+    #: test run. A phone that asks three hundred times a day is a phone somebody
+    #: stops reading, and the cards that matter arrive in that noise.
+    #:
+    #: Only a command the rules actually recognised. An unmatched one defaults
+    #: to medium and stays a question: not knowing what something is has never
+    #: been a reason to allow it.
+    allow_risk_at_or_below: str | None = Field(
+        default=None, validation_alias="HALYARD_ALLOW_RISK_AT_OR_BELOW"
+    )
+
+    @field_validator("allow_risk_at_or_below")
+    @classmethod
+    def _only_low_may_be_skipped(cls, value: str | None) -> str | None:
+        if value is None or not str(value).strip():
+            return None
+        wanted = str(value).strip().lower()
+        if wanted != "low":
+            raise ValueError(
+                "HALYARD_ALLOW_RISK_AT_OR_BELOW takes `low` and nothing else. "
+                "Medium covers commits, moves and container starts; a gate that "
+                "skips those is not a gate."
+            )
+        return wanted
+
     @model_validator(mode="after")
     def _timeouts_must_be_ordered(self) -> Settings:
         """Refuse to start unless approval < bridge < hook.
