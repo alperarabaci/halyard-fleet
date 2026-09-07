@@ -281,7 +281,12 @@ class TelegramChannel:
         # was routed to a seat has to be edited in that seat. Keeping only
         # the message id means editing against the wrong chat, which fails
         # quietly and leaves live-looking buttons on a settled question.
-        self._open: dict[str, tuple[ApprovalRequest, int, str]] = {}
+        #: Open cards, by handle: the request, the message, the chat it is
+        #: in, and the forum topic within it. The topic used to be worked
+        #: out at send time and thrown away, so a reply to a button had to
+        #: derive the destination again — and could disagree with where the
+        #: card actually is.
+        self._open: dict[str, tuple[ApprovalRequest, int, str, int | None]] = {}
         # Questions are held apart from approvals: a different store answers
         # them, and their button carries an option index rather than allow/deny.
         # Same shape otherwise — handle to (request, message id, chat).
@@ -411,7 +416,7 @@ class TelegramChannel:
             chat_id, text, reply_markup=markup, message_thread_id=thread_id
         )
         message_id = int(message["message_id"])
-        self._open[cards.handle_of(request)] = (request, message_id, chat_id)
+        self._open[cards.handle_of(request)] = (request, message_id, chat_id, thread_id)
         # Where a card went, said once per card. "It arrived in the wrong
         # group" is otherwise a question only the person holding the phone can
         # answer, and the answer decays as soon as they scroll.
@@ -499,6 +504,19 @@ class TelegramChannel:
         from six chat bubbles.
         """
         chat_id, thread_id = self._route(role, session_name, agent_id, session_id)
+        return await self._put_long_content(chat_id, thread_id, content, title)
+
+    async def _put_long_content(
+        self, chat_id: str, thread_id: int | None, content: str, title: str
+    ) -> str:
+        """The same, to a destination already known.
+
+        Split out for the one caller that has no routing question to ask: a
+        button pressed on a card belongs to the chat that card is in. Working
+        the destination out again can only disagree with where somebody is
+        looking — and did, sending the full command of a card in one group into
+        another.
+        """
         if len(content) <= cards.MESSAGE_LIMIT - 200:
             message = await self._api.send_message(
                 chat_id,
@@ -2158,17 +2176,13 @@ class TelegramChannel:
             await self._dismiss(query_id, "That request is no longer open.")
             return
 
-        request, message_id, chat_id = entry
+        request, message_id, chat_id, thread_id = entry
 
         if action == cards.SHOW_FULL:
-            await self.send_long_content(
-                request.session_id,
-                request.command_full,
-                "Full command",
-                request.role,
-                agent_id=request.agent_id,
-                session_name=request.session_name,
-            )
+            # To the chat the card is in. `chat_id` came off the pending entry,
+            # which is where the question was asked and where somebody is
+            # looking right now.
+            await self._put_long_content(chat_id, thread_id, request.command_full, "Full command")
             await self._dismiss(query_id)
             return
 
@@ -2387,5 +2401,5 @@ class TelegramChannel:
         them anyway.
         """
         now = self._clock()
-        for handle in [h for h, (r, _, _) in self._open.items() if now >= r.expires_at]:
+        for handle in [h for h, (r, _, _, _) in self._open.items() if now >= r.expires_at]:
             del self._open[handle]
