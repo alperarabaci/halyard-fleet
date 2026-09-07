@@ -112,6 +112,9 @@ const describe = (asked: Asked) =>
 export const HalyardGate = async ({ client, directory, worktree }: any) => {
   log("loaded", { directory, halyard: HALYARD })
 
+  /** The last reply relayed per session, so one turn is not sent twice. */
+  const relayed = new Map<string, string>()
+
   const answer = async (asked: Asked) => {
     const command = describe(asked)
 
@@ -208,6 +211,76 @@ export const HalyardGate = async ({ client, directory, worktree }: any) => {
     }
   }
 
+  /**
+   * What the agent said, once it has stopped saying it.
+   *
+   * The other runtimes have a hook for this — the one that fires when a turn
+   * ends — and relaying it is what makes a phone a place to read replies
+   * rather than only to approve things. opencode has no such hook; it has an
+   * event, `session.idle`, and the text has to be fetched afterwards.
+   *
+   * Fetched rather than accumulated. A turn emits `message.updated` for every
+   * part as it is written, and assembling the reply from those would mean
+   * keeping half-written state in a plugin that can be reloaded mid-turn. The
+   * finished message is already stored; asking for it once is simpler and
+   * cannot drift.
+   *
+   * `session.idle` fires more than once for one turn — measured, twice in the
+   * same second — so the last message relayed is remembered per session. That
+   * is also what stops a reply being sent twice when a turn ends, is compacted,
+   * and settles again.
+   */
+  const relay = async (sessionID: string) => {
+    if (!sessionID) return
+    let messages: any[]
+    try {
+      const got = await client.session.messages({
+        path: { id: sessionID },
+        query: { directory, limit: 1 },
+      })
+      messages = (got as any)?.data ?? got ?? []
+    } catch (unreadable) {
+      log("could not read the reply", { sessionID, why: String(unreadable) })
+      return
+    }
+
+    const last = Array.isArray(messages) ? messages[messages.length - 1] : undefined
+    const info = last?.info ?? {}
+    // Only what the agent said. A user message is the thing somebody typed a
+    // moment ago, and sending it back to them is noise.
+    if (info?.role !== "assistant" || !info?.id) return
+    if (relayed.get(sessionID) === info.id) return
+
+    const text = (last?.parts ?? [])
+      .filter((part: any) => part?.type === "text" && !part?.synthetic && part?.text)
+      .map((part: any) => String(part.text))
+      .join("\n")
+      .trim()
+    if (!text) return
+
+    relayed.set(sessionID, info.id)
+    try {
+      await fetch(`${HALYARD}/v1/messages`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          session_id: sessionID,
+          agent_id: "opencode",
+          text,
+          cwd: directory,
+          project_dir: worktree ?? directory,
+        }),
+        signal: AbortSignal.timeout(TIMEOUT_MS),
+      })
+      log("relayed", { sessionID, messageID: info.id, length: text.length })
+    } catch (unreachable) {
+      // Put back, so the next idle tries again rather than deciding this reply
+      // has already been delivered.
+      relayed.delete(sessionID)
+      log("could not relay", { sessionID, why: String(unreachable) })
+    }
+  }
+
   return {
     event: async ({ event }: { event: { type?: string; properties?: unknown } }) => {
       // Not awaited, either of them: this handler is called for every event
@@ -219,6 +292,10 @@ export const HalyardGate = async ({ client, directory, worktree }: any) => {
       }
       if (event?.type === "session.error") {
         void report(event.properties as Failed)
+        return
+      }
+      if (event?.type === "session.idle") {
+        void relay(String((event.properties as any)?.sessionID ?? ""))
       }
     },
   }
