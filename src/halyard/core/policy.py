@@ -56,7 +56,8 @@ DEFAULT_RULES: tuple[PolicyRule, ...] = (
     _rule(
         "shell_read",
         RiskLevel.LOW,
-        r"^\s*(ls|pwd|cat|head|tail|wc|file|stat|which|whoami|date|echo|grep|rg|fd|find)\b",
+        r"^\s*(ls|pwd|cat|head|tail|nl|wc|file|stat|which|whoami|date|echo|grep|rg|fd|find"
+        r"|ps|tree|du|df|sort|uniq|cut|basename|dirname|realpath|readlink|diff|jq|sed|awk)\b",
     ),
     _rule(
         "test_run",
@@ -84,7 +85,19 @@ DEFAULT_RULES: tuple[PolicyRule, ...] = (
         r"\b(pip|pip3|uv|poetry|npm|yarn|pnpm|cargo|go|brew|apt|apt-get)\s+"
         r"(install|add|sync|get)\b",
     ),
-    _rule("file_write", RiskLevel.MEDIUM, r"(>>?\s*\S|\b(tee|mv|cp|touch|mkdir|ln)\b)"),
+    # A redirect to `/dev/null` writes nothing, and 1446 cards over two weeks
+    # were `2>/dev/null` on a command that was otherwise a read. Discarding
+    # output is not a file write, and treating it as one taught somebody to tap
+    # approve without reading.
+    _rule(
+        "file_write",
+        RiskLevel.MEDIUM,
+        r"(>>?\s*(?!/dev/null\b)\S|\b(tee|mv|cp|touch|mkdir|ln)\b)",
+    ),
+    # `sed` and `awk` read, until `-i` makes them write the file back. Both
+    # are in the read rules above; this is what pulls the in-place form out
+    # again, and it works because `classify` takes the highest match.
+    _rule("edit_in_place", RiskLevel.MEDIUM, r"\b(sed|perl|ruby|awk)\b[^|;]*\s-i\b"),
     _rule(
         "container_lifecycle",
         RiskLevel.MEDIUM,
@@ -138,17 +151,29 @@ DEFAULT_RISK = RiskLevel.MEDIUM
 
 #: A `cd` into the project, which every command from one runtime is wrapped in.
 #:
-#: Measured over two weeks of real use: 1005 of 1406 shell approvals from Claude
-#: Code began `cd /path/to/project && …`. The command after it is usually a
-#: `grep`, and every rule that would have called that low is anchored at the
-#: start of the line — so the prefix hid it, and a fortnight of `grep` was rated
-#: the same as a fortnight of anything else nobody had a rule for.
+#: Measured over two weeks of real use: of 1406 shell approvals from Claude
+#: Code, the great majority began by changing directory into the project. The
+#: command after it is usually a `grep`, and every rule that would have called
+#: that low is anchored at the start of the line — so the prefix hid it, and a
+#: fortnight of `grep` was rated the same as a fortnight of anything else
+#: nobody had a rule for.
 #:
-#: Deliberately narrow. One `cd`, one path, no quotes, no metacharacters, no
-#: second `&&`. What is stripped has to be provably inert, because everything
-#: after it is what gets judged — and if a `;` could hide in here, so could a
-#: command.
-_JUST_A_CD = re.compile(r"^\s*cd\s+(?P<where>[^\s;|&<>$`'\"()]+)\s*&&\s*(?P<rest>\S.*)$", re.S)
+#: Three separators, because all three turned up in the log. `&&` is the one
+#: anybody would guess; a bare newline is what that runtime actually writes,
+#: 2346 times, and it separates commands exactly as `;` does.
+#:
+#: The path may be quoted — it usually is, because it has to survive a space —
+#: but it may not contain anything a shell would act on. What is stripped has
+#: to be provably inert, because everything after it is what gets judged, and
+#: a substitution hiding in here could hide a command.
+_INERT = r"[^\s;|&<>$`\"'()]+"
+_JUST_A_CD = re.compile(
+    rf"""^\s*cd\s+
+        (?: "(?P<quoted>{_INERT})" | '(?P<single>{_INERT})' | (?P<bare>{_INERT}) )
+        \s*(?:&&|;|\n)\s*
+        (?P<rest>\S(?:.|\n)*)$""",
+    re.VERBOSE,
+)
 
 
 def without_a_leading_cd(command: str) -> str:
