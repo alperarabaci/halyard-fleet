@@ -355,6 +355,7 @@ class MessageRelay:
                 role,
                 agent_id=agent_id,
                 session_name=session_name,
+                project=project,
             )
         except Exception:
             logger.exception("Could not relay a message from %s", session_id)
@@ -385,6 +386,7 @@ class MessageRelay:
         *,
         agent_id: str,
         session_name: str | None,
+        project: str | None = None,
     ) -> bool:
         try:
             # Always as messages, however long. A reply arriving as a file has
@@ -396,6 +398,7 @@ class MessageRelay:
                 role,
                 agent_id=agent_id,
                 session_name=session_name,
+                project=project,
             )
         except Exception:
             logger.exception("Channel refused a relayed message from %s", session_id)

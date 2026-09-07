@@ -244,3 +244,49 @@ def test_an_unconfigured_project_falls_back_rather_than_guessing(
         channel._route(None, None, "opencode", "ses_abc", "a-project-nobody-configured")[0]
         == "-9999"
     )
+
+
+async def test_a_reply_from_a_seat_with_no_session_name_reaches_its_group(
+    app_without_session_names,
+) -> None:
+    """A reply carries the id of the session it came from, and nothing that was
+    ever written in a configuration. So the name matches no seat, the message
+    falls through to whatever the role happens to point at, and it arrives in
+    somebody else's group — which is what happened the first time an opencode
+    reply came back.
+
+    The codebase is what places it, the same way the card is placed.
+    """
+    channel = app_without_session_names.state.channel
+    sent: list[tuple[str, str]] = []
+
+    async def record(chat_id, text, **rest):
+        sent.append((chat_id, text))
+        return {"message_id": 1}
+
+    channel._api.send_message = record
+
+    await channel.send_message(
+        "ses_nobody_configured", "done", None, agent_id="opencode", project="a-project"
+    )
+
+    assert sent and sent[0][0] == "-2001", "the reply went somewhere else"
+
+
+async def test_a_reply_with_no_project_still_goes_somewhere_visible(
+    app_without_session_names,
+) -> None:
+    """The bot's own chat, which is visibly wrong. A guess would be invisibly
+    wrong, in a colleague's group."""
+    channel = app_without_session_names.state.channel
+    sent: list[tuple[str, str]] = []
+
+    async def record(chat_id, text, **rest):
+        sent.append((chat_id, text))
+        return {"message_id": 1}
+
+    channel._api.send_message = record
+
+    await channel.send_message("ses_x", "done", None, agent_id="opencode")
+
+    assert sent and sent[0][0] == "-9999"

@@ -114,6 +114,7 @@ class StubChannel:
         *,
         agent_id: str | None = None,
         session_name: str | None = None,
+        project: str | None = None,
     ) -> str:
         logger.info("StubChannel message to %s: %s", session_id, text)
         return f"stub-message-{session_id}"

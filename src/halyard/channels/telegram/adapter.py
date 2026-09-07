@@ -464,6 +464,7 @@ class TelegramChannel:
         *,
         agent_id: str | None = None,
         session_name: str | None = None,
+        project: str | None = None,
     ) -> str:
         """Send an agent's own words, split across messages if they are long.
 
@@ -471,7 +472,7 @@ class TelegramChannel:
         `<div>` is not markup, and sending it as markup makes Telegram refuse
         the whole message.
         """
-        chat_id, thread_id = self._route(role, session_name, agent_id, session_id)
+        chat_id, thread_id = self._route(role, session_name, agent_id, session_id, project)
         chunks = cards.split_for_telegram(text)
         message = None
         for index, chunk in enumerate(chunks, start=1):
