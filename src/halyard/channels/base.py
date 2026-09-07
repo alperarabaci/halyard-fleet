@@ -48,6 +48,7 @@ class ChannelAdapter(Protocol):
         *,
         agent_id: str | None = None,
         session_name: str | None = None,
+        project: str | None = None,
     ) -> str:
         """Send plain text. Returns a channel-side message id.
 
@@ -55,6 +56,12 @@ class ChannelAdapter(Protocol):
         navigator and a driver apart. A channel with one destination ignores it.
         `agent_id` and `session_name` disambiguate seats when more than one
         runtime has the same role.
+
+        `project` is the last of those, and the only one that works for a
+        runtime whose sessions have no name a seat can be written with. Its
+        replies carry an id nobody configured, so the name matches nothing and
+        the message falls through to whatever the role happens to point at —
+        which is how a reply meant for one group arrived in another.
         """
         ...
 

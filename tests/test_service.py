@@ -43,7 +43,14 @@ class ExplodingChannel:
         raise ConnectionError("telegram unreachable")
 
     async def send_message(
-        self, session_id: str, text: str, role=None, *, agent_id=None, session_name=None
+        self,
+        session_id: str,
+        text: str,
+        role=None,
+        *,
+        agent_id=None,
+        session_name=None,
+        project=None,
     ) -> str: ...
     async def send_long_content(
         self,
@@ -70,7 +77,14 @@ class SilentChannel:
         return "sent"
 
     async def send_message(
-        self, session_id: str, text: str, role=None, *, agent_id=None, session_name=None
+        self,
+        session_id: str,
+        text: str,
+        role=None,
+        *,
+        agent_id=None,
+        session_name=None,
+        project=None,
     ) -> str: ...
     async def send_long_content(
         self,

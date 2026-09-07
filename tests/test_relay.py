@@ -40,6 +40,7 @@ class RecordingChannel:
         *,
         agent_id=None,
         session_name=None,
+        project=None,
     ) -> str:
         self.messages.append((session_id, text))
         self.routes.append((agent_id, session_name, role))
@@ -68,6 +69,7 @@ class BrokenChannel(RecordingChannel):
         *,
         agent_id=None,
         session_name=None,
+        project=None,
     ) -> str:
         raise ConnectionError("telegram unreachable")
 
@@ -252,6 +254,7 @@ async def test_relaying_survives_a_channel_that_returns_nonsense(tmp_path: Path)
             *,
             agent_id=None,
             session_name=None,
+            project=None,
         ):
             return None
 

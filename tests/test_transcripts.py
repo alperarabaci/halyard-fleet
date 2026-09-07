@@ -41,7 +41,7 @@ class RecordingChannel:
         self.messages: list[dict] = []
 
     async def send_message(
-        self, session_id, text, role=None, *, agent_id=None, session_name=None
+        self, session_id, text, role=None, *, agent_id=None, session_name=None, project=None
     ) -> str:
         self.messages.append(
             {"session_id": session_id, "text": text, "role": role, "session_name": session_name}
