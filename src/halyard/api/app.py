@@ -404,6 +404,9 @@ def create_app(settings: Settings, *, channel=None) -> FastAPI:
         allowed_writes=allowed_writes,
         allowed_tools=allowed_tools,
         refuse_agent_commits=settings.refuse_agent_commits,
+        allow_risk_at_or_below=(
+            RiskLevel(settings.allow_risk_at_or_below) if settings.allow_risk_at_or_below else None
+        ),
     )
     questions = QuestionService(
         store=question_store,

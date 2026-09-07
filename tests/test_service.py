@@ -107,6 +107,7 @@ def build_service(
     ttl: timedelta = timedelta(minutes=5),
     gate: Gate | None = None,
     refuse_agent_commits: bool = False,
+    allow_risk_at_or_below=None,
 ) -> tuple[ApprovalService, ApprovalStore, JsonlAuditSink]:
     store = store or ApprovalStore(ttl=ttl)
     sink = JsonlAuditSink(tmp_path / "audit.jsonl")
@@ -121,6 +122,7 @@ def build_service(
         project="alpha-engine",
         **({"gate": gate} if gate is not None else {}),
         refuse_agent_commits=refuse_agent_commits,
+        allow_risk_at_or_below=allow_risk_at_or_below,
     )
     return service, store, sink
 
@@ -738,3 +740,88 @@ async def test_a_refusal_is_recorded_as_its_own_thing(tmp_path: Path) -> None:
     assert len(refused) == 1
     assert refused[0]["detail"]["act"] == "commit"
     assert refused[0]["actor"] == "config"
+
+
+# --- a command the rules call low -----------------------------------------
+
+
+class NeverAsked(StubChannel):
+    """A channel that fails if it is ever handed a card."""
+
+    def __init__(self, store) -> None:
+        super().__init__(store, Decision.ALLOW)
+        self.asked = 0
+
+    async def send_approval_request(self, request):
+        self.asked += 1
+        return await super().send_approval_request(request)
+
+
+async def test_a_low_risk_command_is_allowed_without_a_card(tmp_path: Path) -> None:
+    """The point of the setting: three hundred cards a day is a phone somebody
+    stops reading, and the ones that matter arrive in that noise."""
+    store = ApprovalStore(ttl=timedelta(minutes=5))
+    channel = NeverAsked(store)
+    service, _, sink = build_service(
+        tmp_path, channel=channel, store=store, allow_risk_at_or_below=RiskLevel.LOW
+    )
+    await sink.open()
+
+    outcome = await ask(service, "cd /a/project && grep -rn thing .")
+
+    assert outcome.decision is BridgeDecision.ALLOW
+    assert channel.asked == 0, "nobody should have been asked"
+    assert any(r.action.value == "risk.preauthorized" for r in await sink.read_all())
+
+
+async def test_the_rules_that_allowed_it_are_written_down(tmp_path: Path) -> None:
+    """The same reason the other two grants record their pattern: this is a
+    path where nobody was asked, and afterwards the only way to know why is
+    what was written here."""
+    service, _, sink = build_service(tmp_path, allow_risk_at_or_below=RiskLevel.LOW)
+    await sink.open()
+
+    await ask(service, "git status")
+
+    granted = [r for r in await sink.read_all() if r.action.value == "risk.preauthorized"]
+    assert granted and "git_read" in granted[0].detail["matched"]
+
+
+async def test_a_higher_risk_command_still_asks(tmp_path: Path) -> None:
+    store = ApprovalStore(ttl=timedelta(minutes=5))
+    channel = NeverAsked(store)
+    service, _, sink = build_service(
+        tmp_path, channel=channel, store=store, allow_risk_at_or_below=RiskLevel.LOW
+    )
+    await sink.open()
+
+    await ask(service, "cd /a/project && rm -rf build")
+
+    assert channel.asked == 1
+
+
+async def test_an_unrecognised_command_still_asks(tmp_path: Path) -> None:
+    """Not knowing what something is has never been a reason to allow it."""
+    store = ApprovalStore(ttl=timedelta(minutes=5))
+    channel = NeverAsked(store)
+    service, _, sink = build_service(
+        tmp_path, channel=channel, store=store, allow_risk_at_or_below=RiskLevel.LOW
+    )
+    await sink.open()
+
+    await ask(service, "some-tool-nobody-wrote-a-rule-for --go")
+
+    assert channel.asked == 1
+
+
+async def test_nothing_changes_when_it_is_not_configured(tmp_path: Path) -> None:
+    """Off by default, which is how this shipped for everybody who has not
+    asked for it."""
+    store = ApprovalStore(ttl=timedelta(minutes=5))
+    channel = NeverAsked(store)
+    service, _, sink = build_service(tmp_path, channel=channel, store=store)
+    await sink.open()
+
+    await ask(service, "git status")
+
+    assert channel.asked == 1
