@@ -122,3 +122,51 @@ def test_an_unrecognised_command_is_still_a_question() -> None:
 
     assert defaulted
     assert level is RiskLevel.MEDIUM
+
+
+# --- the shapes the log actually contained ------------------------------------
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        'cd "/a/project"\ngrep -n thing .',  # 2346 of these, quoted and on two lines
+        "cd /a/project && grep -n thing .",
+        "cd /a/project ; grep -n thing .",
+        "cd '/a/project'\ngrep -n thing .",
+    ],
+)
+def test_every_separator_the_log_contained(command: str) -> None:
+    """Written for `&&` alone, which is what anybody would guess. A bare
+    newline is what the runtime actually writes, and it separates commands
+    exactly as `;` does."""
+    assert risk(command) == (RiskLevel.LOW, False)
+
+
+def test_a_path_that_could_act_is_not_stripped() -> None:
+    """The path may be quoted — it has to be, to survive a space — but not
+    contain anything a shell would run."""
+    assert without_a_leading_cd('cd "$(evil)"\ngrep x') == 'cd "$(evil)"\ngrep x'
+    assert without_a_leading_cd("cd `evil`\ngrep x") == "cd `evil`\ngrep x"
+
+
+# --- reading a file is not writing it -----------------------------------------
+
+
+def test_sed_reads_until_it_is_told_to_write() -> None:
+    """933 cards over two weeks were a `sed -n '1,5p'`, which prints lines. It
+    asked because no rule knew the name at all, not because anything judged it
+    risky. `-i` is the form that writes the file back, and `classify` taking
+    the highest match is what separates them."""
+    assert risk("sed -n '206,215p' registry.py") == (RiskLevel.LOW, False)
+    assert risk("sed -i 's/a/b/' registry.py")[0] is RiskLevel.MEDIUM
+    assert risk("cd /a && sed -i.bak 's/a/b/' f")[0] is RiskLevel.MEDIUM
+
+
+def test_discarding_output_is_not_a_file_write() -> None:
+    """1446 cards were a read with `2>/dev/null` on the end. A redirect that
+    writes nothing is not a write, and calling it one taught somebody to tap
+    approve without reading."""
+    assert risk("ls platform/test/ 2>/dev/null") == (RiskLevel.LOW, False)
+    assert risk("ls x > out.txt")[0] is RiskLevel.MEDIUM
+    assert risk("echo hi >> notes.md")[0] is RiskLevel.MEDIUM
