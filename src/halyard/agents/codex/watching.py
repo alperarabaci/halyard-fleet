@@ -81,14 +81,9 @@ def _reset_wording(resets_at: object) -> str:
     return f", resets {when.strftime('%H:%M')}"
 
 
-def _last_reading(lines: Iterable[str]) -> dict | None:
-    """The newest `rate_limits` in these lines, or None.
-
-    Only the last one. The event is written on every turn, so a poll catching
-    up on twenty of them holds twenty readings of the same window and nineteen
-    are stale.
-    """
-    latest: dict | None = None
+def _readings(lines: Iterable[str]) -> list[dict]:
+    """Every `rate_limits` in these lines, oldest first."""
+    found: list[dict] = []
     for line in lines:
         line = line.strip()
         if not line:
@@ -101,22 +96,71 @@ def _last_reading(lines: Iterable[str]) -> dict | None:
             (entry.get("payload") or {}).get("rate_limits") if isinstance(entry, dict) else None
         )
         if isinstance(limits, dict):
-            latest = limits
-    return latest
+            found.append(limits)
+    return found
+
+
+def _last_reading(lines: Iterable[str]) -> dict | None:
+    """The newest reading, which is the one that describes now.
+
+    What `/status` wants: somebody asking where a seat stands is asking about
+    this moment, and the nineteen readings before it are history.
+    """
+    found = _readings(lines)
+    return found[-1] if found else None
+
+
+def _highest_reading(lines: Iterable[str]) -> dict | None:
+    """The fullest each window got across these lines.
+
+    What an *alert* wants, which is a different question, and getting it wrong
+    cost two silent exhaustions. A window is written on every turn, so a poll
+    catching up on twenty turns can hold a reading of 100% followed by one of
+    98% — the limit was reached, the window then rolled over, and by the time
+    anybody looked the newest number was below the threshold. Measured on a
+    real machine: the rollout held 100.0 and the last reading was 98.0, and the
+    warning that a limit had been reached was never sent. Twice.
+
+    Taking the peak is safe because saying it twice is already prevented: the
+    key carries the window, the threshold and the reset time, so a threshold
+    crossed in one batch and again in the next is one message, and the same
+    threshold in a *new* window is genuinely new.
+
+    Composed per window rather than per reading. The two windows fill at
+    different rates and there is no reason the same turn holds the peak of
+    both.
+    """
+    found = _readings(lines)
+    if not found:
+        return None
+    highest: dict = {}
+    for reading in found:
+        for which in ("primary", "secondary"):
+            window = reading.get(which)
+            if not isinstance(window, dict):
+                continue
+            used = window.get("used_percent")
+            if not isinstance(used, int | float):
+                continue
+            standing = highest.get(which)
+            if standing is None or used > standing.get("used_percent", -1):
+                highest[which] = window
+    return highest or None
 
 
 def alerts(lines: Iterable[str], seen: set[str]) -> list[Alert]:
     """What is worth saying about the usage windows in these lines.
 
-    Only the *last* reading in a batch is considered. The event is written on
-    every turn, so a poll that catches up on twenty of them holds twenty
-    readings of the same window, and only the newest is true.
+    The *highest* reading in a batch, per window. A limit reached between two
+    polls and rolled over before the next one is still a limit that was
+    reached, and taking the newest number missed exactly that — twice, in the
+    same week, on the same machine.
 
     The key carries the window, the threshold and the reset time, so each is
     said once per window and again after it rolls over — a window that has
     reset is a new fact, not a repeat.
     """
-    latest = _last_reading(lines)
+    latest = _highest_reading(lines)
     if latest is None:
         return []
 
@@ -140,6 +184,15 @@ def alerts(lines: Iterable[str], seen: set[str]) -> list[Alert]:
                 continue
             key = f"{which}:{threshold}:{resets}"
             if key in seen:
+                break
+            # Nor anything milder, once the worse thing has been said. A window
+            # reported full and then read at 99% would otherwise announce the
+            # 90% mark it had skipped on the way up — "is at 99%" arriving
+            # after "has used its whole limit", which reads as the limit
+            # un-filling itself.
+            if any(
+                f"{which}:{higher}:{resets}" in seen for higher in (FULL_AT,) if higher > threshold
+            ):
                 break
             found.append(Alert(key=key, text=f"{phrasing}{_reset_wording(resets)}."))
             break

@@ -90,14 +90,39 @@ def test_both_windows_are_reported_and_named_by_their_length() -> None:
     ]
 
 
-def test_only_the_last_reading_in_a_batch_is_used() -> None:
-    """Twenty turns of catching up is still one true number.
+def test_a_batch_says_the_worst_it_reached_not_the_last_it_saw() -> None:
+    """Twenty turns of catching up is still one message, and it has to be the
+    right one.
 
-    This is the whole reason the reading is taken at the end rather than per
-    line: the earlier ones are history, and history is not worth a message.
+    Written first as "only the last reading counts", with an ascending sequence
+    — 91, 94, 97, 100 — where the last reading and the highest are the same
+    number, so the test could not tell the two rules apart. What happened on a
+    real machine was the other order: the window reached 100, rolled over, and
+    the newest reading was 98 by the time anybody looked. No warning was sent
+    that a limit had been reached. Twice, in one week.
     """
-    catching_up = [reading(primary=p) for p in (91.0, 94.0, 97.0, 100.0)]
+    catching_up = [reading(primary=p) for p in (91.0, 100.0, 98.0)]
+
     assert texts(catching_up) == ["has used its whole 5h Codex limit, resets 15:10."]
+
+
+def test_each_window_keeps_its_own_peak() -> None:
+    """The two fill at different rates, and there is no reason one turn holds
+    the highest of both."""
+    catching_up = [reading(primary=100.0, secondary=40.0), reading(primary=12.0, secondary=100.0)]
+
+    assert texts(catching_up) == [
+        "has used its whole 5h Codex limit, resets 15:10.",
+        "has used its whole weekly Codex limit, resets 15:10.",
+    ]
+
+
+def test_a_peak_is_still_only_said_once() -> None:
+    """Taking the highest is safe because repeating is already prevented: the
+    key carries the window, the threshold and the reset time."""
+    seen = {a.key for a in alerts([reading(primary=100.0), reading(primary=98.0)], set())}
+
+    assert texts([reading(primary=99.0)], seen) == []
 
 
 def test_what_was_said_once_is_not_said_again() -> None:
