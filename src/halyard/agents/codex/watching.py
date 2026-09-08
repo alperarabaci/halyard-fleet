@@ -70,14 +70,39 @@ def transcript(session_id: str, root: Path) -> Path | None:
     return None
 
 
-def _reset_wording(resets_at: object) -> str:
-    """ "resets 19:30", or nothing if the runtime did not say."""
+def _has_reset(resets_at: object, now: float) -> bool:
+    """Whether this window's allowance has already been given back.
+
+    Judged on the reset time rather than on how old the line is, which is the
+    distinction that matters: a weekly reading from this morning is still true
+    this evening, and a five-hour reading from this morning is not.
+
+    A reading with no usable reset time is treated as current. Nothing here can
+    tell, and silence is the failure this watcher exists to prevent.
+    """
+    if not isinstance(resets_at, int | float) or resets_at <= 0:
+        return False
+    return float(resets_at) < now
+
+
+def _reset_wording(resets_at: object, now: float) -> str:
+    """ "resets 19:30", or " it reset at 15:52", or nothing if unsaid.
+
+    Tense, because the same timestamp means two different things. Measured on a
+    real message: "is at 99% of its 5h Codex limit, resets 15:52" arrived at
+    18:48, and every word of it was true about a window that had ended three
+    hours earlier. Read on a phone it says the limit is nearly full *now* and
+    the reset is somehow in the past — two wrong impressions from one honest
+    sentence in the wrong tense.
+    """
     if not isinstance(resets_at, int | float) or resets_at <= 0:
         return ""
     try:
         when = datetime.fromtimestamp(float(resets_at))
     except (OverflowError, OSError, ValueError):
         return ""
+    if _has_reset(resets_at, now):
+        return f"; it reset at {when.strftime('%H:%M')}"
     return f", resets {when.strftime('%H:%M')}"
 
 
@@ -148,13 +173,19 @@ def _highest_reading(lines: Iterable[str]) -> dict | None:
     return highest or None
 
 
-def alerts(lines: Iterable[str], seen: set[str]) -> list[Alert]:
+def alerts(lines: Iterable[str], seen: set[str], now: float | None = None) -> list[Alert]:
     """What is worth saying about the usage windows in these lines.
 
     The *highest* reading in a batch, per window. A limit reached between two
     polls and rolled over before the next one is still a limit that was
     reached, and taking the newest number missed exactly that — twice, in the
     same week, on the same machine.
+
+    Which means a peak whose window has since closed is reported on purpose,
+    and it has to be reported *as* that. Said in the present tense it claims
+    the seat is nearly out of allowance right now, when the allowance has been
+    back for hours — and it pins that claim to a reset time already in the
+    past, which is how somebody spotted it. So the tense follows the clock.
 
     The key carries the window, the threshold and the reset time, so each is
     said once per window and again after it rolls over — a window that has
@@ -163,6 +194,8 @@ def alerts(lines: Iterable[str], seen: set[str]) -> list[Alert]:
     latest = _highest_reading(lines)
     if latest is None:
         return []
+    if now is None:
+        now = datetime.now().timestamp()
 
     found: list[Alert] = []
     for which in ("primary", "secondary"):
@@ -174,11 +207,22 @@ def alerts(lines: Iterable[str], seen: set[str]) -> list[Alert]:
             continue
         name = _window_name(window.get("window_minutes"))
         resets = window.get("resets_at")
+        over = _has_reset(resets, now)
         # The higher threshold first, so a window that jumped straight past both
         # says the useful thing rather than the earlier one.
         for threshold, phrasing in (
-            (FULL_AT, f"has used its whole {name} Codex limit"),
-            (WARN_AT, f"is at {used:.0f}% of its {name} Codex limit"),
+            (
+                FULL_AT,
+                f"used its whole {name} Codex limit"
+                if over
+                else f"has used its whole {name} Codex limit",
+            ),
+            (
+                WARN_AT,
+                f"reached {used:.0f}% of its {name} Codex limit"
+                if over
+                else f"is at {used:.0f}% of its {name} Codex limit",
+            ),
         ):
             if used < threshold:
                 continue
@@ -194,7 +238,7 @@ def alerts(lines: Iterable[str], seen: set[str]) -> list[Alert]:
                 f"{which}:{higher}:{resets}" in seen for higher in (FULL_AT,) if higher > threshold
             ):
                 break
-            found.append(Alert(key=key, text=f"{phrasing}{_reset_wording(resets)}."))
+            found.append(Alert(key=key, text=f"{phrasing}{_reset_wording(resets, now)}."))
             break
     return found
 
