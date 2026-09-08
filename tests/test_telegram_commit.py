@@ -88,7 +88,13 @@ class FakeRunner:
     def preferences(self, session_id: str) -> tuple[str | None, str | None]:
         return (None, None)
 
-    async def send(self, session_id: str, text: str, cwd: str | None = None) -> bool:
+    async def send(
+        self,
+        session_id: str,
+        text: str,
+        cwd: str | None = None,
+        when_done=None,
+    ) -> bool:
         """What reaches a session, as against what reaches the chat."""
         self.sent.append((session_id, text))
         return True

@@ -12,6 +12,8 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Protocol, runtime_checkable
 
+from halyard.agents.turns import LateFailure
+
 
 @dataclass(frozen=True)
 class SessionRef:
@@ -105,14 +107,29 @@ class AgentRunner(Protocol):
         """Choose the reasoning effort. None gives it back."""
         ...
 
-    async def send(self, session_id: str, text: str, cwd: str | None = None) -> bool:
+    async def send(
+        self,
+        session_id: str,
+        text: str,
+        cwd: str | None = None,
+        when_done: LateFailure | None = None,
+    ) -> bool:
         """Put `text` into the session as if the user had typed it.
 
         `cwd` is the directory the session belongs to, for runtimes that scope
         a session to a project.
 
-        Returns whether it was accepted. Must not raise: the caller is handling
-        a chat message, and a failure to deliver is worth reporting rather than
-        propagating.
+        Returns whether it was **accepted** — not whether the turn finished.
+        Two of these runtimes used to answer the second question, which meant a
+        turn that had been working for fifteen minutes was reported as one that
+        never arrived. See `agents/turns.py`.
+
+        Must not raise: the caller is handling a chat message, and a failure to
+        deliver is worth reporting rather than propagating.
+
+        `when_done` is how the part after acceptance still gets reported. It is
+        called only when a turn that was accepted then fails, with the reason —
+        running out of usage halfway through, most often. A runtime that
+        decides before it answers never calls it, and says so.
         """
         ...
