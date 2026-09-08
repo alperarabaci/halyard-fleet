@@ -62,6 +62,46 @@ _FALLBACK_BINARIES = (
 )
 
 
+def read_catalog(binary: str | None) -> dict[str, tuple[str, ...]] | None:
+    """What *this* CLI knows, as model → the efforts it accepts. None if unasked.
+
+    Bundled with the binary, so it is version-bound and authoritative about the
+    one thing a list written here can never be: whether the installed CLI can
+    run a given model. Measured across an upgrade — 0.145.0 answered with the
+    `gpt-5.6` family and no `gpt-6-astra`, and 0.153.4 answered with it.
+
+    **None and empty are different answers.** None means the question could not
+    be asked, and a caller must not conclude anything from it: the built-in
+    fallback list is months old by construction, and refusing a model because
+    it is absent from *that* would be the confidently-wrong failure this
+    project keeps having to undo.
+    """
+    if not binary:
+        return None
+    try:
+        done = subprocess.run(
+            [binary, "debug", "models", "--bundled"],
+            capture_output=True,
+            timeout=30,
+            check=False,
+        )
+        models = json.loads(done.stdout)["models"]
+    except (OSError, ValueError, KeyError, subprocess.SubprocessError):
+        logger.warning("Could not read the Codex model catalog; using the built-in list")
+        return None
+    found = {}
+    for model in models:
+        slug = model.get("slug")
+        efforts = tuple(
+            level["effort"]
+            for level in model.get("supported_reasoning_levels") or []
+            if level.get("effort")
+        )
+        if slug and efforts:
+            found[str(slug)] = efforts
+    return found or None
+
+
 def find_codex_binary(configured: str | None = None) -> str | None:
     if configured:
         return configured if Path(configured).exists() else shutil.which(configured)
@@ -117,34 +157,8 @@ class CodexRunner:
         """Model → the effort levels that model accepts, read from the CLI once."""
         if self._catalog is not None:
             return self._catalog
-        self._catalog = self._read_catalog() or dict(FALLBACK_MODELS)
+        self._catalog = read_catalog(self._binary) or dict(FALLBACK_MODELS)
         return self._catalog
-
-    def _read_catalog(self) -> dict[str, tuple[str, ...]] | None:
-        if not self._binary:
-            return None
-        try:
-            done = subprocess.run(
-                [self._binary, "debug", "models", "--bundled"],
-                capture_output=True,
-                timeout=30,
-                check=False,
-            )
-            models = json.loads(done.stdout)["models"]
-        except (OSError, ValueError, KeyError, subprocess.SubprocessError):
-            logger.warning("Could not read the Codex model catalog; using the built-in list")
-            return None
-        found = {}
-        for model in models:
-            slug = model.get("slug")
-            efforts = tuple(
-                level["effort"]
-                for level in model.get("supported_reasoning_levels") or []
-                if level.get("effort")
-            )
-            if slug and efforts:
-                found[str(slug)] = efforts
-        return found or None
 
     def options(self, session_id: str | None = None) -> dict[str, tuple[tuple[str, ...], bool]]:
         """What can be chosen, narrowed to the model this session is on.
