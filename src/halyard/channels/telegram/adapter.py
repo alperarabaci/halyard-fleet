@@ -35,8 +35,8 @@ from halyard.channels.telegram import cards, commit_card
 from halyard.channels.telegram.api import TelegramApi
 from halyard.commands import catalogue as commands_offered
 from halyard.commands import running as commands_running
+from halyard.core import last_said, transcripts
 from halyard.core import prompts as configured_prompts
-from halyard.core import transcripts
 from halyard.core.approvals import (
     AlreadyResolvedError,
     ApprovalExpiredError,
@@ -102,6 +102,7 @@ POLL_RETRY_MAX_SECONDS = 30.0
 COMMANDS: tuple[tuple[str, str], ...] = (
     ("chat", "Send a message into this seat's session"),
     ("to", "Send a message to another seat by name"),
+    ("forward", "Hand this chat's last reply to another seat"),
     ("commit", "Commit this branch's work, with a message to approve"),
     ("review_and_commit", "The same, with this project's checks and its review round"),
     ("open", "Open an agent on the machine — claude, codex, gemini"),
@@ -157,6 +158,29 @@ def _seat_being_asked_for(text: str) -> str | None:
     """The seat named by one of our own prompts, or None if this is not one."""
     found = _ASKED.match((text or "").strip())
     return found.group(1) if found else None
+
+
+def _is_our_own_prompt(text: str) -> bool:
+    """Whether this text is something Halyard said, not something somebody typed.
+
+    Every one of these is a question with a forced reply, so it sits in the
+    chat looking exactly like a message — and a client anchoring a menu to the
+    nearest message can hand one back as the thing to forward. It happened:
+    an agent was sent "Send what to nav?" and answered that it did not
+    understand.
+
+    A slash command is included for the same reason and was already special
+    cased at one call site. There is no message worth forwarding that begins
+    with one.
+    """
+    said = (text or "").strip()
+    if not said:
+        return False
+    return (
+        said.startswith("/")
+        or _seat_being_asked_for(said) is not None
+        or _commit_being_asked_for(said) is not None
+    )
 
 
 def _commit_being_asked_for(text: str) -> str | None:
@@ -225,6 +249,9 @@ class TelegramChannel:
         prompts: Mapping[str, str] | None = None,
         repositories: Mapping[str, Project] | None = None,
         forge_token: str | None = None,
+        #: Where the last thing said in each chat is kept, so `/forward`
+        #: survives a restart. None disables it: nothing else depends on it.
+        said_path: Path | None = None,
     ) -> None:
         self._api = api
         self._gate = gate or Gate()
@@ -232,6 +259,7 @@ class TelegramChannel:
         self._store = store
         self._audit = audit
         self._chat_id = chat_id
+        self._said_path = said_path
         # Two seats and a default. A role with nowhere of its own falls back to
         # the main chat, so an existing single-chat setup keeps working
         # untouched by any of this.
@@ -478,6 +506,10 @@ class TelegramChannel:
         the whole message.
         """
         chat_id, thread_id = self._route(role, session_name, agent_id, session_id, project)
+        # Kept before the split, because what somebody wants to hand on is the
+        # whole report and a fragment of one would look complete.
+        if self._said_path is not None:
+            last_said.remember(self._said_path, chat_id=chat_id, text=text, session_id=session_id)
         chunks = cards.split_for_telegram(text)
         message = None
         for index, chunk in enumerate(chunks, start=1):
@@ -686,6 +718,9 @@ class TelegramChannel:
                 argument, actor, here or "", thread, replied=replied, anchor_id=anchor
             )
             return
+        if command == "forward":
+            await self._forward_last(argument, actor, here or "", thread)
+            return
         if command in ("commit", "review_and_commit"):
             # Detached: this reads a repository, may run the project's whole
             # gate, and asks a model for a sentence. None of that may hold the
@@ -813,7 +848,12 @@ class TelegramChannel:
         # What was typed wins over what was replied to: somebody who wrote out
         # a message meant that one, and silently sending the other instead
         # would be the worst kind of helpful.
-        text = typed or replied
+        #
+        # And what was replied to is dropped when it is one of Halyard's own
+        # questions. Those sit in the chat looking like messages, so replying
+        # `/to nav` to one would hand an agent the question rather than an
+        # answer — which is how "Send what to nav?" reached a navigator.
+        text = typed or ("" if _is_our_own_prompt(replied) else replied)
 
         if not text and not label:
             # Nothing to send and no seat named: ask which, and the press will
@@ -1672,6 +1712,65 @@ class TelegramChannel:
         except Exception:
             logger.warning("Could not update a commit card", exc_info=True)
 
+    async def _forward_last(
+        self, label: str, actor: str, chat_id: str, thread_id: int | None
+    ) -> None:
+        """Hand the last thing said in this chat to another seat.
+
+        The other half of `/to`, and the half somebody reaches for more often:
+        an agent has just written a page and it needs to go to the seat that
+        can act on it. Retyping it is not an option, and replying to it means
+        finding it again above whatever has been said since.
+
+        Nothing is remembered between the tap and the send. The message is
+        already on disk — kept whole, before Telegram split it — so a bare
+        `/forward` can offer the seats and the button can finish on its own.
+        That is what `/to` cannot do, and why this is a separate command rather
+        than a mode of that one.
+        """
+        if self._said_path is None:
+            await self._say("Nothing here is keeping track of replies.", chat_id, thread_id)
+            return
+
+        said = last_said.last(self._said_path, chat_id)
+        if said is None:
+            await self._say(
+                "Nothing has been said in this chat yet, so there is nothing to hand on.",
+                chat_id,
+                thread_id,
+            )
+            return
+
+        label = (label or "").strip()
+        if not label:
+            keyboard = cards.forward_choices(tuple(seat.label for seat in self._seats))
+            if keyboard is None:
+                await self._say(self._seat_list(), chat_id, thread_id)
+                return
+            when = said.at.strftime("%H:%M")
+            await self._say(
+                f"Hand the reply from <b>{when}</b> to which seat?"
+                f"\n\n<i>{html.escape(said.text[:200])}"
+                f"{'…' if len(said.text) > 200 else ''}</i>",
+                chat_id,
+                thread_id,
+                reply_markup=keyboard,
+            )
+            return
+
+        if said.stale(self._clock()):
+            # Said rather than refused: it is still what arrived, and somebody
+            # who asked for it may well mean it. But a day-old reply handed to
+            # an agent as though it were current is worth a sentence.
+            await self._say(
+                f"That reply is from {said.at:%d %b %H:%M} — sending it anyway.",
+                chat_id,
+                thread_id,
+            )
+
+        logger.info("Forwarding to seat %s from %s: %r", label, actor, said.text[:60])
+        await self._forward_to_seat(f"{label} {said.text}", actor, chat_id, thread_id)
+
     async def _offer_seats(
         self, text: str, chat_id: str, thread_id: int | None, anchor_id: int | None
     ) -> None:
@@ -2112,12 +2211,27 @@ class TelegramChannel:
             if what == "open":
                 await self._open_application(value, here or "", message.get("message_thread_id"))
                 return
+            if what == "fwd":
+                await self._forward_last(
+                    value, f"tg:{user_id}", here or "", message.get("message_thread_id")
+                )
+                return
             if what == "to":
                 carried = ((message.get("reply_to_message") or {}).get("text") or "").strip()
                 # The anchor may be the command itself, in which case the text
                 # is everything after `/to`.
                 if carried.startswith("/to"):
                     carried = carried.partition(" ")[2].strip()
+                if _is_our_own_prompt(carried):
+                    # Halyard's own words are not somebody's message.
+                    #
+                    # The seat menu is posted as a reply, and the client is free
+                    # to anchor it to whatever is nearby — which on a second
+                    # attempt was the "Send what to nav?" left over from the
+                    # first. That question was then carried as the sentence to
+                    # hand over, so Halyard asked an agent its own question and
+                    # the agent, reasonably, said it did not understand.
+                    carried = ""
                 if not carried:
                     # No message to carry — the seat was picked from a bare
                     # `/to`. Ask for the text, naming the seat in the question
@@ -2126,6 +2240,10 @@ class TelegramChannel:
                         value, here or "", message.get("message_thread_id"), user_id
                     )
                     return
+                # Said here as well as on the typed path. This one had no line
+                # at all, so a message handed over by a button went wherever it
+                # went without a trace, and working out where took a screenshot.
+                logger.info("Handing to seat %s from tg:%s: %r", value, user_id, carried[:60])
                 await self._forward_to_seat(
                     f"{value} {carried}",
                     f"tg:{user_id}",
