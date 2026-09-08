@@ -520,7 +520,13 @@ class TelegramChannel:
         # Kept before the split, because what somebody wants to hand on is the
         # whole report and a fragment of one would look complete.
         if self._said_path is not None:
-            last_said.remember(self._said_path, chat_id=chat_id, text=text, session_id=session_id)
+            last_said.remember(
+                self._said_path,
+                chat_id=chat_id,
+                text=text,
+                session_id=session_id,
+                agent_id=agent_id,
+            )
         # A provider that has stopped answering is the one message worth a
         # button. Somebody reading "the limit resets at 03:30" on a phone can
         # do exactly one useful thing about it, and typing a model id with a
@@ -1937,6 +1943,30 @@ class TelegramChannel:
             logger.warning(
                 "No session named %r for the %s seat", name, seat.label if seat else role
             )
+
+        # A chat no seat owns, which is a real way to work: sessions started for
+        # small jobs report into the bot's own chat, several of them, and
+        # answering one there is the natural thing to do.
+        #
+        # Answering it must reach the session whose message is being answered.
+        # The fallback below takes whichever session was heard from last, which
+        # is usually the same one and silently is not: a second session running
+        # a command in between moves "last" without anybody seeing it, and the
+        # reply lands in a conversation nobody was reading.
+        #
+        # What was delivered here is already written down, with the runtime that
+        # owns the id — a session id means nothing without one.
+        if seat is None and role is None and self._said_path is not None:
+            spoke = last_said.last(self._said_path, chat_id)
+            if spoke is not None and spoke.session_id and spoke.agent_id:
+                runner = self._runners.get(spoke.agent_id)
+                if runner is not None:
+                    logger.info(
+                        "Answering %s in %s, which is what last spoke there",
+                        spoke.session_id,
+                        chat_id,
+                    )
+                    return _SessionTarget(spoke.session_id, self._project, None, runner)
 
         session = (
             await self._registry.latest_for_role(role)
