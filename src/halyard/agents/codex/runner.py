@@ -30,6 +30,7 @@ from collections import defaultdict
 from pathlib import Path
 
 from halyard.agents.codex.sessions import find_session
+from halyard.core.said_by_a_process import the_useful_end
 
 logger = logging.getLogger(__name__)
 
@@ -301,11 +302,15 @@ class CodexRunner:
             # on *stdout*, and reading only stderr logged `failed (exit 1):`
             # with nothing after the colon — a delivery that failed for a
             # reason the machine had printed and this threw away.
+            # The end of it, not the beginning. Every one of these CLIs prints
+            # a banner before it prints a problem — see `said_by_a_process`.
             reason = (
-                (stderr or b"").decode("utf-8", "replace").strip()
-                or (stdout or b"").decode("utf-8", "replace").strip()
+                the_useful_end(
+                    (stderr or b"").decode("utf-8", "replace")
+                    or (stdout or b"").decode("utf-8", "replace")
+                )
                 or "no output"
-            )[:400]
+            )
             self._last_error[session_id] = reason
             logger.error(
                 "Delivering a message to %s failed (exit %s): %s",
