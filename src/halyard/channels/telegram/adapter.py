@@ -129,6 +129,15 @@ COMMANDS: tuple[tuple[str, str], ...] = (
 #: the seat that owns the chat. Measured twice, on a message meant for somebody
 #: else. So the seat is held for a few minutes as well, and that fallback is
 #: what carries this now that the prompt no longer forces a reply.
+#: What the opencode bridge puts in front of a message about a provider refusing
+#: on a rate limit. Written there, read here — the two files are in this
+#: repository and the coupling is between our own words, not somebody's prose.
+#:
+#: It exists so this side can tell "the quota is gone" from every other thing an
+#: agent might say, without matching on a provider's sentence. Those get
+#: rephrased; a marker we write does not.
+OUT_OF_QUOTA = "\u26d4\ufe0f"
+
 ASK_FOR_TEXT = "Send what to {seat}?"
 _ASKED = re.compile(r"^Send what to (\S+)\?")
 
@@ -512,14 +521,49 @@ class TelegramChannel:
         # whole report and a fragment of one would look complete.
         if self._said_path is not None:
             last_said.remember(self._said_path, chat_id=chat_id, text=text, session_id=session_id)
+        # A provider that has stopped answering is the one message worth a
+        # button. Somebody reading "the limit resets at 03:30" on a phone can
+        # do exactly one useful thing about it, and typing a model id with a
+        # slash in it is not how they should have to do it.
+        keyboard = self._offer_another_model(text, agent_id)
+
         chunks = cards.split_for_telegram(text)
         message = None
         for index, chunk in enumerate(chunks, start=1):
             marker = f"<i>({index}/{len(chunks)})</i>\n" if len(chunks) > 1 else ""
             message = await self._api.send_message(
-                chat_id, marker + html.escape(chunk), message_thread_id=thread_id
+                chat_id,
+                marker + html.escape(chunk),
+                message_thread_id=thread_id,
+                # On the last one, where somebody's thumb already is.
+                reply_markup=keyboard if index == len(chunks) else None,
             )
         return str(message["message_id"]) if message else ""
+
+    def _offer_another_model(self, text: str, agent_id: str | None) -> dict | None:
+        """The fallback model as a button, when a provider has stopped answering.
+
+        Offered rather than switched. The other model costs different money and
+        may be worse at the work in hand; that is a decision, and this system
+        does not make those on somebody's behalf.
+
+        `None` whenever anything is missing — no marker, no configuration, no
+        fallback named. Every one of those means there is nothing useful to
+        offer, and a button that sets a model nobody chose would be worse than
+        no button.
+        """
+        if not text.startswith(OUT_OF_QUOTA) or not agent_id:
+            return None
+        try:
+            from halyard.core.config_file import runtime_settings
+
+            configured = runtime_settings().get(agent_id)
+        except Exception:
+            logger.debug("Could not read `runtimes:` for %s", agent_id, exc_info=True)
+            return None
+        if configured is None or not configured.on_quota:
+            return None
+        return cards.choices("model", (configured.on_quota,))
 
     async def send_long_content(
         self,
