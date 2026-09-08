@@ -16,6 +16,9 @@ halyard.db
 # When this machine first saw its token — a hash and a date, no secret,
 # but machine state all the same.
 credential-seen.json
+# What each chat last heard, so /forward survives a restart. Agent prose, and
+# this repository is public.
+last-said.json
 halyard.db-shm
 halyard.db-wal
 audit.jsonl
