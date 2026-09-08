@@ -32,6 +32,7 @@ import urllib.error
 import urllib.request
 
 from halyard.agents.base import SessionRef
+from halyard.agents.turns import LateFailure
 
 logger = logging.getLogger(__name__)
 
@@ -129,12 +130,24 @@ class OpencodeRunner:
     def busy(self, session_id: str) -> bool:
         return session_id in self._busy
 
-    async def send(self, session_id: str, text: str, cwd: str | None = None) -> bool:
+    async def send(
+        self,
+        session_id: str,
+        text: str,
+        cwd: str | None = None,
+        when_done: LateFailure | None = None,
+    ) -> bool:
         """Put `text` into the session as if it had been typed there.
 
         Never raises. The caller is handling a chat message, and a delivery
         that failed is worth reporting to the person waiting rather than
         propagating into the poll loop that has to read their next one.
+
+        `when_done` is accepted and never called. What happens after `PROMPT`
+        answers is not visible from here — no process to wait on, no exit code
+        — and the runtime reports its own trouble through the plugin, which is
+        the path a 429 already takes. Calling this on a guess would be worse
+        than leaving it to the half that can see.
         """
         if not session_id or not (text or "").strip():
             return False

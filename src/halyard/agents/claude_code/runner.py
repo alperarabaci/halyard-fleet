@@ -29,17 +29,16 @@ import os
 import re
 import shutil
 import subprocess
-from collections import defaultdict
 from pathlib import Path
 
-from halyard.core.said_by_a_process import the_useful_end
+from halyard.agents.turns import WEDGED_AFTER_SECONDS, LateFailure, Turns
 
 logger = logging.getLogger(__name__)
 
-#: How long to wait for a turn before giving up. Generous, because a real turn
-#: runs tools and can take minutes — each of which may stop for its own
-#: approval, which is a human deciding on a phone.
-DEFAULT_TURN_TIMEOUT_SECONDS = 900.0
+#: When to conclude a turn is wedged rather than merely long. Not a budget —
+#: see `agents/turns.py`, which explains what the old fifteen-minute budget did
+#: to a turn that was working perfectly well.
+DEFAULT_WEDGED_AFTER_SECONDS = WEDGED_AFTER_SECONDS
 
 #: What `--effort` accepts. A closed set the CLI documents, so a typo can be
 #: caught here rather than by a turn that fails a minute later.
@@ -169,7 +168,7 @@ class ClaudeCodeRunner:
         self,
         *,
         binary: str | None = None,
-        timeout_seconds: float = DEFAULT_TURN_TIMEOUT_SECONDS,
+        wedged_after_seconds: float = DEFAULT_WEDGED_AFTER_SECONDS,
         models: tuple[str, ...] | None = None,
         default_model: str | None = DEFAULT_MODEL,
         oauth_token: str | None = None,
@@ -189,9 +188,7 @@ class ClaudeCodeRunner:
         # Measured: `doctor` found codex and the runner did not, in the same
         # minute, because one had asked at startup and the other just now.
         self._configured = binary
-        self._timeout = timeout_seconds
-        self._locks: dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
-        self._last_error: dict[str, str] = {}
+        self._turns = Turns("claude-code", wedged_after=wedged_after_seconds)
         # Per-session overrides for turns *this* runner starts. A turn begun at
         # a keyboard uses whatever the app is set to; nothing here can reach it.
         self._models: dict[str, str] = {}
@@ -273,7 +270,7 @@ class ClaudeCodeRunner:
         are away from. The reason was already printed by the CLI; it only had
         to be carried.
         """
-        return self._last_error.get(session_id)
+        return self._turns.last_error(session_id)
 
     def busy(self, session_id: str) -> bool:
         """Whether a turn this runner started is still going in that session.
@@ -282,16 +279,29 @@ class ClaudeCodeRunner:
         is invisible from here, and claiming otherwise would be worse than
         saying nothing.
         """
-        lock = self._locks.get(session_id)
-        return lock is not None and lock.locked()
+        return self._turns.busy(session_id)
 
-    async def send(self, session_id: str, text: str, cwd: str | None = None) -> bool:
+    async def send(
+        self,
+        session_id: str,
+        text: str,
+        cwd: str | None = None,
+        when_done: LateFailure | None = None,
+    ) -> bool:
         """Resume the session with `text` as the next thing the user said.
 
         `cwd` is the directory the session belongs to. It matters: `--resume`
         looks for a conversation within the current project, so running it
         from anywhere else answers "No conversation found with session ID"
         even though the transcript is right there on disk.
+
+        Returns when the message has been *accepted*, not when the turn is
+        done. The reply was never read from here anyway — it comes back through
+        the Stop hook and the relay, so a message sent from a phone and one
+        typed at the desk arrive by one path — and waiting for work nobody was
+        collecting is what turned a healthy fifteen-minute turn into a killed
+        one. `when_done` covers the rest: it is called if an accepted turn then
+        fails.
         """
         if not self._binary:
             logger.error(
@@ -302,10 +312,20 @@ class ClaudeCodeRunner:
         if not text.strip():
             return False
 
-        # Per session, so two messages to one conversation queue instead of
-        # racing, while two different sessions still run at the same time.
-        async with self._locks[session_id]:
-            return await self._run(session_id, text, cwd)
+        arguments = [self._binary, "-p", "--resume", session_id]
+        if model := self._models.get(session_id) or self._default_model:
+            arguments += ["--model", model]
+        if effort := self._efforts.get(session_id):
+            arguments += ["--effort", effort]
+        arguments.append(text)
+
+        return await self._turns.start(
+            session_id,
+            arguments,
+            cwd=cwd,
+            env=self._environment(),
+            when_done=when_done,
+        )
 
     async def ask(
         self, text: str, *, timeout: float = 180.0, model: str | None = None
@@ -381,63 +401,3 @@ class ClaudeCodeRunner:
                     "rather than the subscription. Unset it to use the token."
                 )
         return environment
-
-    async def _run(self, session_id: str, text: str, cwd: str | None) -> bool:
-        try:
-            arguments = [self._binary, "-p", "--resume", session_id]
-            if model := self._models.get(session_id) or self._default_model:
-                arguments += ["--model", model]
-            if effort := self._efforts.get(session_id):
-                arguments += ["--effort", effort]
-            arguments.append(text)
-
-            process = await asyncio.create_subprocess_exec(
-                *arguments,
-                # Closed rather than inherited: a resumed run warns and stalls
-                # for three seconds when it is handed a stdin that never
-                # produces anything.
-                stdin=asyncio.subprocess.DEVNULL,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                cwd=cwd,
-                env=self._environment(),
-            )
-        except OSError:
-            logger.exception("Could not start the claude CLI")
-            return False
-
-        try:
-            stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=self._timeout)
-        except TimeoutError:
-            logger.error("A turn in %s ran past %.0fs; giving up on it", session_id, self._timeout)
-            process.kill()
-            await process.wait()
-            return False
-
-        if process.returncode != 0:
-            # Both streams. The CLI says "Not logged in · Please run /login"
-            # on *stdout*, and reading only stderr logged `failed (exit 1):`
-            # with nothing after the colon — a delivery that failed for a
-            # reason the machine had printed and this threw away.
-            # The end of it, not the beginning. Every one of these CLIs prints
-            # a banner before it prints a problem — see `said_by_a_process`.
-            reason = (
-                the_useful_end(
-                    (stderr or b"").decode("utf-8", "replace")
-                    or (stdout or b"").decode("utf-8", "replace")
-                )
-                or "no output"
-            )
-            self._last_error[session_id] = reason
-            logger.error(
-                "Delivering a message to %s failed (exit %s): %s",
-                session_id,
-                process.returncode,
-                reason,
-            )
-            return False
-
-        # The reply is not read from here. It arrives the same way every other
-        # turn's does — through the Stop hook and the relay — so a message sent
-        # from a phone and one typed at the desk come back by one path.
-        return True

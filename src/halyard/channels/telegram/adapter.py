@@ -2014,9 +2014,27 @@ class TelegramChannel:
         thread_id: int | None = None,
     ) -> None:
         session_id, project, cwd = session.session_id, session.project, session.cwd
+        runtime = getattr(session.runner, "id", "?")
+
+        async def stopped_afterwards(reason: str) -> None:
+            """Say so when a turn that *was* accepted then fell over.
+
+            A different sentence from the one below, because it is a different
+            thing: the message arrived, work happened, and then it stopped. The
+            two were one message before, and it read "that did not reach" for a
+            turn that had been running for a quarter of an hour.
+            """
+            await self._say(
+                f"⚠️ The turn in <b>{html.escape(str(session_id))}</b> "
+                f"({html.escape(str(runtime))}) stopped."
+                f"\n\n<pre>{html.escape(the_useful_end(reason))}</pre>",
+                chat_id,
+                thread_id,
+            )
+
         delivered = False
         try:
-            delivered = await session.runner.send(session_id, text, cwd)
+            delivered = await session.runner.send(session_id, text, cwd, stopped_afterwards)
         except Exception:
             logger.exception("Could not deliver a message to %s", session_id)
         finally:
@@ -2035,7 +2053,10 @@ class TelegramChannel:
             # away from the machine, and the one fact they cannot recover from
             # there is which session this went to and under which runtime.
             # Two runtimes can hold one name, so neither half is enough alone.
-            runtime = getattr(session.runner, "id", "?")
+            #
+            # This now means what it says. It used to also cover a turn that
+            # had been accepted and was killed by a timeout fifteen minutes
+            # later; that case goes through `stopped_afterwards` above.
             because = getattr(session.runner, "last_error", lambda _: None)(session_id)
             # The runtime usually said why, on a stream this used to discard.
             # "Not logged in · Please run /login" was printed by the CLI, thrown

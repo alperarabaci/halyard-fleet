@@ -26,17 +26,16 @@ import logging
 import os
 import shutil
 import subprocess
-from collections import defaultdict
 from pathlib import Path
 
 from halyard.agents.codex.sessions import find_session
-from halyard.core.said_by_a_process import the_useful_end
+from halyard.agents.turns import WEDGED_AFTER_SECONDS, LateFailure, Turns
 
 logger = logging.getLogger(__name__)
 
-#: Same generous ceiling as the Claude Code runner: a real turn runs tools, and
-#: each of those may stop for an approval decided by a human on a phone.
-DEFAULT_TURN_TIMEOUT_SECONDS = 900.0
+#: Same as the Claude Code runner, and for the same reason: this is the point
+#: at which a turn is wedged rather than long. See `agents/turns.py`.
+DEFAULT_WEDGED_AFTER_SECONDS = WEDGED_AFTER_SECONDS
 
 #: What to offer when the catalog cannot be read — the CLI is missing, or a
 #: future release renames the subcommand. Measured on 0.145.0, and deliberately
@@ -82,7 +81,7 @@ class CodexRunner:
         self,
         *,
         binary: str | None = None,
-        timeout_seconds: float = DEFAULT_TURN_TIMEOUT_SECONDS,
+        wedged_after_seconds: float = DEFAULT_WEDGED_AFTER_SECONDS,
         default_model: str | None = DEFAULT_MODEL,
     ) -> None:
         # The path is *not* resolved here. A control plane runs for days, and
@@ -93,10 +92,8 @@ class CodexRunner:
         # Measured: `doctor` found codex and the runner did not, in the same
         # minute, because one had asked at startup and the other just now.
         self._configured = binary
-        self._timeout = timeout_seconds
+        self._turns = Turns("codex", wedged_after=wedged_after_seconds)
         self._default_model = default_model or None
-        self._locks: dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
-        self._last_error: dict[str, str] = {}
         self._models: dict[str, str] = {}
         self._efforts: dict[str, str] = {}
         self._catalog: dict[str, tuple[str, ...]] | None = None
@@ -212,13 +209,18 @@ class CodexRunner:
         are away from. The reason was already printed by the CLI; it only had
         to be carried.
         """
-        return self._last_error.get(session_id)
+        return self._turns.last_error(session_id)
 
     def busy(self, session_id: str) -> bool:
-        lock = self._locks.get(session_id)
-        return lock is not None and lock.locked()
+        return self._turns.busy(session_id)
 
-    async def send(self, session_id: str, text: str, cwd: str | None = None) -> bool:
+    async def send(
+        self,
+        session_id: str,
+        text: str,
+        cwd: str | None = None,
+        when_done: LateFailure | None = None,
+    ) -> bool:
         """Resume the session with `text` as the next thing the user said.
 
         The lock is kept even though a measured pair of overlapping resumes both
@@ -226,6 +228,10 @@ class CodexRunner:
         queue rather than a failure, and the equivalent on Claude Code forks
         silently — losing a turn with nothing raised anywhere. Being wrong in
         the safe direction here costs a wait.
+
+        Returns on acceptance rather than on completion — see
+        `agents/turns.py`. `when_done` is called if an accepted turn then fails,
+        which is how running out of usage halfway through still gets reported.
         """
         if not self._binary:
             logger.error("Cannot deliver a message: the codex CLI was not found.")
@@ -263,10 +269,6 @@ class CodexRunner:
                 )
                 return False
 
-        async with self._locks[session_id]:
-            return await self._run(session_id, text, cwd)
-
-    async def _run(self, session_id: str, text: str, cwd: str | None) -> bool:
         arguments = [self._binary, "exec", "resume"]
         if model := self._models.get(session_id) or self._default_model:
             arguments += ["--model", model]
@@ -276,47 +278,10 @@ class CodexRunner:
             arguments += ["-c", f'model_reasoning_effort="{effort}"']
         arguments += [session_id, text]
 
-        try:
-            process = await asyncio.create_subprocess_exec(
-                *arguments,
-                stdin=asyncio.subprocess.DEVNULL,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                cwd=cwd,
-                env=os.environ.copy(),
-            )
-        except OSError:
-            logger.exception("Could not start the codex CLI")
-            return False
-
-        try:
-            stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=self._timeout)
-        except TimeoutError:
-            logger.error("A turn in %s ran past %.0fs; giving up on it", session_id, self._timeout)
-            process.kill()
-            await process.wait()
-            return False
-
-        if process.returncode != 0:
-            # Both streams. The CLI says "Not logged in · Please run /login"
-            # on *stdout*, and reading only stderr logged `failed (exit 1):`
-            # with nothing after the colon — a delivery that failed for a
-            # reason the machine had printed and this threw away.
-            # The end of it, not the beginning. Every one of these CLIs prints
-            # a banner before it prints a problem — see `said_by_a_process`.
-            reason = (
-                the_useful_end(
-                    (stderr or b"").decode("utf-8", "replace")
-                    or (stdout or b"").decode("utf-8", "replace")
-                )
-                or "no output"
-            )
-            self._last_error[session_id] = reason
-            logger.error(
-                "Delivering a message to %s failed (exit %s): %s",
-                session_id,
-                process.returncode,
-                reason,
-            )
-            return False
-        return True
+        return await self._turns.start(
+            session_id,
+            arguments,
+            cwd=cwd,
+            env=os.environ.copy(),
+            when_done=when_done,
+        )

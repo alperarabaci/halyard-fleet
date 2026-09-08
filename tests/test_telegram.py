@@ -895,9 +895,18 @@ class FakeRunner:
         else:
             self.efforts.pop(session_id, None)
 
-    async def send(self, session_id: str, text: str, cwd: str | None = None) -> bool:
+    async def send(
+        self,
+        session_id: str,
+        text: str,
+        cwd: str | None = None,
+        when_done=None,
+    ) -> bool:
         self.sent.append((session_id, text))
         self.directories.append(cwd)
+        # Kept so a test can drive the after-acceptance path, which is the one
+        # a real runtime reaches minutes later and nothing else can reach here.
+        self.stopped_afterwards = when_done
         return self._works
 
 
@@ -1045,7 +1054,7 @@ async def test_delivery_does_not_block_the_caller(tmp_path: Path) -> None:
     started = asyncio.Event()
     release = asyncio.Event()
 
-    async def slow(session_id: str, text: str, cwd: str | None = None) -> bool:
+    async def slow(session_id: str, text: str, cwd: str | None = None, when_done=None) -> bool:
         started.set()
         await release.wait()
         return True
@@ -1731,6 +1740,31 @@ async def test_a_failure_with_no_output_says_that_instead(tmp_path: Path, monkey
     )
 
     assert "Nothing was printed" in api.sent[-1]["text"]
+
+
+async def test_a_turn_that_stops_after_it_arrived_is_not_called_undelivered(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The two failures used to share one sentence, and it was the wrong one.
+
+    Measured: a forwarded message reached the navigator, the session worked on
+    it for fifteen minutes, and the timeout killed it. What arrived on the
+    phone was "That did not reach ed774cad-…", which sent the person looking at
+    the feature they had just used rather than at the clock.
+    """
+    channel, api, runner, _ = await wired(tmp_path)
+
+    await channel._handle_message(typed_in("carry on", NAV_CHAT))
+    await drain()
+    before = len(api.sent)
+
+    await runner.stopped_afterwards("usage limit reached; resets at 4:26 PM")
+
+    said = api.sent[-1]["text"]
+    assert len(api.sent) == before + 1, "nothing was said until the turn actually stopped"
+    assert "did not reach" not in said
+    assert "stopped" in said
+    assert "resets at 4:26 PM" in said
 
 
 # --- the command list Telegram shows ------------------------------------------

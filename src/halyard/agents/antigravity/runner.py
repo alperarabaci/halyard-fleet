@@ -54,6 +54,7 @@ from collections import defaultdict
 from pathlib import Path
 
 from halyard.agents.antigravity.sessions import find_session, is_cli
+from halyard.agents.turns import LateFailure
 
 logger = logging.getLogger(__name__)
 
@@ -247,7 +248,13 @@ class AntigravityRunner:
         waiting = self._pending.pop(session_id, [])
         return list(waiting)
 
-    async def send(self, session_id: str, text: str, cwd: str | None = None) -> bool:
+    async def send(
+        self,
+        session_id: str,
+        text: str,
+        cwd: str | None = None,
+        when_done: LateFailure | None = None,
+    ) -> bool:
         """Put `text` into the conversation. Returns whether it was accepted.
 
         **The text does not travel with the call.** `agentapi send-message` can
@@ -267,6 +274,10 @@ class AntigravityRunner:
         `cwd` is unused: `send-message` addresses a conversation directly and
         the application already knows where that conversation lives. Kept in the
         signature because the protocol has it and the other two runtimes need it.
+
+        `when_done` is accepted and never called, and here that is not a gap:
+        `send-message` files the wake and returns a verdict, so acceptance and
+        completion are the same moment. There is no "later" to report.
         """
         if not text.strip():
             return False
