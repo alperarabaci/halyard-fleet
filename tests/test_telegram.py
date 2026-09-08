@@ -2509,3 +2509,34 @@ async def test_what_was_said_survives_a_restart(tmp_path: Path) -> None:
 
     there = [sent for sent in api.sent if sent["chat_id"] == "-1003333333333"]
     assert any("the report" in sent["text"] for sent in there)
+
+
+async def test_the_answer_comes_back_to_the_seat_not_to_whoever_asked(tmp_path: Path) -> None:
+    """A seat's conversation stays in one place, readable from top to bottom.
+
+    Handing something to a seat from somewhere else must not drag that seat's
+    reply along with it — a reply routed to whoever happened to ask would split
+    one conversation across every group somebody had stood in. So routing is by
+    the session that spoke, not by where the request came from, and this pins
+    that: the property is invisible until it breaks, and a routing bug of
+    exactly this shape has already put one reply in the wrong group.
+    """
+    channel, api = await with_two_seats(tmp_path)
+    channel._said_path = tmp_path / "last-said.json"
+    await channel.send_message(
+        "s1", "have a look at this", None, agent_id="claude-code", session_name="alpha-driver"
+    )
+    await channel._handle_message(typed_in("/forward xnav", DRV_CHAT))
+    sent_before = len(api.sent)
+
+    # xnav's agent finishes its turn and says something.
+    await channel.send_message(
+        "s2", "I looked, it is the migration", None, agent_id="codex", session_name="alpha-xnav"
+    )
+
+    answered = api.sent[sent_before:]
+    assert answered, "the reply went nowhere"
+    assert all(sent["chat_id"] == "-1003333333333" for sent in answered), (
+        "the reply followed the request instead of staying with the seat"
+    )
+    assert not any(sent["chat_id"] == DRV_CHAT for sent in answered)
