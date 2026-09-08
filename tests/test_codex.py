@@ -16,6 +16,7 @@ from pathlib import Path
 from halyard.agents import codex
 from halyard.agents.base import SessionRef
 from halyard.agents.codex import CodexRunner, find_session, list_named_sessions
+from halyard.agents.codex.runner import held_by_another
 
 
 def codex_home(root: Path, *, sessions: list[dict], rollouts: dict[str, dict]) -> Path:
@@ -387,3 +388,102 @@ def test_an_install_of_unknown_provenance_is_not_given_a_command_to_paste(monkey
 
     assert not any("brew" in text for _, text in said)
     assert any("upgrade the codex CLI" in text for _, text in said)
+
+
+# --- a thread somebody else is writing ----------------------------------------
+#
+# Codex 0.153 made a thread single-writer. The holder is normally the ChatGPT
+# app's `app-server`, and it holds the lock while the thread is merely *open* —
+# measured with `lsof` on two machines, against a session sitting idle. So the
+# arrangement this project exists for is the one `exec resume` stopped being
+# able to reach:
+#
+#     20:05:46  Message from tg:… → this chat's own seat
+#     20:05:47  failed (exit 1): thread … already has an active writer
+#
+# `codex queue` goes in by another door, and was measured going in while that
+# same lock was held: exit 0, and the session picked the message up on its own
+# and answered into Telegram a minute later.
+
+CONFLICT = (
+    b"ERROR codex_core::session: Failed to create session: thread-store conflict: "
+    b"thread abc already has an active writer\n"
+    b"Error: thread/resume: thread/resume failed: thread abc already has an "
+    b"active writer (code -32600)"
+)
+
+
+class Refusing(FakeProcess):
+    """One `exec resume` that fails the way a held thread fails."""
+
+    returncode = 1
+
+    async def communicate(self) -> tuple[bytes, bytes]:
+        return b"", CONFLICT
+
+
+class Unauthenticated(FakeProcess):
+    returncode = 1
+
+    async def communicate(self) -> tuple[bytes, bytes]:
+        return b"", b"Not logged in \xc2\xb7 Please run /login"
+
+
+def answering(monkeypatch, *processes: FakeProcess) -> list[list[str]]:
+    """Hand out `processes` in order, recording each command line."""
+    waiting = list(processes)
+    seen: list[list[str]] = []
+
+    async def fake_exec(*arguments, **_kwargs):
+        seen.append(list(arguments))
+        return waiting.pop(0) if waiting else FakeProcess()
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec)
+    return seen
+
+
+async def test_a_thread_open_elsewhere_is_reached_by_queueing(monkeypatch) -> None:
+    seen = answering(monkeypatch, Refusing(), FakeProcess())
+
+    assert await runner_with_catalog().send("abc", "carry on", cwd="/repo") is True
+    assert len(seen) == 2
+    assert seen[1][1:] == ["queue", "--thread", "abc", "--message", "carry on"]
+
+
+async def test_a_failure_of_any_other_kind_is_not_queued(monkeypatch) -> None:
+    """The guard that makes the fallback safe. A message queued for a session
+    that cannot log in is a delivery reported and never made — which is the
+    failure this whole path exists to stop, arriving from the other side."""
+    seen = answering(monkeypatch, Unauthenticated())
+
+    assert await runner_with_catalog().send("abc", "carry on", cwd="/repo") is False
+    assert len(seen) == 1, "nothing should have been queued"
+
+
+async def test_a_resume_that_works_is_never_queued(monkeypatch) -> None:
+    """Running the turn ourselves is the better path and stays the first one:
+    it is the one where the model is ours to choose and the end is ours to
+    report."""
+    seen = answering(monkeypatch, FakeProcess())
+
+    assert await runner_with_catalog().send("abc", "carry on", cwd="/repo") is True
+    assert len(seen) == 1
+    assert "queue" not in seen[0]
+
+
+async def test_a_queued_message_still_carries_the_chosen_model(monkeypatch) -> None:
+    seen = answering(monkeypatch, Refusing(), FakeProcess())
+    runner = runner_with_catalog()
+    runner.set_model("abc", "gpt-5.6-sol")
+
+    await runner.send("abc", "carry on", cwd="/repo")
+
+    assert "--model" in seen[1] and "gpt-5.6-sol" in seen[1]
+
+
+async def test_the_phrase_that_means_someone_else_holds_it() -> None:
+    """Matched on what the CLI says rather than on the exit code, which every
+    other failure shares."""
+    assert held_by_another(CONFLICT.decode())
+    assert not held_by_another("Not logged in")
+    assert not held_by_another(None)
