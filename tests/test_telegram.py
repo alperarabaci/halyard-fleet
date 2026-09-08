@@ -2558,3 +2558,76 @@ async def test_the_answer_comes_back_to_the_seat_not_to_whoever_asked(tmp_path: 
         "the reply followed the request instead of staying with the seat"
     )
     assert not any(sent["chat_id"] == DRV_CHAT for sent in answered)
+
+
+# --- the one message worth a button -------------------------------------------
+
+
+def _with_fallback(monkeypatch, on_quota: str = "deepseek/deepseek-v4-pro"):
+    from halyard.core.config_file import RuntimeSettings
+
+    monkeypatch.setattr(
+        "halyard.core.config_file.runtime_settings",
+        lambda *a, **k: {
+            "opencode": RuntimeSettings(
+                name="opencode",
+                models=("zai-coding-plan/glm-5.3-flash", on_quota),
+                on_quota=on_quota,
+            )
+        },
+    )
+
+
+async def test_a_provider_that_stopped_answering_offers_the_other_model(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Somebody reading "the limit resets at 03:30" on a phone can do exactly
+    one useful thing about it, and typing a model id with a slash in it is not
+    how they should have to do it."""
+    _with_fallback(monkeypatch)
+    channel, api = await with_two_seats(tmp_path)
+
+    await channel.send_message(
+        "s1",
+        "⛔️ Usage limit reached for 5 hour. Resets at 03:30. (api.z.ai)",
+        None,
+        agent_id="opencode",
+    )
+
+    buttons = api.sent[-1]["reply_markup"]["inline_keyboard"][0]
+    assert buttons[0]["callback_data"] == "hc:model:deepseek/deepseek-v4-pro"
+
+
+async def test_an_ordinary_reply_gets_no_button(tmp_path: Path, monkeypatch) -> None:
+    """A keyboard under everything an agent says would be a keyboard nobody
+    reads, and the marker is what tells them apart."""
+    _with_fallback(monkeypatch)
+    channel, api = await with_two_seats(tmp_path)
+
+    await channel.send_message("s1", "I have finished the migration", None, agent_id="opencode")
+
+    assert not api.sent[-1].get("reply_markup")
+
+
+async def test_no_fallback_configured_means_no_button(tmp_path: Path, monkeypatch) -> None:
+    """A button that sets a model nobody chose would be worse than none."""
+    monkeypatch.setattr("halyard.core.config_file.runtime_settings", lambda *a, **k: {})
+    channel, api = await with_two_seats(tmp_path)
+
+    await channel.send_message("s1", "⛔️ Usage limit reached.", None, agent_id="opencode")
+
+    assert not api.sent[-1].get("reply_markup")
+
+
+async def test_the_button_rides_the_last_chunk_of_a_long_message(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Where somebody's thumb already is, once they have scrolled."""
+    _with_fallback(monkeypatch)
+    channel, api = await with_two_seats(tmp_path)
+
+    await channel.send_message("s1", "⛔️ " + "x" * 9000, None, agent_id="opencode")
+
+    assert len([sent for sent in api.sent if sent["text"].startswith("<i>(")]) > 1
+    assert api.sent[-1].get("reply_markup")
+    assert not api.sent[-2].get("reply_markup")
