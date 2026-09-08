@@ -2364,3 +2364,148 @@ async def test_answering_a_question_twice_keeps_the_first_answer(tmp_path: Path)
 
     resolution = await qstore.wait_for(request.request_id)
     assert resolution.answer == "Red"
+
+
+async def test_our_own_question_is_never_handed_to_an_agent(tmp_path: Path) -> None:
+    """It was. The seat menu is posted as a reply, and a client is free to
+    anchor it to whatever is nearby — which on a second attempt was the
+    "Send what to xnav?" left over from the first. That question was carried as
+    the sentence to hand over, so an agent was asked Halyard's own question and
+    answered, reasonably, that it did not understand.
+    """
+    channel, api = await with_two_seats(tmp_path)
+
+    await channel._handle_callback(
+        {
+            "id": "q1",
+            "from": {"id": int(APPROVER)},
+            "message": {
+                "chat": {"id": DRV_CHAT},
+                "reply_to_message": {"text": "Send what to xnav?"},
+            },
+            "data": "hc:to:xnav",
+        }
+    )
+
+    assert api.sent[-1]["text"] == "Send what to xnav?", "it should ask, not forward"
+    assert not any(sent["chat_id"] == "-1003333333333" for sent in api.sent)
+
+
+async def test_replying_to_our_own_question_with_a_command_forwards_nothing(
+    tmp_path: Path,
+) -> None:
+    """The same hole on the typed path. `/to xnav` in reply to the question
+    would otherwise hand over the question."""
+    channel, api = await with_two_seats(tmp_path)
+
+    await channel._handle_message(replying("/to xnav", "Send what to xnav?", DRV_CHAT))
+
+    there = [sent for sent in api.sent if sent["chat_id"] == "-1003333333333"]
+    assert not there, "nothing should have reached the seat"
+    assert api.sent[-1]["text"] == "Send what to xnav?"
+
+
+async def test_a_real_message_is_still_carried(tmp_path: Path) -> None:
+    """The guard must not eat what it was written to protect."""
+    channel, api = await with_two_seats(tmp_path)
+
+    await channel._handle_callback(
+        {
+            "id": "q1",
+            "from": {"id": int(APPROVER)},
+            "message": {
+                "chat": {"id": DRV_CHAT},
+                "reply_to_message": {"text": "the migration looks wrong to me"},
+            },
+            "data": "hc:to:xnav",
+        }
+    )
+
+    there = [sent for sent in api.sent if sent["chat_id"] == "-1003333333333"]
+    assert any("the migration looks wrong" in sent["text"] for sent in there)
+
+
+# --- /forward: the other half of /to ------------------------------------------
+
+
+async def test_forward_carries_the_whole_last_reply(tmp_path: Path) -> None:
+    """What somebody wants to hand on is the whole report. Telegram splits a
+    long one into several messages, so it is kept before the split — a fragment
+    would be worse than nothing, because it would look complete."""
+    channel, api = await with_two_seats(tmp_path)
+    channel._said_path = tmp_path / "last-said.json"
+    long_reply = "the migration is wrong because " + "x" * 5000
+
+    await channel.send_message(
+        "s1", long_reply, None, agent_id="claude-code", session_name="alpha-driver"
+    )
+    await channel._handle_message(typed_in("/forward xnav", DRV_CHAT))
+
+    there = [sent for sent in api.sent if sent["chat_id"] == "-1003333333333"]
+    assert there, "nothing reached the seat"
+    assert sum(len(sent["text"]) for sent in there) > 4000, "the reply was truncated"
+
+
+async def test_a_bare_forward_offers_the_seats_without_a_forced_reply(tmp_path: Path) -> None:
+    """No `force_reply` anywhere in this flow. Nothing has to be typed, so
+    nothing should open a reply box — and an abandoned one is a reply box that
+    keeps coming back long after anybody wanted it."""
+    channel, api = await with_two_seats(tmp_path)
+    channel._said_path = tmp_path / "last-said.json"
+    await channel.send_message(
+        "s1", "have a look at this", None, agent_id="claude-code", session_name="alpha-driver"
+    )
+
+    await channel._handle_message(typed_in("/forward", DRV_CHAT))
+
+    assert api.sent[-1].get("reply_markup", {}).get("inline_keyboard")
+    assert "force_reply" not in (api.sent[-1].get("reply_markup") or {})
+
+
+async def test_the_button_finishes_on_its_own(tmp_path: Path) -> None:
+    """Which is what `/to` cannot do: the message is already on disk, so
+    nothing has to be remembered between the tap and the send."""
+    channel, api = await with_two_seats(tmp_path)
+    channel._said_path = tmp_path / "last-said.json"
+    await channel.send_message(
+        "s1", "have a look at this", None, agent_id="claude-code", session_name="alpha-driver"
+    )
+
+    await channel._handle_callback(
+        {
+            "id": "q1",
+            "from": {"id": int(APPROVER)},
+            "message": {"chat": {"id": DRV_CHAT}},
+            "data": "hc:fwd:xnav",
+        }
+    )
+
+    there = [sent for sent in api.sent if sent["chat_id"] == "-1003333333333"]
+    assert any("have a look at this" in sent["text"] for sent in there)
+
+
+async def test_forwarding_with_nothing_said_says_so(tmp_path: Path) -> None:
+    channel, api = await with_two_seats(tmp_path)
+    channel._said_path = tmp_path / "last-said.json"
+
+    await channel._handle_message(typed_in("/forward xnav", DRV_CHAT))
+
+    assert "nothing to hand on" in api.sent[-1]["text"]
+    assert not any(sent["chat_id"] == "-1003333333333" for sent in api.sent)
+
+
+async def test_what_was_said_survives_a_restart(tmp_path: Path) -> None:
+    """The reason it is on disk. Held in memory, a restart threw away exactly
+    the thing somebody was about to hand on."""
+    channel, _ = await with_two_seats(tmp_path)
+    channel._said_path = tmp_path / "last-said.json"
+    await channel.send_message(
+        "s1", "the report", None, agent_id="claude-code", session_name="alpha-driver"
+    )
+
+    fresh, api = await with_two_seats(tmp_path)
+    fresh._said_path = tmp_path / "last-said.json"
+    await fresh._handle_message(typed_in("/forward xnav", DRV_CHAT))
+
+    there = [sent for sent in api.sent if sent["chat_id"] == "-1003333333333"]
+    assert any("the report" in sent["text"] for sent in there)

@@ -308,6 +308,9 @@ def _build_channel(
             )
             if name
         },
+        # Beside the database, for the same reason the credential note is: it
+        # has to survive a restart and is not worth a schema.
+        said_path=settings.db_path.parent / "last-said.json",
     )
 
 

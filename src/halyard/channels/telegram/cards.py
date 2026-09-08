@@ -101,7 +101,7 @@ def parse_choice_data(data: str) -> tuple[str, str] | None:
     if len(parts) != 3 or parts[0] != CHOICE_PREFIX:
         return None
     _, what, value = parts
-    if what not in {"model", "effort", "to", "open", "run", "label"} or not value:
+    if what not in {"model", "effort", "to", "fwd", "open", "run", "label"} or not value:
         return None
     return what, value
 
@@ -131,6 +131,28 @@ def choices(what: str, values: tuple[str, ...]) -> dict | None:
     rows = [buttons[index : index + 3] for index in range(0, len(buttons), 3)]
     rows.append([{"text": "default", "callback_data": choice_data(what, "default")}])
     return {"inline_keyboard": rows}
+
+
+def forward_choices(labels: tuple[str, ...]) -> dict | None:
+    """Buttons for `/forward`, one per seat.
+
+    The same shape as `seat_choices` and a different `what`, because pressing
+    one means something else: there is no text to carry, so the answer is read
+    from what was last said in the chat the button is in.
+
+    Which is why this one *can* be offered from a bare command, where `/to`
+    cannot. Nothing has to be remembered between the tap and the message — the
+    message is already on disk.
+    """
+    buttons = []
+    for label in labels:
+        try:
+            buttons.append({"text": label, "callback_data": choice_data("fwd", label)})
+        except ValueError:
+            continue
+    if not buttons:
+        return None
+    return {"inline_keyboard": [buttons[i : i + 3] for i in range(0, len(buttons), 3)]}
 
 
 def seat_choices(labels: tuple[str, ...]) -> dict | None:
