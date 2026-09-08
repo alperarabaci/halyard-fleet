@@ -62,6 +62,27 @@ _FALLBACK_BINARIES = (
 )
 
 
+#: How the CLI says a thread is open somewhere else.
+#:
+#: Codex 0.153 made a thread single-writer, where 0.145 let two resumes overlap.
+#: The writer is normally the ChatGPT app's `app-server`, which holds the lock
+#: for as long as the thread is open there — measured with `lsof` on both
+#: machines, on a thread that was sitting idle. So the arrangement this project
+#: is built for, a session open at the desk and driven from a phone, is exactly
+#: the arrangement `exec resume` can no longer reach.
+#:
+#: Matched on the phrase rather than the exit code, because every other failure
+#: exits the same way and must not be retried down the other path: queueing a
+#: message for a session that is not logged in would report a delivery that
+#: never happens.
+_ANOTHER_WRITER = "already has an active writer"
+
+
+def held_by_another(reason: str | None) -> bool:
+    """Whether this failure was the thread being open somewhere else."""
+    return _ANOTHER_WRITER in (reason or "")
+
+
 def read_catalog(binary: str | None) -> dict[str, tuple[str, ...]] | None:
     """What *this* CLI knows, as model → the efforts it accepts. None if unasked.
 
@@ -292,10 +313,45 @@ class CodexRunner:
             arguments += ["-c", f'model_reasoning_effort="{effort}"']
         arguments += [session_id, text]
 
-        return await self._turns.start(
+        accepted = await self._turns.start(
             session_id,
             arguments,
             cwd=cwd,
             env=os.environ.copy(),
             when_done=when_done,
         )
+        if accepted or not held_by_another(self._turns.last_error(session_id)):
+            return accepted
+
+        # The thread is open at the desk, so run nothing — hand the message to
+        # whoever is holding it. `queue` goes in by `thread/queue/add` rather
+        # than `thread/resume`, which is the path the writer lock is not on.
+        #
+        # Second rather than first, because the two are not equals. A turn we
+        # run is a turn we chose the model for, can report the end of, and can
+        # say is still going; a queued one is none of those — it runs inside the
+        # application, under that session's own settings. So this is what to do
+        # when the better way is refused, not what to do by default.
+        #
+        # And refused costs nothing: the conflict is decided before any model
+        # call. Measured on the failure that prompted this — the message went in
+        # at 20:05:46 and was refused at 20:05:47.
+        logger.info("%s is open elsewhere; queueing the message for it instead", session_id)
+        return await self._turns.start(
+            session_id,
+            self._queueing(session_id, text),
+            cwd=cwd,
+            env=os.environ.copy(),
+        )
+
+    def _queueing(self, session_id: str, text: str) -> list[str]:
+        """The command that hands a message to a session somebody else is running.
+
+        No effort override: that is a config value read when a turn starts, and
+        this turn starts inside the application. Passing it would be writing
+        down a preference that nothing applies.
+        """
+        arguments = [self._binary or "codex", "queue", "--thread", session_id]
+        if model := self._models.get(session_id) or self._default_model:
+            arguments += ["--model", model]
+        return [*arguments, "--message", text]
