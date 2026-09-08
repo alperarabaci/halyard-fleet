@@ -20,9 +20,13 @@ verdict — see `bridge/opencode.ts`, where that difference is written down.
 permission event at all. Without a `permission` block in the project's own
 config the plugin is wired and dead, which is why wiring writes both.
 
-Sessions have no names here — an id and a title the runtime writes itself,
-from the content, changing as the content does. So a seat cannot be bound the
-way the other three bind one, and `find_session` says so rather than guessing.
+**Sessions are addressed by title, and a title can be set by a person.** This
+paragraph said the opposite for a while — that there was nothing here to bind a
+seat to — and it was wrong on the machine it was written on, which had a
+session titled `alpha-engine-opencode-driver` sitting in the list the whole
+time. `find_session` matches that title. A generated one does move as the
+conversation moves, and that is a reason to name a session rather than a reason
+to say naming is impossible.
 """
 
 from __future__ import annotations
@@ -106,13 +110,26 @@ def check_wired(hooks_file: Path, project_dir: Path, **_context) -> list[tuple[s
 
     permission = document.get("permission")
     permission = permission if isinstance(permission, dict) else {}
-    silent = sorted(name for name, how in wiring.ASK.items() if permission.get(name) != how)
+    silent = sorted(
+        name for name, how in wiring.ASK.items() if not wiring.asks_about(permission.get(name), how)
+    )
     if silent:
         lines.append(("fail", f"{wiring.CONFIG} does not ask about {', '.join(silent)}"))
         lines.append(("", "the plugin is loaded and will never be consulted about those"))
         lines.append(("", f"halyard wire {project_dir}"))
     else:
         lines.append(("ok", f"{wiring.CONFIG} asks about {', '.join(sorted(wiring.ASK))}"))
+
+    # Named, not failed. These are answered inside the runtime, so they reach no
+    # gate: nothing about them is written to the audit log and `/pause` does not
+    # stop them. That is a thing to know about a project, not a thing wrong with
+    # it — somebody chose each one, and the exceptions are what "always allow"
+    # at the keyboard writes.
+    for name in sorted(wiring.ASK):
+        allowed = wiring.answered_without_asking(permission.get(name))
+        if allowed:
+            lines.append(("warn", f"{name} answers {', '.join(allowed)} without asking"))
+            lines.append(("", "those reach no gate, so no audit record and `/pause` misses them"))
     return lines
 
 

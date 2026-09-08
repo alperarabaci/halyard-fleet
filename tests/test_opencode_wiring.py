@@ -128,6 +128,78 @@ def test_what_was_left_alone_is_said_out_loud(project: Path, bridges: Path) -> N
     assert any("left untouched" in text and "instructions" in text for _, text in said)
 
 
+# --- what "always allow" writes ----------------------------------------------
+#
+# Pressing it at the keyboard makes opencode rewrite the category into an object
+# of patterns. Measured on a real project: `{"*": "ask", "grep *": "allow", …}`,
+# which asks about everything except four read-only commands. Reading only the
+# string called that project ungated and printed `halyard wire` underneath —
+# and wiring would then have replaced the object with `"ask"`, deleting the four
+# exceptions to fix a gate that was working.
+
+
+def asking_except(*allowed: str) -> dict:
+    return {"permission": {**wiring.ASK, "bash": {"*": "ask", **{p: "allow" for p in allowed}}}}
+
+
+def test_a_category_that_asks_by_pattern_is_gated(project: Path, bridges: Path) -> None:
+    wiring.install(project, bridges)
+    (project / wiring.CONFIG).write_text(json.dumps(asking_except("grep *", "ls *")))
+
+    said = opencode.check_wired(
+        hooks_file=project / wiring.PLUGINS / wiring.PLUGIN, project_dir=project
+    )
+
+    assert "fail" not in levels(said)
+
+
+def test_the_patterns_it_answers_alone_are_named(project: Path, bridges: Path) -> None:
+    """A warning, because it is true and worth knowing, and not a failure,
+    because somebody chose it and the gate still sees everything else."""
+    wiring.install(project, bridges)
+    (project / wiring.CONFIG).write_text(json.dumps(asking_except("grep *", "ls *")))
+
+    said = opencode.check_wired(
+        hooks_file=project / wiring.PLUGINS / wiring.PLUGIN, project_dir=project
+    )
+
+    assert "warn" in levels(said)
+    assert any("grep *" in text and "ls *" in text for _, text in said)
+    assert any("audit" in text for _, text in said)
+
+
+def test_a_pattern_object_that_allows_everything_is_still_ungated(
+    project: Path, bridges: Path
+) -> None:
+    """The catch-all is the whole question. Without one that asks, the object
+    is a list of exceptions with nothing behind it."""
+    wiring.install(project, bridges)
+    (project / wiring.CONFIG).write_text(
+        json.dumps({"permission": {**wiring.ASK, "bash": {"*": "allow", "rm *": "ask"}}})
+    )
+
+    said = opencode.check_wired(
+        hooks_file=project / wiring.PLUGINS / wiring.PLUGIN, project_dir=project
+    )
+
+    assert "fail" in levels(said)
+    assert any("does not ask about bash" in text for _, text in said)
+
+
+def test_wiring_does_not_delete_what_always_allow_wrote(project: Path, bridges: Path) -> None:
+    """The destructive half. The FAIL above printed `halyard wire` as the
+    remedy, and running it would have thrown these away."""
+    (project / wiring.CONFIG).write_text(json.dumps(asking_except("grep *", "cat *")))
+
+    wiring.install(project, bridges)
+
+    assert config_of(project)["permission"]["bash"] == {
+        "*": "ask",
+        "grep *": "allow",
+        "cat *": "allow",
+    }
+
+
 def test_a_narrower_permission_already_there_is_widened_not_replaced(
     project: Path, bridges: Path
 ) -> None:
