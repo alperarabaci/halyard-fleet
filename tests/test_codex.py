@@ -13,6 +13,8 @@ import asyncio
 import json
 from pathlib import Path
 
+from halyard.agents import codex
+from halyard.agents.base import SessionRef
 from halyard.agents.codex import CodexRunner, find_session, list_named_sessions
 
 
@@ -311,3 +313,77 @@ async def test_two_messages_to_one_session_are_serialised(monkeypatch) -> None:
     await asyncio.gather(first, second)
 
     assert most_at_once == 1
+
+
+# --- whether this CLI can run the model the session is on ---------------------
+#
+# Measured across an upgrade, from a failure that cost a turn to discover. A
+# session on `gpt-6-astra`, a machine whose CLI was 0.145.0, and every message
+# sent from the phone refused at once with "requires a newer version of Codex" —
+# while the same session went on working at the desk and went on asking for
+# approvals, so neither end looked broken. `debug models --bundled` had the
+# answer the whole time.
+#
+# None of this reaches `doctor`. It is a `check_session` on the runtime's own
+# spec, which doctor renders without knowing whose it is —
+# `test_runtime_isolation` fails the build if that ever stops being true.
+
+
+def session_on(model: str | None) -> SessionRef:
+    return SessionRef(session_id="s-1", name="a-seat", cwd="/repo", model=model)
+
+
+def checked(monkeypatch, ref: SessionRef, *, known, binary="/opt/homebrew/bin/codex"):
+    monkeypatch.setattr(codex, "read_catalog", lambda _binary: known)
+    monkeypatch.setattr(codex, "find_codex_binary", lambda *_a, **_k: binary)
+    return codex.RUNTIME.check_session(ref=ref)
+
+
+CATALOG = {"gpt-5.6-terra": ("low", "high"), "gpt-5.5": ("low", "high")}
+
+
+def test_a_model_this_cli_cannot_run_is_a_failure(monkeypatch) -> None:
+    said = checked(monkeypatch, session_on("gpt-6-astra"), known=CATALOG)
+
+    assert any(level == "fail" for level, _ in said)
+    assert any("gpt-6-astra" in text for _, text in said)
+    assert any("gpt-5.6-terra" in text for _, text in said), "say what it can run"
+
+
+def test_a_model_this_cli_knows_is_not_reported(monkeypatch) -> None:
+    assert checked(monkeypatch, session_on("gpt-5.6-terra"), known=CATALOG) == []
+
+
+def test_a_catalog_that_could_not_be_read_asserts_nothing(monkeypatch) -> None:
+    """The guard. `None` means the question could not be asked, and the
+    built-in fallback list is months old by construction — reporting against it
+    would send somebody to upgrade a CLI that is perfectly current."""
+    assert checked(monkeypatch, session_on("gpt-6-astra"), known=None) == []
+
+
+def test_a_session_recording_no_model_is_not_reported(monkeypatch) -> None:
+    assert checked(monkeypatch, session_on(None), known=CATALOG) == []
+
+
+def test_a_homebrew_install_is_told_which_command_upgrades_it(monkeypatch) -> None:
+    """The version lives in the resolved path, so brew is the only thing that
+    can move it — and a command somebody can paste beats a suggestion."""
+    said = checked(
+        monkeypatch,
+        session_on("gpt-6-astra"),
+        known=CATALOG,
+        binary="/opt/homebrew/Caskroom/codex/0.145.0/codex-aarch64-apple-darwin",
+    )
+
+    assert any("brew upgrade --cask codex" in text for _, text in said)
+
+
+def test_an_install_of_unknown_provenance_is_not_given_a_command_to_paste(monkeypatch) -> None:
+    """A wrong command is worse than a sentence: it fails, and it looks like
+    the fix did not work rather than like the wrong fix."""
+    said = checked(
+        monkeypatch, session_on("gpt-6-astra"), known=CATALOG, binary="/usr/local/bin/codex"
+    )
+
+    assert not any("brew" in text for _, text in said)
+    assert any("upgrade the codex CLI" in text for _, text in said)

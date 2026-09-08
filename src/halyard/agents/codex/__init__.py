@@ -1,8 +1,10 @@
 """Codex as an agent runtime."""
 
+from pathlib import Path
+
 from halyard.agents.base import SessionRef
 from halyard.agents.codex import trust
-from halyard.agents.codex.runner import CodexRunner, find_codex_binary
+from halyard.agents.codex.runner import CodexRunner, find_codex_binary, read_catalog
 from halyard.agents.codex.sessions import find_session, list_named_sessions
 from halyard.agents.codex.watching import WATCHING
 from halyard.agents.spec import Hooks, RuntimeSpec, Verification, late
@@ -24,6 +26,51 @@ def _check_available(**_) -> list[tuple[str, str]]:
     if find_codex_binary() is None:
         return [("fail", "the codex CLI is not on this machine")]
     return []
+
+
+def _how_to_upgrade() -> str:
+    """The command that actually upgrades the CLI on this machine.
+
+    Asked rather than assumed. A Homebrew cask puts the real binary under
+    `Caskroom/<version>/` and a symlink on `PATH`, so the version is in the
+    resolved path and `brew` is the only thing that can move it. Anything else
+    gets a sentence rather than a command somebody would paste and watch fail.
+    """
+    found = find_codex_binary()
+    if found and "/Caskroom/" in str(Path(found).resolve()):
+        return "brew upgrade --cask codex"
+    return "upgrade the codex CLI — the model list is bundled with the binary"
+
+
+def _check_session(ref: SessionRef, **_) -> list[tuple[str, str]]:
+    """Whether the CLI here can run the model this session is on.
+
+    The failure it catches is immediate, total and silent until somebody sends
+    a message. Measured: a session on `gpt-6-astra`, a machine whose CLI was
+    0.145.0, and every turn sent from the phone refused with
+    `The 'gpt-6-astra' model requires a newer version of Codex` — while the
+    same session kept working at the desk and kept asking for approvals, so
+    nothing about it looked broken from either end.
+
+    The CLI knew before any of that. `debug models --bundled` is where it says
+    so, and it costs a subprocess rather than a turn.
+
+    Asserted only when the catalog was really read. A `None` there means the
+    question could not be asked, and reporting a model as unsupported on the
+    strength of a fallback list would be worse than saying nothing: it sends
+    somebody to upgrade a CLI that is fine.
+    """
+    model = (ref.model or "").strip()
+    if not model:
+        return []
+    known = read_catalog(find_codex_binary())
+    if not known or model in known:
+        return []
+    return [
+        ("fail", f"the codex CLI here cannot run {model}, so a turn from here fails at once"),
+        ("", f"it knows: {', '.join(sorted(known))}"),
+        ("", _how_to_upgrade()),
+    ]
 
 
 #: What the registry finds. See `halyard.agents.spec`.
@@ -54,6 +101,7 @@ RUNTIME = RuntimeSpec(
     list_sessions=late("halyard.agents.codex", "list_named_sessions"),
     sessions_hint="the Codex thread names on this machine",
     check_available=_check_available,
+    check_session=_check_session,
     present=_present,
     check_wired=trust.check_wired,
     verify=Verification(
