@@ -22,8 +22,19 @@ What is asked for is `"ask"` on every category opencode gates, rather than a
 narrower set of patterns. Which commands are worth a person is Halyard's
 question, answered from `halyard.yaml` and written to the audit log with the
 pattern that allowed it; a second list of exceptions living in the runtime's
-config would be a place for permissions to be granted that nothing audits and
+config is a place for permissions to be granted that nothing audits and
 `/pause` does not reach.
+
+That is what is *written*, and it is not the only shape that can be read back.
+Pressing "always allow" at the keyboard makes opencode rewrite the category
+itself, into an object of patterns with a `"*"` entry deciding the rest — a
+project that still asks about everything except the four commands somebody
+allowed. Reading only the string called that project ungated while every
+command was reaching the phone, and told them to run `halyard wire`, which
+would have replaced the object and thrown their exceptions away. So both
+shapes are understood, and the exceptions are named rather than removed: the
+concern above is real, and the honest response to it is to say what those
+patterns cost, not to quietly undo somebody's answer.
 """
 
 from __future__ import annotations
@@ -60,6 +71,39 @@ ASK = {
     "webfetch": "ask",
     "external_directory": "ask",
 }
+
+
+#: The catch-all key inside a per-pattern permission object. What opencode
+#: writes there decides everything the listed patterns do not match.
+EVERYTHING = "*"
+
+
+def asks_about(setting: object, how: str = "ask") -> bool:
+    """Whether this category still sends what it does not recognise to the gate.
+
+    Both shapes count. `"ask"` is what wiring writes; an object with
+    `{"*": "ask", ...}` is what the runtime writes for itself, and a project in
+    that state asks about everything outside its own short list.
+    """
+    if isinstance(setting, str):
+        return setting == how
+    if isinstance(setting, dict):
+        return setting.get(EVERYTHING) == how
+    return False
+
+
+def answered_without_asking(setting: object) -> list[str]:
+    """Patterns this category settles by itself, in the order they read best.
+
+    Worth naming wherever it is read. These are decisions taken inside the
+    runtime: they reach no gate, so nothing about them is written to the audit
+    log and `/pause` does not stop them.
+    """
+    if not isinstance(setting, dict):
+        return []
+    return sorted(
+        pattern for pattern, how in setting.items() if pattern != EVERYTHING and how != "ask"
+    )
 
 
 def _read(path: Path) -> dict:
@@ -109,7 +153,11 @@ def install(project: Path, bridges: Path) -> list[tuple[str, str]]:
 
     permission = document.get("permission")
     permission = dict(permission) if isinstance(permission, dict) else {}
-    missing = {name: how for name, how in ASK.items() if permission.get(name) != how}
+    # Only what is genuinely not asking. A category the runtime rewrote into a
+    # pattern object with `"*": "ask"` is left exactly as it is — replacing it
+    # with the bare string here would delete the exceptions somebody chose at
+    # the keyboard, in the name of a gate that was already being consulted.
+    missing = {name: how for name, how in ASK.items() if not asks_about(permission.get(name), how)}
     if not missing:
         said.append(("", f"{CONFIG} already asks about {', '.join(sorted(ASK))}"))
         return said
