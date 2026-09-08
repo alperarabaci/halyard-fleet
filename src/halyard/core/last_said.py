@@ -51,8 +51,12 @@ class Said:
 
     text: str
     at: datetime
-    #: The session it came from, so a forward can say where it came from.
+    #: The session it came from, and the runtime that owns that id. Both, or
+    #: neither is any use: a session id means nothing without its runtime, and
+    #: handing a Codex id to Claude Code produces a plausible "no conversation
+    #: found" that hides the boundary it crossed.
     session_id: str | None = None
+    agent_id: str | None = None
 
     def stale(self, now: datetime, hours: int = STALE_AFTER_HOURS) -> bool:
         return (now - self.at).total_seconds() > hours * 3600
@@ -75,6 +79,7 @@ def remember(
     chat_id: str,
     text: str,
     session_id: str | None = None,
+    agent_id: str | None = None,
     now: datetime | None = None,
 ) -> None:
     """Note what an agent just said in this chat.
@@ -91,6 +96,7 @@ def remember(
         "text": text[:LIMIT],
         "at": (now or datetime.now(UTC)).isoformat(),
         "session_id": session_id,
+        "agent_id": agent_id,
     }
     if len(noted) > CHATS:
         # Oldest out. Sorted on the stored timestamp rather than on insertion
@@ -119,4 +125,10 @@ def last(where: Path, chat_id: str) -> Said | None:
     if at.tzinfo is None:
         at = at.replace(tzinfo=UTC)
     session = entry.get("session_id")
-    return Said(text=text, at=at, session_id=session if isinstance(session, str) else None)
+    agent = entry.get("agent_id")
+    return Said(
+        text=text,
+        at=at,
+        session_id=session if isinstance(session, str) else None,
+        agent_id=agent if isinstance(agent, str) else None,
+    )

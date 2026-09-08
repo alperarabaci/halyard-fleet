@@ -14,11 +14,13 @@ from pathlib import Path
 
 import pytest
 
+from halyard.agents.base import SessionRef
 from halyard.channels.telegram import adapter, cards
 from halyard.channels.telegram.adapter import TelegramChannel, _SessionTarget
 from halyard.core.approvals import ApprovalStore, Decision, ResolutionReason
 from halyard.core.audit import AuditAction, AuditLog, JsonlAuditSink
 from halyard.core.events import RiskLevel, Role
+from halyard.core.registry import SessionRegistry
 
 CHAT = "-1001234567890"
 APPROVER = "4242"
@@ -2631,3 +2633,55 @@ async def test_the_button_rides_the_last_chunk_of_a_long_message(
     assert len([sent for sent in api.sent if sent["text"].startswith("<i>(")]) > 1
     assert api.sent[-1].get("reply_markup")
     assert not api.sent[-2].get("reply_markup")
+
+
+# --- a chat no seat owns ------------------------------------------------------
+
+
+async def test_answering_in_the_bots_own_chat_reaches_who_spoke_there(
+    tmp_path: Path,
+) -> None:
+    """Sessions started for small jobs report into the bot's own chat, several
+    of them, and answering one there is the natural thing to do.
+
+    It has to reach the session being answered. Taking whichever session was
+    heard from last is usually the same one and silently is not: a second
+    session running a command in between moves "last", and the reply lands in a
+    conversation nobody was reading.
+    """
+    channel, api = await with_two_seats(tmp_path)
+    channel._said_path = tmp_path / "last-said.json"
+    runner = FakeRunner()
+    channel._runners = {"claude-code": runner}
+    channel._runner = runner
+    channel._registry = SessionRegistry()
+    channel._seats = []  # nothing owns this chat
+
+    await channel.send_message("the-one-being-read", "have a look", None, agent_id="claude-code")
+    sent_before = len(api.sent)
+    await channel._handle_message(typed_in("yes, go ahead", channel._chat_id))
+    await asyncio.sleep(0)
+
+    assert runner.sent, "nothing was delivered"
+    assert runner.sent[-1][0] == "the-one-being-read"
+    assert len(api.sent) >= sent_before
+
+
+async def test_a_chat_a_seat_owns_is_unaffected(tmp_path: Path) -> None:
+    """The seat is still the whole routing rule where there is one. This is a
+    fallback for chats without one, not a new way to resolve every message."""
+    channel, _api = await with_two_seats(tmp_path)
+    channel._said_path = tmp_path / "last-said.json"
+    runner = FakeRunner()
+    runner.sessions["alpha-driver"] = SessionRef("the-seats-own", "alpha-driver", None)
+    channel._runners = {"claude-code": runner}
+    channel._runner = runner
+    channel._registry = SessionRegistry()
+    await channel.send_message(
+        "someone-else", "unrelated", None, agent_id="claude-code", session_name="alpha-driver"
+    )
+
+    await channel._handle_message(typed_in("carry on", DRV_CHAT))
+    await asyncio.sleep(0)
+
+    assert runner.sent[-1][0] == "the-seats-own", "the seat's own session should have won"
