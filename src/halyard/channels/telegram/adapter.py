@@ -68,6 +68,7 @@ from halyard.core.questions import (
     InvalidNonceError as QuestionInvalidNonceError,
 )
 from halyard.core.registry import SessionRegistry
+from halyard.core.said_by_a_process import the_useful_end
 from halyard.core.seats import Seat, find, for_chat, for_project, for_session
 from halyard.core.seats import _default_runtime as default_runtime
 from halyard.core.transcripts import watching_for
@@ -1956,7 +1957,7 @@ class TelegramChannel:
             # away, and replaced with an instruction to read a log on a machine
             # the person had walked away from.
             detail = (
-                f"\n\n<pre>{html.escape(because[:300])}</pre>"
+                f"\n\n<pre>{html.escape(the_useful_end(because))}</pre>"
                 if because
                 else "\n\nNothing was printed. <code>halyard doctor</code> checks the rest."
             )
