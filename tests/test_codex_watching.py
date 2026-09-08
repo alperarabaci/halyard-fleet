@@ -25,6 +25,13 @@ from halyard.agents.codex.watching import WATCHING, _window_name, alerts, transc
 RESETS = 1787832639
 LATER = RESETS + 18_000
 
+#: Where "now" sits relative to those, pinned for the same reason they are. The
+#: default is a minute before `RESETS`, so a window built with it is one that is
+#: still open — which is what every test written before the tense existed meant
+#: by a reading.
+WHILE_OPEN = RESETS - 60
+AFTER_IT_RESET = RESETS + 60
+
 
 @pytest.fixture(autouse=True)
 def _one_timezone() -> None:
@@ -63,8 +70,8 @@ def reading(primary: float | None = None, secondary: float | None = None, resets
     return json.dumps({"type": "event_msg", "payload": {"rate_limits": limits}})
 
 
-def texts(lines: list[str], seen: set[str] | None = None) -> list[str]:
-    return [a.text for a in alerts(lines, seen if seen is not None else set())]
+def texts(lines: list[str], seen: set[str] | None = None, now: float = WHILE_OPEN) -> list[str]:
+    return [a.text for a in alerts(lines, seen if seen is not None else set(), now)]
 
 
 def test_a_window_that_is_filling_is_reported_with_its_percentage() -> None:
@@ -120,30 +127,32 @@ def test_each_window_keeps_its_own_peak() -> None:
 def test_a_peak_is_still_only_said_once() -> None:
     """Taking the highest is safe because repeating is already prevented: the
     key carries the window, the threshold and the reset time."""
-    seen = {a.key for a in alerts([reading(primary=100.0), reading(primary=98.0)], set())}
+    seen = {
+        a.key for a in alerts([reading(primary=100.0), reading(primary=98.0)], set(), WHILE_OPEN)
+    }
 
     assert texts([reading(primary=99.0)], seen) == []
 
 
 def test_what_was_said_once_is_not_said_again() -> None:
     seen: set[str] = set()
-    first = alerts([reading(primary=91.0)], seen)
+    first = alerts([reading(primary=91.0)], seen, WHILE_OPEN)
     seen.update(a.key for a in first)
 
     assert [a.text for a in first]
-    assert alerts([reading(primary=93.0)], seen) == []
+    assert alerts([reading(primary=93.0)], seen, WHILE_OPEN) == []
 
 
 def test_a_window_that_has_reset_is_a_new_fact() -> None:
     """The key carries the reset time, so the next window is reported even
     though the threshold and the window are the same."""
-    seen = {a.key for a in alerts([reading(primary=91.0)], set())}
+    seen = {a.key for a in alerts([reading(primary=91.0)], set(), WHILE_OPEN)}
     assert texts([reading(primary=91.0, resets=LATER)], seen)
 
 
 def test_filling_and_then_full_are_two_separate_messages() -> None:
     """Both thresholds are worth saying, in order, within one window."""
-    seen = {a.key for a in alerts([reading(primary=91.0)], set())}
+    seen = {a.key for a in alerts([reading(primary=91.0)], set(), WHILE_OPEN)}
     assert texts([reading(primary=100.0)], seen) == [
         "has used its whole 5h Codex limit, resets 15:10."
     ]
@@ -163,7 +172,7 @@ def test_lines_that_are_not_readings_are_skipped_not_raised() -> None:
         json.dumps({"payload": {"rate_limits": {"primary": "not a dict"}}}),
         json.dumps({"payload": {"rate_limits": {"primary": {"used_percent": None}}}}),
     ]
-    assert alerts(junk, set()) == []
+    assert alerts(junk, set(), WHILE_OPEN) == []
     assert texts([*junk, reading(primary=100.0)])
 
 
@@ -245,3 +254,50 @@ def test_the_registry_offers_it_and_claude_code_does_not() -> None:
     found = registry.discover()
     assert found["codex"].watching.usage is usage
     assert found["claude-code"].watching.usage is None
+
+
+# --- a peak whose window has already closed -----------------------------------
+#
+# Reported on purpose — that is the whole point of taking the peak rather than
+# the newest reading — but not in the present tense. Measured on a real phone:
+#
+#     18:48  is at 99% of its 5h Codex limit, resets 15:52.
+#
+# Every word true, about a window that had ended three hours before the message
+# was sent. Read at 18:48 it says the seat is nearly out of allowance now, and
+# pins that to a reset time in the past, which is what gave it away.
+
+
+def test_a_peak_from_a_closed_window_is_still_reported() -> None:
+    """The measurement this watcher was rewritten for. A limit reached between
+    two polls and rolled over before the next one was reached, and staying
+    quiet about it is the bug that cost two silent weeks."""
+    assert texts([reading(primary=100.0)], now=AFTER_IT_RESET)
+
+
+def test_a_closed_window_is_spoken_of_in_the_past() -> None:
+    assert texts([reading(primary=99.0)], now=AFTER_IT_RESET) == [
+        "reached 99% of its 5h Codex limit; it reset at 15:10."
+    ]
+
+
+def test_a_closed_window_that_filled_says_so_in_the_past() -> None:
+    assert texts([reading(primary=100.0)], now=AFTER_IT_RESET) == [
+        "used its whole 5h Codex limit; it reset at 15:10."
+    ]
+
+
+def test_an_open_window_is_unchanged_by_any_of_this() -> None:
+    """The common case, and the one that must not have acquired a tense."""
+    assert texts([reading(primary=100.0)], now=WHILE_OPEN) == [
+        "has used its whole 5h Codex limit, resets 15:10."
+    ]
+
+
+def test_a_reading_with_no_reset_time_is_not_judged_by_the_clock() -> None:
+    """Nothing here can tell whether that window is open, and guessing closed
+    would put every such alert in the past tense on the strength of a missing
+    field."""
+    assert texts([reading(primary=100.0, resets=None)], now=AFTER_IT_RESET) == [
+        "has used its whole 5h Codex limit."
+    ]
