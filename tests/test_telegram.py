@@ -1845,8 +1845,11 @@ async def test_naming_a_seat_without_a_message_asks_for_one(tmp_path: Path) -> N
 
     await channel._handle_message(typed_in("/to xnav", DRV_CHAT))
 
-    assert api.sent[-1]["text"] == "Send what to xnav?"
-    assert api.sent[-1]["reply_markup"]["force_reply"] is True
+    assert api.sent[-1]["text"].startswith("Send what to xnav?")
+    # No forced reply. An unanswered one leaves the box open and Telegram
+    # keeps offering it — reported as surviving both closing it and
+    # restarting the client.
+    assert "force_reply" not in (api.sent[-1].get("reply_markup") or {})
 
 
 async def test_answering_that_question_sends_it(tmp_path: Path) -> None:
@@ -2087,7 +2090,7 @@ async def test_a_press_with_nothing_to_carry_asks_for_it(tmp_path: Path) -> None
         }
     )
 
-    assert api.sent[-1]["text"] == "Send what to xnav?"
+    assert api.sent[-1]["text"].startswith("Send what to xnav?")
     assert not any(sent["chat_id"] == "-1003333333333" for sent in api.sent)
 
 
@@ -2184,23 +2187,38 @@ async def test_a_held_seat_belongs_to_the_person_who_picked_it(tmp_path: Path) -
     assert not any("sent to <b>xnav</b>" in sent["text"] for sent in api.sent)
 
 
-async def test_the_reply_box_opens_for_whoever_pressed(tmp_path: Path) -> None:
-    """`selective` limits a forced reply to people named in the text or the
-    author of the message being replied to.
+async def test_the_question_opens_no_reply_box_at_all(tmp_path: Path) -> None:
+    """This carried `force_reply`, and `selective` before that.
 
-    This question names nobody and replies to nothing, so with that flag set it
-    opened the reply box for no one at all — and the answer arrived as ordinary
-    text, attached to nothing, and went to the seat that owns the chat instead
-    of the one that had just been picked. A message reaching an agent nobody
-    chose is the failure this whole flow is arranged to prevent.
+    `selective` limited the forced reply to people named in the text — this
+    question names nobody, so it opened the box for no one, and the answer
+    arrived as ordinary text and went to the seat that owns the chat. Dropping
+    `selective` fixed that and left a box that opens for everybody and will not
+    close: reported as surviving both closing it and restarting the client.
+
+    So there is no box. Both ways of reading the answer are still here — a
+    reply by hand carries the question, and the seat is held for a few minutes
+    besides — and abandoning the question now costs nothing.
     """
     channel, api = await with_two_seats(tmp_path)
 
     await channel._handle_message(typed_in("/to xnav", DRV_CHAT))
 
-    markup = api.sent[-1]["reply_markup"]
-    assert markup["force_reply"] is True
-    assert "selective" not in markup
+    assert not api.sent[-1].get("reply_markup")
+
+
+async def test_a_sentence_typed_without_replying_still_finds_the_seat(
+    tmp_path: Path,
+) -> None:
+    """Which is what makes dropping the box affordable: the fallback that was
+    there for a client ignoring `force_reply` is now the ordinary path."""
+    channel, api = await with_two_seats(tmp_path)
+    await channel._handle_message(typed_in("/to xnav", DRV_CHAT))
+
+    await channel._handle_message(typed_in("have a look at the migration", DRV_CHAT))
+
+    there = [sent for sent in api.sent if sent["chat_id"] == "-1003333333333"]
+    assert any("have a look at the migration" in sent["text"] for sent in there)
 
 
 async def test_a_configured_prompt_answers_to_its_own_command(tmp_path: Path) -> None:
@@ -2387,7 +2405,7 @@ async def test_our_own_question_is_never_handed_to_an_agent(tmp_path: Path) -> N
         }
     )
 
-    assert api.sent[-1]["text"] == "Send what to xnav?", "it should ask, not forward"
+    assert api.sent[-1]["text"].startswith("Send what to xnav?"), "it should ask, not forward"
     assert not any(sent["chat_id"] == "-1003333333333" for sent in api.sent)
 
 
@@ -2402,7 +2420,7 @@ async def test_replying_to_our_own_question_with_a_command_forwards_nothing(
 
     there = [sent for sent in api.sent if sent["chat_id"] == "-1003333333333"]
     assert not there, "nothing should have reached the seat"
-    assert api.sent[-1]["text"] == "Send what to xnav?"
+    assert api.sent[-1]["text"].startswith("Send what to xnav?")
 
 
 async def test_a_real_message_is_still_carried(tmp_path: Path) -> None:

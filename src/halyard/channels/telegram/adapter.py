@@ -124,10 +124,11 @@ COMMANDS: tuple[tuple[str, str], ...] = (
 #:
 #: Written into the message so that a reply to it carries the seat back. That
 #: was meant to be the whole mechanism — nothing remembered between the button
-#: and the sentence somebody types. It is not enough on its own: `force_reply`
-#: only *asks* the client to attach the question, and when it does not, the
-#: sentence arrives looking like an ordinary message and goes to the seat that
-#: owns the chat. Measured twice, on a message meant for somebody else.
+#: and the sentence somebody types — and it is not enough on its own, because a
+#: sentence typed without replying arrives looking like any other and goes to
+#: the seat that owns the chat. Measured twice, on a message meant for somebody
+#: else. So the seat is held for a few minutes as well, and that fallback is
+#: what carries this now that the prompt no longer forces a reply.
 ASK_FOR_TEXT = "Send what to {seat}?"
 _ASKED = re.compile(r"^Send what to (\S+)\?")
 
@@ -945,16 +946,24 @@ class TelegramChannel:
     async def _ask_for_text(
         self, label: str, chat_id: str, thread_id: int | None, user: str
     ) -> None:
-        """Ask what to send, with the reply box already open.
+        """Ask what to send.
 
-        `force_reply` asks the client to aim the next message at this one, so
-        the answer arrives with the question attached — and the question names
-        the seat. That is the exact path, and it is preferred when it works.
+        Without `force_reply`, which this used to carry. It asks the client to
+        aim the next message at this one, so the answer arrives with the
+        question attached and the question names the seat — the exact path, and
+        it worked. What it also did was leave the reply box open on a question
+        nobody answered, and Telegram keeps offering it: reported as coming
+        back after closing it repeatedly, and after restarting the client.
+        A prompt that will not go away costs more than the precision it buys.
 
-        It is a request, though, not a guarantee, and a client that ignores it
-        sends a sentence that looks like any other. So the seat is also held
-        here for a few minutes. Belt and braces on purpose: the cost of the
-        belt slipping was a message reaching an agent nobody chose, twice.
+        Both paths that read the answer are still here. Replying to this by
+        hand still carries the question — `force_reply` only opened the box, it
+        never created the link — and the seat is held for a few minutes besides.
+        What is lost is the box opening itself, which is a convenience; what is
+        gained is that abandoning the question costs nothing.
+
+        `/forward` is the other half of this, and needs none of it: it has
+        nothing to ask for, so it offers buttons and finishes on the tap.
         """
         seat = find(self._seats, label)
         if seat is None:
@@ -970,10 +979,12 @@ class TelegramChannel:
         # one at all.
         self._remember_handoff(seat.label, chat_id, thread_id, user)
         await self._say(
-            ASK_FOR_TEXT.format(seat=html.escape(seat.label)),
+            ASK_FOR_TEXT.format(seat=html.escape(seat.label))
+            + "\n\n<i>Reply to this, or just say it — either reaches "
+            + html.escape(seat.label)
+            + ".</i>",
             chat_id,
             thread_id,
-            reply_markup={"force_reply": True},
         )
 
     # --- opening what is not running ----------------------------------------
