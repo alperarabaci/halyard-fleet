@@ -47,13 +47,41 @@ def _check_available(claude_binary=None, claude_oauth_token=None, **_) -> list[t
     """
     import os
 
-    from halyard.agents.claude_code.runner import auth_method, find_claude_binary, signed_in
+    from halyard.agents.claude_code.runner import (
+        auth_method,
+        desktop_engine_readable,
+        find_claude_binary,
+        signed_in,
+    )
+
+    # Asked only when nothing was configured, because that is the only case
+    # where the app's engine is looked for. `glob` finds no files and reports no
+    # reason, so a refusal reads as "Claude Desktop is not installed".
+    refused = not claude_binary and desktop_engine_readable() is False
 
     found = find_claude_binary(claude_binary)
     if found is None:
+        if refused:
+            # The worse half, and the one a Mac mini is set up for: the engine
+            # lives *only* inside the app bundle there, so a refusal leaves
+            # nothing to fall back to and every delivery fails. Reported as
+            # "the claude CLI is not on this machine" it sends somebody to
+            # install a CLI that is already installed, on a machine they are
+            # away from.
+            return [
+                ("fail", "macOS is refusing to read Claude Desktop's engine directory,"),
+                ("", "and no other claude was found — so nothing can be delivered"),
+                ("", "allow App Data access for whatever runs this — usually uv"),
+            ]
         return [("fail", "the claude CLI is not on this machine")]
 
     lines = [("ok", f"messages use {found}")]
+
+    if refused:
+        lines.append(("warn", "macOS is refusing to read Claude Desktop's engine directory"))
+        lines.append(("", "so the app's own engine cannot be preferred and PATH's claude is used,"))
+        lines.append(("", "which has regressed live transcript refresh on a Desktop-owned session"))
+        lines.append(("", "allow App Data access for whatever runs this — usually uv"))
 
     # Which credential, not just whether there is one. A control plane running
     # on the login somebody made at the keyboard works until that login expires

@@ -74,6 +74,35 @@ _DESKTOP_CLAUDE_CODE_DIR = (
 )
 
 
+def desktop_engine_readable() -> bool | None:
+    """Whether that directory can be read. False when refused, None when absent.
+
+    Two states `glob` collapses into one. `Path.glob` swallows a permission
+    error while it walks and simply finds nothing, so a directory macOS is
+    refusing to open looks exactly like a Claude Desktop that was never
+    installed — and what follows is silent: the runner drops its preference for
+    the app's own engine and uses whatever `claude` is on PATH, which is the
+    arrangement measured to regress live transcript refresh.
+
+    Measured on a Mac mini. This directory lives under `~/Library/Application
+    Support`, which macOS counts as another application's data, so the first
+    read prompts for `kTCCServiceSystemPolicyAppData` — and the prompt names
+    whichever binary is responsible, in that case `uv`, because the service is
+    started with `uv run`. `uv` carries no stable signing identity, so the
+    grant is bound to that exact binary and a `uv` upgrade asks again. On a
+    machine nobody is sitting at, "asks again" means "is refused".
+
+    `os.listdir` is what separates them: it raises rather than returning empty.
+    """
+    try:
+        os.listdir(_DESKTOP_CLAUDE_CODE_DIR)
+    except PermissionError:
+        return False
+    except OSError:
+        return None
+    return True
+
+
 def _desktop_claude_binary() -> str | None:
     """Return the newest Claude Code engine bundled with Claude Desktop."""
 
