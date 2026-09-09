@@ -252,3 +252,95 @@ async def test_an_api_key_that_outranks_the_token_is_reported(
     # The warning explains the consequence, and quotes neither credential.
     assert "sk-ant-api-inherited" not in caplog.text
     assert "sk-ant-oat-example" not in caplog.text
+
+
+# --- a directory macOS will not open ------------------------------------------
+#
+# `~/Library/Application Support/Claude/claude-code` is where the app keeps the
+# engine this runner prefers, and macOS counts it as another application's data.
+# Measured on a Mac mini: the first read prompted for
+# `kTCCServiceSystemPolicyAppData`, naming `uv` — the service is started with
+# `uv run`, so `uv` is the responsible process — and `uv` has no stable signing
+# identity, so the grant is pinned to that binary and a `uv` upgrade asks again.
+# Nobody is sitting at a headless machine to answer it.
+#
+# What makes that worth a check rather than a shrug is how it fails. `glob`
+# swallows the permission error and finds nothing, which is indistinguishable
+# from Claude Desktop not being installed, and the runner then quietly uses
+# whatever `claude` is on PATH.
+
+
+async def test_a_refused_directory_is_not_the_same_as_a_missing_one(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """The distinction `glob` cannot make."""
+    monkeypatch.setattr(runner_module, "_DESKTOP_CLAUDE_CODE_DIR", tmp_path / "nowhere")
+    assert runner_module.desktop_engine_readable() is None
+
+    monkeypatch.setattr(runner_module, "_DESKTOP_CLAUDE_CODE_DIR", tmp_path)
+    assert runner_module.desktop_engine_readable() is True
+
+    def refused(_path):
+        raise PermissionError(1, "Operation not permitted")
+
+    monkeypatch.setattr(runner_module.os, "listdir", refused)
+    assert runner_module.desktop_engine_readable() is False
+
+
+async def test_a_refusal_is_reported_rather_than_absorbed(monkeypatch) -> None:
+    """Because the cost of it is silent: the preference for the app's own
+    engine simply stops applying, and deliveries go on working well enough to
+    look fine."""
+    from halyard.agents import claude_code
+
+    monkeypatch.setattr(runner_module, "find_claude_binary", lambda *_a, **_k: "/bin/sh")
+    monkeypatch.setattr(runner_module, "desktop_engine_readable", lambda: False)
+    monkeypatch.setattr(runner_module, "signed_in", lambda *_a, **_k: True)
+
+    said = claude_code.RUNTIME.check_available(claude_oauth_token="t")
+
+    assert any(level == "warn" and "refusing" in text for level, text in said)
+    assert any("App Data" in text for _, text in said)
+
+
+async def test_a_configured_binary_is_not_warned_about(monkeypatch) -> None:
+    """Nothing looks in that directory when a path was given, so a refusal
+    there costs nothing and saying so would be noise on every check."""
+    from halyard.agents import claude_code
+
+    monkeypatch.setattr(runner_module, "find_claude_binary", lambda *_a, **_k: "/bin/sh")
+    monkeypatch.setattr(runner_module, "desktop_engine_readable", lambda: False)
+    monkeypatch.setattr(runner_module, "signed_in", lambda *_a, **_k: True)
+
+    said = claude_code.RUNTIME.check_available(claude_binary="/bin/sh", claude_oauth_token="t")
+
+    assert not any("refusing" in text for _, text in said)
+
+
+async def test_a_refusal_with_nothing_to_fall_back_to_is_not_called_missing(monkeypatch) -> None:
+    """The Mac mini's shape. Its engine lives only inside the app bundle, so a
+    refusal leaves `find_claude_binary` with nothing at all — and the old answer
+    for that, "the claude CLI is not on this machine", sends somebody to install
+    a CLI that is already installed, on a machine they are away from."""
+    from halyard.agents import claude_code
+
+    monkeypatch.setattr(runner_module, "find_claude_binary", lambda *_a, **_k: None)
+    monkeypatch.setattr(runner_module, "desktop_engine_readable", lambda: False)
+
+    said = claude_code.RUNTIME.check_available()
+
+    assert any(level == "fail" and "refusing" in text for level, text in said)
+    assert not any("not on this machine" in text for _, text in said)
+    assert any("App Data" in text for _, text in said)
+
+
+async def test_a_machine_with_no_claude_at_all_still_says_so(monkeypatch) -> None:
+    """The refusal wording must not swallow the plain case."""
+    from halyard.agents import claude_code
+
+    monkeypatch.setattr(runner_module, "find_claude_binary", lambda *_a, **_k: None)
+    monkeypatch.setattr(runner_module, "desktop_engine_readable", lambda: None)
+
+    said = claude_code.RUNTIME.check_available()
+
+    assert any("not on this machine" in text for _, text in said)
