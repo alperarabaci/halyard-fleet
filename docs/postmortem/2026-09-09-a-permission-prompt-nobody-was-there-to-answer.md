@@ -12,8 +12,11 @@ that machine's screen:
 > **"uv" would like to access data from other apps.**   *Don't Allow* / *Allow*
 
 Nobody was at the machine, which is the entire premise of running the command
-from a phone. Unanswered, the call behind it blocked until Docker's own
-deadline and the build died:
+from a phone.
+
+What the dialog costs when it is not answered was established afterwards, in a
+terminal, by deliberately declining it. The call behind it blocked until
+Docker's own deadline and the build died:
 
 ```
 #6 [mcp internal] load metadata for docker.io/library/python:3.14.6-slim-bookworm
@@ -39,10 +42,10 @@ On that machine `auths` was empty, there were no `credHelpers`, and every image
 in the build is public. The helper was being consulted for nothing, and the
 only thing it could contribute was a dialog that could stop the build.
 
-**Nothing in Halyard was wrong.** The command ran, failed, and the end of its
-output — the real reason — reached the phone, which is what
-`commands/running.py` is built to do. This postmortem is mostly about how long
-it took to establish that.
+**Nothing in Halyard was wrong**, and nothing in Halyard was exercised by the
+failure either: the run that started from the phone was approved by somebody
+who happened to be near the machine, so it succeeded. This postmortem is mostly
+about how long it took to establish where the fault was not.
 
 ## Impact
 
@@ -144,12 +147,20 @@ live in a system database and survive restarts and reboots.
 `~/.docker/config.json`, so no credential helper runs and no application data is
 read. Verified as above.
 
-**Nothing in Halyard.** The generic command path behaved correctly throughout:
-the command ran, the build failed on its own deadline well inside Halyard's,
-and the tail of the output that reached the phone was
-`target mcp: failed to solve: DeadlineExceeded: context deadline exceeded` —
-the actual reason, carried by the rule that keeps the *end* of a failing
-process's output rather than its banner.
+**Nothing in Halyard**, and the honest reason is not that the command path was
+proven good here — it was never put in that position. The phone's run was
+approved and succeeded, so what reached the phone was a success report. The
+failure output quoted at the top came from a terminal, and an early draft of
+this document said it had reached the phone. It had not. That sentence was
+written the same way as the rest of the wrong answers below: an inference about
+what the code would do, recorded as an observation of what it did.
+
+What can be said about the command path is what the code says. On failure it
+carries the last twenty-five lines, ANSI stripped, which is enough to hold the
+`failed to solve:` line at the end of a buildkit failure; on success it carries
+five, because "it passed" is the message; and it reports progress every
+forty-five seconds, so a run blocked behind a dialog would have read as a long
+run rather than as silence. None of that was tested by this incident.
 
 Deliberately not built: a check that understands macOS permission prompts.
 `command` runs whatever a project puts in `halyard.yaml`, and teaching it about
@@ -187,6 +198,12 @@ Two things left as notes rather than changes:
   true, checkable, and beside the point. Each true detail made the wrong answer
   feel better supported, which is how a hypothesis survives contact with
   evidence that never actually tested it.
+- **Write down what was observed, not what would follow.** The first draft of
+  this document claimed a failure message had reached the phone. It was a
+  reasonable inference from the code and it was not what happened, and it was
+  caught by the person who had been looking at the phone. A postmortem about
+  asserting instead of measuring is the last place that should appear, which is
+  the argument for it applying to the writeup as much as to the investigation.
 - **The person at the machine is the primary instrument.** They can see which
   applications are installed, what they run and where. When they say a
   component is not involved, that is a measurement from the only vantage point
