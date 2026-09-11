@@ -283,6 +283,24 @@ def format_remaining(expires_at: datetime, now: datetime) -> str:
     return f"{minutes}m {seconds:02d}s" if minutes else f"{seconds}s"
 
 
+def _asked(request: ApprovalRequest) -> list[str]:
+    """What the runtime says it is asking, where it is not just the command.
+
+    opencode asks about a directory and shows the command as the occasion for
+    it: "Access external directory /tmp", then the patterns that answer covers.
+    A card with the command alone presents the occasion as the question — the
+    thing being decided was never on it. Rendered from what the runtime's bridge
+    sent, so this knows nothing about any runtime.
+    """
+    lines = []
+    if request.asks:
+        lines.append(f"Asks: <b>{html.escape(request.asks)}</b>")
+    if request.patterns:
+        shown = ", ".join(f"<code>{html.escape(p)}</code>" for p in request.patterns)
+        lines.append(f"Patterns: {shown}")
+    return lines
+
+
 def render(request: ApprovalRequest, *, now: datetime) -> str:
     """The approval card."""
     role = (request.role.value if request.role else "agent").upper()
@@ -292,6 +310,7 @@ def render(request: ApprovalRequest, *, now: datetime) -> str:
         f"Project: <code>{html.escape(request.project)}</code>",
         f"Session: <code>{html.escape(_short_session(request.session_id))}</code>",
         f"Tool: <code>{html.escape(request.tool)}</code>",
+        *_asked(request),
         "",
         f"<pre>{html.escape(request.command_summary)}</pre>",
     ]
@@ -316,6 +335,7 @@ def render_resolved(request: ApprovalRequest, *, decision: str, by: str | None) 
             "",
             f"Project: <code>{html.escape(request.project)}</code>",
             f"Tool: <code>{html.escape(request.tool)}</code>",
+            *_asked(request),
             "",
             f"<pre>{html.escape(request.command_summary)}</pre>",
         ]

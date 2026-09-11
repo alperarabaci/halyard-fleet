@@ -109,6 +109,31 @@ type Asked = {
 const describe = (asked: Asked) =>
   asked.metadata?.command ?? asked.patterns?.[0] ?? asked.permission ?? "(no command given)"
 
+/**
+ * The question in the words opencode puts on its own screen, where it is not
+ * simply "may this command run".
+ *
+ * The event carries no title. Read out of 1.18.29's own source, `permission.asked`
+ * is `{id, sessionID, permission, patterns, metadata, always, tool}`, and the TUI
+ * composes its heading from those. Only `external_directory` is copied, because
+ * that is the rule that was read: the directory from `metadata.parentDir`, then
+ * `metadata.filepath`, then the first pattern cut at its wildcard, with home
+ * shortened to `~`. Anything else returns nothing and the card stays as it was —
+ * guessing the TUI's wording would put a sentence on a phone that the screen
+ * never showed.
+ */
+const asksAbout = (asked: Asked): string | undefined => {
+  if (asked.permission !== "external_directory") return undefined
+  const text = (value: unknown) => (typeof value === "string" && value ? value : undefined)
+  const first = text(asked.patterns?.[0])
+  const cut = first?.includes("*") ? first.slice(0, first.indexOf("*")).replace(/[\\/]+$/, "") : first
+  const where = text(asked.metadata?.parentDir) ?? text(asked.metadata?.filepath) ?? text(cut)
+  if (!where) return undefined
+  const home = process.env.HOME
+  const shown = home && where.startsWith(home) ? `~${where.slice(home.length)}` : where
+  return `Access external directory ${shown}`
+}
+
 export const HalyardGate = async ({ client, directory, worktree }: any) => {
   log("loaded", { directory, halyard: HALYARD })
 
@@ -117,6 +142,7 @@ export const HalyardGate = async ({ client, directory, worktree }: any) => {
 
   const answer = async (asked: Asked) => {
     const command = describe(asked)
+    const asks = asksAbout(asked)
 
     let decision: string | undefined
     try {
@@ -131,6 +157,9 @@ export const HalyardGate = async ({ client, directory, worktree }: any) => {
           tool_use_id: asked.tool?.callID,
           cwd: directory,
           project_dir: worktree ?? directory,
+          // Only where the question is not simply the command: for a shell call
+          // the pattern *is* the command, and showing it twice is noise.
+          ...(asks ? { asks, patterns: asked.patterns } : {}),
         }),
         signal: AbortSignal.timeout(TIMEOUT_MS),
       })

@@ -107,6 +107,11 @@ class ApprovalRequestBody(BaseModel):
     #: The destination of a file tool, matched against the `writes:` block to
     #: decide whether this one may go through without a card.
     file_path: str | None = None
+    #: What the runtime says it is asking, in its own words, and what that
+    #: covers — sent by a bridge whose runtime asks about something other than
+    #: the command itself. See `ApprovalRequest.asks`.
+    asks: str | None = None
+    patterns: list[str] | None = None
 
 
 class ApprovalResponse(BaseModel):
@@ -598,6 +603,8 @@ def create_app(settings: Settings, *, channel=None) -> FastAPI:
             reason=body.reason,
             declared_risk=body.declared_risk,
             file_path=body.file_path,
+            asks=body.asks,
+            patterns=body.patterns,
         )
         return ApprovalResponse(
             decision=outcome.decision,

@@ -107,6 +107,15 @@ class ApprovalRequest(BaseModel):
     #: `tool_input.description` says what a command does, not why it is needed.
     #: Stays empty until Phase 2 can ask.
     reason: str | None = None
+    #: What the runtime says it is asking, in its own words, when that is not
+    #: simply "may this command run". opencode asks about a directory and the
+    #: command is only the occasion — "Access external directory /tmp" — so a
+    #: card showing the command alone presents the occasion as the question.
+    #: Written by the runtime's own bridge; nothing here composes it.
+    asks: str | None = None
+    #: What that question covers, as the runtime lists it on its own screen —
+    #: `/tmp/*` for the directory above. Shown, never granted from here.
+    patterns: tuple[str, ...] = ()
 
 
 class ApprovalResolution(BaseModel):
@@ -194,6 +203,8 @@ class ApprovalStore:
         role: Role | None = None,
         session_name: str | None = None,
         reason: str | None = None,
+        asks: str | None = None,
+        patterns: tuple[str, ...] | list[str] | None = None,
     ) -> ApprovalRequest:
         """Open a new approval, or return the one already open for this tool call.
 
@@ -230,6 +241,8 @@ class ApprovalStore:
                 role=role,
                 session_name=session_name,
                 reason=reason,
+                asks=asks,
+                patterns=tuple(patterns or ()),
                 created_at=now,
                 expires_at=now + self._ttl,
             )

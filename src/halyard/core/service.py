@@ -463,6 +463,8 @@ class ApprovalService:
         reason: str | None = None,
         declared_risk: RiskLevel | None = None,
         file_path: str | None = None,
+        asks: str | None = None,
+        patterns: list[str] | None = None,
     ) -> ApprovalOutcome:
         """Ask for permission, and answer. Never raises."""
         try:
@@ -479,6 +481,8 @@ class ApprovalService:
                 reason=reason,
                 declared_risk=declared_risk,
                 file_path=file_path,
+                asks=asks,
+                patterns=patterns,
             )
         except Exception:
             # The outer net. Anything not handled below still has to come out of
@@ -511,6 +515,8 @@ class ApprovalService:
         reason: str | None,
         declared_risk: RiskLevel | None,
         file_path: str | None = None,
+        asks: str | None = None,
+        patterns: list[str] | None = None,
     ) -> ApprovalOutcome:
         # Before everything, including the pause. This is not an approval that
         # somebody could be asked for and it is not a grant that could be
@@ -644,6 +650,8 @@ class ApprovalService:
             role=role,
             session_name=session_name,
             reason=reason,
+            asks=asks,
+            patterns=patterns,
         )
 
         # Record that it was asked before anybody can act on it. An approval
