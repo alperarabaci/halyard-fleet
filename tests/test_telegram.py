@@ -2719,3 +2719,102 @@ async def test_a_chat_a_seat_owns_is_unaffected(tmp_path: Path) -> None:
     await asyncio.sleep(0)
 
     assert runner.sent[-1][0] == "the-seats-own", "the seat's own session should have won"
+
+
+# --- a seat whose runtime cannot be asked -------------------------------------
+#
+# Measured on an opencode TUI started without `--port`: it answers on no port,
+# the session lookup comes back empty, and this said "opencode has no session
+# named alpha-engine-opencode-driver" while that session sat open on the screen
+# under exactly that name. The runtime knew why. It just was not asked.
+
+
+async def unreachable(tmp_path: Path, monkeypatch, *, says=(), raises=False):
+    """A chat owned by a seat whose runtime cannot find its session."""
+    from types import SimpleNamespace
+
+    from halyard.agents import registry as runtimes
+    from halyard.core.registry import SessionRegistry
+    from halyard.core.seats import Seat
+
+    channel, api, _ = await routed(tmp_path)
+
+    class Lost:
+        id = "opencode"
+
+        def resolve(self, _name):
+            return None
+
+    runner = Lost()
+    channel._runners = {"opencode": runner}
+    channel._runner = runner
+    channel._registry = SessionRegistry()  # nothing to fall back to
+    channel._seats = [Seat("opendrv", "opencode", "a-session", DRV_CHAT, Role.DRIVER)]
+
+    asked: list[dict] = []
+
+    def check_available(**context):
+        asked.append(context)
+        if raises:
+            raise RuntimeError("the check itself broke")
+        return list(says)
+
+    spec = SimpleNamespace(check_available=check_available)
+    monkeypatch.setattr(runtimes, "get", lambda name: spec if name == "opencode" else None)
+    return channel, api, asked
+
+
+async def test_a_runtime_that_cannot_be_asked_says_why(tmp_path: Path, monkeypatch) -> None:
+    """The failure and the lines under it — the fix lives in the continuation —
+    and nothing after, and never the sentence that sent somebody looking for a
+    session that was open on their screen."""
+    channel, api, _ = await unreachable(
+        tmp_path,
+        monkeypatch,
+        says=[
+            ("ok", "opencode at /opt/homebrew/bin/opencode"),
+            ("fail", "nothing is answering on port 4096 (Connection refused)"),
+            ("", "start it with `opencode --port 4096`"),
+            ("ok", "something after, which is not part of the reason"),
+        ],
+    )
+
+    await channel._handle_message(typed_in("carry on", DRV_CHAT))
+
+    said = api.sent[-1]["text"]
+    assert "nothing is answering on port 4096" in said
+    assert "opencode --port 4096" in said
+    assert "has no session named" not in said
+    assert "something after" not in said
+
+
+async def test_a_runtime_that_answered_keeps_the_true_message(tmp_path: Path, monkeypatch) -> None:
+    """Reachable and simply without that session is the other case, and there
+    the old sentence is the right one."""
+    channel, api, _ = await unreachable(tmp_path, monkeypatch, says=[("ok", "answering")])
+
+    await channel._handle_message(typed_in("carry on", DRV_CHAT))
+
+    assert "has no session named" in api.sent[-1]["text"]
+
+
+async def test_a_check_that_breaks_falls_back_rather_than_going_quiet(
+    tmp_path: Path, monkeypatch
+) -> None:
+    channel, api, _ = await unreachable(tmp_path, monkeypatch, raises=True)
+
+    await channel._handle_message(typed_in("carry on", DRV_CHAT))
+
+    assert "has no session named" in api.sent[-1]["text"]
+
+
+async def test_the_check_is_given_what_doctor_gives_it(tmp_path: Path, monkeypatch) -> None:
+    """Without the token a Claude Code check would call a machine that signs in
+    with one "not signed in" — a confident wrong reason, which is worse than
+    the vague right one this replaced."""
+    channel, _, asked = await unreachable(tmp_path, monkeypatch, says=[("ok", "fine")])
+    channel._runtime_context = {"claude_oauth_token": "a-token"}
+
+    await channel._handle_message(typed_in("carry on", DRV_CHAT))
+
+    assert asked and asked[0]["claude_oauth_token"] == "a-token"

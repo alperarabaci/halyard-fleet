@@ -300,6 +300,14 @@ def _build_channel(
         # down — the same reason `prompts:` is loaded defensively above.
         repositories=configured_projects(),
         forge_token=settings.forge_token,
+        # What each runtime's own availability check needs — the same context
+        # `halyard doctor` passes it — so a seat that cannot be reached is told
+        # why from the phone, and told it truthfully. Without the token a Claude
+        # Code check would call a machine that signs in with one "not signed in".
+        runtime_context={
+            "claude_binary": settings.claude_binary,
+            "claude_oauth_token": settings.claude_oauth_token,
+        },
         session_names={
             role: name
             for name, role in (

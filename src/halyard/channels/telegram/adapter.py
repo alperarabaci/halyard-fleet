@@ -263,8 +263,13 @@ class TelegramChannel:
         #: Where the last thing said in each chat is kept, so `/forward`
         #: survives a restart. None disables it: nothing else depends on it.
         said_path: Path | None = None,
+        #: What a runtime's own availability check needs to answer truthfully —
+        #: the same context `halyard doctor` hands it. Asked only when a seat's
+        #: session cannot be found, to say *why*.
+        runtime_context: Mapping[str, object] | None = None,
     ) -> None:
         self._api = api
+        self._runtime_context = dict(runtime_context or {})
         self._gate = gate or Gate()
         self._project = project
         self._store = store
@@ -1895,22 +1900,32 @@ class TelegramChannel:
             # information nobody can look up from where they are standing — it
             # is not shown anywhere in Telegram's own interface.
             seat = self._seat_for_chat(chat_id)
-            await self._say(
-                (
+            why = await self._why_unreachable(seat) if seat is not None else None
+            if seat is None:
+                said = (
                     f"No seat owns this chat (<code>{chat_id}</code>). Add it to a "
                     "seat's <code>chat:</code> in your seat configuration, then "
                     "restart — seats are read at startup."
                 )
-                if seat is None
-                else (
+            elif why:
+                # The runtime could not be asked at all, which is a different
+                # sentence from "it has no such session". Measured: an opencode
+                # TUI started without `--port` answers on no port, the lookup
+                # comes back empty, and this said the seat's session did not
+                # exist — while it sat open on the screen under that exact name.
+                said = (
+                    f"The <b>{html.escape(seat.label)}</b> seat's session could not "
+                    f"be looked up — {html.escape(seat.runtime)} did not answer."
+                    f"\n\n<pre>{html.escape(why)}</pre>"
+                )
+            else:
+                said = (
                     f"The <b>{seat.label}</b> seat owns this chat, but "
                     f"{seat.runtime} has no session named "
                     f"<code>{seat.session}</code>. Check it with "
                     "<code>halyard doctor</code>."
-                ),
-                chat_id,
-                thread_id,
-            )
+                )
+            await self._say(said, chat_id, thread_id)
             return
 
         task = asyncio.create_task(self._deliver(found, text, actor, chat_id, thread_id))
@@ -1998,6 +2013,35 @@ class TelegramChannel:
         if runner is None:
             return None
         return await asyncio.to_thread(runner.resolve, name)
+
+    async def _why_unreachable(self, seat: Seat) -> str | None:
+        """Why a seat's runtime could not be asked, if that is what happened.
+
+        Asked of the runtime itself, through the check `halyard doctor` runs
+        first — so this channel learns the reason without knowing a thing about
+        the runtime. Only a failure is carried. A runtime that answered and has
+        no session by that name is the other message, and that one is true.
+        """
+        from halyard.agents import registry
+
+        spec = registry.get(seat.runtime)
+        if spec is None or spec.check_available is None:
+            return None
+        try:
+            found = await asyncio.to_thread(spec.check_available, **self._runtime_context)
+        except Exception:
+            logger.exception("Could not ask %s why it did not answer", seat.runtime)
+            return None
+        # A failure and the lines that belong to it — the fix is usually in the
+        # continuation, and "nothing is answering" without "start it with
+        # --port" is half an answer.
+        said: list[str] = []
+        for level, text in found:
+            if level == "fail" or (not level and said):
+                said.append(text)
+            elif said:
+                break
+        return "\n".join(said) or None
 
     def _role_for_chat(self, chat_id: str) -> Role | None:
         for role, destination in self._routes.items():
