@@ -2818,3 +2818,61 @@ async def test_the_check_is_given_what_doctor_gives_it(tmp_path: Path, monkeypat
     await channel._handle_message(typed_in("carry on", DRV_CHAT))
 
     assert asked and asked[0]["claude_oauth_token"] == "a-token"
+
+
+# --- what the runtime says it is asking ---------------------------------------
+#
+# opencode asks about a directory and shows the command as its occasion:
+# "Access external directory /tmp", then the patterns that answer covers. The
+# card showed the command alone, which presented the occasion as the question.
+
+
+async def asking_about_a_directory(store, **overrides):
+    fields = dict(
+        session_id="ses_1",
+        agent_id="opencode",
+        project="alpha-engine",
+        tool="external_directory",
+        command_summary="make test-guards > /tmp/g1.txt",
+        command_full="make test-guards > /tmp/g1.txt",
+        risk=RiskLevel.MEDIUM,
+        asks="Access external directory /tmp",
+        patterns=["/tmp/*"],
+    )
+    fields.update(overrides)
+    return await store.create(**fields)
+
+
+async def test_the_card_says_what_the_runtime_is_asking(setup) -> None:
+    channel, api, store, _ = setup
+    request = await asking_about_a_directory(store)
+
+    await channel.send_approval_request(request)
+
+    text = api.sent[0]["text"]
+    assert "Asks: <b>Access external directory /tmp</b>" in text
+    assert "Patterns: <code>/tmp/*</code>" in text
+    # The occasion stays on the card: it is what somebody reads to decide.
+    assert "make test-guards" in text
+
+
+async def test_a_card_with_nothing_more_to_say_is_unchanged(setup) -> None:
+    channel, api, store, _ = setup
+    request = await asking_about_a_directory(store, asks=None, patterns=None)
+
+    await channel.send_approval_request(request)
+
+    assert "Asks:" not in api.sent[0]["text"]
+    assert "Patterns:" not in api.sent[0]["text"]
+
+
+async def test_a_settled_card_keeps_what_was_asked() -> None:
+    """Scrolling back through a chat should show what was decided, and for this
+    runtime the decision was about a directory."""
+    from halyard.core.approvals import ApprovalStore
+
+    request = await asking_about_a_directory(ApprovalStore())
+
+    assert "Access external directory /tmp" in cards.render_resolved(
+        request, decision="allow", by="tg:1"
+    )

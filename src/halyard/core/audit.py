@@ -130,6 +130,10 @@ def approval_requested(request: ApprovalRequest, *, now: datetime | None = None)
             "reason": request.reason,
             "tool_use_id": request.tool_use_id,
             "expires_at": request.expires_at.isoformat(),
+            # What was actually asked, where that was not the command — so "what
+            # did I approve" has the answer the screen had, not only its occasion.
+            # Absent otherwise, so every other record keeps exactly its shape.
+            **({"asks": request.asks, "patterns": list(request.patterns)} if request.asks else {}),
         },
     )
 

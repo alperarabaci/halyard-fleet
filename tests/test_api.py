@@ -324,3 +324,51 @@ async def test_the_question_endpoint_rejects_a_body_with_no_options(allowing) ->
     # rather than asking an unanswerable question.
     assert response.status_code == 200
     assert response.json()["answer"] is None
+
+
+# --- what the runtime says it is asking ---------------------------------------
+
+
+def _records(tmp_path: Path) -> list[dict]:
+    import json
+
+    lines = (tmp_path / "audit.jsonl").read_text(encoding="utf-8").splitlines()
+    return [json.loads(line) for line in lines if line.strip()]
+
+
+async def test_what_a_runtime_says_it_is_asking_reaches_the_record(
+    allowing, tmp_path: Path
+) -> None:
+    """From the bridge's body to the audit log: "what did I approve" should have
+    the answer the screen had, not only the command that occasioned it."""
+    client, _ = allowing
+    await client.post(
+        "/v1/approvals",
+        json={
+            **BODY,
+            "agent_id": "opencode",
+            "tool": "external_directory",
+            "command": "make test-guards > /tmp/g1.txt",
+            "tool_use_id": "call_dir",
+            "asks": "Access external directory /tmp",
+            "patterns": ["/tmp/*"],
+        },
+    )
+
+    requested = [r for r in _records(tmp_path) if r["action"] == "approval.requested"]
+    assert requested[-1]["detail"]["asks"] == "Access external directory /tmp"
+    assert requested[-1]["detail"]["patterns"] == ["/tmp/*"]
+
+
+async def test_a_call_that_asks_nothing_more_keeps_its_record_shape(
+    allowing, tmp_path: Path
+) -> None:
+    """Every other runtime's records stay exactly as they were."""
+    client, _ = allowing
+    await client.post(
+        "/v1/approvals", json={**BODY, "command": "touch notes.txt", "tool_use_id": "call_plain"}
+    )
+
+    requested = [r for r in _records(tmp_path) if r["action"] == "approval.requested"]
+    assert "asks" not in requested[-1]["detail"]
+    assert "patterns" not in requested[-1]["detail"]
