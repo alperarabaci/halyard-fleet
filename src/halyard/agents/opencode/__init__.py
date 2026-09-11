@@ -31,6 +31,9 @@ to say naming is impossible.
 
 from __future__ import annotations
 
+import difflib
+import json
+import re
 import shutil
 import subprocess
 from datetime import UTC, datetime
@@ -157,6 +160,133 @@ def reachable(port: int | None) -> tuple[bool, str]:
         return False, str(unreachable)
 
 
+def _known_models() -> dict[str, str] | None:
+    """Every `provider/model` this opencode can run, with the name it shows for
+    it — or None if the question could not be asked.
+
+    Asked of the CLI rather than the server, because this has to answer when
+    the TUI is closed too — `doctor` is often run to find out why it is. The
+    verbose listing costs what the plain one does, 0.83s measured on 1.18.29,
+    and carries the name.
+
+    The name is half the point. The TUI shows `DeepSeek V4.1 Flash`; the id
+    behind it is `deepseek/deepseek-flash`. The id a person writes from that
+    name, `deepseek/deepseek-v4-flash`, exists too — and is the model *before*
+    it. Suggesting ids by spelling alone recommended exactly that one, which is
+    worse than saying nothing: it would have configured the older model on the
+    strength of a check.
+
+    **None and empty are different answers**, as they are for Codex's catalog.
+    None means the question could not be asked, and nothing may be concluded
+    from it. A listing that will not parse is None too, so a format change
+    silences the check rather than turning it against a model that is fine.
+    """
+    found = _binary()
+    if not found:
+        return None
+    try:
+        done = subprocess.run(
+            [found, "models", "--verbose"],
+            capture_output=True,
+            text=True,
+            timeout=TIMEOUT,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if done.returncode != 0:
+        return None
+    return _parse_models(done.stdout or "") or None
+
+
+def _parse_models(listing: str) -> dict[str, str]:
+    """`provider/id` headers, each followed by that model's JSON, into id → name.
+
+    Decoded as JSON rather than read line by line, because each block nests
+    other `id` and `name` keys and only the top-level `name` is the one the TUI
+    shows. A block that will not decode keeps its id with no name: a change in
+    that format costs the names and never the ids.
+    """
+    decoder = json.JSONDecoder()
+    headers = list(re.finditer(r"^([^\s{}]+/\S+)[ \t]*$", listing, re.MULTILINE))
+    found: dict[str, str] = {}
+    for index, header in enumerate(headers):
+        end = headers[index + 1].start() if index + 1 < len(headers) else len(listing)
+        block = listing[header.end() : end].strip()
+        try:
+            parsed, _ = decoder.raw_decode(block)
+        except ValueError:
+            parsed = None
+        shown = parsed.get("name") if isinstance(parsed, dict) else None
+        found[header.group(1)] = shown if isinstance(shown, str) else ""
+    return found
+
+
+def _as_typed(name: str) -> str:
+    """A display name the way somebody copying it into YAML would write it."""
+    return re.sub(r"\s+", "-", name.strip()).casefold()
+
+
+def _check_models(configured) -> list[tuple[str, str]]:
+    """Whether the models the configuration names are ones opencode has.
+
+    Measured the day this was written: `deepseek/deepseek-v4.1-flash` was added
+    as the model to fall back to when a quota runs out, and this opencode knows
+    four DeepSeek models and none of them has that id. The name belongs to
+    `deepseek/deepseek-flash`, shown as DeepSeek V4.1 Flash; the id somebody
+    would write from that name, `deepseek-v4-flash`, is the model before it.
+    The configuration's own check passed, because it only asks whether
+    `on_quota:` is in `models:`, and both were the same wrong name. The one
+    button meant for the moment a provider stops answering would have offered a
+    model that cannot answer either.
+
+    Refreshing the list from models.dev did not add it, so that was not a stale
+    cache. But a model announced this morning can be exactly that, and opencode
+    may pass an id its list lacks straight to the provider — which is why this
+    says the *list* has no such name rather than that the name cannot work, and
+    says to refresh before it says to rename.
+
+    A warning, never a failure. The runtime is still reachable and the session
+    still found; a failure here would stop `doctor` checking the seat, and the
+    channel would carry it to a phone as the reason a session could not be
+    looked up — a wrong reason, in the place this project has worked hardest to
+    give the right one.
+    """
+    if configured is None:
+        return []
+    wanted = [*configured.models, *([configured.on_quota] if configured.on_quota else [])]
+    if not wanted:
+        return []
+    known = _known_models()
+    if not known:
+        return []
+    # The name a person reads on the screen, keyed the way they would type it.
+    shown_as: dict[str, str] = {}
+    for model, shown in known.items():
+        if shown:
+            shown_as.setdefault(f"{model.split('/', 1)[0]}/{_as_typed(shown)}", model)
+    said: list[tuple[str, str]] = []
+    for name in dict.fromkeys(wanted):  # once each, in the order written
+        if name in known:
+            continue
+        what = f"opencode's model list has no {name}"
+        if name == configured.on_quota:
+            what += " — the one offered when a quota runs out"
+        said.append(("warn", what))
+        meant = shown_as.get(name.casefold())
+        if meant:
+            # Exact, not a guess: this is the name the TUI shows for that id.
+            said.append(("", f"that is how opencode shows {meant} ({known[meant]}) — use the id"))
+            continue
+        close = difflib.get_close_matches(name, sorted(known), n=2, cutoff=0.6)
+        if close:
+            said.append(("", f"did you mean {' or '.join(close)}?"))
+        # The list lags new releases, and a model announced this morning is the
+        # likeliest reason to add one — so the cheap step comes before renaming.
+        said.append(("", "if it is newer than the list, `opencode models --refresh` first"))
+    return said
+
+
 def check_available(**_context) -> list[tuple[str, str]]:
     """Whether this machine can run it, and whether it can be reached.
 
@@ -183,17 +313,20 @@ def check_available(**_context) -> list[tuple[str, str]]:
         # make; this check is not the place to raise it a second time.
         configured = None
     port = configured.port if configured else None
+    # Checked whether or not the server answers: the listing comes from the
+    # CLI, and a closed TUI is exactly when somebody runs `doctor`.
+    models_said = _check_models(configured)
 
     if not port:
         lines.append(("warn", "no `runtimes: opencode: port:` in halyard.yaml"))
         lines.append(("", "without one nothing here can tell whether the gate can answer"))
         lines.append(("", "add `port: 4096`, and start it with `opencode --port 4096`"))
-        return lines
+        return lines + models_said
 
     answering, said = reachable(port)
     if answering:
         lines.append(("ok", f"opencode is answering on port {port}"))
-        return lines
+        return lines + models_said
 
     # A failure, not a warning, and the reason is what happens next. Everything
     # after this asks opencode something — which session a seat means, whether
@@ -207,7 +340,9 @@ def check_available(**_context) -> list[tuple[str, str]]:
     lines.append(("", f"start it with `opencode --port {port}`, or leave a headless one"))
     lines.append(("", f"running with `opencode serve --port {port}` and attach to that"))
     lines.append(("", f"from a terminal with `opencode attach http://127.0.0.1:{port}`"))
-    return lines
+    # After the failure and everything under it, so the channel — which
+    # carries a failure and its continuation to a phone — stops before these.
+    return lines + models_said
 
 
 DEFAULT_PORT = 4096

@@ -449,3 +449,122 @@ def test_sessions_are_listed_newest_first(monkeypatch) -> None:
     )
 
     assert [ref.session_id for ref in opencode.list_sessions()] == ["ses_new", "ses_old"]
+
+
+# --- the models the configuration names ---------------------------------------
+#
+# Measured: `deepseek/deepseek-v4.1-flash` was configured as the model to fall
+# back to when a quota runs out. It is a *name*: opencode shows
+# `deepseek/deepseek-flash` as "DeepSeek V4.1 Flash", and the id that name
+# suggests, `deepseek-v4-flash`, is the model before it. The configuration's own
+# check passed, because it only asks whether `on_quota:` is in `models:`, and
+# both held the same wrong value.
+
+#: As `opencode models --verbose` reported them on 1.18.29.
+KNOWN = {
+    "deepseek/deepseek-flash": "DeepSeek V4.1 Flash",
+    "deepseek/deepseek-v4-flash": "DeepSeek V4 Flash",
+    "deepseek/deepseek-v4-pro": "DeepSeek V4 Pro",
+    "zai-coding-plan/glm-5.3-flash": "GLM-5.3-Flash",
+}
+
+
+def _checked(monkeypatch, *, answering=True, known=KNOWN, **settings):
+    from halyard.agents import opencode
+
+    monkeypatch.setattr(
+        opencode, "reachable", lambda port: (answering, "answered" if answering else "refused")
+    )
+    monkeypatch.setattr(opencode, "_available_binary", lambda: [("ok", "opencode at /x")])
+    monkeypatch.setattr(opencode, "_known_models", lambda: known)
+    monkeypatch.setattr(
+        "halyard.core.config_file.runtime_settings",
+        lambda *a, **k: {"opencode": _settings(port=4096, **settings)},
+    )
+    return opencode.check_available()
+
+
+def test_a_name_copied_from_the_screen_is_traced_to_its_id(monkeypatch) -> None:
+    """Exact, not guessed — and never the older model its spelling points at."""
+    said = _checked(
+        monkeypatch,
+        models=("zai-coding-plan/glm-5.3-flash", "deepseek/deepseek-v4.1-flash"),
+        on_quota="deepseek/deepseek-v4.1-flash",
+    )
+    text = "\n".join(line for _, line in said)
+
+    assert any(level == "warn" and "deepseek/deepseek-v4.1-flash" in line for level, line in said)
+    assert "deepseek/deepseek-flash (DeepSeek V4.1 Flash)" in text
+    assert "deepseek/deepseek-v4-flash" not in text, "its spelling points at the model before it"
+    assert "quota" in text, "say which setting it breaks"
+
+
+def test_a_plain_typo_still_gets_the_nearest_spelling(monkeypatch) -> None:
+    said = _checked(monkeypatch, models=("deepseek/deepseek-v4-prro",))
+
+    assert any("did you mean deepseek/deepseek-v4-pro" in line for _, line in said)
+
+
+def test_models_opencode_has_are_not_mentioned(monkeypatch) -> None:
+    said = _checked(
+        monkeypatch,
+        models=("zai-coding-plan/glm-5.3-flash", "deepseek/deepseek-v4-pro"),
+        on_quota="deepseek/deepseek-v4-pro",
+    )
+
+    assert not any("model list has no" in text for _, text in said)
+
+
+def test_a_listing_that_could_not_be_read_asserts_nothing(monkeypatch) -> None:
+    """The guard. Calling a model unknown because the listing failed would send
+    somebody to rename one that is fine."""
+    said = _checked(monkeypatch, known=None, models=("deepseek/deepseek-v4.1-flash",))
+
+    assert not any("model list has no" in text for _, text in said)
+
+
+def test_a_wrong_model_name_is_a_warning_not_a_failure(monkeypatch) -> None:
+    """A failure would stop `doctor` checking the seat, and the channel would
+    carry it to a phone as the reason a session could not be looked up."""
+    said = _checked(monkeypatch, models=("deepseek/deepseek-v4.1-flash",))
+
+    assert "fail" not in {level for level, _ in said}
+
+
+def test_models_are_checked_even_when_the_server_is_down(monkeypatch) -> None:
+    """The listing comes from the CLI, not the server, so it still answers when
+    the TUI is closed — which is when somebody runs `doctor` to find out why.
+    And it comes after the failure, so the part a phone is shown ends first."""
+    said = _checked(monkeypatch, answering=False, models=("deepseek/deepseek-v4.1-flash",))
+
+    levels_in_order = [level for level, _ in said if level]
+    assert "fail" in levels_in_order
+    assert levels_in_order.index("warn", levels_in_order.index("fail")) > levels_in_order.index(
+        "fail"
+    )
+
+
+def test_a_missing_model_suggests_refreshing_before_renaming(monkeypatch) -> None:
+    """The list lags new releases. Refreshing it was measured not to add this
+    one — but a model announced this morning is exactly the case it would, and
+    renaming a correct name to a wrong one is the worse mistake of the two."""
+    said = _checked(monkeypatch, models=("deepseek/deepseek-v5-flash",))
+
+    assert any("--refresh" in text for _, text in said)
+
+
+def test_the_verbose_listing_gives_each_id_its_top_level_name() -> None:
+    """Each block nests other `id` and `name` keys; only the top-level name is
+    the one the TUI shows. Shape copied from 1.18.29."""
+    listing = (
+        "deepseek/deepseek-flash\n"
+        '{\n  "id": "deepseek-flash",\n  "name": "DeepSeek V4.1 Flash",\n'
+        '  "api": {\n    "id": "deepseek-flash",\n    "name": "not this one"\n  }\n}\n'
+        "deepseek/deepseek-v4-pro\n"
+        "{ this block does not decode\n"
+    )
+
+    assert opencode._parse_models(listing) == {
+        "deepseek/deepseek-flash": "DeepSeek V4.1 Flash",
+        "deepseek/deepseek-v4-pro": "",
+    }
