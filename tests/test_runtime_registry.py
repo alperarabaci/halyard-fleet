@@ -85,3 +85,60 @@ def test_the_names_are_what_a_seat_may_be_configured_as() -> None:
     from halyard.core.seats import known_runtimes
 
     assert set(known_runtimes()) == EXPECTED
+
+
+# --- what a runtime's checks take from settings -------------------------------
+
+
+class _Settings:
+    claude_binary = "/somewhere/claude"
+    claude_oauth_token = "a-token"
+    unrelated = "not for anybody's check"
+
+
+def test_only_claude_code_takes_anything_from_settings_for_its_checks() -> None:
+    """Named in its own package and handed to it alone. Before this, `doctor`
+    and the channel named Claude Code's settings and gave them to every check."""
+    contexts = {name: spec.check_context(_Settings()) for name, spec in registry.discover().items()}
+
+    assert contexts.pop("claude-code") == {
+        "claude_binary": "/somewhere/claude",
+        "claude_oauth_token": "a-token",
+    }
+    assert all(context == {} for context in contexts.values()), contexts
+
+
+def test_a_seat_checked_without_settings_still_gets_a_callable_check() -> None:
+    assert all(spec.check_context(None) == {} for spec in registry.discover().values())
+
+
+def test_doctor_hands_each_runtime_its_own_check_context(monkeypatch) -> None:
+    """The path a machine on a long-lived token depends on. Without it the Claude
+    Code check reads the desktop login instead, and can fail a seat that is
+    delivering perfectly well — the false alarm its own comments describe."""
+    from types import SimpleNamespace
+
+    from halyard import doctor
+    from halyard.core.events import Role
+    from halyard.core.seats import Seat
+
+    received: list[dict] = []
+
+    def check_available(**context):
+        received.append(context)
+        return [("ok", "reached")]
+
+    spec = SimpleNamespace(
+        check_available=check_available,
+        check_context=lambda settings: {"marker": settings.marker},
+        find_session=lambda name: None,
+        sessions_hint="",
+    )
+    monkeypatch.setattr(registry, "get", lambda name: spec)
+
+    doctor._check_seat(
+        Seat("nav", "claude-code", "a-session", None, Role.NAVIGATOR),
+        settings=SimpleNamespace(marker="from-settings"),
+    )
+
+    assert received == [{"marker": "from-settings"}]

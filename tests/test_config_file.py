@@ -456,3 +456,74 @@ def test_a_fallback_model_has_to_be_one_of_the_offered_ones() -> None:
         runtimes_from_yaml(
             "runtimes:\n  opencode:\n    models: [a-model]\n    on_quota: something-else"
         )
+
+
+# --- labelling who worked on a task -------------------------------------------
+
+_ONE_SEAT = "    seats: {nav: {runtime: claude-code, session: a}}\n"
+
+
+def test_label_work_is_off_unless_a_project_asks() -> None:
+    """It writes to somebody's issue tracker on its own."""
+    [project] = projects_from_yaml("projects:\n  alpha:\n    path: /tmp/alpha\n" + _ONE_SEAT)
+
+    assert project.label_work is False
+
+
+def test_label_work_can_be_turned_on() -> None:
+    [project] = projects_from_yaml(
+        "projects:\n  alpha:\n    path: /tmp/alpha\n    label_work: true\n" + _ONE_SEAT
+    )
+
+    assert project.label_work is True
+
+
+def test_label_work_refuses_anything_but_a_boolean() -> None:
+    """The generous reading of `"false"` is yes — a string is truthy — and this
+    setting writes to an issue tracker."""
+    with pytest.raises(ValueError, match="true or false"):
+        projects_from_yaml(
+            'projects:\n  alpha:\n    path: /tmp/alpha\n    label_work: "false"\n' + _ONE_SEAT
+        )
+
+
+def _seats(*lines: str) -> str:
+    return "projects:\n  alpha:\n    path: /tmp/alpha\n    seats:\n" + "".join(
+        f"      {line}\n" for line in lines
+    )
+
+
+def test_a_seat_can_name_its_own_task_label() -> None:
+    [project] = projects_from_yaml(
+        _seats("nav: {runtime: claude-code, role: navigator, task_label: 'fable:navigator'}")
+    )
+
+    assert project.seats[0].task_label == "fable:navigator"
+
+
+def test_a_task_label_with_a_comma_is_refused() -> None:
+    """GitLab adds labels as a comma-separated list; one would become two."""
+    with pytest.raises(ValueError, match="comma"):
+        projects_from_yaml(
+            _seats("nav: {runtime: claude-code, role: navigator, task_label: 'a,b'}")
+        )
+
+
+def test_seats_that_cannot_be_told_apart_must_ask_for_the_same_label() -> None:
+    """A sighting carries runtime and role and nothing else."""
+    with pytest.raises(ValueError, match="tell them apart"):
+        projects_from_yaml(
+            _seats(
+                "nav: {runtime: claude-code, role: navigator, task_label: 'fable:nav'}",
+                "nav2: {runtime: claude-code, session: b, role: navigator}",
+            )
+        )
+
+
+def test_seats_without_a_role_cannot_ask_for_different_labels_either() -> None:
+    with pytest.raises(ValueError, match="without a role"):
+        projects_from_yaml(
+            _seats(
+                "dev: {runtime: claude-code, task_label: developer}", "dev2: {runtime: claude-code}"
+            )
+        )

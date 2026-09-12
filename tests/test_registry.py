@@ -127,3 +127,31 @@ async def test_concurrent_sightings_collapse_into_one_session(
     assert len(sessions) == 1
     assert sessions[0].first_seen_at == START
     assert sessions[0].last_seen_at > START
+
+
+# --- whoever listens ----------------------------------------------------------
+
+
+async def test_a_listener_is_told_about_each_sighting(registry: SessionRegistry) -> None:
+    """With the session as it now stands, so a listener sees the role and the
+    directory the sighting brought with it."""
+    heard = []
+    registry.listen(heard.append)
+
+    session = await observe(registry, cwd="/repo", role=Role.NAVIGATOR)
+
+    assert heard == [session]
+
+
+async def test_a_listener_that_fails_does_not_fail_the_sighting(registry: SessionRegistry) -> None:
+    """A listener is told on the path of an approval, and a listener with a bug
+    must not become an approval that fails."""
+
+    def broken(_session) -> None:
+        raise RuntimeError("a listener with a bug")
+
+    registry.listen(broken)
+
+    session = await observe(registry, cwd="/repo")
+
+    assert session.session_id == "session-1"

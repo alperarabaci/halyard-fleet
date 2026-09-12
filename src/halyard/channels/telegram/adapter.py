@@ -263,13 +263,13 @@ class TelegramChannel:
         #: Where the last thing said in each chat is kept, so `/forward`
         #: survives a restart. None disables it: nothing else depends on it.
         said_path: Path | None = None,
-        #: What a runtime's own availability check needs to answer truthfully —
-        #: the same context `halyard doctor` hands it. Asked only when a seat's
-        #: session cannot be found, to say *why*.
-        runtime_context: Mapping[str, object] | None = None,
+        #: Each runtime's own availability-check context, by runtime name — see
+        #: `RuntimeSpec.check_context`. Asked only when a seat's session cannot
+        #: be found, to say *why*; each check is handed its own and nobody else's.
+        check_contexts: Mapping[str, Mapping[str, object]] | None = None,
     ) -> None:
         self._api = api
-        self._runtime_context = dict(runtime_context or {})
+        self._check_contexts = {name: dict(c) for name, c in (check_contexts or {}).items()}
         self._gate = gate or Gate()
         self._project = project
         self._store = store
@@ -2028,7 +2028,9 @@ class TelegramChannel:
         if spec is None or spec.check_available is None:
             return None
         try:
-            found = await asyncio.to_thread(spec.check_available, **self._runtime_context)
+            found = await asyncio.to_thread(
+                spec.check_available, **self._check_contexts.get(seat.runtime, {})
+            )
         except Exception:
             logger.exception("Could not ask %s why it did not answer", seat.runtime)
             return None

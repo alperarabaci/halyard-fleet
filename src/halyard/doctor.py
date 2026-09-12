@@ -231,9 +231,8 @@ def _render(check, label: str, *, indent: bool = False, **context) -> tuple[list
 
 def _check_seat(
     seat,
-    claude_binary: str | None = None,
     project_path: Path | None = None,
-    claude_oauth_token: str | None = None,
+    settings=None,
 ) -> tuple[list[str], int]:
     """Everything one seat needs, checked against the runtime it actually is.
 
@@ -258,12 +257,7 @@ def _check_seat(
     # Can it be reached at all, before asking it anything. The runtime answers;
     # this only renders. Each of these checks was a branch here until the
     # package that knows the answer took it back.
-    reported, fatal = _render(
-        spec.check_available,
-        label,
-        claude_binary=claude_binary,
-        claude_oauth_token=claude_oauth_token,
-    )
+    reported, fatal = _render(spec.check_available, label, **spec.check_context(settings))
     lines += reported
     if fatal:
         return lines, 1
@@ -616,12 +610,7 @@ def run() -> int:
         where = {}
 
     for seat in seats if settings_ok else []:
-        lines, found = _check_seat(
-            seat,
-            settings.claude_binary,
-            where.get(seat.project),
-            settings.claude_oauth_token,
-        )
+        lines, found = _check_seat(seat, where.get(seat.project), settings)
         problems += found
         for line in lines:
             print(line)

@@ -58,6 +58,13 @@ from halyard.core.transcripts import TranscriptWatcher
 logger = logging.getLogger(__name__)
 
 
+def _tag_of(runtime: str) -> str | None:
+    """The short name a runtime labels tasks with — `claude` — asked of the
+    runtime here, where both sides are known, so `tasks` never imports one."""
+    spec = runtimes.get(runtime)
+    return (spec.tag or spec.name) if spec else None
+
+
 def configured_projects() -> dict:
     """Each configured project by name, or nothing if the file cannot be read.
 
@@ -305,13 +312,11 @@ def _build_channel(
         # down — the same reason `prompts:` is loaded defensively above.
         repositories=configured_projects(),
         forge_token=settings.forge_token,
-        # What each runtime's own availability check needs — the same context
-        # `halyard doctor` passes it — so a seat that cannot be reached is told
-        # why from the phone, and told it truthfully. Without the token a Claude
-        # Code check would call a machine that signs in with one "not signed in".
-        runtime_context={
-            "claude_binary": settings.claude_binary,
-            "claude_oauth_token": settings.claude_oauth_token,
+        # What each runtime's own availability check needs, asked of each
+        # runtime — so a seat that cannot be reached is told why from the phone,
+        # truthfully, and nothing here has to know one runtime's settings.
+        check_contexts={
+            name: spec.check_context(settings) for name, spec in runtimes.discover().items()
         },
         session_names={
             role: name
@@ -440,6 +445,20 @@ def create_app(settings: Settings, *, channel=None) -> FastAPI:
     # Writes the record a compaction is about to make unrecoverable, in a turn
     # of its own so the session it is about is never resumed or forked.
     known_projects = configured_projects()
+    # Each seat's label on the task its branch is for — only in projects that
+    # asked, and only with a token to write with. See `tasks.attribution`.
+    labelled = {name: found for name, found in known_projects.items() if found.label_work}
+    if labelled and settings.forge_token:
+        from halyard.tasks.attribution import Attribution
+
+        registry.listen(
+            Attribution(token=settings.forge_token, projects=labelled, tag_of=_tag_of).seen
+        )
+    elif labelled:
+        logger.warning(
+            "label_work is on for %s, but there is no forge token to write labels with",
+            ", ".join(sorted(labelled)),
+        )
     # Prompt files live in the codebase they describe, so they are looked for
     # there rather than beside Halyard. See `compaction.in_project`.
     project_paths = {name: found.path for name, found in known_projects.items() if found.path}
