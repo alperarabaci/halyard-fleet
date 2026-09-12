@@ -495,10 +495,10 @@ def _seats(*lines: str) -> str:
 
 def test_a_seat_can_name_its_own_task_label() -> None:
     [project] = projects_from_yaml(
-        _seats("nav: {runtime: claude-code, role: navigator, task_label: 'fable:navigator'}")
+        _seats("nav: {runtime: claude-code, role: navigator, task_label: 'agent:navigator'}")
     )
 
-    assert project.seats[0].task_label == "fable:navigator"
+    assert project.seats[0].task_label == "agent:navigator"
 
 
 def test_a_task_label_with_a_comma_is_refused() -> None:
@@ -514,7 +514,7 @@ def test_seats_that_cannot_be_told_apart_must_ask_for_the_same_label() -> None:
     with pytest.raises(ValueError, match="tell them apart"):
         projects_from_yaml(
             _seats(
-                "nav: {runtime: claude-code, role: navigator, task_label: 'fable:nav'}",
+                "nav: {runtime: claude-code, role: navigator, task_label: 'agent:nav'}",
                 "nav2: {runtime: claude-code, session: b, role: navigator}",
             )
         )
