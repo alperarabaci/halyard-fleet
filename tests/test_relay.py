@@ -13,6 +13,7 @@ import pytest
 
 from halyard.core.audit import AuditAction, AuditLog, AuditRecord, JsonlAuditSink
 from halyard.core.events import Role
+from halyard.core.gate import Gate
 from halyard.core.redaction import Redactor
 from halyard.core.registry import SessionRegistry
 from halyard.core.service import MessageRelay
@@ -86,7 +87,7 @@ class BrokenChannel(RecordingChannel):
         raise ConnectionError("telegram unreachable")
 
 
-def build(tmp_path: Path, channel=None, audit: AuditLog | None = None):
+def build(tmp_path: Path, channel=None, audit: AuditLog | None = None, gate: Gate | None = None):
     channel = channel or RecordingChannel()
     sink = JsonlAuditSink(tmp_path / "audit.jsonl")
     registry = SessionRegistry()
@@ -96,6 +97,7 @@ def build(tmp_path: Path, channel=None, audit: AuditLog | None = None):
         audit=audit or AuditLog([sink]),
         channel=channel,
         project="alpha-engine",
+        gate=gate,
     )
     return relay, channel, sink, registry
 
@@ -139,6 +141,20 @@ async def test_the_session_is_observed(tmp_path: Path) -> None:
     session = await registry.get("session-1")
     assert session is not None
     assert session.cwd == "/repo"
+
+
+async def test_a_paused_relay_still_sees_the_session(tmp_path: Path) -> None:
+    """The phone is off, not the record of who worked where. A turn that ended
+    at the desk was still a seat at work."""
+    gate = Gate()
+    await gate.pause("tg:1")
+    relay, channel, sink, registry = build(tmp_path, gate=gate)
+    await sink.open()
+
+    assert await say(relay, cwd="/repo") is False
+    assert channel.messages == []
+    session = await registry.get("session-1")
+    assert session is not None and session.cwd == "/repo"
 
 
 async def test_a_long_reply_still_arrives_as_a_message(tmp_path: Path) -> None:

@@ -385,7 +385,13 @@ def _one_project(tmp_path: Path, *, label_work: bool):
     }
 
 
-async def test_a_project_that_asked_for_labels_is_listened_for(tmp_path: Path, monkeypatch) -> None:
+async def test_a_project_that_asked_for_labels_is_listened_for(
+    tmp_path: Path, monkeypatch, caplog
+) -> None:
+    """And says so once at startup: nothing else does until a label is
+    written, and "is it on in the process that is running" had no answer."""
+    import logging
+
     from halyard.api import app as module
 
     monkeypatch.setattr(
@@ -394,10 +400,12 @@ async def test_a_project_that_asked_for_labels_is_listened_for(tmp_path: Path, m
     settings = make_settings(tmp_path, ChannelKind.STUB_ALLOW).model_copy(
         update={"forge_token": "a-token"}
     )
+    caplog.set_level(logging.INFO, logger="halyard.api.app")
 
     app = module.create_app(settings)
 
     assert len(app.state.registry._listeners) == 1
+    assert "Labelling tasks in alpha-engine" in caplog.text
 
 
 async def test_nothing_listens_where_no_project_asked(tmp_path: Path, monkeypatch) -> None:

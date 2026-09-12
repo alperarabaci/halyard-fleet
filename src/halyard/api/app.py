@@ -454,6 +454,9 @@ def create_app(settings: Settings, *, channel=None) -> FastAPI:
         registry.listen(
             Attribution(token=settings.forge_token, projects=labelled, tag_of=_tag_of).seen
         )
+        # Said once, because nothing else is until a label is written, and "is it
+        # on in the process that is running" had no answer from outside it.
+        logger.info("Labelling tasks in %s as seats work on them", ", ".join(sorted(labelled)))
     elif labelled:
         logger.warning(
             "label_work is on for %s, but there is no forge token to write labels with",
