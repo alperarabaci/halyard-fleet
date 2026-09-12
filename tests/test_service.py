@@ -825,3 +825,53 @@ async def test_nothing_changes_when_it_is_not_configured(tmp_path: Path) -> None
     await ask(service, "git status")
 
     assert channel.asked == 1
+
+
+# --- every call is a sighting ------------------------------------------------
+
+
+async def test_a_call_allowed_without_asking_is_still_seen(tmp_path: Path) -> None:
+    """What listens keeps a record of who worked where. Seen only on the way to
+    a card, a reviewer running read-only commands asks for nothing, and could
+    spend an afternoon on a task without ever being seen on it."""
+    service, _, sink = build_service(tmp_path, allow_risk_at_or_below=RiskLevel.LOW)
+    await sink.open()
+
+    outcome = await ask(service, "git status", cwd="/a/project")
+
+    assert outcome.decision is BridgeDecision.ALLOW
+    seen = await service._registry.get("session-1")
+    assert seen is not None and seen.cwd == "/a/project"
+
+
+async def test_a_paused_gate_still_sees_the_call(tmp_path: Path) -> None:
+    """A pause turns the phone off, not the record: work done at the desk is
+    still work on the task."""
+    gate = Gate()
+    service, _, sink = build_service(tmp_path, gate=gate)
+    await sink.open()
+    await gate.pause("tg:1")
+
+    assert (await ask(service, "git status")).decision is BridgeDecision.DEFER
+    assert await service._registry.get("session-1") is not None
+
+
+async def test_a_refused_call_is_still_seen(tmp_path: Path) -> None:
+    service, _, sink = build_service(tmp_path, refuse_agent_commits=True)
+    await sink.open()
+
+    assert (await ask(service, "git commit -m x")).decision is BridgeDecision.DENY
+    assert await service._registry.get("session-1") is not None
+
+
+async def test_a_question_asked_while_paused_is_still_seen(tmp_path: Path) -> None:
+    gate = Gate()
+    await gate.pause("tester")
+    store = QuestionStore(ttl=timedelta(minutes=5))
+    service, _, sink = build_questions(
+        tmp_path, channel=QuestionChannel(store), gate=gate, store=store
+    )
+    await sink.open()
+
+    assert (await ask_question(service)).answer is None
+    assert await service._registry.get("session-1") is not None

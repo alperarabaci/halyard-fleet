@@ -232,14 +232,10 @@ class QuestionService:
         role: Role | None,
         session_name: str | None,
     ) -> QuestionOutcome:
-        if self._gate.paused:
-            # Pausing means the phone is off. The choice belongs at the desk,
-            # which is exactly where the terminal picker will put it.
-            return QuestionOutcome(answer=None)
-
         project = project_name(project_dir, cwd, self._project)
         role = seat_of(role, session_name, self._seats)
 
+        # Seen before the pause, like every call; see `ApprovalService`.
         await self._registry.observe(
             session_id=session_id,
             agent_id=agent_id,
@@ -247,6 +243,11 @@ class QuestionService:
             role=role,
             cwd=cwd,
         )
+
+        if self._gate.paused:
+            # Pausing means the phone is off. The choice belongs at the desk,
+            # which is exactly where the terminal picker will put it.
+            return QuestionOutcome(answer=None)
 
         request = await self._store.create(
             session_id=session_id,
@@ -333,16 +334,10 @@ class MessageRelay:
         session_name: str | None = None,
     ) -> bool:
         """Send an agent's reply out. Returns whether it was delivered."""
-        if self._gate.paused:
-            # Pausing means the phone is off, not that approvals alone stop.
-            # Someone who has taken the decisions back to the keyboard does not
-            # want the replies buzzing on a device they are not looking at.
-            return False
-
         project = project_name(project_dir, cwd, self._project)
         role = seat_of(role, session_name, self._seats)
         try:
-            masked = self._redactor.redact(text)
+            # Seen before the pause, like every call; see `ApprovalService`.
             await self._registry.observe(
                 session_id=session_id,
                 agent_id=agent_id,
@@ -350,6 +345,12 @@ class MessageRelay:
                 role=role,
                 cwd=cwd,
             )
+            if self._gate.paused:
+                # Pausing means the phone is off, not that approvals alone stop.
+                # Someone who has taken the decisions back to the keyboard does
+                # not want the replies buzzing on a device they are not looking at.
+                return False
+            masked = self._redactor.redact(text)
             delivered = await self._deliver(
                 session_id,
                 masked.text,
@@ -518,16 +519,32 @@ class ApprovalService:
         asks: str | None = None,
         patterns: list[str] | None = None,
     ) -> ApprovalOutcome:
-        # Before everything, including the pause. This is not an approval that
-        # somebody could be asked for and it is not a grant that could be
-        # configured around — it is a standing answer, and a guard a pause
+        project = project_name(project_dir, cwd, self._project)
+        role = seat_of(role, session_name, self._seats)
+
+        # Seen first, whatever becomes of the call. Refused, deferred by a pause
+        # or allowed without asking, it is still a seat at work, and what listens
+        # keeps a record of who worked where. Seen only on the way to a card, that
+        # record had gaps exactly where nobody was asked: a reviewer running
+        # read-only commands could spend an afternoon on a task and never be seen.
+        await self._registry.observe(
+            session_id=session_id,
+            agent_id=agent_id,
+            project=project,
+            role=role,
+            cwd=cwd,
+        )
+
+        # Before anything is decided, including the pause. This is not an
+        # approval somebody could be asked for and it is not a grant that could
+        # be configured around — it is a standing answer, and a guard a pause
         # quietly switches off is a guard nobody can rely on.
         if act := refusals.writes_history_if(command, self._refuse_agent_commits):
             await self._try_to_record(
                 refused_outright(
                     session_id=session_id,
                     agent_id=agent_id,
-                    project=project_name(project_dir, cwd, self._project),
+                    project=project,
                     tool=tool,
                     act=act,
                 )
@@ -549,8 +566,6 @@ class ApprovalService:
 
         prepared = self._redactor.prepare(command)
         classification = self._policy.classify(prepared.full, declared=declared_risk)
-        project = project_name(project_dir, cwd, self._project)
-        role = seat_of(role, session_name, self._seats)
 
         # Named in `tools:` — an MCP query, a search. Checked before the write
         # grant below because it is the cheaper question, and it can never reach
@@ -629,14 +644,6 @@ class ApprovalService:
                     ),
                     risk=classification.risk,
                 )
-
-        await self._registry.observe(
-            session_id=session_id,
-            agent_id=agent_id,
-            project=project,
-            role=role,
-            cwd=cwd,
-        )
 
         request = await self._store.create(
             session_id=session_id,
