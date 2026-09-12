@@ -182,9 +182,9 @@ projects:
         role: navigator
         # Optional. The label this seat puts on a task when `label_work` is on —
         # runtime and role unless set, `claude:navigator`, or `claude` alone for a
-        # seat with no role. Set it when the record should say more, like the
-        # model this seat is pinned to.
-        # task_label: fable:navigator
+        # seat with no role. Set it to match labels your tracker already uses.
+        # Leave the model out: that changes under a seat, and this never does.
+        # task_label: agent:navigator
 
       drv:
         runtime: claude-code

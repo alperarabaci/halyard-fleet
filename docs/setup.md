@@ -264,10 +264,12 @@ issue tracker on its own. A seat without a role is labelled with its runtime
 alone, `claude`; in a project that does give roles, a session without one is
 not labelled, since it could be any of them.
 
-A seat can choose its own label with `task_label:` — `fable:navigator`, when
-the seat is pinned to a model and the record should say so. Seats are told
-apart by runtime and role, so two seats in one project that share both must ask
-for the same label. One colon by default, because GitLab's paid tiers read `::`
+A seat can choose its own label with `task_label:` — `agent:navigator`, to
+match labels the tracker already uses. It is written as given, so leave the
+model out of it: a seat keeps its runtime and its role, but its model is chosen
+at the desk and changes under it, and a label naming one would go on naming it
+afterwards. Seats are told apart by runtime and role, so two seats in one
+project that share both must ask for the same label. One colon by default, because GitLab's paid tiers read `::`
 as a scoped label, where `claude::driver` would take `claude::navigator` off a
 task both worked on.
 

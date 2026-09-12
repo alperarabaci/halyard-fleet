@@ -250,21 +250,21 @@ async def test_being_heard_from_never_waits_for_the_tracker(monkeypatch, repo) -
 
 
 async def test_a_seat_that_names_its_own_label_is_labelled_with_it(monkeypatch, repo) -> None:
-    """A model pinned to a seat is known to whoever pinned it."""
+    """A tracker that already has labels for its seats keeps its own."""
     forge = FakeForge()
     registry, labeller = wired(
         monkeypatch,
         repo,
         forge,
         seats=[
-            Seat("nav", "claude-code", "a-nav", None, Role.NAVIGATOR, task_label="fable:navigator")
+            Seat("nav", "claude-code", "a-nav", None, Role.NAVIGATOR, task_label="agent:navigator")
         ],
     )
 
     await work(registry, repo)
     await settled(labeller)
 
-    assert forge.added == [(347, "fable:navigator")]
+    assert forge.added == [(347, "agent:navigator")]
 
 
 async def test_another_seat_s_label_is_not_borrowed(monkeypatch, repo) -> None:
@@ -275,7 +275,7 @@ async def test_another_seat_s_label_is_not_borrowed(monkeypatch, repo) -> None:
         monkeypatch,
         repo,
         forge,
-        seats=[Seat("xrev", "codex", "a-rev", None, Role.REVIEWER, task_label="astra:reviewer")],
+        seats=[Seat("xrev", "codex", "a-rev", None, Role.REVIEWER, task_label="agent:reviewer")],
     )
 
     await work(registry, repo)

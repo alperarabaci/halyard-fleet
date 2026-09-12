@@ -11,8 +11,9 @@ seat's label — `claude:navigator`, `codex:reviewer`.
 **One label per seat.** By default, runtime and role and nothing else. Not the
 session name — the same seat is `alpha-engine-navigator` on one machine and
 `macmini-navigator` on another, and the record would split one seat in two. Not
-the model — it is not reliably known here, and a label that is sometimes right is
-worse for counting than one that is always coarse.
+the model — a seat keeps its runtime and its role, but its model is chosen at the
+desk and changes under it. Measured in one project's transcripts: five sessions
+of eighty-seven changed model partway through, and back again.
 
 **Roles are optional.** A seat given none is labelled with its runtime alone —
 `claude` — which is the whole story in a project with one seat. Where a project
@@ -20,12 +21,12 @@ does give this runtime's seats roles, a sighting without one could be any of
 them, or a session no seat owns, and it is not labelled at all rather than
 guessed at: a guess would put a second label on one seat.
 
-**A seat can say otherwise**, with `task_label:`. A model pinned to a seat is
-known to whoever pinned it even though it is not known here, and
-`fable:navigator` says more than `claude:navigator` when it is true. Matched on
-runtime and role, because that is all a sighting carries; two seats in one
-project that share both and ask for different labels are refused when the
-configuration loads, since nothing here could tell them apart.
+**A seat can say otherwise**, with `task_label:` — to match labels a tracker
+already uses. It is written exactly as given, so the same rule holds: a model
+put in it is right until the seat's model changes, and nothing here would
+notice. Matched on runtime and role, because that is all a sighting carries; two
+seats in one project that share both and ask for different labels are refused
+when the configuration loads, since nothing here could tell them apart.
 
 **One colon.** GitLab reserves `::` for scoped labels on its paid tiers, where two
 labels in one scope replace each other — `claude::driver` would take
