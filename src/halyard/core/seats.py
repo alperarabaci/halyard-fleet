@@ -91,6 +91,10 @@ class Seat:
     #: measured twice. So the record is produced by a separate one-shot turn
     #: reading the transcript, and handed back afterwards with the file above.
     before_compaction: str | None = None
+    #: The label this seat puts on the task its branch is for, when runtime and
+    #: role are not what the record should say — `fable:navigator`. Unset
+    #: means runtime and role, `claude:navigator`. See `tasks.attribution`.
+    task_label: str | None = None
 
     def __post_init__(self) -> None:
         allowed = known_runtimes()

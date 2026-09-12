@@ -55,9 +55,18 @@ _PROJECT_FIELDS = {
     "commands",
     "forge",
     "labels",
+    "label_work",
     "confirmation",
 }
-_SEAT_FIELDS = {"runtime", "session", "chat", "role", "after_compaction", "before_compaction"}
+_SEAT_FIELDS = {
+    "runtime",
+    "session",
+    "chat",
+    "role",
+    "after_compaction",
+    "before_compaction",
+    "task_label",
+}
 
 
 @dataclass(frozen=True)
@@ -111,6 +120,10 @@ class Project:
     #: which is the right default until a project has more of them than a phone
     #: keyboard can show.
     labels: tuple[str, ...] = ()
+    #: Whether each seat's label goes on the task its branch is for, the first
+    #: time that seat works on it — `claude:navigator`. Off unless asked for:
+    #: it writes to somebody's issue tracker on its own. See `tasks.attribution`.
+    label_work: bool = False
     #: The extra round this project asks for before closing a piece of work.
     #: `None` means no such round exists here, and `/commit` is unchanged.
     confirmation: Confirmation | None = None
@@ -174,6 +187,35 @@ def _as_text(value: Any) -> str | None:
     return str(value).strip() or None
 
 
+def _as_flag(project: str, key: str, value: Any) -> bool:
+    """A yes-or-no setting. Absent is no; anything but a boolean is refused.
+
+    Refused rather than read generously, because the generous reading of
+    `label_work: "false"` is yes — a string is truthy — and this one writes to
+    an issue tracker.
+    """
+    if value is None:
+        return False
+    if isinstance(value, bool):
+        return value
+    raise ValueError(f"`{key}:` in project {project!r} must be true or false, not {value!r}.")
+
+
+def _task_label_from(label: str, project: str, value: Any) -> str | None:
+    """A seat's own task label, refused if the tracker would split it in two.
+
+    GitLab adds labels as a comma-separated list, so `task_label: a,b` would put
+    two labels on every task the seat touched.
+    """
+    text = _as_text(value)
+    if text and "," in text:
+        raise ValueError(
+            f"Seat {label!r} in project {project!r}: `task_label:` cannot contain a "
+            "comma, which the tracker would read as two labels."
+        )
+    return text
+
+
 def _seat_from(label: str, spec: Any, project: str) -> Seat:
     if not isinstance(spec, dict):
         raise ValueError(
@@ -205,6 +247,7 @@ def _seat_from(label: str, spec: Any, project: str) -> Seat:
         project=project,
         after_compaction=_as_text(spec.get("after_compaction")),
         before_compaction=_as_text(spec.get("before_compaction")),
+        task_label=_task_label_from(label, project, spec.get("task_label")),
     )
 
 
@@ -260,6 +303,22 @@ def projects_from_yaml(text: str) -> list[Project]:
             seen[label] = project
             seats.append(_seat_from(label, spec, project))
 
+        # A sighting carries a runtime and a role and nothing else, so seats that
+        # share both and ask for different task labels could not be told apart
+        # when one of them is heard from. Refused here, where the fix is a line,
+        # rather than labelling a task with whichever happened to match first.
+        wanted: dict[tuple[str, Role | None], set[str | None]] = {}
+        for seat in seats:
+            wanted.setdefault((seat.runtime, seat.role), set()).add(seat.task_label)
+        for (runtime, role), labels in wanted.items():
+            if len(labels) > 1:
+                shown = ", ".join(sorted(repr(x) if x else "the default" for x in labels))
+                kind = f"{role.value} seats" if role else "seats without a role"
+                raise ValueError(
+                    f"Project {project!r}: its {runtime} {kind} ask for different "
+                    f"task labels ({shown}), and nothing that labels a task can tell them apart."
+                )
+
         path = _as_text(body.get("path"))
         projects.append(
             Project(
@@ -271,6 +330,7 @@ def projects_from_yaml(text: str) -> list[Project]:
                 commands=_commands_from(project, body.get("commands")),
                 forge=_as_text(body.get("forge")),
                 labels=_warnings_from(project, body.get("labels")) or (),
+                label_work=_as_flag(project, "label_work", body.get("label_work")),
                 confirmation=_confirmation_from(project, body.get("confirmation")),
             )
         )

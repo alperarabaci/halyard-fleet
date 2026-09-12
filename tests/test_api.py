@@ -372,3 +372,63 @@ async def test_a_call_that_asks_nothing_more_keeps_its_record_shape(
     requested = [r for r in _records(tmp_path) if r["action"] == "approval.requested"]
     assert "asks" not in requested[-1]["detail"]
     assert "patterns" not in requested[-1]["detail"]
+
+
+# --- labelling who worked on a task -------------------------------------------
+
+
+def _one_project(tmp_path: Path, *, label_work: bool):
+    from halyard.core.config_file import Project
+
+    return {
+        "alpha-engine": Project(name="alpha-engine", path=tmp_path, seats=[], label_work=label_work)
+    }
+
+
+async def test_a_project_that_asked_for_labels_is_listened_for(tmp_path: Path, monkeypatch) -> None:
+    from halyard.api import app as module
+
+    monkeypatch.setattr(
+        module, "configured_projects", lambda: _one_project(tmp_path, label_work=True)
+    )
+    settings = make_settings(tmp_path, ChannelKind.STUB_ALLOW).model_copy(
+        update={"forge_token": "a-token"}
+    )
+
+    app = module.create_app(settings)
+
+    assert len(app.state.registry._listeners) == 1
+
+
+async def test_nothing_listens_where_no_project_asked(tmp_path: Path, monkeypatch) -> None:
+    """Off unless asked for: it writes to somebody's issue tracker on its own."""
+    from halyard.api import app as module
+
+    monkeypatch.setattr(
+        module, "configured_projects", lambda: _one_project(tmp_path, label_work=False)
+    )
+    settings = make_settings(tmp_path, ChannelKind.STUB_ALLOW).model_copy(
+        update={"forge_token": "a-token"}
+    )
+
+    app = module.create_app(settings)
+
+    assert app.state.registry._listeners == []
+
+
+async def test_asking_without_a_token_says_so_and_writes_nothing(
+    tmp_path: Path, monkeypatch, caplog
+) -> None:
+    import logging
+
+    from halyard.api import app as module
+
+    monkeypatch.setattr(
+        module, "configured_projects", lambda: _one_project(tmp_path, label_work=True)
+    )
+    caplog.set_level(logging.WARNING, logger="halyard.api.app")
+
+    app = module.create_app(make_settings(tmp_path, ChannelKind.STUB_ALLOW))
+
+    assert app.state.registry._listeners == []
+    assert "no forge token" in caplog.text

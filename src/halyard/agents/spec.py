@@ -222,6 +222,9 @@ class RuntimeSpec:
     #: not all `drv1`. Matches what people were already writing by hand:
     #: `nav`/`drv`, `xnav`/`xdrv`, `gnav`/`gdrv`.
     prefix: str = ""
+    #: The short name a task is labelled with — `claude` in `claude:navigator`.
+    #: Empty means the runtime's own name, which is already short for the rest.
+    tag: str = ""
     #: Whether this runtime is on the machine, when a PATH lookup is not the
     #: answer. Antigravity's application bundles its binaries inside the `.app`
     #: and puts nothing on PATH, so `which` reports it missing on the one
@@ -238,6 +241,11 @@ class RuntimeSpec:
     #: only runtime that takes a configured binary path, and it reads it from
     #: the keyword arguments rather than making everyone else accept one.
     check_available: Callable[..., list[tuple[str, str]]] | None = field(default=None)
+    #: What this runtime's checks need from `Settings`, as keyword arguments for
+    #: `check_available` — so nothing outside the package has to know one
+    #: runtime's setting names. Claude Code is the only one with any; the rest
+    #: need nothing and leave it unset. See `check_context`.
+    check_settings: Callable[..., dict[str, object]] | None = None
     #: Anything worth saying about a session that *did* resolve. This is where
     #: findable-and-unreachable lives: an Antigravity conversation owned by the
     #: `agy` CLI resolves perfectly and can never be sent to, and without this
@@ -304,6 +312,19 @@ class RuntimeSpec:
         as `halyard unwire` reporting success while changing nothing.
         """
         return self.install is not None and self.uninstall is not None
+
+    def check_context(self, settings: object | None) -> dict[str, object]:
+        """The keyword arguments this runtime's own checks take from `settings`.
+
+        Each caller passes a runtime only what that runtime asked for. Before
+        this, `doctor` and the channel both named Claude Code's two settings and
+        handed them to every runtime's check — one package's knowledge, kept in
+        two places that are not it, and a runtime with settings of its own would
+        have had to be written into both.
+        """
+        if self.check_settings is None or settings is None:
+            return {}
+        return dict(self.check_settings(settings))
 
     def settings_path(self, project_root: Path) -> Path:
         return project_root / self.hooks.settings

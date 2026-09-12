@@ -38,6 +38,16 @@ def _runner(settings=None) -> ClaudeCodeRunner:
     )
 
 
+def _check_settings(settings) -> dict[str, object]:
+    """What `_check_available` takes from `Settings`: the two settings that are
+    Claude Code's own. Named here, beside the check that reads them, and nowhere
+    else — see `RuntimeSpec.check_context`."""
+    return {
+        "claude_binary": getattr(settings, "claude_binary", None),
+        "claude_oauth_token": getattr(settings, "claude_oauth_token", None),
+    }
+
+
 def _check_available(claude_binary=None, claude_oauth_token=None, **_) -> list[tuple[str, str]]:
     """The CLI, which one, and whether it can sign in.
 
@@ -143,6 +153,7 @@ RUNTIME = RuntimeSpec(
     name="claude-code",
     human="Claude Code",
     binary="claude",
+    tag="claude",
     hooks=Hooks(
         settings=".claude/settings.local.json",
         also=(".claude/settings.json",),
@@ -191,6 +202,7 @@ RUNTIME = RuntimeSpec(
     list_sessions=late("halyard.agents.claude_code", "list_named_sessions"),
     sessions_hint="`halyard sessions`",
     check_available=_check_available,
+    check_settings=_check_settings,
     present=_present,
     verify=Verification(
         command=("-p", "--model", "haiku", "{prompt}"),

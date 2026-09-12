@@ -17,6 +17,7 @@ will want a schema shaped by handoff, not by this.
 from __future__ import annotations
 
 import asyncio
+import logging
 from collections.abc import Callable
 from datetime import UTC, datetime
 from enum import StrEnum
@@ -26,6 +27,8 @@ from pydantic import BaseModel, ConfigDict
 from halyard.core.events import Role
 
 Clock = Callable[[], datetime]
+
+logger = logging.getLogger(__name__)
 
 
 def _default_clock() -> datetime:
@@ -81,6 +84,8 @@ class SessionRegistry:
         self._sessions: dict[str, SessionInfo] = {}
         self._lock = asyncio.Lock()
         self._clock = clock
+        #: Told about every sighting. See `listen`.
+        self._listeners: list[Callable[[SessionInfo], None]] = []
 
     async def observe(
         self,
@@ -122,7 +127,25 @@ class SessionRegistry:
                     }
                 )
             self._sessions[session_id] = session
-            return session
+        # Outside the lock, and never allowed to raise: whatever listens is
+        # told on the path of an approval, and a listener that fails must not
+        # become an approval that fails.
+        for listener in self._listeners:
+            try:
+                listener(session)
+            except Exception:
+                logger.exception("A session listener failed")
+        return session
+
+    def listen(self, listener: Callable[[SessionInfo], None]) -> None:
+        """Be told each time a session is heard from.
+
+        Called with the session as it now stands, after the registry has let
+        go of its lock. A listener must return at once — this runs on the path
+        of every approval — so anything slow belongs in a task of its own.
+        The registry does not know what listens; that is the point of it.
+        """
+        self._listeners.append(listener)
 
     async def get(self, session_id: str) -> SessionInfo | None:
         """Return the session, or None if it was never observed."""

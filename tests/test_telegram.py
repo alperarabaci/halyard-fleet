@@ -2808,16 +2808,16 @@ async def test_a_check_that_breaks_falls_back_rather_than_going_quiet(
     assert "has no session named" in api.sent[-1]["text"]
 
 
-async def test_the_check_is_given_what_doctor_gives_it(tmp_path: Path, monkeypatch) -> None:
-    """Without the token a Claude Code check would call a machine that signs in
-    with one "not signed in" — a confident wrong reason, which is worse than
-    the vague right one this replaced."""
+async def test_each_check_is_given_its_own_runtime_s_context(tmp_path: Path, monkeypatch) -> None:
+    """Asked of each runtime and handed to that runtime alone. Without its own
+    settings a check can give a confident wrong reason; with another runtime's
+    it is being told things that are none of its business."""
     channel, _, asked = await unreachable(tmp_path, monkeypatch, says=[("ok", "fine")])
-    channel._runtime_context = {"claude_oauth_token": "a-token"}
+    channel._check_contexts = {"opencode": {"its_own": "yes"}, "codex": {"somebody_else": "no"}}
 
     await channel._handle_message(typed_in("carry on", DRV_CHAT))
 
-    assert asked and asked[0]["claude_oauth_token"] == "a-token"
+    assert asked == [{"its_own": "yes"}]
 
 
 # --- what the runtime says it is asking ---------------------------------------
@@ -2876,3 +2876,25 @@ async def test_a_settled_card_keeps_what_was_asked() -> None:
     assert "Access external directory /tmp" in cards.render_resolved(
         request, decision="allow", by="tg:1"
     )
+
+
+# --- the reviewer seat --------------------------------------------------------
+
+
+async def test_a_reviewer_is_a_seat_like_the_others(tmp_path: Path) -> None:
+    """Configured as `role: reviewer` with a chat of its own. Nothing in routing
+    is special to a role: the card goes where the seat says, and says which
+    seat it came from."""
+    from halyard.core.seats import Seat
+
+    reviewer_chat = "-1005555555555"
+    channel, api, store = await routed(tmp_path)
+    channel._seats = [Seat("xrev", "codex", "alpha-engine-xreviewer", reviewer_chat, Role.REVIEWER)]
+    request = await an_approval(
+        store, agent_id="codex", role=Role.REVIEWER, session_name="alpha-engine-xreviewer"
+    )
+
+    await channel.send_approval_request(request)
+
+    assert api.sent[0]["chat_id"] == reviewer_chat
+    assert "REVIEWER — PERMISSION REQUEST" in api.sent[0]["text"]

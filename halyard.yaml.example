@@ -126,6 +126,10 @@ projects:
   alpha-engine:
     # Where `halyard wire` puts the gate.
     path: ~/code/alpha-engine
+    # Put each seat's label on the task its branch is for — `claude:navigator`,
+    # `codex:reviewer` — the first time that seat works on it. Needs a forge
+    # token that may label issues; off unless set. See docs/setup.md.
+    # label_work: true
     seats:
       # A label is what you type on a phone. It has to be unique across every
       # project, because it is also how `doctor` names a seat.
@@ -176,6 +180,11 @@ projects:
         # Optional. It colours the card and matches a hook that declares one.
         # Two seats may share a role; that is the point of having four.
         role: navigator
+        # Optional. The label this seat puts on a task when `label_work` is on —
+        # runtime and role unless set, `claude:navigator`, or `claude` alone for a
+        # seat with no role. Set it when the record should say more, like the
+        # model this seat is pinned to.
+        # task_label: fable:navigator
 
       drv:
         runtime: claude-code
@@ -194,6 +203,14 @@ projects:
         session: alpha-engine-xdriver
         chat: "-1004234567890"
         role: driver
+
+      # A reviewer is a seat like the others. Hand it work with `/forward`
+      # from the seat that wrote it; its cards go to its own chat.
+      xrev:
+        runtime: codex
+        session: alpha-engine-xreviewer
+        chat: "-1005234567890"
+        role: reviewer
 
   # A second project is a second block. A seat with no `chat` is reachable by
   # name and has nowhere of its own to speak, which is enough to hand it work.
