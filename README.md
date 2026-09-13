@@ -229,12 +229,14 @@ missing costs orientation, never the session.
 
 `halyard service install` sets up a launchd agent that comes back after a crash
 and after a reboot. Every time it starts it runs `git pull --ff-only`, then
-`uv sync`, then serves — so the machine you leave running stays current without
-you logging in to update it. The pull is fail-open: it never rewinds or touches
-local changes, and a pull it cannot fast-forward is skipped so the last
-known-good code still serves. It runs the code it pulls, so point the branch at
-a remote you control; `install` prints which one. `uninstall` and `status` do
-what they say. macOS only — on Linux, run `halyard serve` under a systemd unit.
+`uv sync --inexact`, then serves — so the machine you leave running stays
+current without you logging in to update it, and a checkout you also develop in
+keeps the tools `uv sync --extra dev` installed. The pull is fail-open: it never
+rewinds or touches local changes, and a pull it cannot fast-forward is skipped
+so the last known-good code still serves. It runs the code it pulls, so point
+the branch at a remote you control; `install` prints which one. `uninstall` and
+`status` do what they say. macOS only — on Linux, run `halyard serve` under a
+systemd unit.
 
 ## Known limitations
 
