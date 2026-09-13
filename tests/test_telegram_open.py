@@ -155,7 +155,10 @@ async def test_open_with_no_name_asks_which_one(monkeypatch, on_a_mac, wired) ->
 
     assert "Open which one?" in api.sent[-1]["text"]
     offered = {
-        button["text"] for row in api.sent[-1]["reply_markup"]["inline_keyboard"] for button in row
+        button["text"]
+        for row in api.sent[-1]["reply_markup"]["inline_keyboard"]
+        for button in row
+        if button != cards.CANCEL
     }
     assert offered == {"claude", "codex", "antigravity"}
 
@@ -172,7 +175,10 @@ async def test_only_what_can_be_opened_is_offered(monkeypatch, on_a_mac, wired) 
     await channel._handle_message(typed("/open"))
 
     offered = {
-        button["text"] for row in api.sent[-1]["reply_markup"]["inline_keyboard"] for button in row
+        button["text"]
+        for row in api.sent[-1]["reply_markup"]["inline_keyboard"]
+        for button in row
+        if button != cards.CANCEL
     }
     assert offered == {"codex", "antigravity"}
 

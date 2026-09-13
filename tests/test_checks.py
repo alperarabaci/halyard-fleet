@@ -56,3 +56,23 @@ def test_the_prompt_says_the_check_cannot_look_for_itself() -> None:
 def test_a_fenced_answer_loses_its_fence() -> None:
     assert checks.unfenced("```\nproof · no finding\n```") == "proof · no finding"
     assert checks.unfenced("proof · no finding") == "proof · no finding"
+
+
+def test_the_version_is_the_commit_that_last_changed_the_check(tmp_path: Path) -> None:
+    """What a finding was a finding by, once the file changes next week."""
+    git(tmp_path, "init", "-q")
+    git(tmp_path, "config", "user.email", "t@example.com")
+    git(tmp_path, "config", "user.name", "Tester")
+    (tmp_path / "proof.md").write_text("# proof\n")
+    git(tmp_path, "add", ".")
+    git(tmp_path, "commit", "-qm", "first")
+    commit = subprocess.run(
+        ["git", "-C", str(tmp_path), "log", "-1", "--format=%h"],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+
+    assert checks.version(Path("proof.md"), tmp_path) == commit
+    (tmp_path / "proof.md").write_text("# proof, edited\n")
+    assert checks.version(Path("proof.md"), tmp_path) == f"{commit} + local edits"
