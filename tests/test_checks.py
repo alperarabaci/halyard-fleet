@@ -1,43 +1,40 @@
-"""Tests for `halyard.checks` — reading a project's check, and what it is asked."""
+"""Tests for `halyard.checks` — one check, run over a reply, through `Asker`."""
 
 from __future__ import annotations
 
-import subprocess
 from pathlib import Path
 
 from halyard import checks
 
 
-def git(repo: Path, *args: str) -> None:
-    subprocess.run(["git", "-C", str(repo), *args], capture_output=True, text=True, check=True)
+class Asking:
+    """An `Asker` that answers from a script and remembers what it was asked."""
+
+    def __init__(self, says: str | None = "proof · no finding") -> None:
+        self.says = says
+        self.asked: list[tuple[str, str | None]] = []
+
+    async def ask(
+        self, text: str, *, timeout: float = 180.0, model: str | None = None
+    ) -> str | None:
+        self.asked.append((text, model))
+        if self.says is None:
+            raise RuntimeError("no model today")
+        return self.says
 
 
-def test_a_check_is_read_relative_to_its_project(tmp_path: Path) -> None:
-    (tmp_path / "NOTES").mkdir()
-    (tmp_path / "NOTES" / "proof.md").write_text("# proof\nLook for claims.\n")
-
-    assert checks.read(Path("NOTES/proof.md"), tmp_path) == "# proof\nLook for claims."
-
-
-def test_a_check_that_is_not_there_reads_as_nothing(tmp_path: Path) -> None:
-    assert checks.read(Path("NOTES/gone.md"), tmp_path) == ""
-
-
-def test_the_context_names_the_task_and_where_the_tree_stands(tmp_path: Path) -> None:
-    """A check of a report is only good for the tree the report was about."""
-    git(tmp_path, "init", "-q", "-b", "353-organization-rollout")
-    git(tmp_path, "config", "user.email", "t@example.com")
-    git(tmp_path, "config", "user.name", "Tester")
-    (tmp_path / "a.txt").write_text("a\n")
-    git(tmp_path, "add", ".")
-    git(tmp_path, "commit", "-qm", "first")
-    (tmp_path / "a.txt").write_text("b\n")
-
-    said = checks.context(tmp_path, "alpha-engine")
-
-    assert "Work item: alpha-engine#353" in said
-    assert any(line.startswith("HEAD: ") for line in said)
-    assert any("1 file changed" in line for line in said)
+async def ran(tmp_path: Path, asker: Asking, check: str = "proof.md") -> checks.Answer:
+    return await checks.run(
+        "proof",
+        Path(check),
+        project=tmp_path,
+        context=["Work item: alpha-engine#355"],
+        note="delivery",
+        reply="42 passed",
+        asker=asker,
+        model="sonnet",
+        timeout=5,
+    )
 
 
 def test_the_prompt_says_the_check_cannot_look_for_itself() -> None:
@@ -56,26 +53,6 @@ def test_the_prompt_says_the_check_cannot_look_for_itself() -> None:
 def test_a_fenced_answer_loses_its_fence() -> None:
     assert checks.unfenced("```\nproof · no finding\n```") == "proof · no finding"
     assert checks.unfenced("proof · no finding") == "proof · no finding"
-
-
-def test_the_version_is_the_commit_that_last_changed_the_check(tmp_path: Path) -> None:
-    """What a finding was a finding by, once the file changes next week."""
-    git(tmp_path, "init", "-q")
-    git(tmp_path, "config", "user.email", "t@example.com")
-    git(tmp_path, "config", "user.name", "Tester")
-    (tmp_path / "proof.md").write_text("# proof\n")
-    git(tmp_path, "add", ".")
-    git(tmp_path, "commit", "-qm", "first")
-    commit = subprocess.run(
-        ["git", "-C", str(tmp_path), "log", "-1", "--format=%h"],
-        capture_output=True,
-        text=True,
-        check=True,
-    ).stdout.strip()
-
-    assert checks.version(Path("proof.md"), tmp_path) == commit
-    (tmp_path / "proof.md").write_text("# proof, edited\n")
-    assert checks.version(Path("proof.md"), tmp_path) == f"{commit} + local edits"
 
 
 def test_what_a_seat_is_handed_can_be_read_cold() -> None:
@@ -97,3 +74,39 @@ def test_what_a_seat_is_handed_can_be_read_cold() -> None:
     assert "Check: proof — NOTES/proof.md @ 3e8c847" in text
     assert "Where: Work item: alpha-engine#355" in text
     assert text.index("evidence missing") < text.index("All 42 tests passed.")
+
+
+async def test_a_check_runs_its_own_text_over_the_reply(tmp_path: Path) -> None:
+    """Its instructions, what Halyard can see, and the reply — as one turn."""
+    (tmp_path / "proof.md").write_text("# proof\n")
+    asker = Asking()
+
+    answer = await ran(tmp_path, asker)
+
+    [(asked, model)] = asker.asked
+    assert asked.startswith("# proof")
+    assert "Work item: alpha-engine#355" in asked
+    assert asked.endswith("42 passed")
+    assert model == "sonnet"
+    assert answer.measured
+    assert answer.text == "proof · no finding"
+    assert isinstance(asker, checks.Asker)
+
+
+async def test_a_model_that_does_not_answer_is_said_not_skipped(tmp_path: Path) -> None:
+    """A missing line reads exactly like a clean one."""
+    (tmp_path / "proof.md").write_text("# proof\n")
+
+    answer = await ran(tmp_path, Asking(says=None))
+
+    assert not answer.measured
+    assert answer.why == "the model did not answer"
+
+
+async def test_a_check_that_cannot_be_read_never_asks(tmp_path: Path) -> None:
+    asker = Asking()
+
+    answer = await ran(tmp_path, asker, check="gone.md")
+
+    assert asker.asked == []
+    assert "could not read" in answer.why

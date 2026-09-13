@@ -28,7 +28,8 @@ from functools import partial
 from pathlib import Path
 
 from halyard import checks as checking
-from halyard import commits
+from halyard import commits, frame
+from halyard import handoffs as handing
 from halyard import tasks as task_tracker
 from halyard.agents.base import AgentRunner
 from halyard.applications import catalogue, desktop
@@ -106,6 +107,7 @@ COMMANDS: tuple[tuple[str, str], ...] = (
     ("to", "Send a message to another seat by name"),
     ("forward", "Hand this chat's last reply to another seat"),
     ("checks", "Run one of this project's checks over this chat's last reply"),
+    ("handoff", "Hand this chat's last reply on, the way this project defines it"),
     ("commit", "Commit this branch's work, with a message to approve"),
     ("review_and_commit", "The same, with this project's checks and its review round"),
     ("open", "Open an agent on the machine — claude, codex, gemini"),
@@ -262,6 +264,27 @@ def parse_destination(value: str | None) -> tuple[str, int | None] | None:
     if chat and thread.isdigit():
         return chat, int(thread)
     return value, None
+
+
+class _SeatDelivery:
+    """The channel's side of `handoffs.Delivery`: the path `/to` takes.
+
+    So a handoff lands where a person would have sent it by hand, and both chats
+    say so, the way they do for `/to`.
+    """
+
+    def __init__(
+        self, channel: TelegramChannel, actor: str, chat_id: str, thread_id: int | None
+    ) -> None:
+        self._channel = channel
+        self._actor = actor
+        self._chat_id = chat_id
+        self._thread_id = thread_id
+
+    async def to_seat(self, label: str, text: str) -> None:
+        await self._channel._forward_to_seat(
+            f"{label} {text}", self._actor, self._chat_id, self._thread_id
+        )
 
 
 class TelegramChannel:
@@ -812,6 +835,10 @@ class TelegramChannel:
             # Detached: each check is a model turn of its own over a whole
             # report, and the poller has everybody else's buttons to answer.
             self._detach(self._run_checks(argument, here or "", thread), "/checks")
+            return
+        if command == "handoff":
+            # Detached for the same reason: a handoff may run checks first.
+            self._detach(self._run_handoff(argument, here or "", thread, actor), "/handoff")
             return
         if command in ("commit", "review_and_commit"):
             # Detached: this reads a repository, may run the project's whole
@@ -1962,74 +1989,44 @@ class TelegramChannel:
             await self._run_checks("", chat_id, thread_id)
             return
 
-        # This chat's own runtime if it can take a one-shot turn, and the
-        # default one otherwise, so a report from any seat can be checked.
-        runner = self._message_runner(chat_id)
-        if not hasattr(runner, "ask"):
-            runner = self._runner
-        if not hasattr(runner, "ask"):
+        runner = self._one_shot_runner(chat_id)
+        if runner is None:
             await self._say("No runtime here can take a one-shot turn.", chat_id, thread_id)
             return
 
         path = found.checks[name]
-        instructions = checking.read(path, found.path)
-        if not instructions:
-            logger.warning("Check %s did not run: could not read %s", name, path)
-            await self._say(
-                f"<b>{html.escape(name)}</b> · unmeasured — could not read "
-                f"<code>{html.escape(str(path))}</code>",
-                chat_id,
-                thread_id,
-            )
-            return
-        known, version = await asyncio.gather(
-            asyncio.to_thread(checking.context, found.path, found.name),
-            asyncio.to_thread(checking.version, path, found.path),
-        )
-        note = note.strip()
         arrived = _local(said.at).strftime("%H:%M")
-        # What the model was given, as a frame rather than the files: enough to
-        # say afterwards what a finding was about, and which text found it.
-        logger.info(
-            "Check %s asked · %s · reply %s, %d chars, from %s %s · check %s @ %s, %d chars"
-            " · note %r · model %s",
-            name,
-            " · ".join(known),
-            arrived,
-            len(said.text),
-            said.agent_id or "?",
-            said.session_id or "?",
-            path,
-            version,
-            len(instructions),
-            note,
-            CHECK_MODEL,
-        )
         await self._say(
             f"\U0001f50e <b>{html.escape(name)}</b> is reading the last reply here "
             f"({arrived}, {len(said.text):,} characters) with "
-            f"<code>{html.escape(str(path))}</code> @ {html.escape(version)}…",
+            f"<code>{html.escape(str(path))}</code>…",
             chat_id,
             thread_id,
         )
-        asked = checking.prompt(instructions, context=known, note=note, text=said.text)
-        started = time.monotonic()
-        try:
-            answer = await runner.ask(asked, model=CHECK_MODEL, timeout=CHECK_TIMEOUT_SECONDS)
-        except Exception:
-            logger.warning("Check %s failed", name, exc_info=True)
-            answer = None
-        took = time.monotonic() - started
-        if not answer:
-            logger.info("Check %s got no answer in %.1fs", name, took)
+        known = await asyncio.to_thread(frame.context, found.path, found.name)
+        answer = await checking.run(
+            name,
+            path,
+            project=found.path,
+            context=known,
+            note=note.strip(),
+            reply=said.text,
+            asker=runner,
+            model=CHECK_MODEL,
+            timeout=CHECK_TIMEOUT_SECONDS,
+            about=(
+                f"reply {arrived}, {len(said.text)} chars, "
+                f"from {said.agent_id or '?'} {said.session_id or '?'}"
+            ),
+        )
+        if not answer.measured:
             await self._say(
-                f"<b>{html.escape(name)}</b> · unmeasured — the model did not answer",
+                f"<b>{html.escape(name)}</b> · unmeasured — {html.escape(answer.why)}",
                 chat_id,
                 thread_id,
             )
             return
-        logger.info("Check %s answered in %.1fs:\n%s", name, took, answer)
-        findings = checking.unfenced(answer)
+        findings = answer.text
         # Kept whole — what ran, on what, what it found, and the reply itself —
         # so a button under the answer hands a seat something it can read cold,
         # not just the piece of the answer the button sits under.
@@ -2040,7 +2037,7 @@ class TelegramChannel:
                 text=checking.handed_on(
                     name,
                     path=path,
-                    version=version,
+                    version=answer.version,
                     author=_seat_name(for_chat(self._seats, chat_id)) or "this chat",
                     arrived=arrived,
                     context=known,
@@ -2086,6 +2083,144 @@ class TelegramChannel:
         target = next((s for s in self._seats if s.label.casefold() == label.casefold()), None)
         greeting = f"To {_seat_name(target) or label}, from Halyard."
         await self._forward_to_seat(f"{label} {greeting}\n\n{kept.text}", actor, chat_id, thread_id)
+
+    def _one_shot_runner(self, chat_id: str):
+        """A runtime that can take a turn apart from any session, or None.
+
+        This chat's own if it can, and the default one otherwise, so a report
+        from any seat can be checked — the channel's side of `checks.Asker`.
+        """
+        runner = self._message_runner(chat_id)
+        if not hasattr(runner, "ask"):
+            runner = self._runner
+        return runner if hasattr(runner, "ask") else None
+
+    def _seats_for(self, project: str, to: str | None) -> list[Seat]:
+        """Where a handoff can go: the seat `to:` names, the seats holding the
+        role it names, or every seat of the project.
+
+        A role held by two seats — a navigator on each runtime — offers both
+        rather than guessing between them.
+        """
+        mine = [seat for seat in self._seats if seat.project == project] or list(self._seats)
+        if not to:
+            return mine
+        named = [seat for seat in mine if seat.label.casefold() == to.casefold()]
+        return named or [seat for seat in mine if seat.role and seat.role.value == to.casefold()]
+
+    async def _run_handoff(
+        self,
+        typed: str,
+        chat_id: str,
+        thread_id: int | None,
+        actor: str,
+        to: str | None = None,
+    ) -> None:
+        """`/handoff` — offer this project's handoffs, or make the named one.
+
+        The shape `/checks` has: a button per handoff, and the one pressed goes.
+        It carries the last reply in this chat, the project's own text for the
+        seat receiving it, and the answers of whichever checks it names — run
+        first, so they arrive together. Whatever follows the name goes in as a
+        note, the way it does for a check.
+        """
+        found = self._repository_for(chat_id)
+        if found is None:
+            await self._say(
+                "I do not know which repository this chat is about. Give the "
+                "project a <code>path:</code> in <code>halyard.yaml</code>.",
+                chat_id,
+                thread_id,
+            )
+            return
+        if not found.handoffs:
+            await self._say(
+                f"<b>{html.escape(found.name)}</b> has no <code>handoffs:</code> in "
+                "<code>halyard.yaml</code>.",
+                chat_id,
+                thread_id,
+            )
+            return
+
+        wanted, _, note = typed.strip().partition(" ")
+        if not wanted:
+            await self._say(
+                "Hand the last reply here on how?",
+                chat_id,
+                thread_id,
+                reply_markup=cards.handoff_choices(tuple(found.handoffs)),
+            )
+            return
+        name = next((key for key in found.handoffs if key.casefold() == wanted.casefold()), None)
+        if name is None:
+            await self._say(
+                f"<b>{html.escape(found.name)}</b> has no handoff called "
+                f"<b>{html.escape(wanted)}</b>.",
+                chat_id,
+                thread_id,
+            )
+            await self._run_handoff("", chat_id, thread_id, actor)
+            return
+        handoff = found.handoffs[name]
+
+        said = None
+        if handoff.include_last_message:
+            kept = self._kept(chat_id, SAID_FILE)
+            said = last_said.last(kept, chat_id) if kept else None
+            if said is None:
+                await self._say(
+                    "Nothing has been said in this chat yet, so there is nothing to hand on.",
+                    chat_id,
+                    thread_id,
+                )
+                return
+
+        seats = self._seats_for(found.name, to or handoff.to)
+        if len(seats) != 1:
+            await self._say(
+                f"Hand <b>{html.escape(name)}</b> to which seat?",
+                chat_id,
+                thread_id,
+                reply_markup=cards.handoff_seat_choices(
+                    name, tuple(seat.label for seat in seats or self._seats)
+                ),
+            )
+            return
+        [seat] = seats
+
+        first = f", running {', '.join(handoff.checks)} first" if handoff.checks else ""
+        await self._say(
+            f"\U0001f91d <b>{html.escape(name)}</b> → <b>{html.escape(_seat_name(seat))}</b>"
+            f"{html.escape(first)}…",
+            chat_id,
+            thread_id,
+        )
+        known = await asyncio.to_thread(frame.context, found.path, found.name)
+        handed = await handing.hand_off(
+            handoff,
+            project=found.path,
+            context=known,
+            note=note.strip(),
+            reply=said.text if said else None,
+            arrived=_local(said.at).strftime("%H:%M") if said else "",
+            sender=_seat_name(for_chat(self._seats, chat_id)) or "this chat",
+            recipient_label=seat.label,
+            recipient=_seat_name(seat),
+            project_checks=found.checks,
+            asker=self._one_shot_runner(chat_id) if handoff.checks else None,
+            model=CHECK_MODEL,
+            timeout=CHECK_TIMEOUT_SECONDS,
+            delivery=_SeatDelivery(self, actor, chat_id, thread_id),
+        )
+        if handed.answers:
+            await self._say(
+                " · ".join(
+                    f"<b>{html.escape(a.name)}</b>: {'answered' if a.measured else 'unmeasured'}"
+                    for a in handed.answers
+                ),
+                chat_id,
+                thread_id,
+            )
 
     async def _offer_seats(
         self, text: str, chat_id: str, thread_id: int | None, anchor_id: int | None
@@ -2625,6 +2760,19 @@ class TelegramChannel:
             if what == "result":
                 await self._send_result(
                     value, f"tg:{user_id}", here or "", message.get("message_thread_id")
+                )
+                return
+            if what in ("handoff", "handto"):
+                name, _, label = value.partition(">")
+                self._detach(
+                    self._run_handoff(
+                        name,
+                        here or "",
+                        message.get("message_thread_id"),
+                        f"tg:{user_id}",
+                        to=label or None,
+                    ),
+                    "/handoff",
                 )
                 return
             if what == "open":

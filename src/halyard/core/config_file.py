@@ -36,6 +36,7 @@ That is handled here rather than left to whoever writes the file.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -58,6 +59,7 @@ _PROJECT_FIELDS = {
     "label_work",
     "confirmation",
     "checks",
+    "handoffs",
 }
 _SEAT_FIELDS = {
     "runtime",
@@ -88,6 +90,29 @@ class Confirmation:
     inquiry: Path | None = None
     #: What the navigator is sent when the round is asked for.
     review: Path | None = None
+
+
+@dataclass(frozen=True)
+class Handoff:
+    """One way a reply goes from one seat to another, as a project defines it.
+
+    A button on `/handoff`'s card. It carries the chat's last reply, puts the
+    project's own text in front of it, runs whichever of the project's checks it
+    names over the reply first, and delivers the lot to a seat — the one `to:`
+    names, or whichever is pressed. Everything it reads belongs to the project;
+    Halyard adds only what it can see for itself. See `halyard.handoffs`.
+    """
+
+    name: str
+    #: The project's own text for whoever receives it — `review.md`. Read
+    #: relative to the project. Optional: a handoff can be the reply alone.
+    prompt: Path | None = None
+    #: Whether the chat's last reply goes with it. Almost always.
+    include_last_message: bool = True
+    #: Checks from this project's `checks:`, run over the reply before it goes.
+    checks: tuple[str, ...] = ()
+    #: A role (`navigator`) or a seat's label. Unset offers every seat.
+    to: str | None = None
 
 
 @dataclass(frozen=True)
@@ -133,6 +158,9 @@ class Project:
     #: the project and put in front of a model on its own. Empty unless
     #: configured. See `halyard.checks`.
     checks: dict[str, Path] = field(default_factory=dict)
+    #: How a reply is handed from one seat to another here, by name — see
+    #: `Handoff`. Empty unless configured.
+    handoffs: dict[str, Handoff] = field(default_factory=dict)
 
 
 def _confirmation_from(project: str, value: Any) -> Confirmation | None:
@@ -173,6 +201,75 @@ def _checks_from(project: str, value: Any) -> dict[str, Path]:
                 "like `proof: NOTES/checks/proof.md`."
             )
         found[str(name).strip()] = Path(where.strip()).expanduser()
+    return found
+
+
+#: A handoff's name rides in a button, where Telegram allows 64 bytes of
+#: callback data, and is typed after `/handoff`.
+_HANDOFF_NAME = re.compile(r"^[a-z0-9_-]{1,32}$")
+_HANDOFF_FIELDS = {"prompt", "include_last_message", "checks", "to"}
+
+
+def _handoffs_from(
+    project: str, value: Any, *, checks: dict[str, Path], seats: list[Seat]
+) -> dict[str, Handoff]:
+    """`handoffs:` as a mapping of name to how that handoff is made.
+
+    Checked against the rest of the project here, because a handoff naming a
+    check or a seat nobody defined would otherwise fail only when somebody
+    pressed it — from a phone, in the middle of a piece of work.
+    """
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        raise ValueError(f"Project {project!r}: `handoffs:` must be a mapping of name to handoff.")
+    roles = {role.value for role in Role}
+    labels = {seat.label for seat in seats}
+    found: dict[str, Handoff] = {}
+    for raw, spec in value.items():
+        name = str(raw).strip()
+        where = f"Project {project!r}: handoff {name!r}"
+        if not _HANDOFF_NAME.match(name):
+            raise ValueError(
+                f"{where} needs a name of lowercase letters, digits, `-` or `_`, "
+                "up to 32 characters."
+            )
+        spec = spec or {}
+        if not isinstance(spec, dict):
+            raise ValueError(f"{where} must be a mapping.")
+        unknown = set(spec) - _HANDOFF_FIELDS
+        if unknown:
+            raise ValueError(f"{where} has unknown field(s) {', '.join(sorted(unknown))}")
+        named = spec.get("checks") or []
+        if not isinstance(named, list) or not all(isinstance(n, str) and n.strip() for n in named):
+            raise ValueError(f"{where}: `checks:` must be a list of check names.")
+        named = [n.strip() for n in named]
+        if missing := [n for n in named if n not in checks]:
+            raise ValueError(
+                f"{where} names checks this project does not define: {', '.join(missing)}"
+            )
+        carries = spec.get("include_last_message")
+        carries = (
+            True if carries is None else _as_flag(project, f"{name}.include_last_message", carries)
+        )
+        if named and not carries:
+            raise ValueError(f"{where} runs checks over the last message, so it has to carry it.")
+        prompt = _as_text(spec.get("prompt"))
+        if not prompt and not carries:
+            raise ValueError(f"{where} hands on nothing: give it a `prompt:` or the last message.")
+        to = _as_text(spec.get("to"))
+        if to and to.lower() not in roles and to not in labels:
+            raise ValueError(
+                f"{where}: `to:` must be a role ({', '.join(sorted(roles))}) "
+                "or one of this project's seats."
+            )
+        found[name] = Handoff(
+            name=name,
+            prompt=Path(prompt).expanduser() if prompt else None,
+            include_last_message=carries,
+            checks=tuple(named),
+            to=to.lower() if to and to.lower() in roles else to,
+        )
     return found
 
 
@@ -347,6 +444,7 @@ def projects_from_yaml(text: str) -> list[Project]:
                 )
 
         path = _as_text(body.get("path"))
+        checks = _checks_from(project, body.get("checks"))
         projects.append(
             Project(
                 name=project,
@@ -359,7 +457,8 @@ def projects_from_yaml(text: str) -> list[Project]:
                 labels=_warnings_from(project, body.get("labels")) or (),
                 label_work=_as_flag(project, "label_work", body.get("label_work")),
                 confirmation=_confirmation_from(project, body.get("confirmation")),
-                checks=_checks_from(project, body.get("checks")),
+                checks=checks,
+                handoffs=_handoffs_from(project, body.get("handoffs"), checks=checks, seats=seats),
             )
         )
     return projects
@@ -494,6 +593,9 @@ def missing_files(projects: list[Project]) -> list[str]:
                 wanted.append(("confirmation.review", project.confirmation.review))
         for name, path in project.checks.items():
             wanted.append((f"checks.{name}", path))
+        for name, handoff in project.handoffs.items():
+            if handoff.prompt:
+                wanted.append((f"handoffs.{name}.prompt", handoff.prompt))
         for seat in project.seats:
             for key in ("before_compaction", "after_compaction"):
                 if written := getattr(seat, key, None):
