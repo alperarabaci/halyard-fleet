@@ -96,7 +96,9 @@ def choice_data(what: str, value: str) -> str:
 
 
 #: What a choice button may carry. Anything else in a callback is not ours.
-_CHOOSABLE = frozenset({"model", "effort", "to", "fwd", "open", "run", "label", "check", "cancel"})
+_CHOOSABLE = frozenset(
+    {"model", "effort", "to", "fwd", "open", "run", "label", "check", "cancel", "result"}
+)
 
 
 def parse_choice_data(data: str) -> tuple[str, str] | None:
@@ -495,6 +497,25 @@ def check_choices(names: tuple[str, ...]) -> dict | None:
             buttons.append({"text": name, "callback_data": choice_data("check", name)})
         except ValueError:
             continue
+    if not buttons:
+        return None
+    return _keyboard([buttons[i : i + 3] for i in range(0, len(buttons), 3)])
+
+
+def result_choices(check: str, labels: tuple[str, ...]) -> dict | None:
+    """Buttons under a check's answer, one per seat: hand the answer there.
+
+    The check travels in the button with the seat, because a chat can hold the
+    answers of several checks, and the button under `proof` has to send proof's
+    answer even after `claims` has answered below it.
+    """
+    buttons = []
+    for label in labels:
+        try:
+            data = choice_data("result", f"{check}>{label}")
+        except ValueError:
+            continue
+        buttons.append({"text": f"→ {label}", "callback_data": data})
     if not buttons:
         return None
     return _keyboard([buttons[i : i + 3] for i in range(0, len(buttons), 3)])

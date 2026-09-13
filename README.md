@@ -93,7 +93,7 @@ reading configuration.
 | `/options` | every model and effort level the runtime accepts |
 | `/model`, `/effort` | what answers, and how hard it thinks |
 | `/to` | hand a message to another seat by name |
-| `/checks` | pick one of this project's own checks and run it over the chat's last reply |
+| `/checks` | pick one of this project's own checks and run it over the chat's last reply; the answer has a button per seat to hand it on |
 | `/md` | *(configurable)* have the agent write its answer to a file and pass the path |
 | `/commit` | commit this branch's work, with a message to approve — and push |
 | `/review_and_commit` | the same, plus this project's own checks and its review round |

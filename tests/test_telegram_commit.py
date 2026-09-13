@@ -593,6 +593,79 @@ async def test_the_reply_is_timed_by_this_machines_clock(
     assert "23:20" in api.sent[-1]["text"]
 
 
+def pressed_result(value: str) -> dict:
+    """A seat's button under a check's answer."""
+    from halyard.channels.telegram import cards
+
+    return {
+        "id": "cb1",
+        "from": {"id": int(APPROVER)},
+        "data": cards.choice_data("result", value),
+        "message": {"message_id": 5, "chat": {"id": CHAT}},
+    }
+
+
+async def test_the_answer_carries_a_button_per_seat(tmp_path: Path, wired) -> None:
+    """On the answer itself, so handing it on is one tap from reading it."""
+    from halyard.channels.telegram import cards
+
+    channel, api, _, repo = wired
+    checks_in(channel, repo, tmp_path, proof="# proof")
+
+    await channel._run_checks("proof", CHAT, None)
+
+    rows = api.sent[-1]["reply_markup"]["inline_keyboard"]
+    assert rows[0][0]["text"] == "→ nav"
+    assert rows[-1] == [cards.CANCEL]
+
+
+async def test_a_seats_button_hands_it_the_whole_answer_and_what_it_is(
+    tmp_path: Path, wired
+) -> None:
+    """With the line that says what it is, so the session can tell a finding
+    from an instruction."""
+    channel, _, runner, repo = wired
+    checks_in(channel, repo, tmp_path, proof="# proof")
+    await channel._run_checks("proof", CHAT, None)
+
+    await channel._handle_callback(pressed_result("proof>nav"))
+    await settled(channel)
+
+    [(session, text)] = runner.sent
+    assert session == "id-nav"
+    assert "Halyard's proof check (NOTES/proof.md @ uncommitted)" in text
+    assert "alpha-engine#281" in text
+    assert runner.says in text
+
+
+async def test_the_button_under_one_check_sends_that_checks_answer(tmp_path: Path, wired) -> None:
+    """A chat holds several checks' answers; the one under `proof` sends proof's."""
+    channel, _, runner, repo = wired
+    checks_in(channel, repo, tmp_path, proof="# proof", claims="# claims")
+    runner.says = "proof found this"
+    await channel._run_checks("proof", CHAT, None)
+    runner.says = "claims found that"
+    await channel._run_checks("claims", CHAT, None)
+
+    await channel._handle_callback(pressed_result("proof>nav"))
+    await settled(channel)
+
+    [(_, text)] = runner.sent
+    assert "proof found this" in text
+    assert "claims found that" not in text
+
+
+async def test_an_answer_no_longer_kept_says_so(tmp_path: Path, wired) -> None:
+    channel, api, runner, repo = wired
+    checks_in(channel, repo, tmp_path, proof="# proof")
+
+    await channel._handle_callback(pressed_result("proof>nav"))
+    await settled(channel)
+
+    assert "no longer kept" in api.sent[-1]["text"]
+    assert runner.sent == []
+
+
 async def test_pressing_a_check_runs_that_one_over_the_last_reply(tmp_path: Path, wired) -> None:
     """Its own instructions, the whole reply, and what Halyard can see."""
     from halyard.channels.telegram.adapter import CHECK_MODEL
