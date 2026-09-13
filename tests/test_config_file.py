@@ -349,6 +349,35 @@ def test_a_file_that_is_not_there_is_named_with_its_setting(tmp_path) -> None:
     assert "NOTES/GONE.md" in said[0]
 
 
+def test_checks_are_read_as_names_and_files(tmp_path) -> None:
+    [project] = a_project(
+        tmp_path,
+        lines=["checks:", "  proof: NOTES/checks/proof.md", "  claims: NOTES/checks/claims.md"],
+    )
+
+    assert project.checks == {
+        "proof": Path("NOTES/checks/proof.md"),
+        "claims": Path("NOTES/checks/claims.md"),
+    }
+
+
+def test_a_check_written_as_anything_but_a_file_is_refused(tmp_path) -> None:
+    """Otherwise it becomes a path spelled with its own braces, and fails only
+    when somebody runs it."""
+    with pytest.raises(ValueError, match="needs a file"):
+        a_project(tmp_path, lines=["checks:", "  proof: {prompt: NOTES/checks/proof.md}"])
+
+
+def test_a_check_file_that_is_not_there_is_named_too(tmp_path) -> None:
+    from halyard.core.config_file import missing_files
+
+    found = a_project(tmp_path, lines=["checks:", "  proof: NOTES/GONE.md"])
+
+    [said] = missing_files(found)
+    assert "checks.proof" in said
+    assert "NOTES/GONE.md" in said
+
+
 def test_a_seat_prompt_file_is_checked_too(tmp_path) -> None:
     from halyard.core.config_file import missing_files, projects_from_yaml
 

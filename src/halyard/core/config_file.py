@@ -57,6 +57,7 @@ _PROJECT_FIELDS = {
     "labels",
     "label_work",
     "confirmation",
+    "checks",
 }
 _SEAT_FIELDS = {
     "runtime",
@@ -127,6 +128,11 @@ class Project:
     #: The extra round this project asks for before closing a piece of work.
     #: `None` means no such round exists here, and `/commit` is unchanged.
     confirmation: Confirmation | None = None
+    #: What `/checks` runs over the last reply in a chat, by name — `proof:
+    #: NOTES/checks/proof.md`. Each is the project's own file, read relative to
+    #: the project and put in front of a model on its own. Empty unless
+    #: configured. See `halyard.checks`.
+    checks: dict[str, Path] = field(default_factory=dict)
 
 
 def _confirmation_from(project: str, value: Any) -> Confirmation | None:
@@ -147,6 +153,27 @@ def _confirmation_from(project: str, value: Any) -> Confirmation | None:
         inquiry=Path(inquiry).expanduser() if inquiry else None,
         review=Path(review).expanduser() if review else None,
     )
+
+
+def _checks_from(project: str, value: Any) -> dict[str, Path]:
+    """`checks:` as a mapping of name to the file that says what to look for.
+
+    Strict about the shape: a check written as a mapping would otherwise become
+    a path spelled with its own braces, and fail only when somebody ran it.
+    """
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        raise ValueError(f"Project {project!r}: `checks:` must be a mapping of name to file.")
+    found: dict[str, Path] = {}
+    for name, where in value.items():
+        if not str(name).strip() or not isinstance(where, str) or not where.strip():
+            raise ValueError(
+                f"Project {project!r}: check {name!r} needs a file, "
+                "like `proof: NOTES/checks/proof.md`."
+            )
+        found[str(name).strip()] = Path(where.strip()).expanduser()
+    return found
 
 
 def _commands_from(project: str, value: Any) -> dict[str, str]:
@@ -332,6 +359,7 @@ def projects_from_yaml(text: str) -> list[Project]:
                 labels=_warnings_from(project, body.get("labels")) or (),
                 label_work=_as_flag(project, "label_work", body.get("label_work")),
                 confirmation=_confirmation_from(project, body.get("confirmation")),
+                checks=_checks_from(project, body.get("checks")),
             )
         )
     return projects
@@ -464,6 +492,8 @@ def missing_files(projects: list[Project]) -> list[str]:
                 wanted.append(("confirmation.inquiry", project.confirmation.inquiry))
             if project.confirmation.review:
                 wanted.append(("confirmation.review", project.confirmation.review))
+        for name, path in project.checks.items():
+            wanted.append((f"checks.{name}", path))
         for seat in project.seats:
             for key in ("before_compaction", "after_compaction"):
                 if written := getattr(seat, key, None):
