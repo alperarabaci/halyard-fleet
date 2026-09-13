@@ -1395,6 +1395,15 @@ class TelegramChannel:
     # `halyard.commits`. This resolves which repository a chat is about, moves
     # text between that package and Telegram, and nothing else.
 
+    @property
+    def _results_path(self) -> Path | None:
+        """Where a check's answers are kept for the buttons under them.
+
+        Beside what agents said, never in it: `/forward` means an agent's last
+        reply, and must not start handing on Halyard's own output instead.
+        """
+        return self._said_path.with_name("check-results.json") if self._said_path else None
+
     def _repository_for(self, chat_id: str) -> Project | None:
         """The project this chat is about, and where its code is.
 
@@ -1987,9 +1996,55 @@ class TelegramChannel:
             )
             return
         logger.info("Check %s answered in %.1fs:\n%s", name, took, answer)
-        for index, chunk in enumerate(cards.split_for_telegram(checking.unfenced(answer))):
+        findings = checking.unfenced(answer)
+        # Kept whole, with the line that says what it is, so a button under the
+        # answer can hand all of it to a seat — not just the piece it sits under.
+        if self._results_path is not None:
+            author = for_chat(self._seats, chat_id)
+            last_said.remember(
+                self._results_path,
+                chat_id=f"{chat_id}|{name}",
+                text=(
+                    f"Halyard's {name} check ({path} @ {version}), run over "
+                    f"{author.label if author else 'this chat'}'s reply from {arrived} · "
+                    f"{' · '.join(known)}\n\n{findings}"
+                ),
+            )
+        pieces = cards.split_for_telegram(findings)
+        onward = cards.result_choices(name, tuple(seat.label for seat in self._seats))
+        for index, chunk in enumerate(pieces):
             head = f"<b>{html.escape(name)}</b>\n" if index == 0 else ""
-            await self._say(f"{head}<pre>{html.escape(chunk)}</pre>", chat_id, thread_id)
+            await self._say(
+                f"{head}<pre>{html.escape(chunk)}</pre>",
+                chat_id,
+                thread_id,
+                reply_markup=onward if index == len(pieces) - 1 else None,
+            )
+
+    async def _send_result(
+        self, value: str, actor: str, chat_id: str, thread_id: int | None
+    ) -> None:
+        """Hand a check's answer to a seat: the whole of it, as it was kept.
+
+        Not the piece the button sits under — a long answer is split for
+        Telegram — and with the line that says what it is, so the session it
+        lands in can tell a finding from an instruction.
+        """
+        check, _, label = value.partition(">")
+        kept = (
+            last_said.last(self._results_path, f"{chat_id}|{check}")
+            if self._results_path and check and label
+            else None
+        )
+        if kept is None:
+            await self._say(
+                "That result is no longer kept here. Run the check again.",
+                chat_id,
+                thread_id,
+            )
+            return
+        logger.info("Check %s result sent to %s by %s", check, label, actor)
+        await self._forward_to_seat(f"{label} {kept.text}", actor, chat_id, thread_id)
 
     async def _offer_seats(
         self, text: str, chat_id: str, thread_id: int | None, anchor_id: int | None
@@ -2523,6 +2578,11 @@ class TelegramChannel:
                 self._detach(
                     self._run_checks(value, here or "", message.get("message_thread_id")),
                     "/checks",
+                )
+                return
+            if what == "result":
+                await self._send_result(
+                    value, f"tg:{user_id}", here or "", message.get("message_thread_id")
                 )
                 return
             if what == "open":
