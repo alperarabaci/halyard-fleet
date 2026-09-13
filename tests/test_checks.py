@@ -76,3 +76,24 @@ def test_the_version_is_the_commit_that_last_changed_the_check(tmp_path: Path) -
     assert checks.version(Path("proof.md"), tmp_path) == commit
     (tmp_path / "proof.md").write_text("# proof, edited\n")
     assert checks.version(Path("proof.md"), tmp_path) == f"{commit} + local edits"
+
+
+def test_what_a_seat_is_handed_can_be_read_cold() -> None:
+    """What ran, on whose reply, where, what it found — and the reply itself,
+    because a navigator handed the findings alone could not tell what they
+    were about."""
+    text = checks.handed_on(
+        "proof",
+        path=Path("NOTES/proof.md"),
+        version="3e8c847",
+        author="drv (driver)",
+        arrived="00:21",
+        context=["Work item: alpha-engine#355"],
+        findings="evidence missing",
+        reply="All 42 tests passed.",
+    )
+
+    assert "`proof` check on drv (driver)'s reply from 00:21" in text
+    assert "Check: proof — NOTES/proof.md @ 3e8c847" in text
+    assert "Where: Work item: alpha-engine#355" in text
+    assert text.index("evidence missing") < text.index("All 42 tests passed.")
