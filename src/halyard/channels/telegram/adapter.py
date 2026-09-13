@@ -183,6 +183,13 @@ def _local(moment: datetime) -> datetime:
     return moment.astimezone()
 
 
+def _seat_name(seat: Seat | None) -> str:
+    """A seat the way a sentence names it: `drv (driver)`, or just `drv`."""
+    if seat is None:
+        return ""
+    return f"{seat.label} ({seat.role.value})" if seat.role else seat.label
+
+
 def _seat_being_asked_for(text: str) -> str | None:
     """The seat named by one of our own prompts, or None if this is not one."""
     found = _ASKED.match((text or "").strip())
@@ -1997,17 +2004,22 @@ class TelegramChannel:
             return
         logger.info("Check %s answered in %.1fs:\n%s", name, took, answer)
         findings = checking.unfenced(answer)
-        # Kept whole, with the line that says what it is, so a button under the
-        # answer can hand all of it to a seat — not just the piece it sits under.
+        # Kept whole — what ran, on what, what it found, and the reply itself —
+        # so a button under the answer hands a seat something it can read cold,
+        # not just the piece of the answer the button sits under.
         if self._results_path is not None:
-            author = for_chat(self._seats, chat_id)
             last_said.remember(
                 self._results_path,
                 chat_id=f"{chat_id}|{name}",
-                text=(
-                    f"Halyard's {name} check ({path} @ {version}), run over "
-                    f"{author.label if author else 'this chat'}'s reply from {arrived} · "
-                    f"{' · '.join(known)}\n\n{findings}"
+                text=checking.handed_on(
+                    name,
+                    path=path,
+                    version=version,
+                    author=_seat_name(for_chat(self._seats, chat_id)) or "this chat",
+                    arrived=arrived,
+                    context=known,
+                    findings=findings,
+                    reply=said.text,
                 ),
             )
         pieces = cards.split_for_telegram(findings)
@@ -2044,7 +2056,11 @@ class TelegramChannel:
             )
             return
         logger.info("Check %s result sent to %s by %s", check, label, actor)
-        await self._forward_to_seat(f"{label} {kept.text}", actor, chat_id, thread_id)
+        # Who it is for, in the words the configuration already has: the seat
+        # and its role. The rest was written when the check answered.
+        target = next((s for s in self._seats if s.label.casefold() == label.casefold()), None)
+        greeting = f"To {_seat_name(target) or label}, from Halyard."
+        await self._forward_to_seat(f"{label} {greeting}\n\n{kept.text}", actor, chat_id, thread_id)
 
     async def _offer_seats(
         self, text: str, chat_id: str, thread_id: int | None, anchor_id: int | None

@@ -19,6 +19,9 @@ credential-seen.json
 # What each chat last heard, so /forward survives a restart. Agent prose, and
 # this repository is public.
 last-said.json
+# Each chat's last answer per check, with the reply it checked, so the buttons
+# under an answer can hand it on. Agent prose too.
+check-results.json
 halyard.db-shm
 halyard.db-wal
 audit.jsonl

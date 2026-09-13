@@ -117,6 +117,45 @@ def prompt(instructions: str, *, context: list[str], note: str, text: str) -> st
     return "\n".join(parts)
 
 
+def handed_on(
+    name: str,
+    *,
+    path: Path,
+    version: str,
+    author: str,
+    arrived: str,
+    context: list[str],
+    findings: str,
+    reply: str,
+) -> str:
+    """What a seat is handed when somebody sends it a check's answer.
+
+    Written to be read cold by a session that saw none of it happen: what ran,
+    on whose reply, where, what it found — and the reply itself, because a
+    finding about a report the reader does not have is a finding nobody can
+    weigh. Measured: a navigator handed the findings alone could not tell what
+    they were about.
+    """
+    return "\n".join(
+        [
+            f"The operator ran this project's `{name}` check on {author}'s reply "
+            f"from {arrived} and is handing you the result: what the check found, "
+            "then the reply it checked.",
+            "",
+            f"Check: {name} — {path} @ {version}",
+            f"Where: {' · '.join(context)}",
+            "",
+            "What it found:",
+            "",
+            findings,
+            "",
+            f"The reply it checked ({len(reply):,} characters):",
+            "",
+            reply,
+        ]
+    )
+
+
 def unfenced(answer: str) -> str:
     """An answer wrapped whole in a code fence, without the fence.
 

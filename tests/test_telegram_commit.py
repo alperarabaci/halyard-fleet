@@ -633,9 +633,12 @@ async def test_a_seats_button_hands_it_the_whole_answer_and_what_it_is(
 
     [(session, text)] = runner.sent
     assert session == "id-nav"
-    assert "Halyard's proof check (NOTES/proof.md @ uncommitted)" in text
+    assert "To nav (navigator), from Halyard." in text
+    assert "Check: proof — NOTES/proof.md @ uncommitted" in text
     assert "alpha-engine#281" in text
-    assert runner.says in text
+    # The findings, then the reply they are about: a finding about a report the
+    # reader does not have is a finding nobody can weigh.
+    assert text.index(runner.says) < text.index("All 42 tests passed.")
 
 
 async def test_the_button_under_one_check_sends_that_checks_answer(tmp_path: Path, wired) -> None:
