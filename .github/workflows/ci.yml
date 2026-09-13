@@ -3,9 +3,12 @@ name: CI
 # Every push and every pull request. The suite is the thing that catches what
 # code scanning cannot: a bridge that resolves the wrong address, an approval
 # that stops failing closed, a secret that starts reaching a log.
+#
+# A development branch too, not only main: work toward a release is merged
+# there first, and two pull requests that pass apart can fail together.
 on:
   push:
-    branches: [main]
+    branches: [main, "dev/**"]
   pull_request:
 
 # Cancel a superseded run rather than paying for both.
