@@ -14,7 +14,8 @@ The service does three things in order every time it starts, which is the whole
 point of it over a bare `uv run halyard`:
 
     git pull --ff-only   bring in whatever was pushed to the branch it tracks
-    uv sync              install anything the new code now depends on
+    uv sync --inexact    install anything the new code now depends on, and
+                         remove nothing somebody installed on purpose
     halyard serve        start the gate
 
 The update is **fail-open**: `--ff-only` never rewinds, rebases, or touches
@@ -107,6 +108,16 @@ def _serve_command(repo: Path, git: str, uv: str) -> str:
     `cd` is joined with `&&` because running any of it in the wrong directory is
     worse than not running it. `exec` so the serving process replaces the shell
     and launchd watches the thing that matters rather than its wrapper.
+
+    `--inexact`, because a plain `uv sync` removes whatever the lock does not
+    select, and the development tools are an extra it does not select. On a
+    machine whose checkout is also the one being worked on, every restart took
+    ruff and pytest out of `.venv`, and `make test` answered `Failed to spawn:
+    pytest` until somebody put them back by hand — measured on 2026-09-13, with
+    `.venv/bin` holding nothing but `python`. The sync is here to add what new
+    code needs, not to take away what somebody installed on purpose. The cost is
+    that a dependency the lock drops stays installed until a sync by hand: a
+    leftover, never a missing piece.
     """
     quoted_repo = shlex.quote(str(repo))
     quoted_git = shlex.quote(git)
@@ -114,7 +125,7 @@ def _serve_command(repo: Path, git: str, uv: str) -> str:
     return (
         f"cd {quoted_repo} && "
         f"{quoted_git} pull --ff-only 2>&1 ; "
-        f"{quoted_uv} sync 2>&1 ; "
+        f"{quoted_uv} sync --inexact 2>&1 ; "
         f"exec {quoted_uv} run halyard serve"
     )
 
