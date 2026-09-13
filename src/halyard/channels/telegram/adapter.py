@@ -27,6 +27,7 @@ from datetime import UTC, datetime, timedelta
 from functools import partial
 from pathlib import Path
 
+from halyard import checks as checking
 from halyard import commits
 from halyard import tasks as task_tracker
 from halyard.agents.base import AgentRunner
@@ -104,6 +105,7 @@ COMMANDS: tuple[tuple[str, str], ...] = (
     ("chat", "Send a message into this seat's session"),
     ("to", "Send a message to another seat by name"),
     ("forward", "Hand this chat's last reply to another seat"),
+    ("checks", "Run one of this project's checks over this chat's last reply"),
     ("commit", "Commit this branch's work, with a message to approve"),
     ("review_and_commit", "The same, with this project's checks and its review round"),
     ("open", "Open an agent on the machine — claude, codex, gemini"),
@@ -163,6 +165,13 @@ MESSAGE_MODEL = "sonnet"
 #: How long to wait for it. A commit message is one short line; anything slower
 #: than this has gone wrong, and the phone should hear that rather than hold.
 MESSAGE_TIMEOUT_SECONDS = 120.0
+
+#: The one-shot model each of a project's checks runs on, named here for the
+#: reason `MESSAGE_MODEL` is. One turn per check.
+CHECK_MODEL = "sonnet"
+
+#: How long one check may take. It reads a whole report, not a diff summary.
+CHECK_TIMEOUT_SECONDS = 300.0
 
 
 def _seat_being_asked_for(text: str) -> str | None:
@@ -777,6 +786,11 @@ class TelegramChannel:
             return
         if command == "forward":
             await self._forward_last(argument, actor, here or "", thread)
+            return
+        if command == "checks":
+            # Detached: each check is a model turn of its own over a whole
+            # report, and the poller has everybody else's buttons to answer.
+            self._detach(self._run_checks(argument, here or "", thread), "/checks")
             return
         if command in ("commit", "review_and_commit"):
             # Detached: this reads a repository, may run the project's whole
@@ -1838,6 +1852,108 @@ class TelegramChannel:
         logger.info("Forwarding to seat %s from %s: %r", label, actor, said.text[:60])
         await self._forward_to_seat(f"{label} {said.text}", actor, chat_id, thread_id)
 
+    async def _run_checks(self, typed: str, chat_id: str, thread_id: int | None) -> None:
+        """`/checks` — offer this project's checks, or run the named one.
+
+        The shape `/label` and `/command` have: a button per check, and the one
+        pressed runs. It runs over the last reply in this chat, as a model turn
+        of its own, with the check's text and what Halyard can see of the
+        repository. A turn that could not be had is said as unmeasured rather
+        than left out, because a missing answer reads exactly like a clean one.
+
+        Whatever follows the name goes in as a note: `/checks proof delivery`
+        says which stage the reply belongs to, which is what most checks ask
+        first.
+        """
+        found = self._repository_for(chat_id)
+        if found is None:
+            await self._say(
+                "I do not know which repository this chat is about. Give the "
+                "project a <code>path:</code> in <code>halyard.yaml</code>.",
+                chat_id,
+                thread_id,
+            )
+            return
+        if not found.checks:
+            await self._say(
+                f"<b>{html.escape(found.name)}</b> has no <code>checks:</code> in "
+                "<code>halyard.yaml</code>.",
+                chat_id,
+                thread_id,
+            )
+            return
+        said = last_said.last(self._said_path, chat_id) if self._said_path else None
+        if said is None:
+            await self._say(
+                "Nothing has been said in this chat yet, so there is nothing to check.",
+                chat_id,
+                thread_id,
+            )
+            return
+
+        wanted, _, note = typed.strip().partition(" ")
+        if not wanted:
+            await self._say(
+                f"Check the reply from <b>{said.at:%H:%M}</b> with which one?",
+                chat_id,
+                thread_id,
+                reply_markup=cards.check_choices(tuple(found.checks)),
+            )
+            return
+        name = next((key for key in found.checks if key.casefold() == wanted.casefold()), None)
+        if name is None:
+            await self._say(
+                f"<b>{html.escape(found.name)}</b> has no check called "
+                f"<b>{html.escape(wanted)}</b>.",
+                chat_id,
+                thread_id,
+            )
+            await self._run_checks("", chat_id, thread_id)
+            return
+
+        # This chat's own runtime if it can take a one-shot turn, and the
+        # default one otherwise, so a report from any seat can be checked.
+        runner = self._message_runner(chat_id)
+        if not hasattr(runner, "ask"):
+            runner = self._runner
+        if not hasattr(runner, "ask"):
+            await self._say("No runtime here can take a one-shot turn.", chat_id, thread_id)
+            return
+
+        path = found.checks[name]
+        instructions = checking.read(path, found.path)
+        if not instructions:
+            await self._say(
+                f"<b>{html.escape(name)}</b> · unmeasured — could not read "
+                f"<code>{html.escape(str(path))}</code>",
+                chat_id,
+                thread_id,
+            )
+            return
+        await self._say(
+            f"\U0001f50e <b>{html.escape(name)}</b> is reading the reply from "
+            f"<b>{said.at:%H:%M}</b>…",
+            chat_id,
+            thread_id,
+        )
+        known = await asyncio.to_thread(checking.context, found.path, found.name)
+        asked = checking.prompt(instructions, context=known, note=note.strip(), text=said.text)
+        try:
+            answer = await runner.ask(asked, model=CHECK_MODEL, timeout=CHECK_TIMEOUT_SECONDS)
+        except Exception:
+            logger.warning("The %s check failed", name, exc_info=True)
+            answer = None
+        if not answer:
+            await self._say(
+                f"<b>{html.escape(name)}</b> · unmeasured — the model did not answer",
+                chat_id,
+                thread_id,
+            )
+            return
+        for index, chunk in enumerate(cards.split_for_telegram(checking.unfenced(answer))):
+            head = f"<b>{html.escape(name)}</b>\n" if index == 0 else ""
+            await self._say(f"{head}<pre>{html.escape(chunk)}</pre>", chat_id, thread_id)
+
     async def _offer_seats(
         self, text: str, chat_id: str, thread_id: int | None, anchor_id: int | None
     ) -> None:
@@ -2360,6 +2476,14 @@ class TelegramChannel:
                 return
             if what == "run":
                 await self._run_command(value, here or "", message.get("message_thread_id"))
+                return
+            if what == "check":
+                # Detached, as the command is: a check is a model turn over a
+                # whole report, and this loop answers everybody else's buttons.
+                self._detach(
+                    self._run_checks(value, here or "", message.get("message_thread_id")),
+                    "/checks",
+                )
                 return
             if what == "open":
                 await self._open_application(value, here or "", message.get("message_thread_id"))

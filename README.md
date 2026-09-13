@@ -93,6 +93,7 @@ reading configuration.
 | `/options` | every model and effort level the runtime accepts |
 | `/model`, `/effort` | what answers, and how hard it thinks |
 | `/to` | hand a message to another seat by name |
+| `/checks` | pick one of this project's own checks and run it over the chat's last reply |
 | `/md` | *(configurable)* have the agent write its answer to a file and pass the path |
 | `/commit` | commit this branch's work, with a message to approve — and push |
 | `/review_and_commit` | the same, plus this project's own checks and its review round |
@@ -140,8 +141,8 @@ One pattern covers the same tool on a local server and a production one. `Bash`
 and the file tools cannot be granted here — the first is what the gate is for,
 and the second is granted by destination under `writes:`.
 
-**The last four commands are per-project**, and each is one line under the
-project in `halyard.yaml`:
+**Several commands are per-project**, and each is one line under the project in
+`halyard.yaml`:
 
 ```yaml
 projects:
@@ -156,6 +157,9 @@ projects:
     confirmation:                     # the extra round, when a guard cannot catch it
       inquiry: NOTES/CONFIRMATION_INQUIRY.md
       review: NOTES/CONFIRMATION_REVIEW.md
+    checks:                           # /checks offers these, one button each
+      proof: NOTES/checks/proof.md
+      destructive: NOTES/checks/destructive.md
 ```
 
 **`confirmation:` buys a round that a guard cannot.** A test proves what it

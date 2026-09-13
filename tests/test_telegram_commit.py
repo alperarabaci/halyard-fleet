@@ -474,6 +474,136 @@ def test_commit_is_registered_so_it_appears_when_you_type_a_slash() -> None:
 # --- saying it happened, and pushing ----------------------------------------
 
 
+# --- /checks: a project's own checks over the last reply ----------------------
+#
+# Here because it runs on the same two things `/commit` does: the project's
+# repository, and a one-shot model turn.
+
+
+def checks_in(channel: TelegramChannel, repo: Path, tmp_path: Path, **texts: str) -> None:
+    """Give the project checks on disk, and a reply in the chat to check."""
+    from halyard.core import last_said
+
+    (repo / "NOTES").mkdir(exist_ok=True)
+    for name, text in texts.items():
+        (repo / "NOTES" / f"{name}.md").write_text(text)
+    found = channel._repositories["alpha-engine"]
+    channel._repositories["alpha-engine"] = replace(
+        found, checks={name: Path(f"NOTES/{name}.md") for name in texts}
+    )
+    channel._said_path = tmp_path / "last-said.json"
+    last_said.remember(channel._said_path, chat_id=CHAT, text="All 42 tests passed.")
+
+
+def pressed_check(name: str) -> dict:
+    """The button a check is offered on, pressed by somebody allowed to."""
+    from halyard.channels.telegram import cards
+
+    return {
+        "id": "cb1",
+        "from": {"id": int(APPROVER)},
+        "data": cards.choice_data("check", name),
+        "message": {"message_id": 5, "chat": {"id": CHAT}},
+    }
+
+
+async def test_a_bare_checks_offers_each_check_as_a_button(tmp_path: Path, wired) -> None:
+    """The shape `/label` and `/command` already have: pick one, and it runs."""
+    channel, api, runner, repo = wired
+    checks_in(channel, repo, tmp_path, proof="# proof", claims="# claims")
+
+    await channel._run_checks("", CHAT, None)
+
+    keys = [key["text"] for row in api.sent[-1]["reply_markup"]["inline_keyboard"] for key in row]
+    assert keys == ["proof", "claims"]
+    assert runner.asked == []
+
+
+async def test_pressing_a_check_runs_that_one_over_the_last_reply(tmp_path: Path, wired) -> None:
+    """Its own instructions, the whole reply, and what Halyard can see."""
+    from halyard.channels.telegram.adapter import CHECK_MODEL
+
+    channel, api, runner, repo = wired
+    checks_in(channel, repo, tmp_path, proof="# proof: find the evidence", claims="# claims")
+
+    await channel._handle_callback(pressed_check("proof"))
+    await settled(channel)
+
+    [asked] = runner.asked
+    assert asked.startswith("# proof: find the evidence")
+    assert "All 42 tests passed." in asked
+    assert "alpha-engine#281" in asked
+    assert runner.models == [CHECK_MODEL]
+    assert api.sent[-1]["text"].startswith("<b>proof</b>")
+
+
+async def test_a_check_named_after_the_command_runs_with_the_note(tmp_path: Path, wired) -> None:
+    """`/checks proof delivery` — the note says which stage the reply belongs to."""
+    channel, _, runner, repo = wired
+    checks_in(channel, repo, tmp_path, proof="# proof")
+
+    await channel._handle_message(typed("/checks proof delivery"))
+    await settled(channel)
+
+    [asked] = runner.asked
+    assert "delivery" in asked
+
+
+async def test_a_check_nobody_defined_is_said_and_the_rest_offered(tmp_path: Path, wired) -> None:
+    channel, api, runner, repo = wired
+    checks_in(channel, repo, tmp_path, proof="# proof")
+
+    await channel._run_checks("nope", CHAT, None)
+
+    assert "no check called <b>nope</b>" in api.sent[-2]["text"]
+    assert api.sent[-1]["reply_markup"]["inline_keyboard"]
+    assert runner.asked == []
+
+
+async def test_a_check_the_model_could_not_answer_is_said_not_skipped(
+    tmp_path: Path, wired
+) -> None:
+    """A missing answer reads exactly like a clean one."""
+    channel, api, runner, repo = wired
+    runner.says = None
+    checks_in(channel, repo, tmp_path, proof="# proof")
+
+    await channel._run_checks("proof", CHAT, None)
+
+    assert "unmeasured" in api.sent[-1]["text"]
+
+
+async def test_a_project_without_checks_says_so(wired) -> None:
+    channel, api, runner, _ = wired
+
+    await channel._run_checks("", CHAT, None)
+
+    assert "no <code>checks:</code>" in api.sent[-1]["text"]
+    assert runner.asked == []
+
+
+async def test_nothing_is_checked_before_anything_was_said(tmp_path: Path, wired) -> None:
+    channel, api, runner, repo = wired
+    checks_in(channel, repo, tmp_path, proof="# proof")
+    channel._said_path = tmp_path / "nothing-yet.json"
+
+    await channel._run_checks("", CHAT, None)
+
+    assert "nothing to check" in api.sent[-1]["text"]
+    assert runner.asked == []
+
+
+async def test_checks_answers_from_a_phone(tmp_path: Path, wired) -> None:
+    channel, api, runner, repo = wired
+    checks_in(channel, repo, tmp_path, proof="# proof")
+
+    await channel._handle_message(typed("/checks"))
+    await settled(channel)
+
+    assert api.sent[-1]["reply_markup"]["inline_keyboard"]
+    assert runner.asked == []
+
+
 def a_bare_remote(tmp_path: Path, repo: Path) -> Path:
     """Somewhere for a push to land, so the test exercises git rather than a
     double that would agree with whatever this file believes."""
