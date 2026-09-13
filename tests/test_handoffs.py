@@ -1,0 +1,124 @@
+"""Tests for `halyard.handoffs` — a reply handed on, its checks run first."""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+from halyard import handoffs
+from halyard.core.config_file import Handoff
+
+
+class Asking:
+    """An `Asker` that answers from a script and remembers what it was asked."""
+
+    def __init__(self, says: str | None = "no finding") -> None:
+        self.says = says
+        self.asked: list[str] = []
+
+    async def ask(
+        self, text: str, *, timeout: float = 180.0, model: str | None = None
+    ) -> str | None:
+        self.asked.append(text)
+        return self.says
+
+
+class Delivered:
+    """A `Delivery` that keeps what reached each seat."""
+
+    def __init__(self) -> None:
+        self.sent: list[tuple[str, str]] = []
+
+    async def to_seat(self, label: str, text: str) -> None:
+        self.sent.append((label, text))
+
+
+def a_project(tmp_path: Path) -> Path:
+    (tmp_path / "NOTES").mkdir()
+    (tmp_path / "NOTES" / "discovery.md").write_text("The message below is the driver's report.")
+    (tmp_path / "NOTES" / "proof.md").write_text("# proof")
+    (tmp_path / "NOTES" / "claims.md").write_text("# claims")
+    return tmp_path
+
+
+async def hand(tmp_path: Path, handoff: Handoff, *, asker: Asking | None = None):
+    delivery = Delivered()
+    handed = await handoffs.hand_off(
+        handoff,
+        project=tmp_path,
+        context=["Work item: alpha-engine#355"],
+        note="",
+        reply="All 42 tests passed.",
+        arrived="00:21",
+        sender="drv (driver)",
+        recipient_label="nav",
+        recipient="nav (navigator)",
+        project_checks={"proof": Path("NOTES/proof.md"), "claims": Path("NOTES/claims.md")},
+        asker=asker,
+        model="sonnet",
+        timeout=5,
+        delivery=delivery,
+    )
+    return handed, delivery
+
+
+async def test_the_navigator_gets_the_prompt_the_checks_and_the_report_in_that_order(
+    tmp_path: Path,
+) -> None:
+    """The prompt speaks of "the message below", so the report comes last, and
+    the checks' answers arrive with it rather than after it."""
+    a_project(tmp_path)
+    asker = Asking()
+    discovery = Handoff(
+        name="discovery",
+        prompt=Path("NOTES/discovery.md"),
+        checks=("proof", "claims"),
+        to="navigator",
+    )
+
+    handed, delivery = await hand(tmp_path, discovery, asker=asker)
+
+    [(label, text)] = delivery.sent
+    assert label == "nav"
+    assert text.startswith("To nav (navigator), from Halyard — handoff: discovery.")
+    order = [
+        text.index("The message below"),
+        text.index("Check proof"),
+        text.index("Check claims"),
+        text.index("All 42 tests passed."),
+    ]
+    assert order == sorted(order)
+    assert "From: drv (driver), reply from 00:21" in text
+    assert "Work item: alpha-engine#355" in text
+    assert len(asker.asked) == 2
+    assert [answer.name for answer in handed.answers] == ["proof", "claims"]
+    assert isinstance(delivery, handoffs.Delivery)
+
+
+async def test_a_check_that_could_not_run_still_goes_marked_unmeasured(tmp_path: Path) -> None:
+    """An unmeasured line is not a clean one, and the reader has to see it."""
+    a_project(tmp_path)
+
+    handed, delivery = await hand(tmp_path, Handoff(name="discovery", checks=("proof",)))
+
+    [(_, text)] = delivery.sent
+    assert "unmeasured — no runtime here can take a one-shot turn" in text
+    assert not handed.answers[0].measured
+
+
+async def test_a_handoff_can_be_the_reply_alone(tmp_path: Path) -> None:
+    """The review going back to the navigator needs nothing in front of it but
+    who it is from."""
+    handed, delivery = await hand(tmp_path, Handoff(name="back"))
+
+    [(_, text)] = delivery.sent
+    assert "Prompt:" not in text
+    assert "Check " not in text
+    assert text.endswith("All 42 tests passed.")
+    assert handed.answers == ()
+
+
+async def test_a_prompt_that_cannot_be_read_is_said_rather_than_dropped(tmp_path: Path) -> None:
+    _, delivery = await hand(tmp_path, Handoff(name="review", prompt=Path("NOTES/gone.md")))
+
+    [(_, text)] = delivery.sent
+    assert "NOTES/gone.md @ uncommitted — could not be read" in text

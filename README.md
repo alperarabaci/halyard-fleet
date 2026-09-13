@@ -94,6 +94,7 @@ reading configuration.
 | `/model`, `/effort` | what answers, and how hard it thinks |
 | `/to` | hand a message to another seat by name |
 | `/checks` | pick one of this project's own checks and run it over the chat's last reply; the answer has a button per seat to hand it on |
+| `/handoff` | hand the chat's last reply on the way this project defines it — its own prompt in front, its checks run first |
 | `/md` | *(configurable)* have the agent write its answer to a file and pass the path |
 | `/commit` | commit this branch's work, with a message to approve — and push |
 | `/review_and_commit` | the same, plus this project's own checks and its review round |
@@ -160,6 +161,14 @@ projects:
     checks:                           # /checks offers these, one button each
       proof: NOTES/checks/proof.md
       destructive: NOTES/checks/destructive.md
+    handoffs:                         # /handoff offers these, one button each
+      review:                         # a prompt, handed to the reviewer
+        prompt: NOTES/handoffs/review.md
+        to: reviewer
+      discovery:                      # a report, back to the navigator, checked first
+        prompt: NOTES/handoffs/discovery.md
+        checks: [proof, destructive]
+        to: navigator
 ```
 
 **`confirmation:` buys a round that a guard cannot.** A test proves what it

@@ -378,6 +378,45 @@ def test_a_check_file_that_is_not_there_is_named_too(tmp_path) -> None:
     assert "NOTES/GONE.md" in said
 
 
+def test_handoffs_are_read_with_what_they_carry(tmp_path) -> None:
+    [project] = a_project(
+        tmp_path,
+        lines=[
+            "checks:",
+            "  proof: NOTES/checks/proof.md",
+            "handoffs:",
+            "  review: {prompt: NOTES/handoffs/review.md, to: reviewer}",
+            "  discover_completed: {checks: [proof], to: navigator}",
+        ],
+    )
+
+    review = project.handoffs["review"]
+    assert review.prompt == Path("NOTES/handoffs/review.md")
+    assert review.include_last_message is True
+    assert review.to == "reviewer"
+    assert project.handoffs["discover_completed"].checks == ("proof",)
+
+
+def test_a_handoff_naming_a_check_nobody_defined_is_refused(tmp_path) -> None:
+    """Otherwise it fails only when somebody presses it, from a phone."""
+    with pytest.raises(ValueError, match="does not define: claims"):
+        a_project(tmp_path, lines=["handoffs:", "  discovery: {checks: [claims]}"])
+
+
+def test_a_handoff_to_a_seat_that_is_not_there_is_refused(tmp_path) -> None:
+    with pytest.raises(ValueError, match="must be a role"):
+        a_project(tmp_path, lines=["handoffs:", "  review: {to: somebody}"])
+
+
+def test_a_handoff_prompt_that_is_not_there_is_named(tmp_path) -> None:
+    from halyard.core.config_file import missing_files
+
+    found = a_project(tmp_path, lines=["handoffs:", "  review: {prompt: NOTES/GONE.md}"])
+
+    [said] = missing_files(found)
+    assert "handoffs.review.prompt" in said
+
+
 def test_a_seat_prompt_file_is_checked_too(tmp_path) -> None:
     from halyard.core.config_file import missing_files, projects_from_yaml
 

@@ -130,6 +130,21 @@ projects:
     # `codex:reviewer` — the first time that seat works on it. Needs a forge
     # token that may label issues; off unless set. See docs/setup.md.
     # label_work: true
+    # Checks `/checks` offers over a chat's last reply, and handoffs `/handoff`
+    # offers — each the project's own file, read relative to `path`. A handoff
+    # carries the last reply, puts its prompt in front, runs the checks it names
+    # first, and goes to the seat or role in `to:` (every seat is offered if unset).
+    # checks:
+    #   proof: NOTES/halyard/checks/proof.md
+    #   destructive: NOTES/halyard/checks/destructive.md
+    # handoffs:
+    #   review:
+    #     prompt: NOTES/halyard/handoffs/review.md
+    #     to: reviewer
+    #   discover_completed:
+    #     prompt: NOTES/halyard/handoffs/discovery.md
+    #     checks: [proof, destructive]
+    #     to: navigator
     seats:
       # A label is what you type on a phone. It has to be unique across every
       # project, because it is also how `doctor` names a seat.

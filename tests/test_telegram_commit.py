@@ -556,7 +556,7 @@ async def test_a_check_is_logged_as_what_it_was_given_and_what_it_said(
 
     channel, _, runner, repo = wired
     checks_in(channel, repo, tmp_path, proof="# proof")
-    caplog.set_level(logging.INFO, logger="halyard.channels.telegram.adapter")
+    caplog.set_level(logging.INFO)
 
     await channel._run_checks("proof delivery", CHAT, None)
 
@@ -710,6 +710,127 @@ async def test_a_project_name_cannot_climb_out_of_where_state_is_kept(
     kept = channel._kept(CHAT, "last-said.json")
 
     assert kept.parent.parent == tmp_path / "projects"
+
+
+# --- /handoff: a reply handed on the way the project defines it ---------------
+
+
+def handoffs_in(channel, repo: Path, tmp_path: Path, runner, **specs: dict) -> None:
+    """A reviewer seat, a check, the handoffs asked for, and a reply to hand on."""
+    from halyard.channels.telegram.adapter import SAID_FILE
+    from halyard.core import last_said
+    from halyard.core.config_file import Handoff
+
+    (repo / "NOTES").mkdir(exist_ok=True)
+    (repo / "NOTES" / "review.md").write_text("You did not write this prompt; try to break it.")
+    (repo / "NOTES" / "proof.md").write_text("# proof")
+    channel._seats = [
+        *channel._seats,
+        Seat(
+            label="xrev",
+            runtime="claude-code",
+            chat="-100888",
+            project="alpha-engine",
+            role=Role.REVIEWER,
+            session="alpha-engine-xreview",
+        ),
+    ]
+    runner.sessions["alpha-engine-xreview"] = SessionRef(
+        "id-rev", "alpha-engine-xreview", str(repo), None, None
+    )
+    found = channel._repositories["alpha-engine"]
+    channel._repositories["alpha-engine"] = replace(
+        found,
+        checks={"proof": Path("NOTES/proof.md")},
+        handoffs={name: Handoff(name=name, **spec) for name, spec in specs.items()},
+    )
+    channel._said_path = tmp_path / "last-said.json"
+    last_said.remember(channel._kept(CHAT, SAID_FILE), chat_id=CHAT, text="The prompt for #355.")
+
+
+def pressed_handoff(what: str, value: str) -> dict:
+    from halyard.channels.telegram import cards
+
+    return {
+        "id": "cb1",
+        "from": {"id": int(APPROVER)},
+        "data": cards.choice_data(what, value),
+        "message": {"message_id": 5, "chat": {"id": CHAT}},
+    }
+
+
+async def test_a_bare_handoff_offers_each_handoff_as_a_button(tmp_path: Path, wired) -> None:
+    """The shape `/checks` has: pick one, and it goes — or cancel."""
+    from halyard.channels.telegram import cards
+
+    channel, api, runner, repo = wired
+    review = {"prompt": Path("NOTES/review.md"), "to": "reviewer"}
+    handoffs_in(channel, repo, tmp_path, runner, review=review, back={})
+
+    await channel._run_handoff("", CHAT, None, f"tg:{APPROVER}")
+
+    rows = api.sent[-1]["reply_markup"]["inline_keyboard"]
+    assert [key["text"] for key in rows[0]] == ["review", "back"]
+    assert rows[-1] == [cards.CANCEL]
+
+
+async def test_review_reaches_the_reviewer_with_the_projects_text_in_front(
+    tmp_path: Path, wired
+) -> None:
+    """The navigator's prompt, handed to the reviewer: the project's review text
+    first, then the prompt itself — and no check, because none is named."""
+    channel, _, runner, repo = wired
+    review = {"prompt": Path("NOTES/review.md"), "to": "reviewer"}
+    handoffs_in(channel, repo, tmp_path, runner, review=review)
+
+    await channel._handle_callback(pressed_handoff("handoff", "review"))
+    await settled(channel)
+
+    [(session, text)] = runner.sent
+    assert session == "id-rev"
+    assert "To xrev (reviewer), from Halyard — handoff: review." in text
+    assert text.index("try to break it") < text.index("The prompt for #355.")
+    assert "From: nav (navigator)" in text
+    assert runner.asked == []
+
+
+async def test_a_handoff_without_a_to_offers_every_seat(tmp_path: Path, wired) -> None:
+    channel, api, runner, repo = wired
+    handoffs_in(channel, repo, tmp_path, runner, back={})
+
+    await channel._run_handoff("back", CHAT, None, f"tg:{APPROVER}")
+
+    keys = [key["text"] for key in api.sent[-1]["reply_markup"]["inline_keyboard"][0]]
+    assert keys == ["→ nav", "→ xrev"]
+    assert runner.sent == []
+
+
+async def test_pressing_a_seat_hands_it_on_there(tmp_path: Path, wired) -> None:
+    channel, _, runner, repo = wired
+    handoffs_in(channel, repo, tmp_path, runner, back={})
+
+    await channel._handle_callback(pressed_handoff("handto", "back>xrev"))
+    await settled(channel)
+
+    [(session, _)] = runner.sent
+    assert session == "id-rev"
+
+
+async def test_a_handoff_runs_its_checks_before_it_goes(tmp_path: Path, wired) -> None:
+    """The reply and what the checks made of it arrive together, and the chat
+    it was sent from is told which checks answered."""
+    channel, api, runner, repo = wired
+    handoffs_in(channel, repo, tmp_path, runner, discovery={"checks": ("proof",), "to": "xrev"})
+
+    await channel._run_handoff("discovery delivery", CHAT, None, f"tg:{APPROVER}")
+    await settled(channel)
+
+    assert len(runner.asked) == 1
+    [(_, text)] = runner.sent
+    assert "Check proof — NOTES/proof.md" in text
+    assert runner.says in text
+    assert "Said by whoever asked: delivery" in text
+    assert any("<b>proof</b>: answered" in sent["text"] for sent in api.sent)
 
 
 async def test_pressing_a_check_runs_that_one_over_the_last_reply(tmp_path: Path, wired) -> None:

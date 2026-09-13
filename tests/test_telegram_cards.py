@@ -17,6 +17,8 @@ def test_every_choice_card_can_be_cancelled() -> None:
         cards.label_choices(("andon",)),
         cards.check_choices(("proof",)),
         cards.result_choices("proof", ("nav", "drv")),
+        cards.handoff_choices(("review", "discovery")),
+        cards.handoff_seat_choices("review", ("nav", "xrev")),
     ]
 
     for keyboard in built:

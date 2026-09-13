@@ -97,7 +97,20 @@ def choice_data(what: str, value: str) -> str:
 
 #: What a choice button may carry. Anything else in a callback is not ours.
 _CHOOSABLE = frozenset(
-    {"model", "effort", "to", "fwd", "open", "run", "label", "check", "cancel", "result"}
+    {
+        "model",
+        "effort",
+        "to",
+        "fwd",
+        "open",
+        "run",
+        "label",
+        "check",
+        "cancel",
+        "result",
+        "handoff",
+        "handto",
+    }
 )
 
 
@@ -513,6 +526,41 @@ def result_choices(check: str, labels: tuple[str, ...]) -> dict | None:
     for label in labels:
         try:
             data = choice_data("result", f"{check}>{label}")
+        except ValueError:
+            continue
+        buttons.append({"text": f"→ {label}", "callback_data": data})
+    if not buttons:
+        return None
+    return _keyboard([buttons[i : i + 3] for i in range(0, len(buttons), 3)])
+
+
+def handoff_choices(names: tuple[str, ...]) -> dict | None:
+    """A button per handoff a project defines, the way `/checks` offers checks.
+
+    Two to a row: a handoff's name says where work goes next —
+    `discover_completed` — and three of those wrap on a phone.
+    """
+    buttons = []
+    for name in names:
+        try:
+            buttons.append({"text": name, "callback_data": choice_data("handoff", name)})
+        except ValueError:
+            continue
+    if not buttons:
+        return None
+    return _keyboard([buttons[i : i + 2] for i in range(0, len(buttons), 2)])
+
+
+def handoff_seat_choices(handoff: str, labels: tuple[str, ...]) -> dict | None:
+    """Buttons for where a handoff goes, when its `to:` does not settle it.
+
+    The handoff travels in the button with the seat, so nothing has to be
+    remembered between the tap and the send.
+    """
+    buttons = []
+    for label in labels:
+        try:
+            data = choice_data("handto", f"{handoff}>{label}")
         except ValueError:
             continue
         buttons.append({"text": f"→ {label}", "callback_data": data})
