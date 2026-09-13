@@ -148,7 +148,10 @@ async def test_a_bare_command_asks_which_one(wired) -> None:
 
     assert "Run which one?" in api.sent[-1]["text"]
     offered = {
-        button["text"] for row in api.sent[-1]["reply_markup"]["inline_keyboard"] for button in row
+        button["text"]
+        for row in api.sent[-1]["reply_markup"]["inline_keyboard"]
+        for button in row
+        if button != cards.CANCEL
     }
     assert offered == {"cleanup", "bootstrap", "test-all"}
 
@@ -423,7 +426,10 @@ async def test_label_names_the_task_and_offers_what_is_not_on_it(wired, monkeypa
     assert "#320" in said and "RAG v4 PDF report" in said
     assert "backend" in said  # said as already on it
     offered = {
-        button["text"] for row in api.sent[-1]["reply_markup"]["inline_keyboard"] for button in row
+        button["text"]
+        for row in api.sent[-1]["reply_markup"]["inline_keyboard"]
+        for button in row
+        if button != cards.CANCEL
     }
     assert offered == {"andon", "rework"}
 
@@ -439,7 +445,10 @@ async def test_a_project_can_narrow_which_labels_are_offered(wired, monkeypatch)
     await deliver(channel, typed("/label"))
 
     offered = {
-        button["text"] for row in api.sent[-1]["reply_markup"]["inline_keyboard"] for button in row
+        button["text"]
+        for row in api.sent[-1]["reply_markup"]["inline_keyboard"]
+        for button in row
+        if button != cards.CANCEL
     }
     assert offered == {"andon", "rework"}
 

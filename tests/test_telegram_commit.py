@@ -508,15 +508,89 @@ def pressed_check(name: str) -> dict:
 
 
 async def test_a_bare_checks_offers_each_check_as_a_button(tmp_path: Path, wired) -> None:
-    """The shape `/label` and `/command` already have: pick one, and it runs."""
+    """The shape `/label` and `/command` already have: pick one, and it runs —
+    or cancel, and nothing does."""
+    from halyard.channels.telegram import cards
+
     channel, api, runner, repo = wired
     checks_in(channel, repo, tmp_path, proof="# proof", claims="# claims")
 
     await channel._run_checks("", CHAT, None)
 
-    keys = [key["text"] for row in api.sent[-1]["reply_markup"]["inline_keyboard"] for key in row]
-    assert keys == ["proof", "claims"]
+    rows = api.sent[-1]["reply_markup"]["inline_keyboard"]
+    assert [key["text"] for key in rows[0]] == ["proof", "claims"]
+    assert rows[-1] == [cards.CANCEL]
     assert runner.asked == []
+
+
+async def test_cancelling_a_choice_card_takes_its_buttons_away(tmp_path: Path, wired) -> None:
+    """The card stays, so the chat still shows what was offered; the buttons go,
+    so nothing on it can be pressed by mistake later. Nothing runs."""
+    from halyard.channels.telegram import cards
+
+    channel, api, runner, repo = wired
+    checks_in(channel, repo, tmp_path, proof="# proof")
+
+    await channel._handle_callback(
+        {
+            "id": "cb1",
+            "from": {"id": int(APPROVER)},
+            "data": cards.CANCEL["callback_data"],
+            "message": {"message_id": 5, "chat": {"id": CHAT}, "text": "Check with which one?"},
+        }
+    )
+    await settled(channel)
+
+    assert api.edits[-1]["text"].startswith("Check with which one?")
+    assert api.edits[-1]["text"].endswith("✖️ Cancelled")
+    assert runner.asked == []
+
+
+async def test_a_check_is_logged_as_what_it_was_given_and_what_it_said(
+    tmp_path: Path, wired, caplog
+) -> None:
+    """A frame rather than the files: enough to say afterwards what a finding
+    was about, and which revision of the check found it."""
+    import logging
+
+    channel, _, runner, repo = wired
+    checks_in(channel, repo, tmp_path, proof="# proof")
+    caplog.set_level(logging.INFO, logger="halyard.channels.telegram.adapter")
+
+    await channel._run_checks("proof delivery", CHAT, None)
+
+    asked = next(r.getMessage() for r in caplog.records if "Check proof asked" in r.getMessage())
+    assert "alpha-engine#281" in asked
+    assert "NOTES/proof.md @ uncommitted" in asked
+    assert "'delivery'" in asked
+    assert "Check proof answered" in caplog.text
+    assert runner.says in caplog.text
+
+
+async def test_the_reply_is_timed_by_this_machines_clock(
+    tmp_path: Path, wired, monkeypatch
+) -> None:
+    """Kept in UTC, shown in local time: a reply that arrived at 23:20 in
+    Istanbul was shown as 20:20, and read as three hours old."""
+    import time
+    from datetime import UTC, datetime
+
+    from halyard.core import last_said
+
+    channel, api, _, repo = wired
+    checks_in(channel, repo, tmp_path, proof="# proof")
+    last_said.remember(
+        channel._said_path, chat_id=CHAT, text="done", now=datetime(2026, 9, 13, 20, 20, tzinfo=UTC)
+    )
+    monkeypatch.setenv("TZ", "Europe/Istanbul")
+    time.tzset()
+    try:
+        await channel._run_checks("", CHAT, None)
+    finally:
+        monkeypatch.undo()
+        time.tzset()
+
+    assert "23:20" in api.sent[-1]["text"]
 
 
 async def test_pressing_a_check_runs_that_one_over_the_last_reply(tmp_path: Path, wired) -> None:

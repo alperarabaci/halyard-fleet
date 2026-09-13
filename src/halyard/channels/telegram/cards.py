@@ -95,15 +95,29 @@ def choice_data(what: str, value: str) -> str:
     return data
 
 
+#: What a choice button may carry. Anything else in a callback is not ours.
+_CHOOSABLE = frozenset({"model", "effort", "to", "fwd", "open", "run", "label", "check", "cancel"})
+
+
 def parse_choice_data(data: str) -> tuple[str, str] | None:
     """Decode a preference button into (what, value), or None if it is not ours."""
     parts = data.split(":", 2)
     if len(parts) != 3 or parts[0] != CHOICE_PREFIX:
         return None
     _, what, value = parts
-    if what not in {"model", "effort", "to", "fwd", "open", "run", "label", "check"} or not value:
+    if what not in _CHOOSABLE or not value:
         return None
     return what, value
+
+
+#: The way out of every choice card. Only the commit card had one; the rest
+#: could only be left in the chat, still pressable long after anybody meant to.
+CANCEL = {"text": "✖️ Cancel", "callback_data": choice_data("cancel", "x")}
+
+
+def _keyboard(rows: list[list[dict]]) -> dict:
+    """Rows of choices, and a way out of them as the last row."""
+    return {"inline_keyboard": [*rows, [dict(CANCEL)]]}
 
 
 def choices(what: str, values: tuple[str, ...]) -> dict | None:
@@ -130,7 +144,7 @@ def choices(what: str, values: tuple[str, ...]) -> dict | None:
     # would truncate on a phone.
     rows = [buttons[index : index + 3] for index in range(0, len(buttons), 3)]
     rows.append([{"text": "default", "callback_data": choice_data(what, "default")}])
-    return {"inline_keyboard": rows}
+    return _keyboard(rows)
 
 
 def forward_choices(labels: tuple[str, ...]) -> dict | None:
@@ -152,7 +166,7 @@ def forward_choices(labels: tuple[str, ...]) -> dict | None:
             continue
     if not buttons:
         return None
-    return {"inline_keyboard": [buttons[i : i + 3] for i in range(0, len(buttons), 3)]}
+    return _keyboard([buttons[i : i + 3] for i in range(0, len(buttons), 3)])
 
 
 def seat_choices(labels: tuple[str, ...]) -> dict | None:
@@ -172,7 +186,7 @@ def seat_choices(labels: tuple[str, ...]) -> dict | None:
             continue
     if not buttons:
         return None
-    return {"inline_keyboard": [buttons[i : i + 3] for i in range(0, len(buttons), 3)]}
+    return _keyboard([buttons[i : i + 3] for i in range(0, len(buttons), 3)])
 
 
 #: Its own prefix, apart from the approval buttons and the preference ones.
@@ -431,7 +445,7 @@ def open_choices(names: tuple[str, ...]) -> dict | None:
     if not buttons:
         return None
     rows = [buttons[index : index + 3] for index in range(0, len(buttons), 3)]
-    return {"inline_keyboard": rows}
+    return _keyboard(rows)
 
 
 def command_choices(names: tuple[str, ...]) -> dict | None:
@@ -449,7 +463,7 @@ def command_choices(names: tuple[str, ...]) -> dict | None:
             continue
     if not buttons:
         return None
-    return {"inline_keyboard": [buttons[i : i + 3] for i in range(0, len(buttons), 3)]}
+    return _keyboard([buttons[i : i + 3] for i in range(0, len(buttons), 3)])
 
 
 def label_choices(names: tuple[str, ...]) -> dict | None:
@@ -466,7 +480,7 @@ def label_choices(names: tuple[str, ...]) -> dict | None:
             continue
     if not buttons:
         return None
-    return {"inline_keyboard": [buttons[i : i + 2] for i in range(0, len(buttons), 2)]}
+    return _keyboard([buttons[i : i + 2] for i in range(0, len(buttons), 2)])
 
 
 def check_choices(names: tuple[str, ...]) -> dict | None:
@@ -483,4 +497,4 @@ def check_choices(names: tuple[str, ...]) -> dict | None:
             continue
     if not buttons:
         return None
-    return {"inline_keyboard": [buttons[i : i + 3] for i in range(0, len(buttons), 3)]}
+    return _keyboard([buttons[i : i + 3] for i in range(0, len(buttons), 3)])

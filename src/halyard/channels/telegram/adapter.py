@@ -174,6 +174,15 @@ CHECK_MODEL = "sonnet"
 CHECK_TIMEOUT_SECONDS = 300.0
 
 
+def _local(moment: datetime) -> datetime:
+    """A stored UTC time as this machine's clock reads it.
+
+    `last_said` keeps UTC, which is right for a file and wrong for a person: a
+    reply that arrived at 23:20 was shown as 20:20, and read as three hours old.
+    """
+    return moment.astimezone()
+
+
 def _seat_being_asked_for(text: str) -> str | None:
     """The seat named by one of our own prompts, or None if this is not one."""
     found = _ASKED.match((text or "").strip())
@@ -1828,7 +1837,7 @@ class TelegramChannel:
             if keyboard is None:
                 await self._say(self._seat_list(), chat_id, thread_id)
                 return
-            when = said.at.strftime("%H:%M")
+            when = _local(said.at).strftime("%H:%M")
             await self._say(
                 f"Hand the reply from <b>{when}</b> to which seat?"
                 f"\n\n<i>{html.escape(said.text[:200])}"
@@ -1844,7 +1853,7 @@ class TelegramChannel:
             # who asked for it may well mean it. But a day-old reply handed to
             # an agent as though it were current is worth a sentence.
             await self._say(
-                f"That reply is from {said.at:%d %b %H:%M} — sending it anyway.",
+                f"That reply is from {_local(said.at):%d %b %H:%M} — sending it anyway.",
                 chat_id,
                 thread_id,
             )
@@ -1894,7 +1903,7 @@ class TelegramChannel:
         wanted, _, note = typed.strip().partition(" ")
         if not wanted:
             await self._say(
-                f"Check the reply from <b>{said.at:%H:%M}</b> with which one?",
+                f"Check the reply from <b>{_local(said.at):%H:%M}</b> with which one?",
                 chat_id,
                 thread_id,
                 reply_markup=cards.check_choices(tuple(found.checks)),
@@ -1923,6 +1932,7 @@ class TelegramChannel:
         path = found.checks[name]
         instructions = checking.read(path, found.path)
         if not instructions:
+            logger.warning("Check %s did not run: could not read %s", name, path)
             await self._say(
                 f"<b>{html.escape(name)}</b> · unmeasured — could not read "
                 f"<code>{html.escape(str(path))}</code>",
@@ -1930,26 +1940,53 @@ class TelegramChannel:
                 thread_id,
             )
             return
+        known, version = await asyncio.gather(
+            asyncio.to_thread(checking.context, found.path, found.name),
+            asyncio.to_thread(checking.version, path, found.path),
+        )
+        note = note.strip()
+        arrived = _local(said.at).strftime("%H:%M")
+        # What the model was given, as a frame rather than the files: enough to
+        # say afterwards what a finding was about, and which text found it.
+        logger.info(
+            "Check %s asked · %s · reply %s, %d chars, from %s %s · check %s @ %s, %d chars"
+            " · note %r · model %s",
+            name,
+            " · ".join(known),
+            arrived,
+            len(said.text),
+            said.agent_id or "?",
+            said.session_id or "?",
+            path,
+            version,
+            len(instructions),
+            note,
+            CHECK_MODEL,
+        )
         await self._say(
-            f"\U0001f50e <b>{html.escape(name)}</b> is reading the reply from "
-            f"<b>{said.at:%H:%M}</b>…",
+            f"\U0001f50e <b>{html.escape(name)}</b> is reading the last reply here "
+            f"({arrived}, {len(said.text):,} characters) with "
+            f"<code>{html.escape(str(path))}</code> @ {html.escape(version)}…",
             chat_id,
             thread_id,
         )
-        known = await asyncio.to_thread(checking.context, found.path, found.name)
-        asked = checking.prompt(instructions, context=known, note=note.strip(), text=said.text)
+        asked = checking.prompt(instructions, context=known, note=note, text=said.text)
+        started = time.monotonic()
         try:
             answer = await runner.ask(asked, model=CHECK_MODEL, timeout=CHECK_TIMEOUT_SECONDS)
         except Exception:
-            logger.warning("The %s check failed", name, exc_info=True)
+            logger.warning("Check %s failed", name, exc_info=True)
             answer = None
+        took = time.monotonic() - started
         if not answer:
+            logger.info("Check %s got no answer in %.1fs", name, took)
             await self._say(
                 f"<b>{html.escape(name)}</b> · unmeasured — the model did not answer",
                 chat_id,
                 thread_id,
             )
             return
+        logger.info("Check %s answered in %.1fs:\n%s", name, took, answer)
         for index, chunk in enumerate(cards.split_for_telegram(checking.unfenced(answer))):
             head = f"<b>{html.escape(name)}</b>\n" if index == 0 else ""
             await self._say(f"{head}<pre>{html.escape(chunk)}</pre>", chat_id, thread_id)
@@ -2471,6 +2508,9 @@ class TelegramChannel:
             here = str((message.get("chat") or {}).get("id") or "") or None
             what, value = chosen
             await self._dismiss(query_id)
+            if what == "cancel":
+                await self._close_card(message, here)
+                return
             if what == "label":
                 await self._label_task(value, here or "", message.get("message_thread_id"))
                 return
@@ -2636,6 +2676,23 @@ class TelegramChannel:
             # Cosmetic. The decision is already recorded and the nonce is spent,
             # so a stale-looking card is untidy rather than dangerous.
             logger.warning("Could not update the card for %s", request.request_id, exc_info=True)
+
+    async def _close_card(self, message: dict, chat_id: str | None) -> None:
+        """Take the buttons off a choice card, and say it was cancelled.
+
+        The text stays, so the chat still shows what was offered; the buttons
+        go, so nothing on it can be pressed by mistake afterwards.
+        """
+        message_id = message.get("message_id")
+        if not chat_id or not message_id:
+            return
+        shown = html.escape((message.get("text") or "").strip())
+        try:
+            await self._api.edit_message_text(
+                chat_id, message_id, f"{shown}\n\n✖️ Cancelled" if shown else "✖️ Cancelled"
+            )
+        except Exception:
+            logger.debug("Could not close a choice card", exc_info=True)
 
     async def _dismiss(self, query_id: str, text: str | None = None) -> None:
         if not query_id:

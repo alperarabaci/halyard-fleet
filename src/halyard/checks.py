@@ -86,6 +86,19 @@ def context(path: Path, project: str) -> list[str]:
     return lines
 
 
+def version(path: Path, project: Path) -> str:
+    """Which revision of a check ran: the commit that last changed its file, and
+    whether it has been edited since.
+
+    What a finding was a finding *by*, once the file changes next week.
+    """
+    commit = _git(project, "log", "-1", "--format=%h", "--", str(path))
+    if not commit:
+        return "uncommitted"
+    edited = _git(project, "status", "--porcelain", "--", str(path))
+    return f"{commit} + local edits" if edited else commit
+
+
 def prompt(instructions: str, *, context: list[str], note: str, text: str) -> str:
     """One check's turn: its own instructions, what Halyard knows, and the text."""
     parts = [
