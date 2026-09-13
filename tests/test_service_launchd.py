@@ -45,6 +45,16 @@ def test_a_failed_update_still_serves(tmp_path: Path) -> None:
     assert command.endswith("run halyard serve")
 
 
+def test_the_update_removes_nothing_somebody_installed(tmp_path: Path) -> None:
+    """A plain `uv sync` removes what the lock does not select, and the
+    development tools are an extra it does not select: on a checkout that is
+    also worked in, every restart took pytest away and `make test` could not
+    start. The update adds what new code needs and takes nothing out."""
+    command = service._serve_command(tmp_path, "/usr/bin/git", "/usr/bin/uv")
+
+    assert "uv sync --inexact" in command
+
+
 def test_the_agent_carries_a_path_that_finds_uv(tmp_path: Path) -> None:
     """launchd's own PATH is /usr/bin:/bin, and uv is usually neither."""
     document = plistlib.loads(
