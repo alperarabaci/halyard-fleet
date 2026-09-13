@@ -482,6 +482,7 @@ def test_commit_is_registered_so_it_appears_when_you_type_a_slash() -> None:
 
 def checks_in(channel: TelegramChannel, repo: Path, tmp_path: Path, **texts: str) -> None:
     """Give the project checks on disk, and a reply in the chat to check."""
+    from halyard.channels.telegram.adapter import SAID_FILE
     from halyard.core import last_said
 
     (repo / "NOTES").mkdir(exist_ok=True)
@@ -492,7 +493,7 @@ def checks_in(channel: TelegramChannel, repo: Path, tmp_path: Path, **texts: str
         found, checks={name: Path(f"NOTES/{name}.md") for name in texts}
     )
     channel._said_path = tmp_path / "last-said.json"
-    last_said.remember(channel._said_path, chat_id=CHAT, text="All 42 tests passed.")
+    last_said.remember(channel._kept(CHAT, SAID_FILE), chat_id=CHAT, text="All 42 tests passed.")
 
 
 def pressed_check(name: str) -> dict:
@@ -575,12 +576,16 @@ async def test_the_reply_is_timed_by_this_machines_clock(
     import time
     from datetime import UTC, datetime
 
+    from halyard.channels.telegram.adapter import SAID_FILE
     from halyard.core import last_said
 
     channel, api, _, repo = wired
     checks_in(channel, repo, tmp_path, proof="# proof")
     last_said.remember(
-        channel._said_path, chat_id=CHAT, text="done", now=datetime(2026, 9, 13, 20, 20, tzinfo=UTC)
+        channel._kept(CHAT, SAID_FILE),
+        chat_id=CHAT,
+        text="done",
+        now=datetime(2026, 9, 13, 20, 20, tzinfo=UTC),
     )
     monkeypatch.setenv("TZ", "Europe/Istanbul")
     time.tzset()
@@ -669,6 +674,44 @@ async def test_an_answer_no_longer_kept_says_so(tmp_path: Path, wired) -> None:
     assert runner.sent == []
 
 
+async def test_what_a_chat_heard_is_kept_under_its_project(tmp_path: Path, wired) -> None:
+    """As `halyard.yaml` nests them: a project's agent prose stays with that
+    project, its bound is its own, and removing it leaves nothing mixed in."""
+    channel, *_ = wired
+    channel._said_path = tmp_path / "last-said.json"
+
+    await channel.send_message(
+        "id-nav", "the plan", None, agent_id="claude-code", session_name="alpha-engine-navigator"
+    )
+
+    assert (tmp_path / "projects" / "alpha-engine" / "last-said.json").is_file()
+    assert not (tmp_path / "last-said.json").exists()
+
+
+async def test_a_chat_no_project_owns_keeps_the_machine_file(tmp_path: Path, wired) -> None:
+    channel, *_ = wired
+    channel._said_path = tmp_path / "last-said.json"
+    # Two projects, so a chat no seat owns belongs to neither.
+    channel._repositories["beta"] = Project(name="beta", path=tmp_path, seats=[])
+
+    assert channel._kept("-100999", "last-said.json") == tmp_path / "last-said.json"
+
+
+async def test_a_project_name_cannot_climb_out_of_where_state_is_kept(
+    tmp_path: Path, wired
+) -> None:
+    """A directory named by configuration must not be able to leave `projects/`."""
+    channel, *_ = wired
+    channel._said_path = tmp_path / "last-said.json"
+    channel._seats = [
+        Seat(label="nav", runtime="claude-code", chat=CHAT, project="../evil", session="x")
+    ]
+
+    kept = channel._kept(CHAT, "last-said.json")
+
+    assert kept.parent.parent == tmp_path / "projects"
+
+
 async def test_pressing_a_check_runs_that_one_over_the_last_reply(tmp_path: Path, wired) -> None:
     """Its own instructions, the whole reply, and what Halyard can see."""
     from halyard.channels.telegram.adapter import CHECK_MODEL
@@ -735,7 +778,7 @@ async def test_a_project_without_checks_says_so(wired) -> None:
 async def test_nothing_is_checked_before_anything_was_said(tmp_path: Path, wired) -> None:
     channel, api, runner, repo = wired
     checks_in(channel, repo, tmp_path, proof="# proof")
-    channel._said_path = tmp_path / "nothing-yet.json"
+    channel._said_path = tmp_path / "elsewhere" / "last-said.json"
 
     await channel._run_checks("", CHAT, None)
 

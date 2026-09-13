@@ -22,6 +22,8 @@ last-said.json
 # Each chat's last answer per check, with the reply it checked, so the buttons
 # under an answer can hand it on. Agent prose too.
 check-results.json
+# The same two, per project: projects/<name>/last-said.json and so on.
+/projects/
 halyard.db-shm
 halyard.db-wal
 audit.jsonl

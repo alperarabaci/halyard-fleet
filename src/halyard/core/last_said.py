@@ -19,6 +19,11 @@ be worse than forwarding nothing, because it would look complete.
 Keyed by chat rather than by seat. `/forward` is asked in a conversation and
 means "this one, over there" — which chat it was asked in is the question, and
 a chat is what a person is looking at.
+
+**Where the file lives is the caller's choice.** The Telegram channel keeps one
+per project, under `projects/<name>/` beside the database, the way
+`halyard.yaml` nests projects; a chat no project owns uses the machine-level
+file.
 """
 
 from __future__ import annotations

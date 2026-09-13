@@ -173,6 +173,11 @@ CHECK_MODEL = "sonnet"
 #: How long one check may take. It reads a whole report, not a diff summary.
 CHECK_TIMEOUT_SECONDS = 300.0
 
+#: What each chat last heard, and each chat's last answer per check. Kept per
+#: project — see `_kept`.
+SAID_FILE = "last-said.json"
+RESULTS_FILE = "check-results.json"
+
 
 def _local(moment: datetime) -> datetime:
     """A stored UTC time as this machine's clock reads it.
@@ -549,9 +554,9 @@ class TelegramChannel:
         chat_id, thread_id = self._route(role, session_name, agent_id, session_id, project)
         # Kept before the split, because what somebody wants to hand on is the
         # whole report and a fragment of one would look complete.
-        if self._said_path is not None:
+        if (said_path := self._kept(chat_id, SAID_FILE)) is not None:
             last_said.remember(
-                self._said_path,
+                said_path,
                 chat_id=chat_id,
                 text=text,
                 session_id=session_id,
@@ -1402,28 +1407,47 @@ class TelegramChannel:
     # `halyard.commits`. This resolves which repository a chat is about, moves
     # text between that package and Telegram, and nothing else.
 
-    @property
-    def _results_path(self) -> Path | None:
-        """Where a check's answers are kept for the buttons under them.
+    def _project_name_for(self, chat_id: str) -> str | None:
+        """Which project a chat is about: its seat's, or the only one there is.
 
-        Beside what agents said, never in it: `/forward` means an agent's last
-        reply, and must not start handing on Halyard's own output instead.
+        A machine describing exactly one project answers for it from any chat,
+        which is the single-seat setup that existed before seats were split
+        across groups.
         """
-        return self._said_path.with_name("check-results.json") if self._said_path else None
+        seat = for_chat(self._seats, chat_id) if chat_id else None
+        if seat and seat.project:
+            return seat.project
+        if len(self._repositories) == 1:
+            return next(iter(self._repositories))
+        return None
+
+    def _kept(self, chat_id: str, filename: str) -> Path | None:
+        """Where a chat's kept state lives: under its project, the way
+        `halyard.yaml` nests them — `projects/alpha-engine/last-said.json`.
+
+        One file per project rather than one per machine: a project's agent
+        prose stays with that project, its bound is its own, and removing a
+        project leaves nothing of it mixed into another's. A chat no project
+        owns keeps the machine-level file, where it always was. Beside the
+        database either way, never inside the project's repository, where
+        `/commit` would find it on every card.
+        """
+        if self._said_path is None:
+            return None
+        project = self._project_name_for(chat_id)
+        if not project:
+            return self._said_path.with_name(filename)
+        # A directory named by configuration, so it must not be able to climb out.
+        safe = re.sub(r"[^A-Za-z0-9._-]", "_", project).strip(".") or "_"
+        return self._said_path.parent / "projects" / safe / filename
 
     def _repository_for(self, chat_id: str) -> Project | None:
         """The project this chat is about, and where its code is.
 
         No configuration of its own: the chat already names a seat and a seat
-        already names its project. A machine describing exactly one project
-        answers for it from any chat, which is the single-seat setup that
-        existed before seats were split across groups.
+        already names its project.
         """
-        seat = for_chat(self._seats, chat_id) if chat_id else None
-        name = seat.project if seat and seat.project else None
-        if name is None and len(self._repositories) == 1:
-            name = next(iter(self._repositories))
-        found = self._repositories.get(name or "")
+        found = self._repositories.get(self._project_name_for(chat_id) or "")
         return found if found and found.path else None
 
     def _message_runner(self, chat_id: str):
@@ -1834,11 +1858,12 @@ class TelegramChannel:
         That is what `/to` cannot do, and why this is a separate command rather
         than a mode of that one.
         """
-        if self._said_path is None:
+        kept = self._kept(chat_id, SAID_FILE)
+        if kept is None:
             await self._say("Nothing here is keeping track of replies.", chat_id, thread_id)
             return
 
-        said = last_said.last(self._said_path, chat_id)
+        said = last_said.last(kept, chat_id)
         if said is None:
             await self._say(
                 "Nothing has been said in this chat yet, so there is nothing to hand on.",
@@ -1907,7 +1932,8 @@ class TelegramChannel:
                 thread_id,
             )
             return
-        said = last_said.last(self._said_path, chat_id) if self._said_path else None
+        kept = self._kept(chat_id, SAID_FILE)
+        said = last_said.last(kept, chat_id) if kept else None
         if said is None:
             await self._say(
                 "Nothing has been said in this chat yet, so there is nothing to check.",
@@ -2007,9 +2033,9 @@ class TelegramChannel:
         # Kept whole — what ran, on what, what it found, and the reply itself —
         # so a button under the answer hands a seat something it can read cold,
         # not just the piece of the answer the button sits under.
-        if self._results_path is not None:
+        if (results := self._kept(chat_id, RESULTS_FILE)) is not None:
             last_said.remember(
-                self._results_path,
+                results,
                 chat_id=f"{chat_id}|{name}",
                 text=checking.handed_on(
                     name,
@@ -2043,10 +2069,9 @@ class TelegramChannel:
         lands in can tell a finding from an instruction.
         """
         check, _, label = value.partition(">")
+        results = self._kept(chat_id, RESULTS_FILE)
         kept = (
-            last_said.last(self._results_path, f"{chat_id}|{check}")
-            if self._results_path and check and label
-            else None
+            last_said.last(results, f"{chat_id}|{check}") if results and check and label else None
         )
         if kept is None:
             await self._say(
@@ -2195,8 +2220,9 @@ class TelegramChannel:
         #
         # What was delivered here is already written down, with the runtime that
         # owns the id — a session id means nothing without one.
-        if seat is None and role is None and self._said_path is not None:
-            spoke = last_said.last(self._said_path, chat_id)
+        kept = self._kept(chat_id, SAID_FILE)
+        if seat is None and role is None and kept is not None:
+            spoke = last_said.last(kept, chat_id)
             if spoke is not None and spoke.session_id and spoke.agent_id:
                 runner = self._runners.get(spoke.agent_id)
                 if runner is not None:
