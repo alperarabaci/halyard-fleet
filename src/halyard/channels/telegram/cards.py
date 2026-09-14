@@ -33,6 +33,8 @@ PREFIX = "hf"
 ALLOW = "a"
 DENY = "d"
 SHOW_FULL = "f"
+#: A check's card only: refuse the command, and end the check that asked.
+STOP = "s"
 
 _RISK_BADGE = {
     RiskLevel.LOW: "🟢 LOW",
@@ -71,7 +73,7 @@ def parse_callback_data(data: str) -> tuple[str, str, str] | None:
     if len(parts) != 4 or parts[0] != PREFIX:
         return None
     _, handle, nonce, action = parts
-    if action not in {ALLOW, DENY, SHOW_FULL} or not handle or not nonce:
+    if action not in {ALLOW, DENY, SHOW_FULL, STOP} or not handle or not nonce:
         return None
     return handle, nonce, action
 
@@ -370,7 +372,7 @@ def render_resolved(
     buttons on questions that were settled hours ago. A check's card stays a
     check's, so the chat still says what was allowed to look.
     """
-    mark = "✅ ALLOWED" if decision == "allow" else "⛔ DENIED"
+    mark = {"allow": "✅ ALLOWED", "stop": "⏹ STOPPED"}.get(decision, "⛔ DENIED")
     who = f" by {html.escape(by)}" if by else ""
     return _fit(
         [
@@ -386,11 +388,13 @@ def render_resolved(
     )
 
 
-def keyboard(request: ApprovalRequest, *, include_full: bool) -> dict:
+def keyboard(request: ApprovalRequest, *, include_full: bool, stoppable: bool = False) -> dict:
     """The buttons under a card.
 
     Allow and Deny sit on their own row, away from anything harmless, so a
-    mistimed tap on 'show the rest of this' cannot land on 'allow'.
+    mistimed tap on 'show the rest of this' cannot land on 'allow'. A check's
+    card can also stop the check: Deny refuses one command and the check tries
+    the next, which is not what somebody watching a check run away wants.
     """
     rows = [
         [
@@ -402,6 +406,8 @@ def keyboard(request: ApprovalRequest, *, include_full: bool) -> dict:
         rows.append(
             [{"text": "Show full command", "callback_data": callback_data(request, SHOW_FULL)}]
         )
+    if stoppable:
+        rows.append([{"text": "⏹ Stop the check", "callback_data": callback_data(request, STOP)}])
     return {"inline_keyboard": rows}
 
 

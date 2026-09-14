@@ -80,3 +80,25 @@ def test_a_seats_command_is_carded_as_it_always_was() -> None:
 
     assert asked.startswith("<b>[AGENT — PERMISSION REQUEST]</b>")
     assert "Check:" not in asked
+
+
+def test_only_a_checks_card_can_stop_the_check() -> None:
+    """Deny refuses one command and a check tries the next; Stop ends it. A
+    seat's card has no such button — a seat is not stopped from a card."""
+    seats = cards.keyboard(a_command(), include_full=False)
+    checks = cards.keyboard(a_command(), include_full=False, stoppable=True)
+
+    assert [key["text"] for row in seats["inline_keyboard"] for key in row] == [
+        "Allow once",
+        "Deny",
+    ]
+    [stop] = checks["inline_keyboard"][-1]
+    assert stop["text"] == "⏹ Stop the check"
+    assert cards.parse_callback_data(stop["callback_data"])[2] == cards.STOP
+
+
+def test_a_stopped_card_says_who_stopped_it() -> None:
+    settled = cards.render_resolved(a_command(), decision="stop", by="tg:4242", checker="claims")
+
+    assert settled.startswith("<b>⏹ STOPPED</b> by tg:4242")
+    assert "Check: <b>claims</b>" in settled

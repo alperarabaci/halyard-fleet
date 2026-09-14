@@ -23,11 +23,13 @@ credentials in the user's home directory.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import os
 import re
 import shutil
+import signal
 import subprocess
 from pathlib import Path
 
@@ -194,6 +196,21 @@ def find_claude_binary(configured: str | None = None) -> str | None:
         if candidate.exists():
             return str(candidate)
     return None
+
+
+def _end(process) -> None:
+    """End a one-shot turn and everything it started.
+
+    A check's turn runs commands — a test suite, say — as processes of its own,
+    and killing the CLI alone would leave them running for a check nobody is
+    waiting on. So the turn starts as a group of its own, and the group is what
+    is ended.
+    """
+    try:
+        os.killpg(process.pid, signal.SIGKILL)
+    except OSError:
+        with contextlib.suppress(ProcessLookupError):
+            process.kill()
 
 
 class ClaudeCodeRunner:
@@ -412,6 +429,7 @@ class ClaudeCodeRunner:
                 stderr=asyncio.subprocess.PIPE,
                 cwd=cwd,
                 env=self._environment(),
+                start_new_session=True,
             )
         except OSError:
             logger.warning("Could not start the claude CLI for a one-shot turn", exc_info=True)
@@ -419,10 +437,17 @@ class ClaudeCodeRunner:
         try:
             stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=timeout)
         except TimeoutError:
-            process.kill()
+            _end(process)
             await process.wait()
             logger.warning("A one-shot turn ran past %.0fs; giving up on it", timeout)
             return None
+        except asyncio.CancelledError:
+            # Stopped by somebody. What the turn started is a process of its
+            # own and would carry on for a check nobody is waiting on.
+            _end(process)
+            with contextlib.suppress(asyncio.CancelledError):
+                await process.wait()
+            raise
         if process.returncode != 0:
             reason = (
                 (stderr or b"").decode("utf-8", "replace").strip()

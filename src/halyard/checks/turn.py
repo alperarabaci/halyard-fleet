@@ -8,7 +8,7 @@ import time
 from pathlib import Path
 
 from halyard import frame
-from halyard.checks.spec import Answer, Asker
+from halyard.checks.spec import Answer, Asker, StoppedError
 
 logger = logging.getLogger(__name__)
 
@@ -21,9 +21,13 @@ def prompt(instructions: str, *, context: list[str], note: str, text: str) -> st
         "---",
         "",
         "This check runs in the project's own directory. It can read files and "
-        "run commands but cannot edit anything; each command is put in front of "
-        "the operator before it runs, and one that is refused or does not finish "
-        "counts as unmeasured.",
+        "cannot edit anything.",
+        "",
+        "It runs only the commands this check's text tells it to, each once and "
+        "as written — nothing of its own: no probes, no reproductions, no scratch "
+        "copies, no setup or cleanup. Every command waits for the operator to "
+        "allow it, and one that is refused or does not finish counts as "
+        "unmeasured.",
         "",
         "It is checking, not changing: read what this check needs. The project's "
         "own instructions, and the files they point to, are background here "
@@ -143,6 +147,10 @@ async def run(
             name=f"{name} · handoff {handoff}" if handoff else name,
             edits=False,
         )
+    except StoppedError as stopped:
+        took = time.monotonic() - started
+        logger.info("Check %s %s after %.1fs", name, stopped, took)
+        return Answer(name, path, version, why=str(stopped), took=took)
     except Exception:
         logger.warning("Check %s failed", name, exc_info=True)
         said = None

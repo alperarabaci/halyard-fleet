@@ -47,6 +47,7 @@ from halyard.core.approvals import (
     ApprovalStore,
     Decision,
     InvalidNonceError,
+    ResolutionReason,
     UnknownApprovalError,
 )
 from halyard.core.audit import (
@@ -301,6 +302,18 @@ class _SeatDelivery:
         )
 
 
+@dataclass
+class _Check:
+    """A check's turn while it runs: what it is, where its answer is going, and
+    the task running it — which is what Stop cancels."""
+
+    name: str
+    destination: tuple[str, int | None]
+    turn: asyncio.Future
+    #: Who pressed Stop, once somebody has.
+    stopped_by: str | None = None
+
+
 class _Checking:
     """The channel's side of `checks.Asker`: a runtime's turn, known by its id.
 
@@ -308,17 +321,14 @@ class _Checking:
     where its answer is going for as long as it runs. A command the check asks
     to run is then a card that says which check wants it, in the chat the
     answer is headed for — rather than one from a session nobody has seen, in
-    whichever chat an unknown session falls to.
+    whichever chat an unknown session falls to. The card can stop the check.
     """
 
     def __init__(
-        self,
-        runner,
-        running: dict[str, tuple[str, tuple[str, int | None]]],
-        destination: tuple[str, int | None],
+        self, channel: TelegramChannel, runner, destination: tuple[str, int | None]
     ) -> None:
+        self._channel = channel
         self._runner = runner
-        self._running = running
         self._destination = destination
 
     async def ask(
@@ -332,14 +342,25 @@ class _Checking:
         edits: bool = True,
     ) -> str | None:
         session = str(uuid.uuid4())
-        self._running[session] = (name or "check", self._destination)
-        logger.info("Check %s runs as session %s", name or "?", session)
+        running = _Check(
+            name or "check",
+            self._destination,
+            asyncio.ensure_future(
+                self._runner.ask(
+                    text, timeout=timeout, model=model, cwd=cwd, edits=edits, session_id=session
+                )
+            ),
+        )
+        self._channel._checking[session] = running
+        logger.info("Check %s runs as session %s", running.name, session)
         try:
-            return await self._runner.ask(
-                text, timeout=timeout, model=model, cwd=cwd, edits=edits, session_id=session
-            )
+            return await running.turn
+        except asyncio.CancelledError:
+            if running.stopped_by is None:
+                raise
+            raise checking.StoppedError(f"stopped by {running.stopped_by}") from None
         finally:
-            self._running.pop(session, None)
+            self._channel._checking.pop(session, None)
 
 
 class TelegramChannel:
@@ -440,9 +461,9 @@ class TelegramChannel:
         #: card actually is.
         self._open: dict[str, tuple[ApprovalRequest, int, str, int | None]] = {}
         #: The checks running now, by the session id each was started under:
-        #: what the check is, and where its answer is headed — which is where a
-        #: command it asks to run goes. See `_Checking`.
-        self._checking: dict[str, tuple[str, tuple[str, int | None]]] = {}
+        #: what the check is, where its answer is headed — which is where a
+        #: command it asks to run goes — and how to stop it. See `_Checking`.
+        self._checking: dict[str, _Check] = {}
         # Questions are held apart from approvals: a different store answers
         # them, and their button carries an option index rather than allow/deny.
         # Same shape otherwise — handle to (request, message id, chat).
@@ -558,15 +579,18 @@ class TelegramChannel:
         """
         self._forget_expired()
         # A check's turn is nobody's seat. Its command goes where the check's
-        # answer is going and says it is a check's; routed like a seat's, it
-        # would land wherever an unknown session falls, over a session id
-        # nobody has seen.
-        checker, destination = self._checking.get(request.session_id) or (None, None)
+        # answer is going, says it is a check's, and can stop the check; routed
+        # like a seat's, it would land wherever an unknown session falls, over
+        # a session id nobody has seen.
+        running = self._checking.get(request.session_id)
+        checker = running.name if running else None
         text = cards.render(request, now=self._clock(), checker=checker)
         markup = cards.keyboard(
-            request, include_full=request.command_full != request.command_summary
+            request,
+            include_full=request.command_full != request.command_summary,
+            stoppable=running is not None,
         )
-        chat_id, thread_id = destination or self._route(
+        chat_id, thread_id = (running.destination if running else None) or self._route(
             request.role,
             request.session_name,
             request.agent_id,
@@ -2171,11 +2195,36 @@ class TelegramChannel:
         """This chat's one-shot runtime, for a check whose answer goes to
         `destination` — and so does anything the check asks to run."""
         runner = self._one_shot_runner(chat_id)
-        return _Checking(runner, self._checking, destination) if runner else None
+        return _Checking(self, runner, destination) if runner else None
 
     def _destination_of(self, seat: Seat) -> tuple[str, int | None]:
         """Where a seat's traffic goes: its own chat, or the default one."""
         return (parse_destination(seat.chat) if seat.chat else None) or (self._chat_id, None)
+
+    async def _stop_check(self, session: str, actor: str) -> None:
+        """End a check's turn, closing any other card it still has open.
+
+        Those are denied and closed before the turn is cancelled, while the
+        check is still known and its cards can still say whose they were.
+        """
+        running = self._checking.get(session)
+        if running is None:
+            return
+        running.stopped_by = actor
+        for request, message_id, chat_id, _ in list(self._open.values()):
+            if request.session_id != session:
+                continue
+            if await self._store.resolution_of(request.request_id) is not None:
+                continue
+            with contextlib.suppress(UnknownApprovalError):
+                await self._store.deny(
+                    request.request_id,
+                    reason=ResolutionReason.USER,
+                    note=f"Denied: {actor} stopped the check that asked for this.",
+                )
+            await self._settle_card(request, message_id, chat_id, "stop", actor)
+        logger.info("Check %s stopped by %s", running.name, actor)
+        running.turn.cancel()
 
     def _seats_for(self, project: str, to: str | None) -> list[Seat]:
         """Where a handoff can go: the seat `to:` names, the seats holding the
@@ -2979,6 +3028,14 @@ class TelegramChannel:
             await self._dismiss(query_id, "That request is no longer open.")
             return
 
+        if action == cards.STOP:
+            # Refused like any denial, and then the check that asked is ended:
+            # Deny alone leaves it free to try the next thing, which is exactly
+            # what somebody pressing Stop wants to stop.
+            await self._settle_card(request, message_id, chat_id, "stop", actor)
+            await self._stop_check(request.session_id, actor)
+            await self._dismiss(query_id, "Stopped.")
+            return
         await self._settle_card(request, message_id, chat_id, decision.value, actor)
         await self._dismiss(query_id, "Allowed." if decision is Decision.ALLOW else "Denied.")
 
@@ -3003,7 +3060,7 @@ class TelegramChannel:
                 chat_id,
                 message_id,
                 cards.render_resolved(
-                    request, decision=decision, by=by, checker=running[0] if running else None
+                    request, decision=decision, by=by, checker=running.name if running else None
                 ),
                 reply_markup=None,
             )

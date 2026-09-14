@@ -33,6 +33,15 @@ class Asker(Protocol):
     ) -> str | None: ...
 
 
+class StoppedError(Exception):
+    """A check's turn ended by a person before it answered.
+
+    Raised by whatever runs the turn, and kept as the reason on an unmeasured
+    answer: a check somebody stopped says so, rather than reading as a model
+    that went quiet.
+    """
+
+
 @dataclass(frozen=True)
 class Answer:
     """One check's answer — or why there is none, which is an answer too."""
