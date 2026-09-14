@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from typing import Protocol, runtime_checkable
 
 from halyard.checks import Answer
+from halyard.commands import Command, Result
 
 
 @runtime_checkable
@@ -20,10 +21,23 @@ class Delivery(Protocol):
     async def to_seat(self, label: str, text: str) -> None: ...
 
 
+@runtime_checkable
+class Runner(Protocol):
+    """How a handoff runs one of its project's commands.
+
+    The channel answers it: it knows where the project is, who is waiting to
+    see it move, and what else is running there. A handoff knows only which
+    commands it names, and what came back.
+    """
+
+    async def run(self, command: Command) -> Result: ...
+
+
 @dataclass(frozen=True)
 class Handed:
-    """What a handoff did: the message it delivered, and the checks that went
-    with it."""
+    """What a handoff did: the message it delivered, the commands it ran and
+    the checks that went with it."""
 
     text: str
     answers: tuple[Answer, ...] = ()
+    ran: tuple[tuple[Command, Result], ...] = ()

@@ -1,4 +1,4 @@
-"""Making a handoff: its checks first, then the message, then the seat."""
+"""Making a handoff: its commands, then its checks, then the message, then the seat."""
 
 from __future__ import annotations
 
@@ -8,9 +8,10 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 
 from halyard import checks, frame
+from halyard.commands import Command, Result, summary
 from halyard.core.config_file import Handoff
 from halyard.handoffs.message import compose
-from halyard.handoffs.spec import Delivery, Handed
+from halyard.handoffs.spec import Delivery, Handed, Runner
 
 logger = logging.getLogger(__name__)
 
@@ -33,8 +34,17 @@ async def hand_off(
     delivery: Delivery,
     findings: Sequence[str] = (),
     labeller: checks.Labeller | None = None,
+    project_commands: Mapping[str, str] | None = None,
+    runner: Runner | None = None,
 ) -> Handed:
-    """Run the checks a handoff names over the reply, write the message, deliver it.
+    """Run a handoff's commands, then its checks, write the message, deliver it.
+
+    The one place the parts of a handoff meet, in this order, each handed what
+    came before it. The commands run first, one after another, where the
+    project is; what each did becomes a line of the envelope, so the checks read
+    Halyard's own run rather than setting out to make one. A command that fails
+    is reported and the handoff goes on — whoever receives it has to see that it
+    failed.
 
     The checks run side by side, each a turn of its own, and all before the
     message is written: the seat receives the reply and what the checks made of
@@ -44,6 +54,20 @@ async def hand_off(
     something labels the task as it would run by hand: the project's `findings`
     decide, not the handoff.
     """
+    ran: list[tuple[Command, Result]] = []
+    for name in handoff.commands:
+        command = Command(name=name, line=(project_commands or {}).get(name, ""))
+        if runner is None:
+            result = Result(ok=False, output="nothing here can run a command", seconds=0.0)
+        else:
+            try:
+                result = await runner.run(command)
+            except Exception:
+                logger.warning("Handoff %s could not run %s", handoff.name, name, exc_info=True)
+                result = Result(ok=False, output="it could not be run", seconds=0.0)
+        ran.append((command, result))
+    envelope = [*context, *(summary(c.name, c.line, r) for c, r in ran)]
+
     answers: tuple[checks.Answer, ...] = ()
     if handoff.checks and (asker is None or reply is None):
         why = "no runtime here can take a one-shot turn" if asker is None else "there was no reply"
@@ -58,7 +82,7 @@ async def hand_off(
                         name,
                         project_checks[name],
                         project=project,
-                        context=context,
+                        context=envelope,
                         note=note,
                         reply=reply,
                         asker=asker,
@@ -85,12 +109,13 @@ async def hand_off(
         recipient=recipient,
         sender=sender,
         arrived=arrived,
-        context=context,
+        context=envelope,
         note=note,
         prompt=prompt,
         prompt_ref=prompt_ref,
         answers=answers,
         reply=reply,
+        ran=ran,
     )
     await delivery.to_seat(recipient_label, text)
     logger.info(
@@ -101,6 +126,6 @@ async def hand_off(
         len(text),
         ", ".join(f"{a.name} {'answered' if a.measured else 'unmeasured'}" for a in answers)
         or "none",
-        " · ".join(context),
+        " · ".join(envelope),
     )
-    return Handed(text, answers)
+    return Handed(text, answers, tuple(ran))

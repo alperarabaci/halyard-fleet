@@ -94,7 +94,7 @@ reading configuration.
 | `/model`, `/effort` | what answers, and how hard it thinks |
 | `/to` | *(typed; not on the menu)* hand a message to another seat by name |
 | `/checks` | pick one of this project's own checks and run it over the chat's last reply; the answer has a button per seat to hand it on |
-| `/handoff` | hand the chat's last reply on the way this project defines it — its own prompt in front, its checks run first |
+| `/handoff` | hand the chat's last reply on the way this project defines it — its own prompt in front, its commands and checks run first |
 | `/md` | *(configurable)* have the agent write its answer to a file and pass the path |
 | `/commit` | commit this branch's work, with a message to approve — and push |
 | `/review_and_commit` | the same, plus this project's own checks and its review round |
@@ -152,6 +152,7 @@ projects:
     validate: make test-fast          # /commit runs this first, every time
     commands:                         # what /command offers, by name
       test-all: make test-all
+      test-fast: make test-fast
       bootstrap: make bootstrap-up
     labels: [andon, rework]           # narrows /label; empty means all of them
     label_groups:                     # the task's label from each group goes on the envelope
@@ -171,6 +172,11 @@ projects:
         to: reviewer
       discovery:                      # a report, back to the navigator, checked first
         prompt: NOTES/handoffs/discovery.md
+        checks: [proof, destructive]
+        to: navigator
+      close:                          # the delivery: the tests run, then the checks
+        prompt: NOTES/handoffs/close.md
+        commands: [test-fast]
         checks: [proof, destructive]
         to: navigator
 ```
@@ -202,6 +208,14 @@ answer says one of them the task gets `halyard:<check>`. From `/checks` and from
 a handoff alike, since both run the same check. Halyard only adds: closing a
 finding, as a false alarm or as approved, is a label somebody puts on by hand.
 A project that has not said what a finding looks like has nothing written.
+
+**A handoff can run the project's commands first.** Under `commands:` a handoff
+names entries of the project's `commands:`, and they run in that order before its
+checks — one at a time, as `/command` runs them, so a handoff does not go while
+something else is running in the project. What each did goes into the envelope
+the checks read, as one line with its exit code and last line, and what it
+printed goes into the message. A command that fails is reported and the handoff
+goes on: whoever receives it has to see that it failed.
 
 **`confirmation:` buys a round that a guard cannot.** A test proves what it
 tests and a file of invariants proves nothing at all — an agent's attention is

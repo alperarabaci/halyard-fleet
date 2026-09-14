@@ -8,15 +8,17 @@ project's own words for whoever receives it, and — for the one that matters
 most — the answers of the checks it names, so the navigator does not have to
 find every missing proof alone.
 
-**Checks are used, never owned.** A handoff runs checks through
-`halyard.checks`; a check never hands anything on. Neither knows a chat or a
-runtime: a model is reached through `checks.Asker` and a seat through
-`Delivery`, and the Telegram channel is the one adapter answering both today.
+**Commands and checks are used, never owned.** A handoff runs a project's
+commands through `Runner` and its checks through `halyard.checks`, in that
+order, and hands each what came before it: a check reads in its envelope what
+the commands did. None of them knows a chat or a runtime — a model is reached
+through `checks.Asker`, a command through `Runner` and a seat through
+`Delivery` — and the Telegram channel is the one adapter answering them today.
 `tests/test_layering.py` keeps it that way.
 """
 
 from halyard.handoffs.flow import hand_off
 from halyard.handoffs.message import compose
-from halyard.handoffs.spec import Delivery, Handed
+from halyard.handoffs.spec import Delivery, Handed, Runner
 
-__all__ = ["Delivery", "Handed", "compose", "hand_off"]
+__all__ = ["Delivery", "Handed", "Runner", "compose", "hand_off"]

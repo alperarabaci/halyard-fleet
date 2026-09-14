@@ -20,6 +20,7 @@ from halyard.commands.running import (
     LINES_WHEN_IT_PASSED,
     Result,
     run,
+    summary,
 )
 
 __all__ = [
@@ -31,4 +32,5 @@ __all__ = [
     "offered",
     "resolve",
     "run",
+    "summary",
 ]

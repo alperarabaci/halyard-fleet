@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from halyard import handoffs
+from halyard.commands import Command, Result
 from halyard.core.config_file import Handoff
 
 
@@ -50,7 +51,21 @@ def a_project(tmp_path: Path) -> Path:
     return tmp_path
 
 
-async def hand(tmp_path: Path, handoff: Handoff, *, asker: Asking | None = None):
+class Running:
+    """A `Runner` that answers from a script and keeps what it ran, in order."""
+
+    def __init__(self, **results: Result) -> None:
+        self.results = results
+        self.ran: list[str] = []
+
+    async def run(self, command: Command) -> Result:
+        self.ran.append(command.name)
+        return self.results.get(command.name) or Result(
+            ok=True, output="collected\n1420 passed", seconds=94.0, exit_code=0
+        )
+
+
+async def hand(tmp_path: Path, handoff: Handoff, *, asker: Asking | None = None, **more):
     delivery = Delivered()
     handed = await handoffs.hand_off(
         handoff,
@@ -67,6 +82,7 @@ async def hand(tmp_path: Path, handoff: Handoff, *, asker: Asking | None = None)
         model="sonnet",
         timeout=5,
         delivery=delivery,
+        **more,
     )
     return handed, delivery
 
@@ -186,3 +202,63 @@ async def test_a_check_in_a_handoff_labels_the_task_as_it_would_by_hand(tmp_path
     )
 
     assert put == ["halyard:proof"]
+
+
+COMMANDS = {"test-fast": "make test-fast", "lint": "make lint"}
+
+
+async def test_commands_run_first_and_the_checks_read_what_they_did(tmp_path: Path) -> None:
+    """Halyard's own run, in the check's envelope — so a check comparing a
+    report against the tests reads the run instead of setting out to make one."""
+    a_project(tmp_path)
+    asker, runner = Asking(), Running()
+
+    handed, delivery = await hand(
+        tmp_path,
+        Handoff(name="close", commands=("test-fast",), checks=("claims",)),
+        asker=asker,
+        project_commands=COMMANDS,
+        runner=runner,
+    )
+
+    ran = "Ran test-fast: make test-fast · exit 0 · 94s · last line: 1420 passed"
+    [checked] = asker.asked
+    assert ran in checked
+    [(_, text)] = delivery.sent
+    assert f"- {ran}" in text
+    assert "Command test-fast — make test-fast:\n\ncollected\n1420 passed" in text
+    assert text.index("Command test-fast") < text.index("Check claims")
+    assert [command.name for command, _ in handed.ran] == ["test-fast"]
+
+
+async def test_commands_run_one_after_another_in_the_order_written(tmp_path: Path) -> None:
+    a_project(tmp_path)
+    runner = Running()
+
+    await hand(
+        tmp_path,
+        Handoff(name="close", commands=("lint", "test-fast")),
+        project_commands=COMMANDS,
+        runner=runner,
+    )
+
+    assert runner.ran == ["lint", "test-fast"]
+
+
+async def test_a_command_that_fails_is_reported_and_the_handoff_still_goes(
+    tmp_path: Path,
+) -> None:
+    """Whoever receives it has to see that it failed."""
+    a_project(tmp_path)
+    broke = Result(ok=False, output="2 failed", seconds=31.0, exit_code=1)
+
+    _, delivery = await hand(
+        tmp_path,
+        Handoff(name="close", commands=("test-fast",)),
+        project_commands=COMMANDS,
+        runner=Running(**{"test-fast": broke}),
+    )
+
+    [(_, text)] = delivery.sent
+    assert "Ran test-fast: make test-fast · exit 1 · 31s · last line: 2 failed" in text
+    assert "Command test-fast — make test-fast:\n\n2 failed" in text
