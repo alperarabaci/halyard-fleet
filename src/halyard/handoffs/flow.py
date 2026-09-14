@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 
 from halyard import checks, frame
@@ -31,6 +31,8 @@ async def hand_off(
     model: str,
     timeout: float,
     delivery: Delivery,
+    findings: Sequence[str] = (),
+    labeller: checks.Labeller | None = None,
 ) -> Handed:
     """Run the checks a handoff names over the reply, write the message, deliver it.
 
@@ -38,7 +40,9 @@ async def hand_off(
     message is written: the seat receives the reply and what the checks made of
     it together. A check that could not run goes as unmeasured rather than
     being left out — the project's prompts say an unmeasured line is not a
-    clean one, and the reader has to see it to know that.
+    clean one, and the reader has to see it to know that. A check that finds
+    something labels the task as it would run by hand: the project's `findings`
+    decide, not the handoff.
     """
     answers: tuple[checks.Answer, ...] = ()
     if handoff.checks and (asker is None or reply is None):
@@ -62,6 +66,8 @@ async def hand_off(
                         timeout=timeout,
                         about=f"handoff {handoff.name}, {sender}'s reply from {arrived}",
                         handoff=handoff.name,
+                        findings=findings,
+                        labeller=labeller,
                     )
                     for name in handoff.checks
                 )

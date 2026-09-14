@@ -150,6 +150,13 @@ projects:
     # Nothing is required or refused: a task with none of them adds nothing.
     # label_groups:
     #   level: [level::1, level::2, level::3]
+    # What the checks' answers say when they found something, in the project's
+    # own words — quoted, since a phrase with a colon is otherwise a mapping. An
+    # answer saying one of them puts `halyard:<check>` on the task. This writes
+    # to the tracker, so nothing is written unless it is set.
+    # label_findings:
+    #   - "status: candidate"
+    #   - "status: evidence missing"
     seats:
       # A label is what you type on a phone. It has to be unique across every
       # project, because it is also how `doctor` names a seat.

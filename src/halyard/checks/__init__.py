@@ -19,12 +19,29 @@ project's gate first — and edits nothing. The prompt says so, and that a
 command refused or unfinished leaves the check unmeasured rather than clean.
 Whoever is asked to allow one of those commands can stop the check instead.
 
-**One port, and no chat.** A check reaches a model through `Asker` and knows
-nothing of Telegram or of any runtime. `halyard.handoffs` runs checks; nothing
-here hands anything on. `tests/test_layering.py` keeps it that way.
+**A finding can label the task.** A project writes under `label_findings:` what
+its checks' answers say when they found something, in its own words, and an
+answer that says one of them puts `halyard:<check>` on the task. The check
+decides, from the project's settings — whoever runs it has no say — so a check
+in a handoff labels exactly as one run by hand. Halyard only adds.
+
+**Two ports, and no chat.** A check reaches a model through `Asker` and the task
+through `Labeller`, and knows nothing of Telegram, of any runtime or of any
+tracker. `halyard.handoffs` runs checks; nothing here hands anything on.
+`tests/test_layering.py` keeps it that way.
 """
 
-from halyard.checks.spec import Answer, Asker, StoppedError
-from halyard.checks.turn import handed_on, prompt, run, unfenced
+from halyard.checks.spec import Answer, Asker, Labeller, StoppedError
+from halyard.checks.turn import finding, handed_on, prompt, run, unfenced
 
-__all__ = ["Answer", "Asker", "StoppedError", "handed_on", "prompt", "run", "unfenced"]
+__all__ = [
+    "Answer",
+    "Asker",
+    "Labeller",
+    "StoppedError",
+    "finding",
+    "handed_on",
+    "prompt",
+    "run",
+    "unfenced",
+]

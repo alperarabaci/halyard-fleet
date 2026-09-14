@@ -57,6 +57,7 @@ _PROJECT_FIELDS = {
     "forge",
     "labels",
     "label_groups",
+    "label_findings",
     "label_work",
     "confirmation",
     "checks",
@@ -153,6 +154,12 @@ class Project:
     #: with none of a group's labels, or a tracker that cannot be read, adds
     #: nothing: this reports what is there, it does not ask for anything.
     label_groups: dict[str, tuple[str, ...]] = field(default_factory=dict)
+    #: What this project's checks answer when they found something, in its own
+    #: words — `status: candidate`. An answer that says one of them puts
+    #: `halyard:<check>` on the task, wherever the check ran. Empty unless
+    #: configured, and nothing is written without it: this writes to somebody's
+    #: tracker on its own.
+    label_findings: tuple[str, ...] = ()
     #: Whether each seat's label goes on the task its branch is for, the first
     #: time that seat works on it — `claude:navigator`. Off unless asked for:
     #: it writes to somebody's issue tracker on its own. See `tasks.attribution`.
@@ -302,6 +309,31 @@ def _warnings_from(project: str, value: Any) -> tuple[str, ...] | None:
     if not isinstance(value, list):
         raise ValueError(f"Project {project!r}: `warn_if:` must be a list of names.")
     return tuple(str(name).strip() for name in value if str(name).strip())
+
+
+def _findings_from(project: str, value: Any) -> tuple[str, ...]:
+    """`label_findings:` as phrases, in the project's own words.
+
+    A phrase is nearly always `status: something`, which YAML reads as a
+    mapping unless it is quoted — so a mapping here is refused with that said,
+    rather than turned into text nobody's answer will ever contain.
+    """
+    if value is None:
+        return ()
+    if isinstance(value, str):
+        value = [value]
+    if not isinstance(value, list):
+        raise ValueError(f"Project {project!r}: `label_findings:` must be a list of phrases.")
+    phrases = []
+    for phrase in value:
+        if isinstance(phrase, dict):
+            raise ValueError(
+                f"Project {project!r}: a `label_findings:` phrase with a colon in it has "
+                'to be quoted — `- "status: candidate"` — or YAML reads it as a mapping.'
+            )
+        if str(phrase).strip():
+            phrases.append(str(phrase).strip())
+    return tuple(phrases)
 
 
 def _label_groups_from(project: str, value: Any) -> dict[str, tuple[str, ...]]:
@@ -487,6 +519,7 @@ def projects_from_yaml(text: str) -> list[Project]:
                 forge=_as_text(body.get("forge")),
                 labels=_warnings_from(project, body.get("labels")) or (),
                 label_groups=_label_groups_from(project, body.get("label_groups")),
+                label_findings=_findings_from(project, body.get("label_findings")),
                 label_work=_as_flag(project, "label_work", body.get("label_work")),
                 confirmation=_confirmation_from(project, body.get("confirmation")),
                 checks=checks,

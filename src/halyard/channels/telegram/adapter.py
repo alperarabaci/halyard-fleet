@@ -379,6 +379,21 @@ class _Checking:
             self._channel._checking.pop(session, None)
 
 
+class _Labelling:
+    """The channel's side of `checks.Labeller`: a label onto this project's task.
+
+    Written off to one side, so a check's answer and a handoff never wait on an
+    issue tracker, and quietly — the log says what happened, nobody is asked.
+    """
+
+    def __init__(self, channel: TelegramChannel, found: Project) -> None:
+        self._channel = channel
+        self._found = found
+
+    async def label(self, label: str) -> None:
+        self._channel._detach(self._channel._put_label(self._found, label), f"label {label}")
+
+
 class TelegramChannel:
     """Puts approvals in a chat and brings the answers back."""
 
@@ -2139,6 +2154,8 @@ class TelegramChannel:
             asker=asker,
             model=CHECK_MODEL,
             timeout=CHECK_TIMEOUT_SECONDS,
+            findings=found.label_findings,
+            labeller=_Labelling(self, found),
             about=(
                 f"reply {arrived}, {len(said.text)} chars, "
                 f"from {said.agent_id or '?'} {said.session_id or '?'}"
@@ -2255,6 +2272,58 @@ class TelegramChannel:
         logger.info("Check %s stopped by %s", running.name, actor)
         running.turn.cancel()
 
+    async def _reach_quietly(self, found: Project):
+        """The forge and the task this project's branch is for, or None.
+
+        `_reach_task` without the telling: nobody asked for what needs this, so
+        a branch not named for a task, or a remote with no tracker behind it, is
+        said only in the log.
+        """
+        if found.path is None:
+            return None
+        branch = await asyncio.to_thread(task_tracker.current_branch, found.path)
+        number = task_tracker.number_of(branch or "")
+        if number is None:
+            return None
+        origin = await asyncio.to_thread(task_tracker.origin_of, found.path)
+        if origin is None:
+            logger.info("%s#%d: the repository has no origin to ask", found.name, number)
+            return None
+        try:
+            forge = task_tracker.build(origin, self._forge_token or "", declared=found.forge)
+        except task_tracker.ForgeError as refused:
+            logger.info("%s#%d: %s", found.name, number, refused)
+            return None
+        return forge, number
+
+    async def _put_label(self, found: Project, label: str) -> None:
+        """One label onto the task this project's branch is for, unless it is on
+        it already. Logged whichever way it goes, never raised — see
+        `_Labelling`."""
+        reached = await self._reach_quietly(found)
+        if reached is None:
+            logger.info("%s went on no task: %s names none that can be reached", label, found.name)
+            return
+        forge, number = reached
+        try:
+            task = await asyncio.wait_for(forge.task(number), timeout=LABELS_TIMEOUT_SECONDS)
+            if label.casefold() in {name.casefold() for name in task.labels}:
+                logger.info("%s was already on %s#%d", label, found.name, number)
+                return
+            await asyncio.wait_for(
+                task_tracker.put_on(forge, number, label), timeout=LABELS_TIMEOUT_SECONDS
+            )
+        except (task_tracker.ForgeError, TimeoutError) as refused:
+            logger.warning(
+                "Could not put %s on %s#%d: %s",
+                label,
+                found.name,
+                number,
+                str(refused) or "no answer in time",
+            )
+            return
+        logger.info("Labelled %s#%d %s", found.name, number, label)
+
     async def _task_labels(self, found: Project) -> dict[str, str]:
         """The task's labels from this project's own groups, for the envelope.
 
@@ -2263,17 +2332,13 @@ class TelegramChannel:
         tracker that does not answer adds nothing and says so only in the log.
         A project without `label_groups:` never asks the tracker at all.
         """
-        if not found.label_groups or found.path is None:
+        if not found.label_groups:
             return {}
-        branch = await asyncio.to_thread(task_tracker.current_branch, found.path)
-        number = task_tracker.number_of(branch or "")
-        if number is None:
+        reached = await self._reach_quietly(found)
+        if reached is None:
             return {}
+        forge, number = reached
         try:
-            origin = await asyncio.to_thread(task_tracker.origin_of, found.path)
-            if origin is None:
-                raise task_tracker.ForgeError("the repository has no origin to ask")
-            forge = task_tracker.build(origin, self._forge_token or "", declared=found.forge)
             task = await asyncio.wait_for(forge.task(number), timeout=LABELS_TIMEOUT_SECONDS)
         except (task_tracker.ForgeError, TimeoutError) as missing:
             logger.info(
@@ -2450,6 +2515,8 @@ class TelegramChannel:
             model=CHECK_MODEL,
             timeout=CHECK_TIMEOUT_SECONDS,
             delivery=_SeatDelivery(self, actor, chat_id, thread_id),
+            findings=found.label_findings,
+            labeller=_Labelling(self, found),
         )
         if handed.answers:
             await self._say(

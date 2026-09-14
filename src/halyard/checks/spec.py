@@ -33,6 +33,17 @@ class Asker(Protocol):
     ) -> str | None: ...
 
 
+@runtime_checkable
+class Labeller(Protocol):
+    """What a check may do to the task it ran on: put one more label on it.
+
+    The channel answers it — it knows which task, which tracker and which
+    token. A check knows only what it found, and never waits on the writing.
+    """
+
+    async def label(self, label: str) -> None: ...
+
+
 class StoppedError(Exception):
     """A check's turn ended by a person before it answered.
 
