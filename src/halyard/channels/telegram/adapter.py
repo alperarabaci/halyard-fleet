@@ -104,7 +104,6 @@ POLL_RETRY_MAX_SECONDS = 30.0
 #: description at most 256. Anything else is rejected for the whole list.
 COMMANDS: tuple[tuple[str, str], ...] = (
     ("chat", "Send a message into this seat's session"),
-    ("to", "Send a message to another seat by name"),
     ("forward", "Hand this chat's last reply to another seat"),
     ("checks", "Run one of this project's checks over this chat's last reply"),
     ("handoff", "Hand this chat's last reply on, the way this project defines it"),
@@ -122,6 +121,18 @@ COMMANDS: tuple[tuple[str, str], ...] = (
     ("resume", "Take the gate back"),
     ("help", "This list"),
 )
+
+#: Answered when typed, and kept off the menu. `/to` is what a handoff already
+#: does from the menu, and one fewer button on a phone is worth more than a
+#: second way to the same place; whoever types it still gets it.
+UNLISTED: tuple[str, ...] = ("to",)
+
+
+def reserved_names() -> list[str]:
+    """Every name a configured prompt cannot take: the menu's, and the ones
+    answered only when typed — a prompt called `to` would never run, because
+    `/to` answers first."""
+    return [name for name, _ in COMMANDS] + list(UNLISTED)
 
 
 #: How the prompt names the seat it is waiting for.

@@ -1800,6 +1800,17 @@ async def test_the_help_text_lists_exactly_those(tmp_path: Path) -> None:
         assert f"/{name} — {description}" in said
 
 
+def test_to_answers_when_typed_but_is_off_the_menu() -> None:
+    """A handoff does from the menu what `/to` did, and one fewer button on a
+    phone is worth more than a second way to the same place. Typed, `/to` still
+    answers — so a prompt still cannot take its name."""
+    listed = {name for name, _ in adapter.COMMANDS}
+
+    assert "to" not in listed
+    assert "forward" in listed
+    assert "to" in adapter.reserved_names()
+
+
 async def test_a_refused_registration_does_not_stop_the_gate(tmp_path: Path) -> None:
     """Trading the thing for the label on it. The bot answers every command
     whether Telegram knows about them or not."""
