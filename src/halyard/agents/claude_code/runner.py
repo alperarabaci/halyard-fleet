@@ -50,6 +50,12 @@ EFFORT_LEVELS = ("low", "medium", "high", "xhigh", "max")
 #: Override with HALYARD_CLAUDE_MODELS when something new appears.
 DEFAULT_MODELS = ("opus", "sonnet", "haiku", "fable")
 
+#: What a turn that may not edit anything is left with: the tools that read,
+#: and the shell — which the project's gate puts in front of a person, where an
+#: edit granted by `writes:` would go through without one. Passed with `=`, so
+#: the list cannot swallow the prompt that follows it.
+READING_TOOLS = "Read,Grep,Glob,Bash"
+
 #: No model override by default. Measured on a live Desktop-owned session:
 #: `--resume` with no `--model` continued on that session's opus model. The
 #: earlier haiku measurement came from a fresh headless prompt and was wrongly
@@ -357,7 +363,14 @@ class ClaudeCodeRunner:
         )
 
     async def ask(
-        self, text: str, *, timeout: float = 180.0, model: str | None = None
+        self,
+        text: str,
+        *,
+        timeout: float = 180.0,
+        model: str | None = None,
+        cwd: Path | None = None,
+        edits: bool = True,
+        session_id: str | None = None,
     ) -> str | None:
         """Run one prompt in a session of its own and return what came back.
 
@@ -366,6 +379,14 @@ class ClaudeCodeRunner:
         session fork it silently — so work that is *about* a session, rather
         than part of it, has to happen somewhere else entirely. This is that
         somewhere else: a throwaway turn that reads what it is given and answers.
+
+        `cwd` stands the turn inside a project instead of wherever Halyard was
+        started — a check comparing a report against code has to be where that
+        code is. Such a turn is kept out of the project's session history:
+        nobody resumes it, and a list of every check ever run would bury the
+        sessions somebody does come back to. `edits=False` leaves it
+        `READING_TOOLS`. `session_id` is the id it runs under, chosen by the
+        caller so that what the turn asks for can be recognised as it arrives.
 
         Returns None on every failure. The caller is producing a convenience —
         a record of what a session knew before it was compacted — and a session
@@ -377,12 +398,19 @@ class ClaudeCodeRunner:
         arguments = [binary, "-p"]
         if chosen := model or self._default_model:
             arguments += ["--model", chosen]
+        if not edits:
+            arguments.append(f"--tools={READING_TOOLS}")
+        if session_id:
+            arguments += ["--session-id", session_id]
+        if cwd is not None:
+            arguments.append("--no-session-persistence")
         arguments.append(text)
         try:
             process = await asyncio.create_subprocess_exec(
                 *arguments,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
+                cwd=cwd,
                 env=self._environment(),
             )
         except OSError:

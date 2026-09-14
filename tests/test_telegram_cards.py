@@ -2,7 +2,30 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
+
 from halyard.channels.telegram import cards
+from halyard.core.approvals import ApprovalRequest
+from halyard.core.events import RiskLevel
+
+NOW = datetime(2026, 9, 14, 18, 0, tzinfo=UTC)
+
+
+def a_command(**overrides: object) -> ApprovalRequest:
+    defaults = {
+        "request_id": "req_1",
+        "nonce": "nonce-1",
+        "session_id": "0b7c6f0e-5d7a-4c1e-9a53-2b1f4b9c8d11",
+        "agent_id": "claude-code",
+        "project": "alpha-engine",
+        "tool": "Bash",
+        "command_summary": "make test-fast",
+        "command_full": "make test-fast",
+        "risk": RiskLevel.HIGH,
+        "created_at": NOW,
+        "expires_at": NOW + timedelta(minutes=5),
+    }
+    return ApprovalRequest(**{**defaults, **overrides})  # type: ignore[arg-type]
 
 
 def test_every_choice_card_can_be_cancelled() -> None:
@@ -36,3 +59,24 @@ def test_a_result_button_carries_the_check_as_well_as_the_seat() -> None:
 
 def test_the_cancel_button_is_read_back_as_a_choice() -> None:
     assert cards.parse_choice_data(cards.CANCEL["callback_data"]) == ("cancel", "x")
+
+
+def test_a_command_a_check_asks_for_says_whose_it_is() -> None:
+    """A check's turn is nobody's seat. Without this the card would say AGENT
+    over a session nobody has seen, and what is being allowed is a check
+    looking, not a seat working — before it is answered and after."""
+    checker = "claims · handoff discover_completed"
+
+    asked = cards.render(a_command(), now=NOW, checker=checker)
+    settled = cards.render_resolved(a_command(), decision="allow", by="tg:4242", checker=checker)
+
+    assert asked.startswith("<b>[CHECKER — PERMISSION REQUEST]</b>")
+    assert "Check: <b>claims · handoff discover_completed</b>" in asked
+    assert "Check: <b>claims · handoff discover_completed</b>" in settled
+
+
+def test_a_seats_command_is_carded_as_it_always_was() -> None:
+    asked = cards.render(a_command(), now=NOW)
+
+    assert asked.startswith("<b>[AGENT — PERMISSION REQUEST]</b>")
+    assert "Check:" not in asked

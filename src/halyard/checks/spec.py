@@ -11,13 +11,25 @@ from typing import Protocol, runtime_checkable
 class Asker(Protocol):
     """A turn apart from any session: text in, an answer out, or None.
 
-    The one port a check runs through. Claude Code's runner answers it today;
-    any runtime that can take a turn of its own can, and that is where a check
-    stops depending on one model.
+    The one port a check runs through. The channel answers it today, with
+    Claude Code's runner behind it; any runtime that can take a turn of its own
+    can, and that is where a check stops depending on one model.
+
+    `cwd` is where the turn runs. `name` is what it goes by wherever it is shown
+    to a person — a command it asks to run is a card, and the card has to say
+    whose. `edits=False` is a turn with no tool that edits a file: it may still
+    read, and run commands, which the project's gate puts in front of somebody.
     """
 
     async def ask(
-        self, text: str, *, timeout: float = 180.0, model: str | None = None
+        self,
+        text: str,
+        *,
+        timeout: float = 180.0,
+        model: str | None = None,
+        cwd: Path | None = None,
+        name: str | None = None,
+        edits: bool = True,
     ) -> str | None: ...
 
 
