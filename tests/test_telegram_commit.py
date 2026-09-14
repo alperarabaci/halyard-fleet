@@ -1141,6 +1141,61 @@ async def test_a_findings_label_already_on_the_task_is_not_written_again(
     assert tracker.added == []
 
 
+def a_suite(channel: TelegramChannel, monkeypatch, *, output: str = "1420 passed") -> list:
+    """`test-fast` among the project's commands, and a run of it that answers at once."""
+    from halyard.channels.telegram import adapter as under_test
+    from halyard.commands import Result
+
+    found = channel._repositories["alpha-engine"]
+    channel._repositories["alpha-engine"] = replace(found, commands={"test-fast": "make test-fast"})
+    ran: list = []
+
+    def running(line, path, *, timeout, on_progress=None):
+        ran.append((line, path, timeout))
+        return Result(ok=True, output=output, seconds=94.0, exit_code=0)
+
+    monkeypatch.setattr(under_test.commands_running, "run", running)
+    return ran
+
+
+async def test_a_handoff_runs_its_commands_and_says_how_they_went(
+    tmp_path: Path, wired, monkeypatch
+) -> None:
+    """Where the project is, one after another, and before the checks — then
+    the seat gets what they did, and the chat is told."""
+    channel, api, runner, repo = wired
+    handoffs_in(channel, repo, tmp_path, runner, close={"commands": ("test-fast",), "to": "xrev"})
+    ran = a_suite(channel, monkeypatch)
+
+    await channel._run_handoff("close", CHAT, None, f"tg:{APPROVER}")
+    await settled(channel)
+
+    assert ran == [("make test-fast", repo, 600.0)]
+    [(_, text)] = runner.sent
+    assert "Ran test-fast: make test-fast · exit 0 · 94s · last line: 1420 passed" in text
+    assert any("<b>test-fast</b>: passed" in sent["text"] for sent in api.sent)
+    assert channel._working == {}
+
+
+async def test_a_handoff_with_commands_does_not_go_while_another_runs(
+    tmp_path: Path, wired, monkeypatch
+) -> None:
+    """Two `make` runs in one directory fight over the same outputs. Nothing
+    is handed on, and it can be pressed again."""
+    channel, api, runner, repo = wired
+    handoffs_in(channel, repo, tmp_path, runner, close={"commands": ("test-fast",), "to": "xrev"})
+    ran = a_suite(channel, monkeypatch)
+    channel._working["alpha-engine"] = "test-all"
+
+    await channel._run_handoff("close", CHAT, None, f"tg:{APPROVER}")
+    await settled(channel)
+
+    assert ran == []
+    assert runner.sent == []
+    assert "did not go" in api.sent[-1]["text"]
+    assert channel._working == {"alpha-engine": "test-all"}
+
+
 async def test_a_handoff_labels_like_a_check_run_by_hand(
     tmp_path: Path, wired, monkeypatch
 ) -> None:

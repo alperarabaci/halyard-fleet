@@ -145,6 +145,11 @@ projects:
     #     prompt: NOTES/halyard/handoffs/discovery.md
     #     checks: [proof, destructive]
     #     to: navigator
+    #   close:
+    #     prompt: NOTES/halyard/handoffs/close.md
+    #     commands: [test-fast]          # from `commands:`, run before the checks
+    #     checks: [proof, destructive]
+    #     to: navigator
     # Groups of task labels. The first one the task carries from each group
     # goes on the envelope checks and handoffs are given, as `level: level::3`.
     # Nothing is required or refused: a task with none of them adds nothing.

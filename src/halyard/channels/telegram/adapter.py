@@ -199,6 +199,11 @@ TREE_TIMEOUT_SECONDS = 5.0
 #: not answered by then leaves them off the envelope; nothing else waits on it.
 LABELS_TIMEOUT_SECONDS = 10.0
 
+#: How long one of a handoff's commands may run. The bound `validate:` has:
+#: somebody is holding a phone waiting for the handoff to go, and the long
+#: suites are for `/command`, which reports when it is done.
+HANDOFF_COMMAND_TIMEOUT_SECONDS = 600.0
+
 #: What each chat last heard, and each chat's last answer per check. Kept per
 #: project — see `_kept`.
 SAID_FILE = "last-said.json"
@@ -318,6 +323,13 @@ def _files_of(said: last_said.Said | None) -> frame.Tree | None:
     return frame.Tree(head=said.head or "?", content=said.content)
 
 
+def _ended(result: commands_running.Result) -> str:
+    """How a command ended, in a word."""
+    if result.timed_out:
+        return "stopped"
+    return "passed" if result.ok else "failed"
+
+
 @dataclass
 class _Check:
     """A check's turn while it runs: what it is, where its answer is going, and
@@ -392,6 +404,49 @@ class _Labelling:
 
     async def label(self, label: str) -> None:
         self._channel._detach(self._channel._put_label(self._found, label), f"label {label}")
+
+
+class _Running:
+    """The channel's side of `handoffs.Runner`: a project command, run where the
+    project is, with how it is getting on said in the chat the handoff came from.
+
+    The command says for itself that it started and how it ended, in the log —
+    see `commands.running`. What this adds is what only the channel can: the
+    chat that is waiting sees it move.
+    """
+
+    def __init__(
+        self, channel: TelegramChannel, path: Path, chat_id: str, thread_id: int | None
+    ) -> None:
+        self._channel = channel
+        self._path = path
+        self._chat_id = chat_id
+        self._thread_id = thread_id
+
+    async def run(self, command: commands_offered.Command) -> commands_running.Result:
+        loop = asyncio.get_running_loop()
+
+        def progress(seconds: float, latest: str) -> None:
+            asyncio.run_coroutine_threadsafe(
+                self._channel._say(
+                    f"… <b>{html.escape(command.name)}</b> "
+                    f"{self._channel._elapsed(seconds)} — "
+                    f"<code>{html.escape(latest[:150])}</code>",
+                    self._chat_id,
+                    self._thread_id,
+                ),
+                loop,
+            )
+
+        return await asyncio.to_thread(
+            partial(
+                commands_running.run,
+                command.line,
+                self._path,
+                timeout=HANDOFF_COMMAND_TIMEOUT_SECONDS,
+                on_progress=progress,
+            )
+        )
 
 
 class TelegramChannel:
@@ -2495,51 +2550,80 @@ class TelegramChannel:
             return
         [seat] = seats
 
-        first = f", running {', '.join(handoff.checks)} first" if handoff.checks else ""
+        # One at a time per project, as for `/command`: two `make` runs in one
+        # directory fight over the same outputs, and the second one's failure
+        # is a mystery. Nothing is handed on; the handoff can be pressed again.
+        if handoff.commands and (busy := self._working.get(found.name)):
+            await self._say(
+                f"⏳ <b>{html.escape(busy)}</b> is still running in "
+                f"<b>{html.escape(found.name)}</b>, so <b>{html.escape(name)}</b> did "
+                "not go. One at a time.",
+                chat_id,
+                thread_id,
+            )
+            return
+
+        steps = [
+            *([f"running {', '.join(handoff.commands)}"] if handoff.commands else []),
+            *([f"checking {', '.join(handoff.checks)}"] if handoff.checks else []),
+        ]
+        first = f", {' then '.join(steps)} first" if steps else ""
         await self._say(
             f"\U0001f91d <b>{html.escape(name)}</b> → <b>{html.escape(_seat_name(seat))}</b>"
             f"{html.escape(first)}…",
             chat_id,
             thread_id,
         )
-        labels = await self._task_labels(found)
-        known = await asyncio.to_thread(
-            partial(
-                frame.context,
-                found.path,
-                found.name,
-                replied=_local(said.at).strftime("%H:%M") if said else "",
-                reply=_files_of(said),
-                labels=labels,
+        if handoff.commands:
+            self._working[found.name] = f"handoff {name}"
+        try:
+            labels = await self._task_labels(found)
+            known = await asyncio.to_thread(
+                partial(
+                    frame.context,
+                    found.path,
+                    found.name,
+                    replied=_local(said.at).strftime("%H:%M") if said else "",
+                    reply=_files_of(said),
+                    labels=labels,
+                )
             )
-        )
-        handed = await handing.hand_off(
-            handoff,
-            project=found.path,
-            context=known,
-            note=note.strip(),
-            reply=said.text if said else None,
-            arrived=_local(said.at).strftime("%H:%M") if said else "",
-            sender=_seat_name(for_chat(self._seats, chat_id)) or "this chat",
-            recipient_label=seat.label,
-            recipient=_seat_name(seat),
-            project_checks=found.checks,
-            asker=self._checker(chat_id, self._destination_of(seat)) if handoff.checks else None,
-            model=CHECK_MODEL,
-            timeout=CHECK_TIMEOUT_SECONDS,
-            delivery=_SeatDelivery(self, actor, chat_id, thread_id),
-            findings=found.label_findings,
-            labeller=_Labelling(self, found),
-        )
-        if handed.answers:
-            await self._say(
-                " · ".join(
-                    f"<b>{html.escape(a.name)}</b>: {'answered' if a.measured else 'unmeasured'}"
-                    for a in handed.answers
+            handed = await handing.hand_off(
+                handoff,
+                project=found.path,
+                context=known,
+                note=note.strip(),
+                reply=said.text if said else None,
+                arrived=_local(said.at).strftime("%H:%M") if said else "",
+                sender=_seat_name(for_chat(self._seats, chat_id)) or "this chat",
+                recipient_label=seat.label,
+                recipient=_seat_name(seat),
+                project_checks=found.checks,
+                asker=(
+                    self._checker(chat_id, self._destination_of(seat)) if handoff.checks else None
                 ),
-                chat_id,
-                thread_id,
+                model=CHECK_MODEL,
+                timeout=CHECK_TIMEOUT_SECONDS,
+                delivery=_SeatDelivery(self, actor, chat_id, thread_id),
+                findings=found.label_findings,
+                labeller=_Labelling(self, found),
+                project_commands=found.commands,
+                runner=_Running(self, found.path, chat_id, thread_id),
             )
+        finally:
+            # Released whatever happened, as `/command` does: a project left
+            # marked busy would refuse every command after it.
+            if handoff.commands:
+                self._working.pop(found.name, None)
+        outcomes = [
+            *(f"<b>{html.escape(c.name)}</b>: {_ended(r)}" for c, r in handed.ran),
+            *(
+                f"<b>{html.escape(a.name)}</b>: {'answered' if a.measured else 'unmeasured'}"
+                for a in handed.answers
+            ),
+        ]
+        if outcomes:
+            await self._say(" · ".join(outcomes), chat_id, thread_id)
 
     async def _offer_seats(
         self, text: str, chat_id: str, thread_id: int | None, anchor_id: int | None

@@ -437,6 +437,41 @@ def test_handoffs_are_read_with_what_they_carry(tmp_path) -> None:
     assert project.handoffs["discover_completed"].checks == ("proof",)
 
 
+def test_a_handoff_can_run_the_projects_commands_first(tmp_path) -> None:
+    [project] = a_project(
+        tmp_path,
+        lines=[
+            "commands:",
+            "  test-fast: make test-fast",
+            "  lint: make lint",
+            "handoffs:",
+            "  close: {commands: [lint, test-fast], to: navigator}",
+        ],
+    )
+
+    assert project.handoffs["close"].commands == ("lint", "test-fast")
+
+
+def test_a_handoff_naming_a_command_nobody_defined_is_refused(tmp_path) -> None:
+    """The same as a check: otherwise it fails only when somebody presses it."""
+    with pytest.raises(ValueError, match="does not define: test-all"):
+        a_project(tmp_path, lines=["handoffs:", "  close: {commands: [test-all]}"])
+
+
+def test_a_handoff_of_commands_alone_is_something_to_hand_on(tmp_path) -> None:
+    [project] = a_project(
+        tmp_path,
+        lines=[
+            "commands:",
+            "  test-fast: make test-fast",
+            "handoffs:",
+            "  tests: {commands: [test-fast], include_last_message: false}",
+        ],
+    )
+
+    assert project.handoffs["tests"].include_last_message is False
+
+
 def test_a_handoff_naming_a_check_nobody_defined_is_refused(tmp_path) -> None:
     """Otherwise it fails only when somebody presses it, from a phone."""
     with pytest.raises(ValueError, match="does not define: claims"):

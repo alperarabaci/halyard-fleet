@@ -113,6 +113,10 @@ class Handoff:
     include_last_message: bool = True
     #: Checks from this project's `checks:`, run over the reply before it goes.
     checks: tuple[str, ...] = ()
+    #: Commands from this project's `commands:`, run one after another before
+    #: the checks. What each did goes into the envelope the checks read, and
+    #: into the message; a failure is reported, not a reason to stop.
+    commands: tuple[str, ...] = ()
     #: A role (`navigator`) or a seat's label. Unset offers every seat.
     to: str | None = None
 
@@ -221,17 +225,22 @@ def _checks_from(project: str, value: Any) -> dict[str, Path]:
 #: A handoff's name rides in a button, where Telegram allows 64 bytes of
 #: callback data, and is typed after `/handoff`.
 _HANDOFF_NAME = re.compile(r"^[a-z0-9_-]{1,32}$")
-_HANDOFF_FIELDS = {"prompt", "include_last_message", "checks", "to"}
+_HANDOFF_FIELDS = {"prompt", "include_last_message", "checks", "commands", "to"}
 
 
 def _handoffs_from(
-    project: str, value: Any, *, checks: dict[str, Path], seats: list[Seat]
+    project: str,
+    value: Any,
+    *,
+    checks: dict[str, Path],
+    seats: list[Seat],
+    commands: dict[str, str] | None = None,
 ) -> dict[str, Handoff]:
     """`handoffs:` as a mapping of name to how that handoff is made.
 
     Checked against the rest of the project here, because a handoff naming a
-    check or a seat nobody defined would otherwise fail only when somebody
-    pressed it — from a phone, in the middle of a piece of work.
+    check, a command or a seat nobody defined would otherwise fail only when
+    somebody pressed it — from a phone, in the middle of a piece of work.
     """
     if value is None:
         return {}
@@ -262,6 +271,14 @@ def _handoffs_from(
             raise ValueError(
                 f"{where} names checks this project does not define: {', '.join(missing)}"
             )
+        ran = spec.get("commands") or []
+        if not isinstance(ran, list) or not all(isinstance(n, str) and n.strip() for n in ran):
+            raise ValueError(f"{where}: `commands:` must be a list of command names.")
+        ran = [n.strip() for n in ran]
+        if missing := [n for n in ran if n not in (commands or {})]:
+            raise ValueError(
+                f"{where} names commands this project does not define: {', '.join(missing)}"
+            )
         carries = spec.get("include_last_message")
         carries = (
             True if carries is None else _as_flag(project, f"{name}.include_last_message", carries)
@@ -269,8 +286,10 @@ def _handoffs_from(
         if named and not carries:
             raise ValueError(f"{where} runs checks over the last message, so it has to carry it.")
         prompt = _as_text(spec.get("prompt"))
-        if not prompt and not carries:
-            raise ValueError(f"{where} hands on nothing: give it a `prompt:` or the last message.")
+        if not prompt and not carries and not ran:
+            raise ValueError(
+                f"{where} hands on nothing: give it a `prompt:`, the last message or a command."
+            )
         to = _as_text(spec.get("to"))
         if to and to.lower() not in roles and to not in labels:
             raise ValueError(
@@ -282,6 +301,7 @@ def _handoffs_from(
             prompt=Path(prompt).expanduser() if prompt else None,
             include_last_message=carries,
             checks=tuple(named),
+            commands=tuple(ran),
             to=to.lower() if to and to.lower() in roles else to,
         )
     return found
@@ -508,6 +528,7 @@ def projects_from_yaml(text: str) -> list[Project]:
 
         path = _as_text(body.get("path"))
         checks = _checks_from(project, body.get("checks"))
+        commands = _commands_from(project, body.get("commands"))
         projects.append(
             Project(
                 name=project,
@@ -515,7 +536,7 @@ def projects_from_yaml(text: str) -> list[Project]:
                 seats=seats,
                 validate=_as_text(body.get("validate")),
                 warn_if=_warnings_from(project, body.get("warn_if")),
-                commands=_commands_from(project, body.get("commands")),
+                commands=commands,
                 forge=_as_text(body.get("forge")),
                 labels=_warnings_from(project, body.get("labels")) or (),
                 label_groups=_label_groups_from(project, body.get("label_groups")),
@@ -523,7 +544,9 @@ def projects_from_yaml(text: str) -> list[Project]:
                 label_work=_as_flag(project, "label_work", body.get("label_work")),
                 confirmation=_confirmation_from(project, body.get("confirmation")),
                 checks=checks,
-                handoffs=_handoffs_from(project, body.get("handoffs"), checks=checks, seats=seats),
+                handoffs=_handoffs_from(
+                    project, body.get("handoffs"), checks=checks, seats=seats, commands=commands
+                ),
             )
         )
     return projects
