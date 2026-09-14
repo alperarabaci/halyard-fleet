@@ -833,6 +833,80 @@ async def test_a_handoff_runs_its_checks_before_it_goes(tmp_path: Path, wired) -
     assert any("<b>proof</b>: answered" in sent["text"] for sent in api.sent)
 
 
+def a_command_from(session_id: str):
+    """What the gate brings in when a turn asks to run something."""
+    from datetime import UTC, datetime
+
+    from halyard.core.approvals import ApprovalRequest
+    from halyard.core.events import RiskLevel
+
+    now = datetime.now(UTC)
+    return ApprovalRequest(
+        request_id="req_check",
+        nonce="nonce-check",
+        session_id=session_id,
+        agent_id="claude-code",
+        project="alpha-engine",
+        tool="Bash",
+        command_summary="make test-fast",
+        command_full="make test-fast",
+        risk=RiskLevel.HIGH,
+        created_at=now,
+        expires_at=now + timedelta(minutes=5),
+    )
+
+
+def asking_to_run_something(channel: TelegramChannel, runner: FakeRunner) -> list[dict]:
+    """A check that asks to run a command half way through its turn, the way
+    the gate would bring it in, and remembers how its turn was started."""
+    started: list[dict] = []
+
+    async def ask(text: str, *, model: str | None = None, **kwargs) -> str | None:
+        started.append(kwargs)
+        await channel.send_approval_request(a_command_from(kwargs["session_id"]))
+        return "proof · no finding"
+
+    runner.ask = ask
+    return started
+
+
+async def test_a_command_a_check_asks_for_reaches_where_the_handoff_goes(
+    tmp_path: Path, wired
+) -> None:
+    """The check's turn is nobody's seat. Its command is a card in the chat of
+    the seat the handoff is for, saying which check and which handoff want it
+    — and the turn stands in the project, with nothing that edits."""
+    channel, api, runner, repo = wired
+    handoffs_in(channel, repo, tmp_path, runner, discovery={"checks": ("proof",), "to": "xrev"})
+    started = asking_to_run_something(channel, runner)
+
+    await channel._run_handoff("discovery", CHAT, None, f"tg:{APPROVER}")
+    await settled(channel)
+
+    [how] = started
+    assert how["cwd"] == repo
+    assert how["edits"] is False
+    [card] = [sent for sent in api.sent if "PERMISSION REQUEST" in sent["text"]]
+    assert card["chat_id"] == "-100888"
+    assert card["text"].startswith("<b>[CHECKER — PERMISSION REQUEST]</b>")
+    assert "Check: <b>proof · handoff discovery</b>" in card["text"]
+    assert channel._checking == {}
+
+
+async def test_a_command_a_check_asks_for_here_is_carded_here(tmp_path: Path, wired) -> None:
+    """`/checks` hands nothing on: the card says which check, in the chat that asked."""
+    channel, api, runner, repo = wired
+    checks_in(channel, repo, tmp_path, proof="# proof")
+    asking_to_run_something(channel, runner)
+
+    await channel._handle_callback(pressed_check("proof"))
+    await settled(channel)
+
+    [card] = [sent for sent in api.sent if "PERMISSION REQUEST" in sent["text"]]
+    assert card["chat_id"] == CHAT
+    assert "Check: <b>proof</b>" in card["text"]
+
+
 async def test_pressing_a_check_runs_that_one_over_the_last_reply(tmp_path: Path, wired) -> None:
     """Its own instructions, the whole reply, and what Halyard can see."""
     from halyard.channels.telegram.adapter import CHECK_MODEL

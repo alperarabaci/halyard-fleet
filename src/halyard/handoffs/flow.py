@@ -61,6 +61,7 @@ async def hand_off(
                         model=model,
                         timeout=timeout,
                         about=f"handoff {handoff.name}, {sender}'s reply from {arrived}",
+                        handoff=handoff.name,
                     )
                     for name in handoff.checks
                 )

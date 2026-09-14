@@ -330,12 +330,23 @@ def _asked(request: ApprovalRequest) -> list[str]:
     return lines
 
 
-def render(request: ApprovalRequest, *, now: datetime) -> str:
-    """The approval card."""
-    role = (request.role.value if request.role else "agent").upper()
+def _checked_by(checker: str | None) -> list[str]:
+    """Which check a command came from, when a check asked for it."""
+    return [f"Check: <b>{html.escape(checker)}</b>"] if checker else []
+
+
+def render(request: ApprovalRequest, *, now: datetime, checker: str | None = None) -> str:
+    """The approval card.
+
+    `checker` names the check a command came from. A check's turn is nobody's
+    seat, so without it the card would say AGENT over a session nobody has seen
+    — and what is being allowed is a check looking, not a seat working.
+    """
+    role = "checker" if checker else (request.role.value if request.role else "agent")
     lines = [
-        f"<b>[{role} — PERMISSION REQUEST]</b>  {_RISK_BADGE[request.risk]}",
+        f"<b>[{role.upper()} — PERMISSION REQUEST]</b>  {_RISK_BADGE[request.risk]}",
         "",
+        *_checked_by(checker),
         f"Project: <code>{html.escape(request.project)}</code>",
         f"Session: <code>{html.escape(_short_session(request.session_id))}</code>",
         f"Tool: <code>{html.escape(request.tool)}</code>",
@@ -349,12 +360,15 @@ def render(request: ApprovalRequest, *, now: datetime) -> str:
     return _fit(lines)
 
 
-def render_resolved(request: ApprovalRequest, *, decision: str, by: str | None) -> str:
+def render_resolved(
+    request: ApprovalRequest, *, decision: str, by: str | None, checker: str | None = None
+) -> str:
     """What the card becomes once it has been answered.
 
     The message is edited in place rather than replaced, so scrolling back
     through a chat shows what was decided instead of a row of live-looking
-    buttons on questions that were settled hours ago.
+    buttons on questions that were settled hours ago. A check's card stays a
+    check's, so the chat still says what was allowed to look.
     """
     mark = "✅ ALLOWED" if decision == "allow" else "⛔ DENIED"
     who = f" by {html.escape(by)}" if by else ""
@@ -362,6 +376,7 @@ def render_resolved(request: ApprovalRequest, *, decision: str, by: str | None) 
         [
             f"<b>{mark}</b>{who}",
             "",
+            *_checked_by(checker),
             f"Project: <code>{html.escape(request.project)}</code>",
             f"Tool: <code>{html.escape(request.tool)}</code>",
             *_asked(request),

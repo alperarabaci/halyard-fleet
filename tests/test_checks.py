@@ -13,17 +13,29 @@ class Asking:
     def __init__(self, says: str | None = "proof · no finding") -> None:
         self.says = says
         self.asked: list[tuple[str, str | None]] = []
+        #: Where each turn was to run, what it went by, and whether it could edit.
+        self.how: list[dict] = []
 
     async def ask(
-        self, text: str, *, timeout: float = 180.0, model: str | None = None
+        self,
+        text: str,
+        *,
+        timeout: float = 180.0,
+        model: str | None = None,
+        cwd: Path | None = None,
+        name: str | None = None,
+        edits: bool = True,
     ) -> str | None:
         self.asked.append((text, model))
+        self.how.append({"cwd": cwd, "name": name, "edits": edits})
         if self.says is None:
             raise RuntimeError("no model today")
         return self.says
 
 
-async def ran(tmp_path: Path, asker: Asking, check: str = "proof.md") -> checks.Answer:
+async def ran(
+    tmp_path: Path, asker: Asking, check: str = "proof.md", *, handoff: str = ""
+) -> checks.Answer:
     return await checks.run(
         "proof",
         Path(check),
@@ -34,18 +46,22 @@ async def ran(tmp_path: Path, asker: Asking, check: str = "proof.md") -> checks.
         asker=asker,
         model="sonnet",
         timeout=5,
+        handoff=handoff,
     )
 
 
-def test_the_prompt_says_the_check_cannot_look_for_itself() -> None:
-    """The turn runs apart from the project. Saying so keeps an answer that
-    needed a command run from reading as though it had run one."""
+def test_the_prompt_says_where_the_check_stands_and_what_it_may_do() -> None:
+    """In the project, reading and running but never editing — and reading for
+    the check rather than through everything the project's own instructions
+    name, which a turn standing in the project would otherwise start on."""
     asked = checks.prompt(
         "# proof", context=["Project: alpha-engine"], note="delivery", text="42 passed"
     )
 
     assert asked.startswith("# proof")
-    assert "cannot open files or run commands" in asked
+    assert "runs in the project's own directory" in asked
+    assert "cannot edit anything" in asked
+    assert "rather than a reading list" in asked
     assert "delivery" in asked
     assert asked.endswith("42 passed")
 
@@ -91,6 +107,29 @@ async def test_a_check_runs_its_own_text_over_the_reply(tmp_path: Path) -> None:
     assert answer.measured
     assert answer.text == "proof · no finding"
     assert isinstance(asker, checks.Asker)
+
+
+async def test_the_turn_stands_in_the_project_and_cannot_change_it(tmp_path: Path) -> None:
+    """A report is compared against the code it is about, so the turn runs where
+    that code is — Halyard's own directory is another repository, and a check
+    started there found nothing it could compare. It may look and run, and edit
+    nothing."""
+    (tmp_path / "proof.md").write_text("# proof\n")
+    asker = Asking()
+
+    await ran(tmp_path, asker)
+
+    assert asker.how == [{"cwd": tmp_path, "name": "proof", "edits": False}]
+
+
+async def test_a_check_run_for_a_handoff_goes_by_both_names(tmp_path: Path) -> None:
+    """Whatever it asks a person for says which check and which handoff."""
+    (tmp_path / "proof.md").write_text("# proof\n")
+    asker = Asking()
+
+    await ran(tmp_path, asker, handoff="discover_completed")
+
+    assert asker.how[0]["name"] == "proof · handoff discover_completed"
 
 
 async def test_a_model_that_does_not_answer_is_said_not_skipped(tmp_path: Path) -> None:

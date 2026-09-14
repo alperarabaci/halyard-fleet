@@ -20,8 +20,14 @@ def prompt(instructions: str, *, context: list[str], note: str, text: str) -> st
         "",
         "---",
         "",
-        "This check runs apart from the project: it cannot open files or run "
-        "commands, so judge only what is written here.",
+        "This check runs in the project's own directory. It can read files and "
+        "run commands but cannot edit anything; each command is put in front of "
+        "the operator before it runs, and one that is refused or does not finish "
+        "counts as unmeasured.",
+        "",
+        "It is checking, not changing: read what this check needs. The project's "
+        "own instructions, and the files they point to, are background here "
+        "rather than a reading list.",
         "",
         *context,
     ]
@@ -93,8 +99,15 @@ async def run(
     model: str,
     timeout: float,
     about: str = "",
+    handoff: str = "",
 ) -> Answer:
     """Run one check over a reply: its own text, what Halyard can see, the reply.
+
+    The turn stands in the project, because a report is compared against the
+    code it is about: it may read, and run what the check's text sends it to,
+    and edits nothing. It goes by the check's name — and the handoff's, when it
+    runs for one — so that a command it wants run reaches a person as that
+    check's rather than a stranger's.
 
     Never raises. A check that cannot be read, or a model that does not answer,
     comes back as an `Answer` with no text and the reason — never as nothing,
@@ -126,6 +139,9 @@ async def run(
             prompt(instructions, context=context, note=note, text=reply),
             model=model,
             timeout=timeout,
+            cwd=project,
+            name=f"{name} · handoff {handoff}" if handoff else name,
+            edits=False,
         )
     except Exception:
         logger.warning("Check %s failed", name, exc_info=True)

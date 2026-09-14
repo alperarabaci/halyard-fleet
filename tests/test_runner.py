@@ -344,3 +344,56 @@ async def test_a_machine_with_no_claude_at_all_still_says_so(monkeypatch) -> Non
     said = claude_code.RUNTIME.check_available()
 
     assert any("not on this machine" in text for _, text in said)
+
+
+# --- a turn apart from any session --------------------------------------------
+#
+# A check compares a report against the code it is about. Started wherever
+# Halyard runs, it stood in Halyard's own repository and could compare nothing.
+
+
+def spying_on_the_turn(monkeypatch) -> list[tuple[list[str], dict]]:
+    """Capture what a one-shot turn would be started with, and where."""
+    calls: list[tuple[list[str], dict]] = []
+
+    async def fake_exec(*arguments, **kwargs):
+        calls.append((list(arguments), kwargs))
+        return FakeProcess()
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec)
+    return calls
+
+
+async def test_a_check_turn_stands_in_the_project_under_the_id_it_was_given(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """In the project's directory; with the tools that read and the shell, and
+    none that edits; under an id the channel chose, so the cards its commands
+    raise can be recognised; and kept out of the project's session history,
+    where nobody wants to find every check ever run."""
+    calls = spying_on_the_turn(monkeypatch)
+
+    await runner().ask("check this", cwd=tmp_path, edits=False, session_id="the-id")
+
+    [(arguments, kwargs)] = calls
+    assert kwargs["cwd"] == tmp_path
+    assert "--tools=Read,Grep,Glob,Bash" in arguments
+    assert arguments[arguments.index("--session-id") + 1] == "the-id"
+    assert "--no-session-persistence" in arguments
+    assert arguments[-1] == "check this"
+
+
+async def test_an_ordinary_one_shot_turn_is_left_as_it_was(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A commit message or a compaction record: nowhere in particular to stand,
+    every tool it always had, and no id chosen for it."""
+    calls = spying_on_the_turn(monkeypatch)
+
+    await runner().ask("write a subject line", model="sonnet")
+
+    [(arguments, kwargs)] = calls
+    assert kwargs["cwd"] is None
+    assert not any(argument.startswith("--tools") for argument in arguments)
+    assert "--session-id" not in arguments
+    assert "--no-session-persistence" not in arguments

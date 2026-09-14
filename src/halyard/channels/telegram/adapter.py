@@ -21,6 +21,7 @@ import io
 import logging
 import re
 import time
+import uuid
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -183,8 +184,10 @@ MESSAGE_TIMEOUT_SECONDS = 120.0
 #: reason `MESSAGE_MODEL` is. One turn per check.
 CHECK_MODEL = "sonnet"
 
-#: How long one check may take. It reads a whole report, not a diff summary.
-CHECK_TIMEOUT_SECONDS = 300.0
+#: How long one check may take. It reads a whole report and may run what the
+#: report says was run, each command waiting on a tap first — the bound
+#: `validate:` has, for the same kind of work.
+CHECK_TIMEOUT_SECONDS = 600.0
 
 #: What each chat last heard, and each chat's last answer per check. Kept per
 #: project — see `_kept`.
@@ -298,6 +301,47 @@ class _SeatDelivery:
         )
 
 
+class _Checking:
+    """The channel's side of `checks.Asker`: a runtime's turn, known by its id.
+
+    Each turn starts under an id chosen here, kept with what the check is and
+    where its answer is going for as long as it runs. A command the check asks
+    to run is then a card that says which check wants it, in the chat the
+    answer is headed for — rather than one from a session nobody has seen, in
+    whichever chat an unknown session falls to.
+    """
+
+    def __init__(
+        self,
+        runner,
+        running: dict[str, tuple[str, tuple[str, int | None]]],
+        destination: tuple[str, int | None],
+    ) -> None:
+        self._runner = runner
+        self._running = running
+        self._destination = destination
+
+    async def ask(
+        self,
+        text: str,
+        *,
+        timeout: float = 180.0,
+        model: str | None = None,
+        cwd: Path | None = None,
+        name: str | None = None,
+        edits: bool = True,
+    ) -> str | None:
+        session = str(uuid.uuid4())
+        self._running[session] = (name or "check", self._destination)
+        logger.info("Check %s runs as session %s", name or "?", session)
+        try:
+            return await self._runner.ask(
+                text, timeout=timeout, model=model, cwd=cwd, edits=edits, session_id=session
+            )
+        finally:
+            self._running.pop(session, None)
+
+
 class TelegramChannel:
     """Puts approvals in a chat and brings the answers back."""
 
@@ -395,6 +439,10 @@ class TelegramChannel:
         #: derive the destination again — and could disagree with where the
         #: card actually is.
         self._open: dict[str, tuple[ApprovalRequest, int, str, int | None]] = {}
+        #: The checks running now, by the session id each was started under:
+        #: what the check is, and where its answer is headed — which is where a
+        #: command it asks to run goes. See `_Checking`.
+        self._checking: dict[str, tuple[str, tuple[str, int | None]]] = {}
         # Questions are held apart from approvals: a different store answers
         # them, and their button carries an option index rather than allow/deny.
         # Same shape otherwise — handle to (request, message id, chat).
@@ -509,11 +557,16 @@ class TelegramChannel:
         the alternative is a bridge blocked on a question nobody was asked.
         """
         self._forget_expired()
-        text = cards.render(request, now=self._clock())
+        # A check's turn is nobody's seat. Its command goes where the check's
+        # answer is going and says it is a check's; routed like a seat's, it
+        # would land wherever an unknown session falls, over a session id
+        # nobody has seen.
+        checker, destination = self._checking.get(request.session_id) or (None, None)
+        text = cards.render(request, now=self._clock(), checker=checker)
         markup = cards.keyboard(
             request, include_full=request.command_full != request.command_summary
         )
-        chat_id, thread_id = self._route(
+        chat_id, thread_id = destination or self._route(
             request.role,
             request.session_name,
             request.agent_id,
@@ -532,7 +585,7 @@ class TelegramChannel:
             "Card for %s (%s, session %r) sent to %s",
             request.project,
             request.agent_id,
-            request.session_name or "unnamed",
+            f"check {checker}" if checker else request.session_name or "unnamed",
             chat_id,
         )
         return str(message_id)
@@ -2008,8 +2061,8 @@ class TelegramChannel:
             await self._run_checks("", chat_id, thread_id)
             return
 
-        runner = self._one_shot_runner(chat_id)
-        if runner is None:
+        asker = self._checker(chat_id, (chat_id, thread_id))
+        if asker is None:
             await self._say("No runtime here can take a one-shot turn.", chat_id, thread_id)
             return
 
@@ -2030,7 +2083,7 @@ class TelegramChannel:
             context=known,
             note=note.strip(),
             reply=said.text,
-            asker=runner,
+            asker=asker,
             model=CHECK_MODEL,
             timeout=CHECK_TIMEOUT_SECONDS,
             about=(
@@ -2113,6 +2166,16 @@ class TelegramChannel:
         if not hasattr(runner, "ask"):
             runner = self._runner
         return runner if hasattr(runner, "ask") else None
+
+    def _checker(self, chat_id: str, destination: tuple[str, int | None]) -> _Checking | None:
+        """This chat's one-shot runtime, for a check whose answer goes to
+        `destination` — and so does anything the check asks to run."""
+        runner = self._one_shot_runner(chat_id)
+        return _Checking(runner, self._checking, destination) if runner else None
+
+    def _destination_of(self, seat: Seat) -> tuple[str, int | None]:
+        """Where a seat's traffic goes: its own chat, or the default one."""
+        return (parse_destination(seat.chat) if seat.chat else None) or (self._chat_id, None)
 
     def _seats_for(self, project: str, to: str | None) -> list[Seat]:
         """Where a handoff can go: the seat `to:` names, the seats holding the
@@ -2226,7 +2289,7 @@ class TelegramChannel:
             recipient_label=seat.label,
             recipient=_seat_name(seat),
             project_checks=found.checks,
-            asker=self._one_shot_runner(chat_id) if handoff.checks else None,
+            asker=self._checker(chat_id, self._destination_of(seat)) if handoff.checks else None,
             model=CHECK_MODEL,
             timeout=CHECK_TIMEOUT_SECONDS,
             delivery=_SeatDelivery(self, actor, chat_id, thread_id),
@@ -2934,11 +2997,14 @@ class TelegramChannel:
         by: str | None,
     ) -> None:
         """Rewrite the card to show the outcome and drop the buttons."""
+        running = self._checking.get(request.session_id)
         try:
             await self._api.edit_message_text(
                 chat_id,
                 message_id,
-                cards.render_resolved(request, decision=decision, by=by),
+                cards.render_resolved(
+                    request, decision=decision, by=by, checker=running[0] if running else None
+                ),
                 reply_markup=None,
             )
         except Exception:

@@ -14,11 +14,21 @@ class Asking:
     def __init__(self, says: str | None = "no finding") -> None:
         self.says = says
         self.asked: list[str] = []
+        #: What each turn went by, as a card for one of its commands would say.
+        self.names: list[str | None] = []
 
     async def ask(
-        self, text: str, *, timeout: float = 180.0, model: str | None = None
+        self,
+        text: str,
+        *,
+        timeout: float = 180.0,
+        model: str | None = None,
+        cwd: Path | None = None,
+        name: str | None = None,
+        edits: bool = True,
     ) -> str | None:
         self.asked.append(text)
+        self.names.append(name)
         return self.says
 
 
@@ -122,3 +132,14 @@ async def test_a_prompt_that_cannot_be_read_is_said_rather_than_dropped(tmp_path
 
     [(_, text)] = delivery.sent
     assert "NOTES/gone.md @ uncommitted — could not be read" in text
+
+
+async def test_each_check_a_handoff_runs_goes_by_the_handoffs_name_too(tmp_path: Path) -> None:
+    """A command one of them asks to run reaches a person saying which check
+    and which handoff it came from."""
+    a_project(tmp_path)
+    asker = Asking()
+
+    await hand(tmp_path, Handoff(name="discovery", checks=("proof", "claims")), asker=asker)
+
+    assert sorted(asker.names) == ["claims · handoff discovery", "proof · handoff discovery"]
