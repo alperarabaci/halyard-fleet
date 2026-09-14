@@ -121,6 +121,29 @@ class ApprovalRequestBody(BaseModel):
     patterns: list[str] | None = None
 
 
+class AnsweredBody(BaseModel):
+    """A card's question, answered where the agent runs instead.
+
+    Sent by a bridge whose runtime keeps its own prompt on the screen while a
+    card is out — opencode — when somebody answers there first. `tool_use_id`
+    is whatever the bridge sent the question under.
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    session_id: str
+    tool_use_id: str
+    decision: Decision
+    agent_id: str = runtimes.DEFAULT
+
+
+class AnsweredResponse(BaseModel):
+    """Whether a card was still open for it: false when the phone answered
+    first, or no card was ever sent."""
+
+    closed: bool
+
+
 class ApprovalResponse(BaseModel):
     """What the bridge turns into a hook decision.
 
@@ -634,6 +657,17 @@ def create_app(settings: Settings, *, channel=None) -> FastAPI:
             request_id=outcome.request_id,
             risk=outcome.risk,
         )
+
+    @app.post("/v1/approvals/answered", response_model=AnsweredResponse)
+    async def answered_elsewhere(body: AnsweredBody) -> AnsweredResponse:
+        """Close the card for a question answered at the desk. Decides nothing."""
+        closed = await service.answered_elsewhere(
+            session_id=body.session_id,
+            agent_id=body.agent_id,
+            tool_use_id=body.tool_use_id,
+            decision=body.decision,
+        )
+        return AnsweredResponse(closed=closed)
 
     @app.post("/v1/questions", response_model=QuestionResponse)
     async def ask_question(body: QuestionRequestBody) -> QuestionResponse:

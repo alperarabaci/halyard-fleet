@@ -130,3 +130,133 @@ def test_a_shell_call_sends_nothing_more(tmp_path: Path) -> None:
 
     assert "asks" not in body
     assert "patterns" not in body
+
+
+#: The bridge with a control plane whose approvals either never come back —
+#: the card is still out — or come back at once with the given decision, fed a
+#: run of events of any type. Prints every body posted and every answer given
+#: to opencode.
+SEQUENCE = r"""
+import { pathToFileURL } from "node:url"
+const posted = []
+const answered = []
+globalThis.fetch = async (url, init) => {
+  posted.push({ url: String(url), body: JSON.parse(init.body) })
+  if (String(url).endsWith("/v1/approvals")) {
+    if (process.argv[4] === "hang") return new Promise(() => {})
+    return { ok: true, json: async () => ({ decision: process.argv[4] }) }
+  }
+  return { ok: true, json: async () => ({ closed: true }) }
+}
+const events = JSON.parse(process.argv[3])
+const { HalyardGate } = await import(pathToFileURL(process.argv[2]).href)
+const gate = await HalyardGate({
+  client: { postSessionIdPermissionsPermissionId: async (call) => { answered.push(call) } },
+  directory: "/repo",
+  worktree: "/repo",
+})
+for (const event of events) {
+  await gate.event({ event })
+  await new Promise((done) => setTimeout(done, 20))
+}
+await new Promise((done) => setTimeout(done, 100))
+console.log(JSON.stringify({ posted, answered }))
+process.exit(0)
+"""
+
+
+def played(tmp_path: Path, *events: dict, approvals: str = "hang") -> dict:
+    """What the bridge posts, and what it answers opencode, for a run of events."""
+    node = _node()
+    if node is None:
+        pytest.skip("needs Node 22.6 or newer, to load the bridge's TypeScript")
+    driver = tmp_path / "sequence.mjs"
+    driver.write_text(SEQUENCE, encoding="utf-8")
+    done = subprocess.run(
+        [
+            node,
+            "--experimental-strip-types",
+            "--no-warnings",
+            str(driver),
+            str(BRIDGE),
+            json.dumps(list(events)),
+            approvals,
+        ],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        env={"PATH": "/usr/bin:/bin", "HOME": "/Users/somebody"},
+    )
+    assert done.returncode == 0, done.stderr
+    return json.loads(done.stdout.strip().splitlines()[-1])
+
+
+def replied(reply: str, **spelled) -> dict:
+    """A `permission.replied` event, in 1.18.30's shape unless told otherwise."""
+    return {
+        "type": "permission.replied",
+        "properties": spelled or {"sessionID": "ses_1", "requestID": "per_1", "reply": reply},
+    }
+
+
+def closings(result: dict) -> list[dict]:
+    return [p["body"] for p in result["posted"] if p["url"].endswith("/v1/approvals/answered")]
+
+
+def test_a_question_goes_under_its_own_id(tmp_path: Path) -> None:
+    """The id the reply event will name it by. One tool call can raise two
+    questions, and they must not share a card."""
+    [body] = posted(tmp_path, asked("bash", metadata={"command": "ls"}, tool={"callID": "call_1"}))
+
+    assert body["tool_use_id"] == "per_1"
+
+
+def test_an_answer_at_the_desk_closes_the_card(tmp_path: Path) -> None:
+    """The desk won the race: the card is told, with what the desk said."""
+    result = played(
+        tmp_path,
+        {"type": "permission.asked", "properties": asked("bash", metadata={"command": "ls"})},
+        replied("once"),
+    )
+
+    assert closings(result) == [
+        {"session_id": "ses_1", "agent_id": "opencode", "tool_use_id": "per_1", "decision": "allow"}
+    ]
+    assert result["answered"] == []
+
+
+def test_a_refusal_at_the_desk_closes_the_card_as_denied(tmp_path: Path) -> None:
+    result = played(
+        tmp_path,
+        {"type": "permission.asked", "properties": asked("bash", metadata={"command": "rm -r x"})},
+        replied("reject"),
+    )
+
+    [closing] = closings(result)
+    assert closing["decision"] == "deny"
+
+
+def test_an_older_opencode_spells_the_answer_differently(tmp_path: Path) -> None:
+    result = played(
+        tmp_path,
+        {"type": "permission.asked", "properties": asked("bash", metadata={"command": "ls"})},
+        replied("", sessionID="ses_1", permissionID="per_1", response="always"),
+    )
+
+    [closing] = closings(result)
+    assert closing["tool_use_id"] == "per_1"
+    assert closing["decision"] == "allow"
+
+
+def test_the_bridges_own_answer_is_not_mistaken_for_the_desks(tmp_path: Path) -> None:
+    """Relaying the phone's answer makes opencode say it was answered, and that
+    echo must not come back as an answer from the desk."""
+    result = played(
+        tmp_path,
+        {"type": "permission.asked", "properties": asked("bash", metadata={"command": "ls"})},
+        replied("reject"),
+        approvals="deny",
+    )
+
+    assert [call["path"]["permissionID"] for call in result["answered"]] == ["per_1"]
+    assert closings(result) == []

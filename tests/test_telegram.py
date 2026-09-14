@@ -2927,3 +2927,17 @@ async def test_a_reviewer_is_a_seat_like_the_others(tmp_path: Path) -> None:
 
     assert api.sent[0]["chat_id"] == reviewer_chat
     assert "REVIEWER — PERMISSION REQUEST" in api.sent[0]["text"]
+
+
+async def test_a_card_answered_at_the_desk_says_so_and_loses_its_buttons(setup) -> None:
+    """Somebody answered in the runtime's own prompt first. A card left live
+    would go on asking a settled question until it expired."""
+    channel, api, store, _ = setup
+    request = await an_approval(store, agent_id="opencode", tool="bash", tool_use_id="per_1")
+    await channel.send_approval_request(request)
+
+    await channel.close_approval(request, decision="allow", by="opencode, at the desk")
+
+    [edit] = api.edits
+    assert edit["text"].startswith("<b>✅ ALLOWED</b> by opencode, at the desk")
+    assert edit["reply_markup"] is None

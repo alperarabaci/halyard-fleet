@@ -22,6 +22,7 @@ from halyard.core import refusals, tools, writes
 from halyard.core.approvals import (
     ApprovalRequest,
     ApprovalStore,
+    Decision,
     ResolutionReason,
 )
 from halyard.core.audit import (
@@ -501,6 +502,38 @@ class ApprovalService:
                 ),
             )
 
+    async def answered_elsewhere(
+        self, *, session_id: str, agent_id: str, tool_use_id: str, decision: Decision
+    ) -> bool:
+        """A card's question was answered where the agent runs. Close the card.
+
+        This decides nothing: the runtime has already acted on what was said at
+        the desk. It records that, and takes the buttons off a card that would
+        otherwise go on asking a settled question until it expired. The answer
+        is whether a card was still open — it is not, when the phone got there
+        first.
+        """
+        where = f"{agent_id}, at the desk"
+        request = await self._store.answered_elsewhere(
+            session_id=session_id,
+            tool_use_id=tool_use_id,
+            decision=decision,
+            decided_by=where,
+            note=(
+                f"{'Allowed' if decision is Decision.ALLOW else 'Denied'} in {agent_id} "
+                "itself, before anybody answered here."
+            ),
+        )
+        if request is None:
+            return False
+        closing = getattr(self._channel, "close_approval", None)
+        if closing is not None:
+            try:
+                await closing(request, decision=decision.value, by=where)
+            except Exception:
+                logger.warning("Could not close the card for %s", request.request_id, exc_info=True)
+        return True
+
     async def _request(
         self,
         *,
@@ -692,6 +725,17 @@ class ApprovalService:
         resolution = await self._store.wait_for(request.request_id)
 
         recorded = await self._try_to_record(approval_resolved(request, resolution))
+        if resolution.reason is ResolutionReason.ELSEWHERE:
+            # Answered at the desk, in the runtime's own prompt, and acted on
+            # there already. Handed back as an allow, anything able to post
+            # "answered at the desk" could approve a command; so the bridge is
+            # told what a pause tells it — this was not Halyard's to answer.
+            return ApprovalOutcome(
+                decision=BridgeDecision.DEFER,
+                reason=resolution.note or "Answered where the agent runs.",
+                request_id=request.request_id,
+                risk=request.risk,
+            )
         if not recorded and resolution.allowed:
             # A denial that went unrecorded is still a denial, so it stands. An
             # approval that went unrecorded is a command about to run with no

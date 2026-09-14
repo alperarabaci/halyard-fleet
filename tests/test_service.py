@@ -875,3 +875,37 @@ async def test_a_question_asked_while_paused_is_still_seen(tmp_path: Path) -> No
 
     assert (await ask_question(service)).answer is None
     assert await service._registry.get("session-1") is not None
+
+
+class ClosingChannel(SilentChannel):
+    """A silent channel that can also close a card answered elsewhere."""
+
+    def __init__(self) -> None:
+        self.closed: list[tuple[str, str, str]] = []
+
+    async def close_approval(self, request: ApprovalRequest, *, decision: str, by: str) -> None:
+        self.closed.append((request.request_id, decision, by))
+
+
+async def test_an_answer_at_the_desk_is_never_handed_back_as_an_approval(tmp_path: Path) -> None:
+    """Otherwise anything able to post "answered at the desk" could approve a
+    command. The card closes saying what the desk said, and the waiting bridge
+    is told the question was not Halyard's to answer."""
+    channel = ClosingChannel()
+    service, _, sink = build_service(tmp_path, channel=channel)
+    await sink.open()
+    desk = {"session_id": "ses_1", "agent_id": "opencode", "tool_use_id": "per_1"}
+
+    asking = asyncio.create_task(ask(service, "make deploy", tool="bash", **desk))
+    for _ in range(200):
+        if channel.last_request is not None:
+            break
+        await asyncio.sleep(0.01)
+    closed = await service.answered_elsewhere(**desk, decision=Decision.ALLOW)
+    outcome = await asking
+    nothing_left = await service.answered_elsewhere(**desk, decision=Decision.ALLOW)
+
+    assert closed is True
+    assert outcome.decision is BridgeDecision.DEFER
+    assert channel.closed == [(channel.last_request.request_id, "allow", "opencode, at the desk")]
+    assert nothing_left is False

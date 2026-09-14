@@ -645,6 +645,19 @@ class TelegramChannel:
         )
         return str(message_id)
 
+    async def close_approval(self, request: ApprovalRequest, *, decision: str, by: str) -> None:
+        """Take the buttons off a card whose question was answered somewhere else.
+
+        The runtime's own prompt won the race — somebody at the desk answered
+        first — and a card left live would go on asking a settled question until
+        it expired. It says who answered, and how, instead.
+        """
+        entry = self._open.get(cards.handle_of(request))
+        if entry is None:
+            return
+        _, message_id, chat_id, _ = entry
+        await self._settle_card(request, message_id, chat_id, decision, by)
+
     async def send_question(self, request: QuestionRequest) -> str:
         """Put a question card in the seat's chat.
 
