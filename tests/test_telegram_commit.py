@@ -1001,6 +1001,100 @@ async def test_a_check_is_told_whether_the_files_moved_since_the_reply(
     )
 
 
+class Tracker:
+    """A tracker that answers with a task's labels, or refuses."""
+
+    name = "GitLab"
+
+    def __init__(self, labels=(), refuse: Exception | None = None) -> None:
+        self.on_task = tuple(labels)
+        self.refuse = refuse
+        self.asked: list[int] = []
+
+    async def task(self, number: int):
+        from halyard.tasks.spec import Task
+
+        self.asked.append(number)
+        if self.refuse:
+            raise self.refuse
+        return Task(number=number, title="Rollout p3", labels=self.on_task)
+
+
+def behind_a_tracker(channel: TelegramChannel, monkeypatch, tracker: Tracker) -> Tracker:
+    """The project's remote, with this tracker behind it."""
+    from halyard import tasks
+    from halyard.channels.telegram import adapter as under_test
+
+    monkeypatch.setattr(
+        under_test.task_tracker,
+        "origin_of",
+        lambda path: tasks.Origin(host="gitlab.com", path="a/b"),
+    )
+    monkeypatch.setattr(under_test.task_tracker, "build", lambda *a, **k: tracker)
+    channel._forge_token = "glpat-x"
+    return tracker
+
+
+def levels(channel: TelegramChannel) -> None:
+    """A `level` label group on the project."""
+    found = channel._repositories["alpha-engine"]
+    channel._repositories["alpha-engine"] = replace(
+        found, label_groups={"level": ("level::1", "level::2", "level::3")}
+    )
+
+
+async def test_the_tasks_level_goes_on_the_envelope(tmp_path: Path, wired, monkeypatch) -> None:
+    """Read from the tracker, one label from each of the project's groups, and
+    put under the work item it belongs to."""
+    channel, _, runner, repo = wired
+    checks_in(channel, repo, tmp_path, proof="# proof")
+    levels(channel)
+    tracker = behind_a_tracker(channel, monkeypatch, Tracker(labels=("backend", "level::3")))
+
+    await channel._handle_callback(pressed_check("proof"))
+    await settled(channel)
+
+    [asked] = runner.asked
+    assert "- Work item: alpha-engine#281\n- level: level::3\n" in asked
+    assert tracker.asked == [281]
+
+
+async def test_a_tracker_that_cannot_be_read_leaves_the_envelope_as_it_was(
+    tmp_path: Path, wired, monkeypatch
+) -> None:
+    """This reports what is there; it is not a gate. A tracker refusing costs
+    the line and nothing else — the check runs as it would have."""
+    from halyard.tasks.spec import ForgeError
+
+    channel, _, runner, repo = wired
+    checks_in(channel, repo, tmp_path, proof="# proof")
+    levels(channel)
+    behind_a_tracker(channel, monkeypatch, Tracker(refuse=ForgeError("GitLab says 401")))
+
+    await channel._handle_callback(pressed_check("proof"))
+    await settled(channel)
+
+    [asked] = runner.asked
+    assert "- Work item: alpha-engine#281" in asked
+    assert "- level:" not in asked
+
+
+async def test_a_project_without_label_groups_never_asks_the_tracker(
+    tmp_path: Path, wired, monkeypatch
+) -> None:
+    """Not everybody needs this, and whoever does not never pays for it."""
+    channel, _, runner, repo = wired
+    checks_in(channel, repo, tmp_path, proof="# proof")
+    tracker = behind_a_tracker(channel, monkeypatch, Tracker(labels=("level::3",)))
+
+    await channel._handle_callback(pressed_check("proof"))
+    await settled(channel)
+
+    assert tracker.asked == []
+    [asked] = runner.asked
+    assert "- level:" not in asked
+
+
 async def test_pressing_a_check_runs_that_one_over_the_last_reply(tmp_path: Path, wired) -> None:
     """Its own instructions, the whole reply, and what Halyard can see."""
     from halyard.channels.telegram.adapter import CHECK_MODEL

@@ -17,10 +17,10 @@ fingerprint is taken over the files themselves: staging, committing or squashing
 them leaves it as it was, and any edit changes it.
 
 Read from the project's working tree, never written to it. Git refreshes its
-index on the way if it is let, and an agent committing at the same moment would
-find it locked; so it is asked without optional locks, and through plumbing
-where the porcelain ignores that — measured: `git diff` rewrote the index
-regardless, `git diff-index` did not.
+index on the way if it is let, and a commit made from the phone at that moment
+would find it locked; so it is asked without optional locks, and through
+plumbing where the porcelain ignores that — measured: `git diff` rewrote the
+index regardless, `git diff-index` did not.
 """
 
 from __future__ import annotations
@@ -30,7 +30,7 @@ import logging
 import os
 import socket
 import subprocess
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -174,7 +174,14 @@ def envelope(facts: Sequence[str]) -> list[str]:
     return ["Envelope:", *(f"- {fact}" for fact in facts)]
 
 
-def context(path: Path, project: str, *, replied: str = "", reply: Tree | None = None) -> list[str]:
+def context(
+    path: Path,
+    project: str,
+    *,
+    replied: str = "",
+    reply: Tree | None = None,
+    labels: Mapping[str, str] | None = None,
+) -> list[str]:
     """What Halyard can see for itself, one fact to a line.
 
     The work item comes from the branch name, the rule `/label` uses. The rest
@@ -184,12 +191,15 @@ def context(path: Path, project: str, *, replied: str = "", reply: Tree | None =
     about. `replied` is when the reply being judged came in, and `reply` where
     the files stood then, recorded as it arrived: a check on a report three
     hours old, told nothing of it, set about rebuilding the tree it came from.
+    `labels` are the task's own, one from each of the project's
+    `label_groups:`, read from its tracker by whoever is asking.
     """
     branch = current(path)
     number = number_of(branch or "")
     lines = [f"Project: {project}", f"Host: {host()}"]
     if number is not None:
         lines.append(f"Work item: {project}#{number}")
+    lines += [f"{group}: {label}" for group, label in (labels or {}).items()]
     lines.append(f"Branch: {branch or 'none (detached HEAD)'}")
     if head := _git(path, "rev-parse", "--short", "HEAD"):
         lines.append(f"HEAD: {head}")

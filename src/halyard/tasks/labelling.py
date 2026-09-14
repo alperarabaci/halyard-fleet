@@ -1,4 +1,4 @@
-"""Which labels are worth offering, and putting one on.
+"""Which labels are worth offering, putting one on, and which a task carries.
 
 The rule, kept out of the channel. Deciding what to show is not rendering, and
 it went into the Telegram adapter first — where it sat between two f-strings
@@ -16,7 +16,7 @@ Neither rule is GitLab's. They hold for whatever answers `Forge`.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
 from halyard.tasks.spec import Forge, Task
@@ -67,3 +67,21 @@ async def to_offer(forge: Forge, number: int, narrow: Sequence[str] = ()) -> Cho
 async def put_on(forge: Forge, number: int, label: str) -> Task:
     """Add one label, and return the task as it now stands."""
     return await forge.add_label(number, label.strip())
+
+
+def picked(groups: Mapping[str, Sequence[str]], carried: Sequence[str]) -> dict[str, str]:
+    """The first label a task carries from each of a project's groups.
+
+    `level: [level::1, level::2, level::3]` and a task labelled `level::3` give
+    `{"level": "level::3"}`, spelled as the task spells it. First in the group's
+    own order, should a task carry two; a group it carries nothing from is left
+    out. What a missing label means is not decided here — that is a different
+    rule, somewhere else.
+    """
+    on_task = {label.lower(): label for label in carried}
+    found: dict[str, str] = {}
+    for group, labels in groups.items():
+        first = next((on_task[name.lower()] for name in labels if name.lower() in on_task), None)
+        if first is not None:
+            found[group] = first
+    return found

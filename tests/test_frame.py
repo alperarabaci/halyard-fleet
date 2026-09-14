@@ -125,8 +125,8 @@ def test_the_context_says_whether_these_are_the_files_the_reply_was_about(
 
 
 def test_reading_where_the_tree_stands_never_writes_to_it(tmp_path: Path) -> None:
-    """An agent committing at the same moment must not find the index locked,
-    so git is not let refresh it on the way."""
+    """A commit made from the phone at that moment must not find the index
+    locked, so git is not let refresh it on the way."""
     committed(tmp_path)
     index = tmp_path / ".git" / "index"
     before = index.stat().st_mtime_ns
@@ -144,3 +144,13 @@ def test_the_envelope_is_a_list_with_each_facts_name_first() -> None:
         "- Project: alpha-engine",
         "- Host: mini",
     ]
+
+
+def test_the_tasks_own_labels_sit_under_the_work_item(tmp_path: Path) -> None:
+    """What the task is, together: its number, then what it is labelled."""
+    committed(tmp_path, "359-organization-rollout")
+
+    said = frame.context(tmp_path, "alpha-engine", labels={"level": "level::3"})
+
+    at = said.index("Work item: alpha-engine#359")
+    assert said[at + 1] == "level: level::3"
