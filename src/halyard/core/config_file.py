@@ -56,6 +56,7 @@ _PROJECT_FIELDS = {
     "commands",
     "forge",
     "labels",
+    "label_groups",
     "label_work",
     "confirmation",
     "checks",
@@ -146,6 +147,12 @@ class Project:
     #: which is the right default until a project has more of them than a phone
     #: keyboard can show.
     labels: tuple[str, ...] = ()
+    #: Groups of task labels, by name — `level: [level::1, level::2, level::3]`.
+    #: The first label a task carries from each goes on the envelope checks and
+    #: handoffs are given, as `level: level::3`. Empty unless configured. A task
+    #: with none of a group's labels, or a tracker that cannot be read, adds
+    #: nothing: this reports what is there, it does not ask for anything.
+    label_groups: dict[str, tuple[str, ...]] = field(default_factory=dict)
     #: Whether each seat's label goes on the task its branch is for, the first
     #: time that seat works on it — `claude:navigator`. Off unless asked for:
     #: it writes to somebody's issue tracker on its own. See `tasks.attribution`.
@@ -295,6 +302,30 @@ def _warnings_from(project: str, value: Any) -> tuple[str, ...] | None:
     if not isinstance(value, list):
         raise ValueError(f"Project {project!r}: `warn_if:` must be a list of names.")
     return tuple(str(name).strip() for name in value if str(name).strip())
+
+
+def _label_groups_from(project: str, value: Any) -> dict[str, tuple[str, ...]]:
+    """`label_groups:` as a mapping of group name to its labels, in order.
+
+    The order is kept because it is the order a group is searched in. A group
+    written as a lone label is read as a group of one.
+    """
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        raise ValueError(
+            f"Project {project!r}: `label_groups:` must be a mapping of name to labels."
+        )
+    groups: dict[str, tuple[str, ...]] = {}
+    for name, labels in value.items():
+        if isinstance(labels, str):
+            labels = [labels]
+        if not isinstance(labels, list):
+            raise ValueError(
+                f"Project {project!r}: label group {str(name)!r} must be a list of labels."
+            )
+        groups[str(name)] = tuple(str(label).strip() for label in labels if str(label).strip())
+    return groups
 
 
 def _as_text(value: Any) -> str | None:
@@ -455,6 +486,7 @@ def projects_from_yaml(text: str) -> list[Project]:
                 commands=_commands_from(project, body.get("commands")),
                 forge=_as_text(body.get("forge")),
                 labels=_warnings_from(project, body.get("labels")) or (),
+                label_groups=_label_groups_from(project, body.get("label_groups")),
                 label_work=_as_flag(project, "label_work", body.get("label_work")),
                 confirmation=_confirmation_from(project, body.get("confirmation")),
                 checks=checks,

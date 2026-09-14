@@ -14,7 +14,7 @@ is the one implementation there is today.
 
 from halyard.tasks.branches import current as current_branch
 from halyard.tasks.branches import number_of
-from halyard.tasks.labelling import Choice, put_on, to_offer, worth_offering
+from halyard.tasks.labelling import Choice, picked, put_on, to_offer, worth_offering
 from halyard.tasks.registry import BUILDERS, KNOWN_HOSTS, build, kind_of
 from halyard.tasks.remotes import Origin, origin_of
 from halyard.tasks.remotes import read as read_remote
@@ -33,6 +33,7 @@ __all__ = [
     "kind_of",
     "number_of",
     "origin_of",
+    "picked",
     "put_on",
     "read_remote",
     "to_offer",

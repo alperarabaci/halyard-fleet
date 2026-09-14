@@ -154,6 +154,8 @@ projects:
       test-all: make test-all
       bootstrap: make bootstrap-up
     labels: [andon, rework]           # narrows /label; empty means all of them
+    label_groups:                     # the task's label from each group goes on the envelope
+      level: [level::1, level::2, level::3]
     warn_if: [task-id-missing]        # the default; [] turns the warnings off
     confirmation:                     # the extra round, when a guard cannot catch it
       inquiry: NOTES/CONFIRMATION_INQUIRY.md
@@ -186,7 +188,10 @@ itself: the machine, the branch, HEAD, a fingerprint of the files, and — kept 
 the reply came in — where the files stood then, so a check can tell at once
 whether it is still looking at the code the report was about. The fingerprint is
 of the files, not the commits: committing them, or squash-merging the branch,
-leaves it as it was.
+leaves it as it was. A project can name groups of task labels under
+`label_groups:`, and the one the task carries from each group goes on the
+envelope too — `level: level::3`. It only reports: a task with none of them, or
+a tracker that cannot be read, adds nothing.
 
 **`confirmation:` buys a round that a guard cannot.** A test proves what it
 tests and a file of invariants proves nothing at all — an agent's attention is

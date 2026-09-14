@@ -145,6 +145,11 @@ projects:
     #     prompt: NOTES/halyard/handoffs/discovery.md
     #     checks: [proof, destructive]
     #     to: navigator
+    # Groups of task labels. The first one the task carries from each group
+    # goes on the envelope checks and handoffs are given, as `level: level::3`.
+    # Nothing is required or refused: a task with none of them adds nothing.
+    # label_groups:
+    #   level: [level::1, level::2, level::3]
     seats:
       # A label is what you type on a phone. It has to be unique across every
       # project, because it is also how `doctor` names a seat.

@@ -195,6 +195,10 @@ CHECK_TIMEOUT_SECONDS = 600.0
 #: record of where the files stood, never the reply.
 TREE_TIMEOUT_SECONDS = 5.0
 
+#: How long a check or a handoff waits for its task's labels. A tracker that has
+#: not answered by then leaves them off the envelope; nothing else waits on it.
+LABELS_TIMEOUT_SECONDS = 10.0
+
 #: What each chat last heard, and each chat's last answer per check. Kept per
 #: project — see `_kept`.
 SAID_FILE = "last-said.json"
@@ -2114,8 +2118,16 @@ class TelegramChannel:
             chat_id,
             thread_id,
         )
+        labels = await self._task_labels(found)
         known = await asyncio.to_thread(
-            partial(frame.context, found.path, found.name, replied=arrived, reply=_files_of(said))
+            partial(
+                frame.context,
+                found.path,
+                found.name,
+                replied=arrived,
+                reply=_files_of(said),
+                labels=labels,
+            )
         )
         answer = await checking.run(
             name,
@@ -2242,6 +2254,41 @@ class TelegramChannel:
             await self._settle_card(request, message_id, chat_id, "stop", actor)
         logger.info("Check %s stopped by %s", running.name, actor)
         running.turn.cancel()
+
+    async def _task_labels(self, found: Project) -> dict[str, str]:
+        """The task's labels from this project's own groups, for the envelope.
+
+        Quiet where `/label` explains itself: nobody asked for these, so a
+        branch not named for a task, a remote with no tracker behind it, or a
+        tracker that does not answer adds nothing and says so only in the log.
+        A project without `label_groups:` never asks the tracker at all.
+        """
+        if not found.label_groups or found.path is None:
+            return {}
+        branch = await asyncio.to_thread(task_tracker.current_branch, found.path)
+        number = task_tracker.number_of(branch or "")
+        if number is None:
+            return {}
+        try:
+            origin = await asyncio.to_thread(task_tracker.origin_of, found.path)
+            if origin is None:
+                raise task_tracker.ForgeError("the repository has no origin to ask")
+            forge = task_tracker.build(origin, self._forge_token or "", declared=found.forge)
+            task = await asyncio.wait_for(forge.task(number), timeout=LABELS_TIMEOUT_SECONDS)
+        except (task_tracker.ForgeError, TimeoutError) as missing:
+            logger.info(
+                "No task labels on the envelope for %s#%d: %s",
+                found.name,
+                number,
+                str(missing) or "no answer in time",
+            )
+            return {}
+        except Exception:
+            logger.warning(
+                "Could not read %s#%d's labels for the envelope", found.name, number, exc_info=True
+            )
+            return {}
+        return task_tracker.picked(found.label_groups, task.labels)
 
     async def _files_at_reply(
         self, project: str | None, agent_id: str | None, session_id: str | None
@@ -2377,6 +2424,7 @@ class TelegramChannel:
             chat_id,
             thread_id,
         )
+        labels = await self._task_labels(found)
         known = await asyncio.to_thread(
             partial(
                 frame.context,
@@ -2384,6 +2432,7 @@ class TelegramChannel:
                 found.name,
                 replied=_local(said.at).strftime("%H:%M") if said else "",
                 reply=_files_of(said),
+                labels=labels,
             )
         )
         handed = await handing.hand_off(

@@ -231,6 +231,26 @@ def a_task(*labels: str) -> Task:
     return Task(number=320, title="RAG v4 PDF report", labels=tuple(labels))
 
 
+def test_a_task_carries_the_first_label_of_each_group_it_has_one_from() -> None:
+    """`level: level::3` from a task labelled `backend` and `level::3`; a group
+    the task carries nothing from is left out rather than guessed at."""
+    groups = {"level": ("level::1", "level::2", "level::3"), "risk": ("risk::high",)}
+
+    assert labelling.picked(groups, ("backend", "level::3")) == {"level": "level::3"}
+
+
+def test_two_labels_from_one_group_give_the_first_in_the_groups_order() -> None:
+    """There should never be two; if there are, the answer is still one, and
+    always the same one."""
+    groups = {"level": ("level::1", "level::2", "level::3")}
+
+    assert labelling.picked(groups, ("level::3", "level::1")) == {"level": "level::1"}
+
+
+def test_a_group_label_is_found_however_the_task_capitalised_it() -> None:
+    assert labelling.picked({"level": ("level::3",)}, ("Level::3",)) == {"level": "Level::3"}
+
+
 def test_a_label_already_on_the_task_is_not_offered() -> None:
     """Which also means the "it is already there" case cannot arise, so nothing
     downstream has to handle it."""

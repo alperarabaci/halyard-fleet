@@ -378,6 +378,30 @@ def test_a_check_file_that_is_not_there_is_named_too(tmp_path) -> None:
     assert "NOTES/GONE.md" in said
 
 
+def test_label_groups_are_read_as_names_and_labels_in_order(tmp_path) -> None:
+    """In order, because that is the order a group is searched in."""
+    [project] = a_project(
+        tmp_path,
+        lines=["label_groups:", "  level: [level::1, level::2, level::3]", "  risk: risk::high"],
+    )
+
+    assert project.label_groups == {
+        "level": ("level::1", "level::2", "level::3"),
+        "risk": ("risk::high",),
+    }
+
+
+def test_label_groups_are_empty_unless_written(tmp_path) -> None:
+    [project] = a_project(tmp_path, lines=["checks:", "  proof: NOTES/checks/proof.md"])
+
+    assert project.label_groups == {}
+
+
+def test_a_label_group_written_as_a_mapping_is_refused(tmp_path) -> None:
+    with pytest.raises(ValueError, match="must be a list of labels"):
+        a_project(tmp_path, lines=["label_groups:", "  level: {one: level::1}"])
+
+
 def test_handoffs_are_read_with_what_they_carry(tmp_path) -> None:
     [project] = a_project(
         tmp_path,
