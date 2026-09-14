@@ -70,6 +70,9 @@ class ResolutionReason(StrEnum):
     EXPIRED = "expired"
     #: The control plane stopped while the request was still open.
     SHUTDOWN = "shutdown"
+    #: Answered where the agent runs — its own prompt, at the desk — before
+    #: anybody answered here. Recorded; never an approval Halyard gave.
+    ELSEWHERE = "elsewhere"
 
 
 class ApprovalRequest(BaseModel):
@@ -393,6 +396,42 @@ class ApprovalStore:
             if pending.resolution is not None:
                 return pending.resolution
             return self._settle(pending, Decision.DENY, reason, self._clock(), note=note)
+
+    async def answered_elsewhere(
+        self,
+        *,
+        session_id: str,
+        tool_use_id: str,
+        decision: Decision,
+        decided_by: str,
+        note: str,
+    ) -> ApprovalRequest | None:
+        """Close a request somebody answered where the agent runs, not here.
+
+        A runtime whose own prompt stays on the screen while a card is out —
+        opencode — can be answered at the desk first. What was decided there
+        already stands; this records it and stops the card asking a question
+        that is settled. No nonce, because nobody here pressed anything — and
+        for the same reason the waiting bridge is never handed this as an
+        approval. See `ApprovalService._request`.
+
+        The request, if it was still open for that session. None if it was
+        decided already, has expired, or never existed.
+        """
+        async with self._lock:
+            now = self._clock()
+            pending = self._find_open_by_tool_use_id(tool_use_id, now)
+            if pending is None or pending.request.session_id != session_id:
+                return None
+            self._settle(
+                pending,
+                decision,
+                ResolutionReason.ELSEWHERE,
+                now,
+                decided_by=decided_by,
+                note=note,
+            )
+            return pending.request
 
     def _settle(
         self,

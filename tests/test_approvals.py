@@ -284,6 +284,51 @@ async def test_only_one_of_many_simultaneous_presses_wins(store: ApprovalStore) 
 # --- retries and retention --------------------------------------------------
 
 
+async def test_a_question_answered_at_the_desk_is_closed_by_its_tool_call(
+    store: ApprovalStore,
+) -> None:
+    """No nonce — nobody here pressed anything — and whoever is waiting learns
+    it was answered elsewhere, not here."""
+    request = await open_request(store, tool_use_id="per_1")
+
+    closed = await store.answered_elsewhere(
+        session_id="session-1",
+        tool_use_id="per_1",
+        decision=Decision.ALLOW,
+        decided_by="opencode, at the desk",
+        note="Allowed in opencode itself.",
+    )
+    resolution = await store.wait_for(request.request_id)
+
+    assert closed == request
+    assert resolution.reason is ResolutionReason.ELSEWHERE
+    assert resolution.decided_by == "opencode, at the desk"
+
+
+async def test_only_an_open_question_of_that_session_is_closed_from_the_desk(
+    store: ApprovalStore,
+) -> None:
+    """Another session's question is not this one, and a question the phone
+    already answered stays answered the way the phone answered it."""
+    request = await open_request(store, tool_use_id="per_1")
+    elsewhere = {
+        "tool_use_id": "per_1",
+        "decision": Decision.ALLOW,
+        "decided_by": "opencode, at the desk",
+        "note": "Allowed in opencode itself.",
+    }
+
+    another_session = await store.answered_elsewhere(session_id="session-2", **elsewhere)
+    await store.resolve(
+        request.request_id, nonce=request.nonce, decision=Decision.DENY, decided_by="tg:1"
+    )
+    after_the_phone = await store.answered_elsewhere(session_id="session-1", **elsewhere)
+
+    assert another_session is None
+    assert after_the_phone is None
+    assert (await store.resolution_of(request.request_id)).decision is Decision.DENY
+
+
 async def test_a_retried_tool_call_reuses_its_open_request(store: ApprovalStore) -> None:
     first = await open_request(store, tool_use_id="toolu_1")
     second = await open_request(store, tool_use_id="toolu_1")
