@@ -33,6 +33,38 @@ class Asking:
         return self.says
 
 
+class Labelling:
+    """A `Labeller` that keeps what it was asked to put on the task."""
+
+    def __init__(self, *, fails: bool = False) -> None:
+        self.put: list[str] = []
+        self.fails = fails
+
+    async def label(self, label: str) -> None:
+        if self.fails:
+            raise RuntimeError("the tracker is down")
+        self.put.append(label)
+
+
+async def checked(
+    tmp_path: Path, says: str | None, labeller: Labelling, findings=("status: candidate",)
+) -> checks.Answer:
+    (tmp_path / "proof.md").write_text("# proof\n")
+    return await checks.run(
+        "proof",
+        Path("proof.md"),
+        project=tmp_path,
+        context=[],
+        note="",
+        reply="42 passed",
+        asker=Asking(says=says),
+        model="sonnet",
+        timeout=5,
+        findings=findings,
+        labeller=labeller,
+    )
+
+
 async def ran(
     tmp_path: Path, asker: Asking, check: str = "proof.md", *, handoff: str = ""
 ) -> checks.Answer:
@@ -168,3 +200,46 @@ async def test_a_check_somebody_stopped_says_so(tmp_path: Path) -> None:
 
     assert not answer.measured
     assert answer.why == "stopped by tg:4242"
+
+
+def test_a_finding_is_the_projects_own_words_whatever_their_case() -> None:
+    """Whatever the project's check files have the model write, matched as
+    written give or take case; no phrases means nothing is ever a finding."""
+    findings = ("status: candidate", "status: evidence missing")
+
+    assert (
+        checks.finding("proof · #355 · Status: Candidate\n- one", findings) == "status: candidate"
+    )
+    assert checks.finding("proof · #355 · status: no finding", findings) is None
+    assert checks.finding("proof · #355 · status: candidate", ()) is None
+
+
+async def test_a_check_that_finds_something_labels_the_task(tmp_path: Path) -> None:
+    """Decided by the check, from the project's own words — so a check run by
+    hand and one run by a handoff label alike."""
+    labeller = Labelling()
+
+    await checked(tmp_path, "proof · status: candidate", labeller)
+
+    assert labeller.put == ["halyard:proof"]
+
+
+async def test_nothing_is_labelled_without_a_finding(tmp_path: Path) -> None:
+    """Not for a clean answer, not for one that never came, and not for a
+    project that has not said what a finding looks like."""
+    labeller = Labelling()
+
+    await checked(tmp_path, "proof · status: no finding", labeller)
+    await checked(tmp_path, None, labeller)
+    await checked(tmp_path, "proof · status: candidate", labeller, findings=())
+
+    assert labeller.put == []
+
+
+async def test_a_label_that_cannot_be_written_costs_the_label_not_the_answer(
+    tmp_path: Path,
+) -> None:
+    answer = await checked(tmp_path, "proof · status: candidate", Labelling(fails=True))
+
+    assert answer.measured
+    assert answer.text == "proof · status: candidate"

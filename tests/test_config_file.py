@@ -402,6 +402,22 @@ def test_a_label_group_written_as_a_mapping_is_refused(tmp_path) -> None:
         a_project(tmp_path, lines=["label_groups:", "  level: {one: level::1}"])
 
 
+def test_label_findings_are_read_as_phrases(tmp_path) -> None:
+    [project] = a_project(
+        tmp_path,
+        lines=["label_findings:", '  - "status: candidate"', '  - "status: evidence missing"'],
+    )
+
+    assert project.label_findings == ("status: candidate", "status: evidence missing")
+
+
+def test_a_finding_phrase_left_unquoted_is_refused_with_why(tmp_path) -> None:
+    """`- status: candidate` is a mapping to YAML, and would otherwise become
+    text no answer ever contains."""
+    with pytest.raises(ValueError, match="has to be quoted"):
+        a_project(tmp_path, lines=["label_findings:", "  - status: candidate"])
+
+
 def test_handoffs_are_read_with_what_they_carry(tmp_path) -> None:
     [project] = a_project(
         tmp_path,

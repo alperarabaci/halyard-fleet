@@ -1010,6 +1010,7 @@ class Tracker:
         self.on_task = tuple(labels)
         self.refuse = refuse
         self.asked: list[int] = []
+        self.added: list[tuple[int, str]] = []
 
     async def task(self, number: int):
         from halyard.tasks.spec import Task
@@ -1018,6 +1019,12 @@ class Tracker:
         if self.refuse:
             raise self.refuse
         return Task(number=number, title="Rollout p3", labels=self.on_task)
+
+    async def add_label(self, number: int, label: str):
+        from halyard.tasks.spec import Task
+
+        self.added.append((number, label))
+        return Task(number=number, title="Rollout p3", labels=(*self.on_task, label))
 
 
 def behind_a_tracker(channel: TelegramChannel, monkeypatch, tracker: Tracker) -> Tracker:
@@ -1093,6 +1100,61 @@ async def test_a_project_without_label_groups_never_asks_the_tracker(
     assert tracker.asked == []
     [asked] = runner.asked
     assert "- level:" not in asked
+
+
+def findings_in(channel: TelegramChannel) -> None:
+    """The project's checks say `status: candidate` when they found something."""
+    found = channel._repositories["alpha-engine"]
+    channel._repositories["alpha-engine"] = replace(found, label_findings=("status: candidate",))
+
+
+async def test_a_check_that_finds_something_labels_its_task(
+    tmp_path: Path, wired, monkeypatch
+) -> None:
+    """Off to one side: the answer arrives as it always did, and the task gets
+    the check's label."""
+    channel, api, runner, repo = wired
+    checks_in(channel, repo, tmp_path, proof="# proof")
+    findings_in(channel)
+    tracker = behind_a_tracker(channel, monkeypatch, Tracker(labels=("backend",)))
+    runner.says = "proof · alpha-engine#281 · status: candidate"
+
+    await channel._handle_callback(pressed_check("proof"))
+    await settled(channel)
+
+    assert tracker.added == [(281, "halyard:proof")]
+    assert api.sent[-1]["text"].startswith("<b>proof</b>")
+
+
+async def test_a_findings_label_already_on_the_task_is_not_written_again(
+    tmp_path: Path, wired, monkeypatch
+) -> None:
+    channel, _, runner, repo = wired
+    checks_in(channel, repo, tmp_path, proof="# proof")
+    findings_in(channel)
+    tracker = behind_a_tracker(channel, monkeypatch, Tracker(labels=("halyard:proof",)))
+    runner.says = "proof · status: candidate"
+
+    await channel._handle_callback(pressed_check("proof"))
+    await settled(channel)
+
+    assert tracker.added == []
+
+
+async def test_a_handoff_labels_like_a_check_run_by_hand(
+    tmp_path: Path, wired, monkeypatch
+) -> None:
+    """The same check, so the same label — handoffs are no exception."""
+    channel, _, runner, repo = wired
+    handoffs_in(channel, repo, tmp_path, runner, discovery={"checks": ("proof",), "to": "xrev"})
+    findings_in(channel)
+    tracker = behind_a_tracker(channel, monkeypatch, Tracker())
+    runner.says = "proof · status: candidate"
+
+    await channel._run_handoff("discovery", CHAT, None, f"tg:{APPROVER}")
+    await settled(channel)
+
+    assert tracker.added == [(281, "halyard:proof")]
 
 
 async def test_pressing_a_check_runs_that_one_over_the_last_reply(tmp_path: Path, wired) -> None:

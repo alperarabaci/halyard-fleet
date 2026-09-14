@@ -163,6 +163,8 @@ projects:
     checks:                           # /checks offers these, one button each
       proof: NOTES/checks/proof.md
       destructive: NOTES/checks/destructive.md
+    label_findings:                   # an answer saying one of these labels the task halyard:<check>
+      - "status: candidate"
     handoffs:                         # /handoff offers these, one button each
       review:                         # a prompt, handed to the reviewer
         prompt: NOTES/handoffs/review.md
@@ -192,6 +194,14 @@ leaves it as it was. A project can name groups of task labels under
 `label_groups:`, and the one the task carries from each group goes on the
 envelope too — `level: level::3`. It only reports: a task with none of them, or
 a tracker that cannot be read, adds nothing.
+
+**A finding can label the task.** A project writes under `label_findings:` what
+its checks' answers say when they found something, in its own words — quoted,
+because a phrase with a colon is otherwise a YAML mapping — and whenever an
+answer says one of them the task gets `halyard:<check>`. From `/checks` and from
+a handoff alike, since both run the same check. Halyard only adds: closing a
+finding, as a false alarm or as approved, is a label somebody puts on by hand.
+A project that has not said what a finding looks like has nothing written.
 
 **`confirmation:` buys a round that a guard cannot.** A test proves what it
 tests and a file of invariants proves nothing at all — an agent's attention is
