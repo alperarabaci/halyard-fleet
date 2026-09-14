@@ -33,11 +33,12 @@ def prompt(instructions: str, *, context: list[str], note: str, text: str) -> st
         "own instructions, and the files they point to, are background here "
         "rather than a reading list.",
         "",
-        *context,
+        *frame.envelope([*context, *([f"Said by whoever asked: {note}"] if note else [])]),
+        "",
+        "Text to check:",
+        "",
+        text,
     ]
-    if note:
-        parts.append(f"Said by whoever asked: {note}")
-    parts += ["", "Text to check:", "", text]
     return "\n".join(parts)
 
 
@@ -78,7 +79,8 @@ def handed_on(
             "then the reply it checked.",
             "",
             f"Check: {name} — {path} @ {version}",
-            f"Where: {' · '.join(context)}",
+            "",
+            *frame.envelope(context),
             "",
             "What it found:",
             "",

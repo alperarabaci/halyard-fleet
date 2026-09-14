@@ -143,3 +143,15 @@ async def test_each_check_a_handoff_runs_goes_by_the_handoffs_name_too(tmp_path:
     await hand(tmp_path, Handoff(name="discovery", checks=("proof", "claims")), asker=asker)
 
     assert sorted(asker.names) == ["claims · handoff discovery", "proof · handoff discovery"]
+
+
+async def test_the_seat_reads_an_envelope_one_fact_to_a_line(tmp_path: Path) -> None:
+    """What Halyard can see, which prompt, who asked and who it is from — as a
+    list, not a line of facts run together for a model to pick apart."""
+    a_project(tmp_path)
+
+    _, delivery = await hand(tmp_path, Handoff(name="discovery", prompt=Path("NOTES/discovery.md")))
+
+    [(_, text)] = delivery.sent
+    assert "Envelope:\n- Work item: alpha-engine#355\n- Prompt: NOTES/discovery.md @ " in text
+    assert "\n- From: drv (driver), reply from 00:21" in text

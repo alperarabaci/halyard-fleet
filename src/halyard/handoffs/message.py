@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 
+from halyard import frame
 from halyard.checks import Answer
 
 
@@ -24,21 +25,23 @@ def compose(
 
     Who it is for and from, first, so a session can tell a handoff from an
     instruction typed at it. Then the project's own text for this handoff, which
-    speaks of "the message below". Then what Halyard can see for itself — the
-    task, the tree, which revision of the prompt — because the project's prompts
-    refuse to guess at any of it. Then the checks' answers, measured or not.
-    Then the reply itself, last, where the prompt said it would be.
+    speaks of "the message below". Then the envelope: what Halyard can see for
+    itself — the task, the machine, the tree, which revision of the prompt — one
+    fact to a line, because the project's prompts refuse to guess at any of it.
+    Then the checks' answers, measured or not. Then the reply itself, last,
+    where the prompt said it would be.
     """
     parts = [f"To {recipient}, from Halyard — handoff: {name}."]
     if prompt:
         parts += ["", prompt]
-    parts += ["", "---", "", f"Where: {' · '.join(context)}"]
+    facts = list(context)
     if prompt_ref:
-        parts.append(f"Prompt: {prompt_ref}")
+        facts.append(f"Prompt: {prompt_ref}")
     if note:
-        parts.append(f"Said by whoever asked: {note}")
+        facts.append(f"Said by whoever asked: {note}")
     if reply is not None:
-        parts.append(f"From: {sender}, reply from {arrived} ({len(reply):,} characters)")
+        facts.append(f"From: {sender}, reply from {arrived} ({len(reply):,} characters)")
+    parts += ["", "---", "", *frame.envelope(facts)]
     for answer in answers:
         parts += ["", f"Check {answer.name} — {answer.path} @ {answer.version}:", ""]
         parts.append(answer.text if answer.measured else f"unmeasured — {answer.why}")

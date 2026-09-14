@@ -66,6 +66,7 @@ def test_the_prompt_says_where_the_check_stands_and_what_it_may_do() -> None:
     assert "only the commands this check's text tells it to" in asked
     assert "nothing of its own" in asked
     assert "rather than a reading list" in asked
+    assert "Envelope:\n- Project: alpha-engine\n- Said by whoever asked: delivery" in asked
     assert "delivery" in asked
     assert asked.endswith("42 passed")
 
@@ -92,7 +93,7 @@ def test_what_a_seat_is_handed_can_be_read_cold() -> None:
 
     assert "`proof` check on drv (driver)'s reply from 00:21" in text
     assert "Check: proof — NOTES/proof.md @ 3e8c847" in text
-    assert "Where: Work item: alpha-engine#355" in text
+    assert "Envelope:\n- Work item: alpha-engine#355" in text
     assert text.index("evidence missing") < text.index("All 42 tests passed.")
 
 

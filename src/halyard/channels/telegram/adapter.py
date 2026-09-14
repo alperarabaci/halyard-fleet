@@ -190,6 +190,11 @@ CHECK_MODEL = "sonnet"
 #: `validate:` has, for the same kind of work.
 CHECK_TIMEOUT_SECONDS = 600.0
 
+#: How long a reply waits for its project's files to be read. A local
+#: repository answers in well under a second, and one that does not costs the
+#: record of where the files stood, never the reply.
+TREE_TIMEOUT_SECONDS = 5.0
+
 #: What each chat last heard, and each chat's last answer per check. Kept per
 #: project — see `_kept`.
 SAID_FILE = "last-said.json"
@@ -300,6 +305,13 @@ class _SeatDelivery:
         await self._channel._forward_to_seat(
             f"{label} {text}", self._actor, self._chat_id, self._thread_id
         )
+
+
+def _files_of(said: last_said.Said | None) -> frame.Tree | None:
+    """Where the files stood when a reply came in, if that was recorded."""
+    if said is None or not said.content:
+        return None
+    return frame.Tree(head=said.head or "?", content=said.content)
 
 
 @dataclass
@@ -666,12 +678,15 @@ class TelegramChannel:
         # Kept before the split, because what somebody wants to hand on is the
         # whole report and a fragment of one would look complete.
         if (said_path := self._kept(chat_id, SAID_FILE)) is not None:
+            files = await self._files_at_reply(project, agent_id, session_id)
             last_said.remember(
                 said_path,
                 chat_id=chat_id,
                 text=text,
                 session_id=session_id,
                 agent_id=agent_id,
+                head=files.head if files else None,
+                content=files.content if files else None,
             )
         # A provider that has stopped answering is the one message worth a
         # button. Somebody reading "the limit resets at 03:30" on a phone can
@@ -2099,7 +2114,9 @@ class TelegramChannel:
             chat_id,
             thread_id,
         )
-        known = await asyncio.to_thread(frame.context, found.path, found.name)
+        known = await asyncio.to_thread(
+            partial(frame.context, found.path, found.name, replied=arrived, reply=_files_of(said))
+        )
         answer = await checking.run(
             name,
             path,
@@ -2226,6 +2243,40 @@ class TelegramChannel:
         logger.info("Check %s stopped by %s", running.name, actor)
         running.turn.cancel()
 
+    async def _files_at_reply(
+        self, project: str | None, agent_id: str | None, session_id: str | None
+    ) -> frame.Tree | None:
+        """Where the project's files stood as a reply came in.
+
+        Kept with the reply, so a check run on it later can say whether it is
+        still looking at the code the reply was about. Bounded, because this is
+        on the path that delivers the reply.
+        """
+        found = self._repositories.get(project or "")
+        if found is None or found.path is None:
+            return None
+        try:
+            files = await asyncio.wait_for(
+                asyncio.to_thread(frame.tree, found.path), timeout=TREE_TIMEOUT_SECONDS
+            )
+        except TimeoutError:
+            logger.warning(
+                "Could not read %s's files in %.0fs; the reply goes on without them",
+                project,
+                TREE_TIMEOUT_SECONDS,
+            )
+            return None
+        if files is not None:
+            logger.info(
+                "Reply from %s %s in %s: HEAD %s · Content %s",
+                agent_id or "?",
+                session_id or "?",
+                project,
+                files.head,
+                files.content,
+            )
+        return files
+
     def _seats_for(self, project: str, to: str | None) -> list[Seat]:
         """Where a handoff can go: the seat `to:` names, the seats holding the
         role it names, or every seat of the project.
@@ -2326,7 +2377,15 @@ class TelegramChannel:
             chat_id,
             thread_id,
         )
-        known = await asyncio.to_thread(frame.context, found.path, found.name)
+        known = await asyncio.to_thread(
+            partial(
+                frame.context,
+                found.path,
+                found.name,
+                replied=_local(said.at).strftime("%H:%M") if said else "",
+                reply=_files_of(said),
+            )
+        )
         handed = await handing.hand_off(
             handoff,
             project=found.path,

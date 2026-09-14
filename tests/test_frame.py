@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import subprocess
 from pathlib import Path
 
@@ -54,3 +55,92 @@ def test_the_version_is_the_commit_that_last_changed_the_file(tmp_path: Path) ->
     assert frame.version(Path("a.txt"), tmp_path) == commit
     (tmp_path / "a.txt").write_text("edited\n")
     assert frame.version(Path("a.txt"), tmp_path) == f"{commit} + local edits"
+
+
+def test_the_fingerprint_is_of_the_files_not_the_commits(tmp_path: Path) -> None:
+    """The same files give the same fingerprint however much of them is
+    committed: a branch is squash-merged, and its commits are not a reference
+    that lasts."""
+    committed(tmp_path)
+    (tmp_path / "a.txt").write_text("b\n")
+    uncommitted = frame.tree(tmp_path)
+    git(tmp_path, "commit", "-qam", "second")
+    after = frame.tree(tmp_path)
+
+    assert uncommitted is not None and after is not None
+    assert uncommitted.content == after.content
+    assert uncommitted.head != after.head
+    assert after.clean and not uncommitted.clean
+
+
+def test_any_edit_moves_the_fingerprint_and_an_ignored_file_does_not(tmp_path: Path) -> None:
+    committed(tmp_path)
+    (tmp_path / ".gitignore").write_text("build/\n")
+    git(tmp_path, "add", ".gitignore")
+    git(tmp_path, "commit", "-qm", "ignore builds")
+    before = frame.tree(tmp_path)
+    assert before is not None
+
+    (tmp_path / "build").mkdir()
+    (tmp_path / "build" / "out.bin").write_text("built\n")
+    ignored = frame.tree(tmp_path)
+    (tmp_path / "notes.md").write_text("new\n")
+    untracked = frame.tree(tmp_path)
+
+    assert ignored is not None and ignored.content == before.content
+    assert untracked is not None and untracked.content != before.content
+
+
+def test_the_context_says_which_machine_and_which_files(tmp_path: Path) -> None:
+    """The same repository sits on more than one machine, and a report from
+    one is not about the files on another."""
+    committed(tmp_path)
+    now = frame.tree(tmp_path)
+    assert now is not None
+
+    said = frame.context(tmp_path, "alpha-engine")
+
+    assert f"Host: {frame.host()}" in said
+    assert f"Content: {now.content} (clean)" in said
+
+
+def test_the_context_says_whether_these_are_the_files_the_reply_was_about(
+    tmp_path: Path,
+) -> None:
+    """Kept as the reply came in, compared now. A check on a report three hours
+    old, told nothing of it, set about rebuilding the tree."""
+    committed(tmp_path)
+    then = frame.tree(tmp_path)
+    assert then is not None
+
+    same = frame.context(tmp_path, "alpha-engine", replied="17:14", reply=then)
+    (tmp_path / "a.txt").write_text("b\n")
+    moved = frame.context(tmp_path, "alpha-engine", replied="17:14", reply=then)
+    unknown = frame.context(tmp_path, "alpha-engine", replied="17:14")
+
+    stood = f"At the reply: 17:14 · HEAD {then.head} · Content {then.content}"
+    assert f"{stood} · same files" in same
+    assert f"{stood} · files changed since" in moved
+    assert "At the reply: 17:14 · not recorded" in unknown
+
+
+def test_reading_where_the_tree_stands_never_writes_to_it(tmp_path: Path) -> None:
+    """An agent committing at the same moment must not find the index locked,
+    so git is not let refresh it on the way."""
+    committed(tmp_path)
+    index = tmp_path / ".git" / "index"
+    before = index.stat().st_mtime_ns
+    later = before + 5_000_000_000
+    os.utime(tmp_path / "a.txt", ns=(later, later))
+
+    frame.context(tmp_path, "alpha-engine")
+
+    assert index.stat().st_mtime_ns == before
+
+
+def test_the_envelope_is_a_list_with_each_facts_name_first() -> None:
+    assert frame.envelope(["Project: alpha-engine", "Host: mini"]) == [
+        "Envelope:",
+        "- Project: alpha-engine",
+        "- Host: mini",
+    ]
