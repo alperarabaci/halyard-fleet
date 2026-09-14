@@ -1011,11 +1011,19 @@ class TelegramChannel:
             thread_id,
         )
         if destination != chat_id:
-            await self._say(
-                f"↪ from <b>{html.escape(actor)}</b>, via another chat:\n\n{html.escape(text)}",
-                destination,
-                destination_thread,
-            )
+            # In pieces Telegram will take, the way a relayed reply is sent.
+            # Whole, a handoff — the project's prompt and a report — ran past
+            # 4096 characters, Telegram refused it, and the refusal went to the
+            # log: the session got the message and its chat showed nothing.
+            chunks = cards.split_for_telegram(text)
+            for index, chunk in enumerate(chunks, start=1):
+                marker = f"<i>({index}/{len(chunks)})</i>\n" if len(chunks) > 1 else ""
+                head = (
+                    f"↪ from <b>{html.escape(actor)}</b>, via another chat:\n\n"
+                    if index == 1
+                    else ""
+                )
+                await self._say(head + marker + html.escape(chunk), destination, destination_thread)
         await self._forward_to_session(text, actor, destination, destination_thread)
 
     def _detach(self, work, what: str) -> None:
