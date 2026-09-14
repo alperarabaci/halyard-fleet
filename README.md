@@ -181,6 +181,13 @@ the chat that asked. **Deny** refuses one command and the check carries on;
 started. A command refused, a check stopped, or one that runs out of time
 leaves the check unmeasured rather than clean.
 
+**Every check and handoff carries an envelope** of what Halyard reads for
+itself: the machine, the branch, HEAD, a fingerprint of the files, and — kept as
+the reply came in — where the files stood then, so a check can tell at once
+whether it is still looking at the code the report was about. The fingerprint is
+of the files, not the commits: committing them, or squash-merging the branch,
+leaves it as it was.
+
 **`confirmation:` buys a round that a guard cannot.** A test proves what it
 tests and a file of invariants proves nothing at all — an agent's attention is
 finite, and past a point more written rules are noise competing with the work.

@@ -88,12 +88,13 @@ async def hand_off(
     )
     await delivery.to_seat(recipient_label, text)
     logger.info(
-        "Handoff %s: %s → %s, %d chars, checks: %s",
+        "Handoff %s: %s → %s, %d chars, checks: %s · %s",
         handoff.name,
         sender,
         recipient,
         len(text),
         ", ".join(f"{a.name} {'answered' if a.measured else 'unmeasured'}" for a in answers)
         or "none",
+        " · ".join(context),
     )
     return Handed(text, answers)

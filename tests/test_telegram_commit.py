@@ -966,6 +966,41 @@ async def test_a_handoff_goes_on_without_a_check_somebody_stopped(tmp_path: Path
     assert f"stopped by tg:{APPROVER}" in text
 
 
+async def test_a_check_is_told_whether_the_files_moved_since_the_reply(
+    tmp_path: Path, wired, caplog
+) -> None:
+    """Where the files stood is kept as a reply comes in, and a check run on it
+    later is told whether they still stand there. Measured: a check on a report
+    three hours old, told nothing of it, set about rebuilding the tree."""
+    from halyard.channels.telegram.adapter import SAID_FILE
+    from halyard.core import last_said
+
+    caplog.set_level("INFO")
+    channel, _, runner, repo = wired
+    checks_in(channel, repo, tmp_path, proof="# proof")
+    await channel.send_message(
+        "id-nav",
+        "All 42 tests passed.",
+        Role.NAVIGATOR,
+        agent_id="claude-code",
+        project="alpha-engine",
+    )
+    said = last_said.last(channel._kept(CHAT, SAID_FILE), CHAT)
+    (repo / "seed.txt").write_text("changed after the report\n")
+
+    await channel._handle_callback(pressed_check("proof"))
+    await settled(channel)
+
+    assert said is not None and said.content
+    [asked] = runner.asked
+    assert "- At the reply: " in asked
+    assert f"Content {said.content} · files changed since" in asked
+    assert any(
+        f"in alpha-engine: HEAD {said.head} · Content {said.content}" in record.getMessage()
+        for record in caplog.records
+    )
+
+
 async def test_pressing_a_check_runs_that_one_over_the_last_reply(tmp_path: Path, wired) -> None:
     """Its own instructions, the whole reply, and what Halyard can see."""
     from halyard.channels.telegram.adapter import CHECK_MODEL

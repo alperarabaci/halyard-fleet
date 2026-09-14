@@ -62,6 +62,11 @@ class Said:
     #: found" that hides the boundary it crossed.
     session_id: str | None = None
     agent_id: str | None = None
+    #: Where the project's files stood as it arrived — the commit under them and
+    #: a fingerprint of them, see `halyard.frame.tree` — so a check run on it
+    #: hours later can tell whether it is still looking at the same code.
+    head: str | None = None
+    content: str | None = None
 
     def stale(self, now: datetime, hours: int = STALE_AFTER_HOURS) -> bool:
         return (now - self.at).total_seconds() > hours * 3600
@@ -85,6 +90,8 @@ def remember(
     text: str,
     session_id: str | None = None,
     agent_id: str | None = None,
+    head: str | None = None,
+    content: str | None = None,
     now: datetime | None = None,
 ) -> None:
     """Note what an agent just said in this chat.
@@ -102,6 +109,8 @@ def remember(
         "at": (now or datetime.now(UTC)).isoformat(),
         "session_id": session_id,
         "agent_id": agent_id,
+        "head": head,
+        "content": content,
     }
     if len(noted) > CHATS:
         # Oldest out. Sorted on the stored timestamp rather than on insertion
@@ -131,9 +140,13 @@ def last(where: Path, chat_id: str) -> Said | None:
         at = at.replace(tzinfo=UTC)
     session = entry.get("session_id")
     agent = entry.get("agent_id")
+    head = entry.get("head")
+    content = entry.get("content")
     return Said(
         text=text,
         at=at,
         session_id=session if isinstance(session, str) else None,
         agent_id=agent if isinstance(agent, str) else None,
+        head=head if isinstance(head, str) else None,
+        content=content if isinstance(content, str) else None,
     )
