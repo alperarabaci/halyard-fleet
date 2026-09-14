@@ -281,11 +281,11 @@ def _build_channel(
     # Prompts are the one part of the configuration a person edits often, so a
     # mistake in them must not take the control plane down with it. Refusing to
     # start over the wording of a shortcut would lose the gate as well.
-    from halyard.channels.telegram.adapter import COMMANDS
+    from halyard.channels.telegram.adapter import reserved_names
     from halyard.core import prompts as configured_prompts
 
     try:
-        prompts = configured_prompts.load(reserved=[name for name, _ in COMMANDS])
+        prompts = configured_prompts.load(reserved=reserved_names())
     except ValueError as error:
         logger.warning("Ignoring the `prompts:` block: %s", error)
         prompts = dict(configured_prompts.DEFAULTS)
