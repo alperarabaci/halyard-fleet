@@ -2500,6 +2500,24 @@ async def test_forward_carries_the_whole_last_reply(tmp_path: Path) -> None:
     assert sum(len(sent["text"]) for sent in there) > 4000, "the reply was truncated"
 
 
+async def test_a_long_message_shows_in_the_seats_chat_in_pieces_telegram_takes(
+    tmp_path: Path,
+) -> None:
+    """Telegram refuses a message over 4096 characters, and the refusal was
+    swallowed: a long handoff reached the session and never showed in the
+    seat's own chat, which read as the handoff having gone nowhere."""
+    channel, api = await with_two_seats(tmp_path)
+    long_text = "the review prompt, then the report " + "x" * 9000
+
+    await channel._handle_message(typed_in(f"/to xnav {long_text}", DRV_CHAT))
+
+    there = [sent for sent in api.sent if sent["chat_id"] == "-1003333333333"]
+    assert len(there) > 1
+    assert all(len(sent["text"]) <= 4096 for sent in there)
+    assert there[0]["text"].startswith("↪ from")
+    assert sum(sent["text"].count("x") for sent in there) >= 9000
+
+
 async def test_a_bare_forward_offers_the_seats_without_a_forced_reply(tmp_path: Path) -> None:
     """No `force_reply` anywhere in this flow. Nothing has to be typed, so
     nothing should open a reply box — and an abandoned one is a reply box that
