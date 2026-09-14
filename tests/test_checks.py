@@ -51,9 +51,11 @@ async def ran(
 
 
 def test_the_prompt_says_where_the_check_stands_and_what_it_may_do() -> None:
-    """In the project, reading and running but never editing — and reading for
-    the check rather than through everything the project's own instructions
-    name, which a turn standing in the project would otherwise start on."""
+    """In the project, reading but never editing; running only what the check's
+    own text names — measured: told only that it could run commands, a claims
+    check ran the suite test by test, wrote probes of its own and made scratch
+    copies — and reading for the check rather than through everything the
+    project's own instructions name."""
     asked = checks.prompt(
         "# proof", context=["Project: alpha-engine"], note="delivery", text="42 passed"
     )
@@ -61,6 +63,8 @@ def test_the_prompt_says_where_the_check_stands_and_what_it_may_do() -> None:
     assert asked.startswith("# proof")
     assert "runs in the project's own directory" in asked
     assert "cannot edit anything" in asked
+    assert "only the commands this check's text tells it to" in asked
+    assert "nothing of its own" in asked
     assert "rather than a reading list" in asked
     assert "delivery" in asked
     assert asked.endswith("42 passed")
@@ -149,3 +153,17 @@ async def test_a_check_that_cannot_be_read_never_asks(tmp_path: Path) -> None:
 
     assert asker.asked == []
     assert "could not read" in answer.why
+
+
+async def test_a_check_somebody_stopped_says_so(tmp_path: Path) -> None:
+    """Unmeasured, with who stopped it — never read as a model that went quiet."""
+    (tmp_path / "proof.md").write_text("# proof\n")
+
+    class Stopping(Asking):
+        async def ask(self, text: str, **_) -> str | None:
+            raise checks.StoppedError("stopped by tg:4242")
+
+    answer = await ran(tmp_path, Stopping())
+
+    assert not answer.measured
+    assert answer.why == "stopped by tg:4242"

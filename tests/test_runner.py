@@ -9,6 +9,8 @@ answers, plausibly, and says nothing about it.
 from __future__ import annotations
 
 import asyncio
+import os
+import signal
 from pathlib import Path
 
 import pytest
@@ -397,3 +399,47 @@ async def test_an_ordinary_one_shot_turn_is_left_as_it_was(
     assert not any(argument.startswith("--tools") for argument in arguments)
     assert "--session-id" not in arguments
     assert "--no-session-persistence" not in arguments
+
+
+class StillRunning:
+    """A turn that has not answered yet, and can be ended."""
+
+    pid = 4242
+    returncode = None
+
+    async def communicate(self) -> tuple[bytes, bytes]:
+        await asyncio.Event().wait()
+        return b"", b""
+
+    def kill(self) -> None: ...
+
+    async def wait(self) -> int:
+        return -9
+
+
+async def test_a_stopped_turn_ends_with_everything_it_started(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A check's turn runs commands as processes of its own. Stopping it ends
+    the group they are in, not only the CLI — a test run it started would
+    otherwise carry on for a check nobody is waiting on."""
+    started: list[dict] = []
+    ended: list[tuple[int, int]] = []
+
+    async def fake_exec(*_arguments, **kwargs):
+        started.append(kwargs)
+        return StillRunning()
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec)
+    monkeypatch.setattr(os, "killpg", lambda group, sent: ended.append((group, sent)))
+
+    turn = asyncio.ensure_future(runner().ask("check this", cwd=Path("."), edits=False))
+    while not started:
+        await asyncio.sleep(0)
+    await asyncio.sleep(0)
+    turn.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await turn
+
+    assert started[0]["start_new_session"] is True
+    assert ended == [(4242, signal.SIGKILL)]

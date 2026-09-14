@@ -12,17 +12,19 @@ is worth checking is something a team learns about its own failures. Halyard
 reads them, adds what it can see for itself (`halyard.frame`), and hands the
 answer back as it came.
 
-**The turn cannot look for itself.** It runs apart from the project, so it sees
-only what it is given and can neither open a file nor run a command. The prompt
-says so, which keeps a check that needed a command run from answering as though
-it had run one.
+**The turn stands in the project.** It runs in the project's directory, where
+the code a report is about is: it reads what the check needs, runs only the
+commands the check's text names — each put in front of a person by the
+project's gate first — and edits nothing. The prompt says so, and that a
+command refused or unfinished leaves the check unmeasured rather than clean.
+Whoever is asked to allow one of those commands can stop the check instead.
 
 **One port, and no chat.** A check reaches a model through `Asker` and knows
 nothing of Telegram or of any runtime. `halyard.handoffs` runs checks; nothing
 here hands anything on. `tests/test_layering.py` keeps it that way.
 """
 
-from halyard.checks.spec import Answer, Asker
+from halyard.checks.spec import Answer, Asker, StoppedError
 from halyard.checks.turn import handed_on, prompt, run, unfenced
 
-__all__ = ["Answer", "Asker", "handed_on", "prompt", "run", "unfenced"]
+__all__ = ["Answer", "Asker", "StoppedError", "handed_on", "prompt", "run", "unfenced"]

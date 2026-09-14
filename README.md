@@ -172,12 +172,14 @@ projects:
 ```
 
 **A check runs inside the project.** Each is a one-shot turn in the project's
-own directory, over its own text and the reply: it can read files and run
-commands, and has no tool that edits one. A command it wants run comes to you
-as a card headed **CHECKER**, naming the check and the handoff it runs for, in
-the chat the handoff is going to — or, for `/checks`, the chat that asked. A
-command refused, or one that does not finish, leaves the check unmeasured
-rather than clean.
+own directory, over its own text and the reply: it can read files, has no tool
+that edits one, and is told to run only the commands its text names. Each of
+those comes to you as a card headed **CHECKER**, naming the check and the
+handoff it runs for, in the chat the handoff is going to — or, for `/checks`,
+the chat that asked. **Deny** refuses one command and the check carries on;
+**Stop the check** refuses it and ends the check, along with anything it
+started. A command refused, a check stopped, or one that runs out of time
+leaves the check unmeasured rather than clean.
 
 **`confirmation:` buys a round that a guard cannot.** A test proves what it
 tests and a file of invariants proves nothing at all — an agent's attention is

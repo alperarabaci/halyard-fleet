@@ -833,41 +833,54 @@ async def test_a_handoff_runs_its_checks_before_it_goes(tmp_path: Path, wired) -
     assert any("<b>proof</b>: answered" in sent["text"] for sent in api.sent)
 
 
-def a_command_from(session_id: str):
-    """What the gate brings in when a turn asks to run something."""
-    from datetime import UTC, datetime
-
-    from halyard.core.approvals import ApprovalRequest
-    from halyard.core.events import RiskLevel
-
-    now = datetime.now(UTC)
-    return ApprovalRequest(
-        request_id="req_check",
-        nonce="nonce-check",
-        session_id=session_id,
-        agent_id="claude-code",
-        project="alpha-engine",
-        tool="Bash",
-        command_summary="make test-fast",
-        command_full="make test-fast",
-        risk=RiskLevel.HIGH,
-        created_at=now,
-        expires_at=now + timedelta(minutes=5),
-    )
-
-
-def asking_to_run_something(channel: TelegramChannel, runner: FakeRunner) -> list[dict]:
+class CheckAsking:
     """A check that asks to run a command half way through its turn, the way
-    the gate would bring it in, and remembers how its turn was started."""
-    started: list[dict] = []
+    the gate brings one in — and, told to, waits on it until it is stopped."""
 
-    async def ask(text: str, *, model: str | None = None, **kwargs) -> str | None:
-        started.append(kwargs)
-        await channel.send_approval_request(a_command_from(kwargs["session_id"]))
+    def __init__(self, channel: TelegramChannel, runner: FakeRunner, *, waits: bool = False):
+        self.channel = channel
+        self.waits = waits
+        #: How each turn was started, and the command each one asked for.
+        self.started: list[dict] = []
+        self.asked: list = []
+        runner.ask = self.ask
+
+    async def ask(self, text: str, *, model: str | None = None, **kwargs) -> str | None:
+        from halyard.core.events import RiskLevel
+
+        self.started.append(kwargs)
+        request = await self.channel._store.create(
+            session_id=kwargs["session_id"],
+            agent_id="claude-code",
+            project="alpha-engine",
+            tool="Bash",
+            command_summary="make test-fast",
+            command_full="make test-fast",
+            risk=RiskLevel.HIGH,
+        )
+        await self.channel.send_approval_request(request)
+        self.asked.append(request)
+        if self.waits:
+            await asyncio.Event().wait()
         return "proof · no finding"
 
-    runner.ask = ask
-    return started
+    async def until_asked(self) -> None:
+        for _ in range(200):
+            if self.asked:
+                return
+            await asyncio.sleep(0.01)
+        raise AssertionError("the check never asked to run anything")
+
+
+def stopping(request) -> dict:
+    """Stop, pressed on a check's card by somebody allowed to."""
+    from halyard.channels.telegram import cards
+
+    return {
+        "id": "cbq-1",
+        "from": {"id": int(APPROVER)},
+        "data": cards.callback_data(request, cards.STOP),
+    }
 
 
 async def test_a_command_a_check_asks_for_reaches_where_the_handoff_goes(
@@ -878,18 +891,20 @@ async def test_a_command_a_check_asks_for_reaches_where_the_handoff_goes(
     — and the turn stands in the project, with nothing that edits."""
     channel, api, runner, repo = wired
     handoffs_in(channel, repo, tmp_path, runner, discovery={"checks": ("proof",), "to": "xrev"})
-    started = asking_to_run_something(channel, runner)
+    check = CheckAsking(channel, runner)
 
     await channel._run_handoff("discovery", CHAT, None, f"tg:{APPROVER}")
     await settled(channel)
 
-    [how] = started
+    [how] = check.started
     assert how["cwd"] == repo
     assert how["edits"] is False
     [card] = [sent for sent in api.sent if "PERMISSION REQUEST" in sent["text"]]
     assert card["chat_id"] == "-100888"
     assert card["text"].startswith("<b>[CHECKER — PERMISSION REQUEST]</b>")
     assert "Check: <b>proof · handoff discovery</b>" in card["text"]
+    keys = [key["text"] for row in card["reply_markup"]["inline_keyboard"] for key in row]
+    assert keys[-1] == "⏹ Stop the check"
     assert channel._checking == {}
 
 
@@ -897,7 +912,7 @@ async def test_a_command_a_check_asks_for_here_is_carded_here(tmp_path: Path, wi
     """`/checks` hands nothing on: the card says which check, in the chat that asked."""
     channel, api, runner, repo = wired
     checks_in(channel, repo, tmp_path, proof="# proof")
-    asking_to_run_something(channel, runner)
+    CheckAsking(channel, runner)
 
     await channel._handle_callback(pressed_check("proof"))
     await settled(channel)
@@ -905,6 +920,50 @@ async def test_a_command_a_check_asks_for_here_is_carded_here(tmp_path: Path, wi
     [card] = [sent for sent in api.sent if "PERMISSION REQUEST" in sent["text"]]
     assert card["chat_id"] == CHAT
     assert "Check: <b>proof</b>" in card["text"]
+
+
+async def test_stop_on_a_checks_card_ends_the_check_and_says_who(tmp_path: Path, wired) -> None:
+    """Deny refuses one command and the check tries the next; Stop refuses it
+    and ends the check. Measured: a claims check told only that it could run
+    commands asked for one after another — the suite test by test, probes of
+    its own, scratch copies — and nothing short of a restart could end it. The
+    card says who stopped it, and the answer is an unmeasured one saying why."""
+    from halyard.core.approvals import Decision
+
+    channel, api, runner, repo = wired
+    checks_in(channel, repo, tmp_path, proof="# proof")
+    check = CheckAsking(channel, runner, waits=True)
+
+    await channel._handle_callback(pressed_check("proof"))
+    await check.until_asked()
+    [request] = check.asked
+    await channel._handle_callback(stopping(request))
+    await settled(channel)
+
+    resolution = await channel._store.resolution_of(request.request_id)
+    assert resolution.decision is Decision.DENY
+    assert any(edit["text"].startswith(f"<b>⏹ STOPPED</b> by tg:{APPROVER}") for edit in api.edits)
+    said = [sent["text"] for sent in api.sent]
+    assert f"<b>proof</b> · unmeasured — stopped by tg:{APPROVER}" in said
+    assert channel._checking == {}
+
+
+async def test_a_handoff_goes_on_without_a_check_somebody_stopped(tmp_path: Path, wired) -> None:
+    """Stop ends that check, not the handoff: the seat still gets the reply,
+    with the stopped check said to be unmeasured and why."""
+    channel, _, runner, repo = wired
+    handoffs_in(channel, repo, tmp_path, runner, discovery={"checks": ("proof",), "to": "xrev"})
+    check = CheckAsking(channel, runner, waits=True)
+
+    handing = asyncio.ensure_future(channel._run_handoff("discovery", CHAT, None, f"tg:{APPROVER}"))
+    await check.until_asked()
+    await channel._handle_callback(stopping(check.asked[0]))
+    await handing
+    await settled(channel)
+
+    [(session, text)] = runner.sent
+    assert session == "id-rev"
+    assert f"stopped by tg:{APPROVER}" in text
 
 
 async def test_pressing_a_check_runs_that_one_over_the_last_reply(tmp_path: Path, wired) -> None:
