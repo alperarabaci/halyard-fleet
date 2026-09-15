@@ -185,3 +185,26 @@ def test_content_is_the_tree_anybody_can_compute_with_git(tmp_path: Path) -> Non
     assert clean.clean
     assert edited.content == written[:12]
     assert not edited.clean
+
+
+def test_uncommitted_counts_the_new_files_too(tmp_path: Path) -> None:
+    """Git's summary leaves untracked files out, and `nothing` beside three new
+    files read as no change at all — while `Content` already held them."""
+    committed(tmp_path)
+    (tmp_path / ".gitignore").write_text("build/\n")
+    git(tmp_path, "add", ".gitignore")
+    git(tmp_path, "commit", "-qm", "ignore builds")
+    (tmp_path / "build").mkdir()
+    (tmp_path / "build" / "out.bin").write_text("built\n")
+    clean = frame.context(tmp_path, "alpha-engine")
+
+    (tmp_path / "notes.md").write_text("new\n")
+    (tmp_path / "plan.md").write_text("new\n")
+    new = frame.context(tmp_path, "alpha-engine")
+    (tmp_path / "a.txt").write_text("b\n")
+    both = frame.context(tmp_path, "alpha-engine")
+
+    assert "Uncommitted: nothing" in clean
+    assert "Uncommitted: 2 untracked files" in new
+    changed = "1 file changed, 1 insertion(+), 1 deletion(-)"
+    assert f"Uncommitted: {changed} · 2 untracked files" in both
