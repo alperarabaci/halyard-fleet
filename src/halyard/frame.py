@@ -147,7 +147,12 @@ def tree(path: Path) -> Tree | None:
         copy = Path(scratch) / "index"
         real = Path(index) if Path(index).is_absolute() else path / index
         try:
-            shutil.copyfile(real, copy)
+            # With its modification time. Git decides which entries to re-read
+            # by comparing them with when the index was written, and a copy
+            # stamped "now" told it that a same-sized edit made in the same
+            # second as the file's last write was clean: the tree came back
+            # unchanged, about one time in seven in a test that edits at once.
+            shutil.copy2(real, copy)
         except FileNotFoundError:
             pass  # No index yet: an empty one is where git itself would start.
         except OSError:
