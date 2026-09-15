@@ -448,3 +448,19 @@ def test_no_service_log_still_says_where_it_would_be(tmp_path: Path) -> None:
 
     assert problems == 0
     assert any(str(missing) in line for line in lines)
+
+
+def test_a_project_whose_seats_have_no_path_is_a_warning() -> None:
+    """Everything else keeps working without one, which is how a `path:` deleted
+    by accident went unnoticed: only the repository's commands failed, from the
+    phone."""
+    from halyard.core.seats import Seat
+
+    nav = Seat(label="nav", runtime="claude-code", project="alpha-engine")
+
+    [warning] = doctor._without_a_path({"alpha-engine": None, "beta": Path("/code/b")}, [nav])
+
+    assert "alpha-engine has no `path:`" in warning
+    # Described before anybody decided where its code lives, and no seat in it
+    # yet: nothing asks it for a path.
+    assert doctor._without_a_path({"gamma": None}, [nav]) == []
