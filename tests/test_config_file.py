@@ -472,6 +472,23 @@ def test_a_handoff_of_commands_alone_is_something_to_hand_on(tmp_path) -> None:
     assert project.handoffs["tests"].include_last_message is False
 
 
+def test_validate_names_one_of_the_projects_commands(tmp_path) -> None:
+    [project] = a_project(
+        tmp_path, lines=["commands:", "  test-fast: make test-fast", "validate: test-fast"]
+    )
+
+    assert project.validate == "test-fast"
+
+
+def test_validate_written_as_a_command_line_is_refused(tmp_path) -> None:
+    """What Halyard runs for a project is what `commands:` lists, and a line
+    written into `validate:` is one that list does not show."""
+    written = ["commands:", "  test-fast: make test-fast", "validate: make test-fast"]
+
+    with pytest.raises(ValueError, match="`validate:` names 'make test-fast'"):
+        a_project(tmp_path, lines=written)
+
+
 def test_a_handoff_naming_a_check_nobody_defined_is_refused(tmp_path) -> None:
     """Otherwise it fails only when somebody presses it, from a phone."""
     with pytest.raises(ValueError, match="does not define: claims"):

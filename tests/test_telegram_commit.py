@@ -1429,9 +1429,14 @@ async def test_the_card_says_what_changed_not_only_which_files(wired) -> None:
 
 
 def demands(channel: TelegramChannel, command: str | None) -> None:
-    """Give the project a check to run, as `halyard.yaml` would."""
+    """Give the project a check to run, as `halyard.yaml` would: a line under
+    `commands:`, and `validate:` naming it."""
     found = channel._repositories["alpha-engine"]
-    channel._repositories["alpha-engine"] = replace(found, validate=command)
+    channel._repositories["alpha-engine"] = replace(
+        found,
+        commands={**found.commands, "check": command} if command else found.commands,
+        validate="check" if command else None,
+    )
 
 
 async def test_a_project_with_no_check_configured_runs_nothing(wired) -> None:
@@ -1743,8 +1748,7 @@ async def test_a_slow_commit_does_not_stop_anything_else_being_answered(wired) -
     being down, and worse, because the approvals expire while it looks alive.
     """
     channel, api, _, repo = wired
-    found = channel._repositories["alpha-engine"]
-    channel._repositories["alpha-engine"] = replace(found, validate="sleep 5")
+    demands(channel, "sleep 5")
     wrote(repo, "loader.py", "x = 1\n")
 
     # Not awaited: this is the poll loop handing the update over and moving on.
@@ -1771,10 +1775,7 @@ async def test_a_plain_commit_runs_no_checks_at_all(wired) -> None:
     moment somebody already knows which of the two they meant.
     """
     channel, api, _, repo = wired
-    found = channel._repositories["alpha-engine"]
-    channel._repositories["alpha-engine"] = replace(
-        found, validate="echo ran >> " + str(repo / "ran.txt")
-    )
+    demands(channel, "echo ran >> " + str(repo / "ran.txt"))
     wrote(repo, "loader.py", "x = 1\n")
 
     await deliver(channel, typed("/commit"))
