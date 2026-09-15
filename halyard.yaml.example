@@ -5,7 +5,9 @@
 # Halyard takes of it, because the bot token lives here.
 #
 # `halyard init` writes this file for you and can wire a project afterwards.
-# Editing it by hand is the same thing more slowly.
+# Editing it by hand is the same thing more slowly. For the smallest file that
+# works — one project, one seat, one chat — start from
+# `halyard.simple.yaml.example`; this one describes everything.
 #
 # A real environment variable still wins over anything below — that is how a
 # container passes a token in without writing it to disk. There is no second
@@ -57,6 +59,10 @@ settings:
   # Serving holds an idle-sleep assertion on macOS, because a control plane
   # that sleeps denies every command on the machine and says nothing.
   # HALYARD_KEEP_AWAKE: false
+
+  # How much the log says. INFO unless set; DEBUG says more. A level that does
+  # not exist refuses to start rather than quietly logging at INFO.
+  # HALYARD_LOG_LEVEL: DEBUG
 
 # Paths the agent may write to without being asked.
 #
@@ -130,10 +136,16 @@ projects:
     # `codex:reviewer` — the first time that seat works on it. Needs a forge
     # token that may label issues; off unless set. See docs/setup.md.
     # label_work: true
+    # What `/command` offers, by name. `validate:` and a handoff's `commands:`
+    # name entries from here rather than a command line of their own.
+    # commands:
+    #   test-fast: make test-fast
+    # validate: test-fast             # run first by /review_and_commit
     # Checks `/checks` offers over a chat's last reply, and handoffs `/handoff`
     # offers — each the project's own file, read relative to `path`. A handoff
-    # carries the last reply, puts its prompt in front, runs the checks it names
-    # first, and goes to the seat or role in `to:` (every seat is offered if unset).
+    # carries the last reply, puts its prompt in front, runs its commands and then
+    # the checks it names, and goes to the seat or role in `to:` (every seat is
+    # offered if unset). All of it is described in docs/handoffs.md.
     # checks:
     #   proof: NOTES/halyard/checks/proof.md
     #   destructive: NOTES/halyard/checks/destructive.md
