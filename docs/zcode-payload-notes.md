@@ -2,8 +2,9 @@
 
 **Version:** ZCode 3.11.2 (`/Applications/ZCode.app`), macOS · **Measured:** 2026-09-15 ·
 **Calls captured:** 15, from a probe workspace whose hooks wrote down every one ·
-**Status:** the gate (`PreToolUse`) and the reply relay (`Stop`) are wired; putting a
-message into a session is not.
+**Status:** the gate (`PreToolUse`) and the reply relay (`Stop`) are wired, and a
+session's title is read from ZCode's own database; putting a message into a session is
+not.
 
 Each section says whether it was **measured** here or only **documented** by ZCode's
 own guide — the built-in `zcode-guide` plugin's `diagnosing-hooks` and
@@ -20,7 +21,8 @@ it is the one that decides whether anything runs.
   do not. They do.
 - A `PreToolUse` `allow` replaces ZCode's own approval prompt; a `deny` blocks and the
   reason reaches the agent.
-- Sessions have no names.
+- A call carries no session name, but ZCode keeps every session's title in its own
+  database, under the same `session_id`.
 
 ## Where hooks are read (documented, then measured)
 
@@ -94,7 +96,7 @@ Every event: `session_id` (`sess_<uuid>`, new with every task), `cwd`,
 | `Stop` | the whole reply in `last_assistant_message` |
 
 Tools seen: `Bash` with `{command, description}`, and `Write` with
-`{file_path, content}`. No session name appears anywhere.
+`{file_path, content}`. No session name appears in a call — see *Session titles*.
 
 Two things to handle rather than trust:
 
@@ -114,6 +116,28 @@ The bridge's own output, returned by a probe:
 
 So an approval from the phone takes the place of the one at the desk, and silence is
 "no opinion", which is what `hook.sh` turns a pause into.
+
+## Session titles (found by ZCode, schema read here)
+
+Not in any call, but not nowhere. Asked where the title a session shows in its list
+comes from, ZCode found it in its own database, and the schema was read here the same
+day (2026-09-16):
+
+- `~/.zcode/cli/db/db.sqlite`, table `session`. `id` is the call's `session_id`
+  (`sess_<uuid>`).
+- `title`, and `title_source` saying where it came from: `first_input` — the first
+  thing somebody typed, shown until there is a title — then `generated`, or `custom`
+  when a person set it.
+- `parent_id` ties a subagent's session to the one that started it, `directory` is
+  where it works, and `time_archived` is set once it is put away.
+
+The bridge reads the title for every call, read-only, so a card carries the session's
+name and a seat's `session:` finds it; a subagent's calls go by the topmost session's
+title. `doctor` finds a seat's session the same way and then checks the gate in its
+directory. A `first_input` title is never taken: it is a prompt, not a name, and not
+for a card. The database is the application's and its schema is no contract, so
+anything that goes wrong reading it means no name — and a seat without one is found by
+its project, as it was before.
 
 ## What Halyard writes
 

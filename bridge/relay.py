@@ -45,6 +45,7 @@ from _settings import (
     note,
     runtime_of,
     session_name,
+    zcode_title,
 )
 from _settings import timeout as lookup_timeout
 
@@ -120,13 +121,15 @@ def main() -> int:
             "role": os.environ.get("HALYARD_ROLE") or None,
             # Each runtime keeps the name somewhere else, and none of them in
             # the payload. Antigravity's is in an annotation file beside the
-            # conversation; Codex's in a session index; Claude Code's in the
-            # transcript itself.
+            # conversation; Codex's in a session index; ZCode's in its own
+            # database; Claude Code's in the transcript itself.
             "session_name": (
                 codex_thread_name(session_id)
                 if runtime == "codex"
                 else antigravity_title(session_id)
                 if runtime == "antigravity"
+                else zcode_title(session_id)
+                if runtime == "zcode"
                 else session_name(transcript)
             ),
         }

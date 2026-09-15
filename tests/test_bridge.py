@@ -12,12 +12,13 @@ a decision — the agent should be told it was denied, not that the plumbing bro
 from __future__ import annotations
 
 import json
+import sqlite3
 import subprocess
 import sys
 import threading
 import time
 from collections.abc import Iterator
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
@@ -644,10 +645,13 @@ ZCODE_PAYLOAD = {
 }
 
 
-def test_a_zcode_hook_is_zcode_because_it_says_so(bridge_module, monkeypatch) -> None:
+def test_a_zcode_hook_is_zcode_because_it_says_so(
+    bridge_module, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """Nothing in the call says so. Its transcript is a temporary copy in no
     runtime's home, so the path alone reads as Claude Code's — and a card filed
     under the wrong runtime goes to the wrong seat."""
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
     monkeypatch.setenv("HALYARD_RUNTIME", "zcode")
 
     body = bridge_module.build_body(ZCODE_PAYLOAD)
@@ -663,10 +667,9 @@ def test_a_runtime_that_has_no_reason_to_declare_itself_cannot(bridge_module, mo
     assert bridge_module.build_body(ZCODE_PAYLOAD)["agent_id"] == "claude-code"
 
 
-def test_a_zcode_reply_reaches_the_control_plane_as_zcodes() -> None:
-    """ZCode's camelCase copies are what the relay took for Antigravity's; the
-    hook's own declaration settles it, and the reply is the payload's own."""
-    stop = {
+def zcode_stop() -> dict:
+    """The `Stop` that goes with `ZCODE_PAYLOAD`."""
+    return {
         **{k: v for k, v in ZCODE_PAYLOAD.items() if not k.startswith(("tool", "hook"))},
         "hook_event_name": "Stop",
         "hookEventName": "Stop",
@@ -674,9 +677,17 @@ def test_a_zcode_reply_reaches_the_control_plane_as_zcodes() -> None:
         "last_assistant_message": "All three done.",
     }
 
+
+def test_a_zcode_reply_reaches_the_control_plane_as_zcodes(tmp_path: Path) -> None:
+    """ZCode's camelCase copies are what the relay took for Antigravity's; the
+    hook's own declaration settles it, and the reply is the payload's own."""
     with control_plane(body={"delivered": True}) as (url, received):
         result = run_relay(
-            stop, HALYARD_URL=url, HALYARD_RUNTIME="zcode", CLAUDE_PROJECT_DIR="/repo"
+            zcode_stop(),
+            HALYARD_URL=url,
+            HALYARD_RUNTIME="zcode",
+            CLAUDE_PROJECT_DIR="/repo",
+            HOME=str(tmp_path),
         )
 
     assert result.returncode == 0
@@ -735,6 +746,78 @@ def test_a_missing_codex_index_is_no_name_rather_than_a_crash(
     )
 
     assert body["session_name"] is None
+
+
+def zcode_sessions(home: Path, *rows: tuple) -> None:
+    """ZCode's own database, with only what the bridge reads of its sessions."""
+    database = home / ".zcode" / "cli" / "db" / "db.sqlite"
+    database.parent.mkdir(parents=True)
+    with closing(sqlite3.connect(database)) as db:
+        db.execute(
+            "CREATE TABLE session (id TEXT PRIMARY KEY, parent_id TEXT, "
+            "title TEXT NOT NULL, title_source TEXT NOT NULL)"
+        )
+        db.executemany("INSERT INTO session VALUES (?, ?, ?, ?)", rows)
+        db.commit()
+
+
+def zcode_named(bridge_module, home: Path, monkeypatch: pytest.MonkeyPatch) -> str | None:
+    """The name the bridge sends for `ZCODE_PAYLOAD`, with `home` as the home directory."""
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+    monkeypatch.setenv("HALYARD_RUNTIME", "zcode")
+    return bridge_module.build_body(ZCODE_PAYLOAD)["session_name"]
+
+
+def test_a_zcode_name_comes_from_zcodes_own_database(
+    bridge_module, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No call carries it. ZCode keeps it under the same `sess_` id, so a seat
+    can name its session as it does on every other runtime."""
+    sid = ZCODE_PAYLOAD["session_id"]
+    zcode_sessions(tmp_path, (sid, None, "alpha-engine-zdriver", "custom"))
+
+    assert zcode_named(bridge_module, tmp_path, monkeypatch) == "alpha-engine-zdriver"
+
+
+def test_a_zcode_session_still_under_its_first_prompt_has_no_name(
+    bridge_module, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Until a title exists ZCode shows the first thing typed, which is a
+    prompt — not a name, and not something to put on a card."""
+    sid = ZCODE_PAYLOAD["session_id"]
+    zcode_sessions(tmp_path, (sid, None, "delete the old reports", "first_input"))
+
+    assert zcode_named(bridge_module, tmp_path, monkeypatch) is None
+
+
+def test_a_zcode_subagent_goes_by_the_session_that_started_it(
+    bridge_module, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    sid = ZCODE_PAYLOAD["session_id"]
+    zcode_sessions(
+        tmp_path,
+        ("sess_parent", None, "alpha-engine-zdriver", "custom"),
+        (sid, "sess_parent", "Explore the loader", "generated"),
+    )
+
+    assert zcode_named(bridge_module, tmp_path, monkeypatch) == "alpha-engine-zdriver"
+
+
+def test_no_zcode_database_is_no_name_rather_than_a_crash(
+    bridge_module, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No name means the seat is found by its project, as before. A bridge
+    that raised here would deny the command instead."""
+    assert zcode_named(bridge_module, tmp_path, monkeypatch) is None
+
+
+def test_a_zcode_reply_carries_its_sessions_title(tmp_path: Path) -> None:
+    zcode_sessions(tmp_path, (ZCODE_PAYLOAD["session_id"], None, "alpha-engine-zdriver", "custom"))
+
+    with control_plane(body={"delivered": True}) as (url, received):
+        run_relay(zcode_stop(), HALYARD_URL=url, HALYARD_RUNTIME="zcode", HOME=str(tmp_path))
+
+    assert received[0]["session_name"] == "alpha-engine-zdriver"
 
 
 # --- Antigravity, whose Stop says what a turn did and never what it said ------
