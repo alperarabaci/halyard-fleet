@@ -229,6 +229,25 @@ def _render(check, label: str, *, indent: bool = False, **context) -> tuple[list
     return lines, fatal
 
 
+def _without_a_path(where: dict[str, Path | None], seats) -> list[str]:
+    """A warning for each project whose seats have chats but whose code has no
+    `path:`.
+
+    The configuration allows it, since a project can be described before anybody
+    decides where its code lives, so nothing refuses it, and everything else
+    keeps working: approvals come from the hook inside the project. Only the
+    commands that work in the repository fail, from the phone, and only then do
+    they say why. A `path:` deleted by accident went unnoticed that way, on a
+    machine this printed "Everything checks out" for.
+    """
+    return [
+        f"{WARN}{name} has no `path:`, so /commit, /command, /checks, /handoff "
+        "and /label have nowhere to run for it"
+        for name, path in where.items()
+        if path is None and any(seat.project == name for seat in seats)
+    ]
+
+
 def _check_seat(
     seat,
     project_path: Path | None = None,
@@ -608,6 +627,9 @@ def run() -> int:
         where = {p.name: p.path for p in described_projects()}
     except ValueError:
         where = {}
+    for line in _without_a_path(where, seats):
+        problems += 1
+        print(line)
 
     for seat in seats if settings_ok else []:
         lines, found = _check_seat(seat, where.get(seat.project), settings)
