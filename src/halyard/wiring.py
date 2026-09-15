@@ -507,12 +507,18 @@ def wire(directory: Path, runtimes: tuple[RuntimeSpec, ...] | None = None) -> in
             continue
         root = project_root(directory)
         # Loud, because the failure it prevents is silent: a runtime can be
-        # wired correctly and still run none of it.
+        # wired correctly and still run none of it. The lines under a finding
+        # go with it — they say how to fix it, and `doctor` used to be the only
+        # place that printed them.
+        speaking = False
         for level, text in runtime.check_wired(settings_path(directory, runtime), root):
             if level == "fail":
                 print(f"\n⚠ {runtime.human}: {text}")
             elif level == "warn":
                 print(f"\n  {runtime.human}: {text}")
+            elif not level and speaking:
+                print(f"    {text}")
+            speaking = level in ("fail", "warn") or (speaking and not level)
 
     print(f"\nRestart the session — hooks are read at startup.\n\n{RULES}")
     # Rules 1 and 3 describe a gate that blocks, which is what three of these
