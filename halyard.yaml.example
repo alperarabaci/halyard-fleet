@@ -152,6 +152,7 @@ projects:
     # handoffs:
     #   review:
     #     prompt: NOTES/halyard/handoffs/review.md
+    #     followup_prompt: NOTES/halyard/handoffs/review-followup.md   # rounds after the first
     #     to: reviewer
     #   discover_completed:
     #     prompt: NOTES/halyard/handoffs/discovery.md

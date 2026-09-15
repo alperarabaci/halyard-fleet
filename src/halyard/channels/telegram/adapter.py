@@ -22,7 +22,7 @@ import logging
 import re
 import time
 import uuid
-from collections.abc import Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from functools import partial
@@ -76,6 +76,8 @@ from halyard.core.said_by_a_process import the_useful_end
 from halyard.core.seats import Seat, find, for_chat, for_project, for_session
 from halyard.core.seats import _default_runtime as default_runtime
 from halyard.core.transcripts import watching_for
+from halyard.handoffs import rounds
+from halyard.tasks.branches import current as current_branch
 
 logger = logging.getLogger(__name__)
 
@@ -204,10 +206,12 @@ LABELS_TIMEOUT_SECONDS = 10.0
 #: suites are for `/command`, which reports when it is done.
 HANDOFF_COMMAND_TIMEOUT_SECONDS = 600.0
 
-#: What each chat last heard, and each chat's last answer per check. Kept per
-#: project — see `_kept`.
+#: What each chat last heard, each chat's last answer per check, and how many
+#: times each handoff has gone for a piece of work. Kept per project — see
+#: `_kept`.
 SAID_FILE = "last-said.json"
 RESULTS_FILE = "check-results.json"
+ROUNDS_FILE = "handoff-rounds.json"
 
 
 def _local(moment: datetime) -> datetime:
@@ -299,20 +303,31 @@ class _SeatDelivery:
     """The channel's side of `handoffs.Delivery`: the path `/to` takes.
 
     So a handoff lands where a person would have sent it by hand, and both chats
-    say so, the way they do for `/to`.
+    say so, the way they do for `/to`. `accepted` runs once the seat's session
+    takes the message, which is when a handoff's round counts.
     """
 
     def __init__(
-        self, channel: TelegramChannel, actor: str, chat_id: str, thread_id: int | None
+        self,
+        channel: TelegramChannel,
+        actor: str,
+        chat_id: str,
+        thread_id: int | None,
+        accepted: Callable[[], Awaitable[None]] | None = None,
     ) -> None:
         self._channel = channel
         self._actor = actor
         self._chat_id = chat_id
         self._thread_id = thread_id
+        self._accepted = accepted
 
     async def to_seat(self, label: str, text: str) -> None:
         await self._channel._forward_to_seat(
-            f"{label} {text}", self._actor, self._chat_id, self._thread_id
+            f"{label} {text}",
+            self._actor,
+            self._chat_id,
+            self._thread_id,
+            accepted=self._accepted,
         )
 
 
@@ -1145,6 +1160,7 @@ class TelegramChannel:
         thread_id: int | None = None,
         replied: str = "",
         anchor_id: int | None = None,
+        accepted: Callable[[], Awaitable[None]] | None = None,
     ) -> None:
         """Send a message to a seat by name, from anywhere.
 
@@ -1226,7 +1242,9 @@ class TelegramChannel:
                     else ""
                 )
                 await self._say(head + marker + html.escape(chunk), destination, destination_thread)
-        await self._forward_to_session(text, actor, destination, destination_thread)
+        await self._forward_to_session(
+            text, actor, destination, destination_thread, accepted=accepted
+        )
 
     def _detach(self, work, what: str) -> None:
         """Run something slow without holding the poll loop.
@@ -2498,6 +2516,29 @@ class TelegramChannel:
         named = [seat for seat in mine if seat.label.casefold() == to.casefold()]
         return named or [seat for seat in mine if seat.role and seat.role.value == to.casefold()]
 
+    def _answer_since(self, last: rounds.Round, number: int) -> handing.Previous:
+        """What the seat the last round went to has said since it got there.
+
+        Read from what that seat's chat last heard, and only if it came after
+        the round did: anything older is an answer to something else.
+        """
+        seat = find(self._seats, last.to)
+        sent = _local(last.at).strftime("%H:%M")
+        named = _seat_name(seat) or last.to
+        where = parse_destination(seat.chat) if seat is not None else None
+        chat = where[0] if where else self._chat_id
+        kept = self._kept(chat, SAID_FILE)
+        said = last_said.last(kept, chat) if kept is not None else None
+        if said is None or said.at <= last.at:
+            return handing.Previous(number=number - 1, seat=named, sent=sent)
+        return handing.Previous(
+            number=number - 1,
+            seat=named,
+            sent=sent,
+            text=said.text,
+            at=_local(said.at).strftime("%H:%M"),
+        )
+
     async def _run_handoff(
         self,
         typed: str,
@@ -2586,14 +2627,33 @@ class TelegramChannel:
             )
             return
 
+        # Which time this goes for the work the branch is on, this one included.
+        # Counted when it reaches the seat rather than here: a press that went
+        # nowhere is the same round when it is pressed again.
+        tally = self._kept(chat_id, ROUNDS_FILE)
+        work = rounds.work_of(await asyncio.to_thread(current_branch, found.path), found.name)
+        done = await asyncio.to_thread(rounds.taken, tally, work, name) if tally and work else None
+        number = len(done) + 1 if done is not None else None
+        previous = self._answer_since(done[-1], number) if done and number else None
+
+        async def reached() -> None:
+            """The round counts: the seat's session took the message."""
+            if tally is None or work is None:
+                return
+            counted = await asyncio.to_thread(rounds.record, tally, work, name, to=seat.label)
+            logger.info(
+                "Round %s of %s for %s reached %s", rounds.shown(counted), name, work, seat.label
+            )
+
         steps = [
             *([f"running {', '.join(handoff.commands)}"] if handoff.commands else []),
             *([f"checking {', '.join(handoff.checks)}"] if handoff.checks else []),
         ]
         first = f", {' then '.join(steps)} first" if steps else ""
+        which = f" (round {rounds.shown(number)})" if number else ""
         await self._say(
-            f"\U0001f91d <b>{html.escape(name)}</b> → <b>{html.escape(_seat_name(seat))}</b>"
-            f"{html.escape(first)}…",
+            f"\U0001f91d <b>{html.escape(name)}</b>{which} → "
+            f"<b>{html.escape(_seat_name(seat))}</b>{html.escape(first)}…",
             chat_id,
             thread_id,
         )
@@ -2627,11 +2687,15 @@ class TelegramChannel:
                 ),
                 model=CHECK_MODEL,
                 timeout=CHECK_TIMEOUT_SECONDS,
-                delivery=_SeatDelivery(self, actor, chat_id, thread_id),
+                delivery=_SeatDelivery(
+                    self, actor, chat_id, thread_id, accepted=reached if number else None
+                ),
                 findings=found.label_findings,
                 labeller=_Labelling(self, found),
                 project_commands=found.commands,
                 runner=_Running(self, found.path, chat_id, thread_id),
+                round_number=number,
+                previous=previous,
             )
         finally:
             # Released whatever happened, as `/command` does: a project left
@@ -2673,7 +2737,12 @@ class TelegramChannel:
         )
 
     async def _forward_to_session(
-        self, text: str, actor: str, chat_id: str, thread_id: int | None = None
+        self,
+        text: str,
+        actor: str,
+        chat_id: str,
+        thread_id: int | None = None,
+        accepted: Callable[[], Awaitable[None]] | None = None,
     ) -> None:
         """Put a typed message into the session that chat belongs to.
 
@@ -2738,7 +2807,7 @@ class TelegramChannel:
             await self._say(said, chat_id, thread_id)
             return
 
-        task = asyncio.create_task(self._deliver(found, text, actor, chat_id, thread_id))
+        task = asyncio.create_task(self._deliver(found, text, actor, chat_id, thread_id, accepted))
         # Held so the loop does not drop the only reference and cancel it.
         self._sending.add(task)
         task.add_done_callback(self._sending.discard)
@@ -2869,6 +2938,7 @@ class TelegramChannel:
         actor: str,
         chat_id: str | None = None,
         thread_id: int | None = None,
+        accepted: Callable[[], Awaitable[None]] | None = None,
     ) -> None:
         session_id, project, cwd = session.session_id, session.project, session.cwd
         runtime = getattr(session.runner, "id", "?")
@@ -2904,6 +2974,14 @@ class TelegramChannel:
                     delivered=delivered,
                 )
             )
+        if delivered and accepted is not None:
+            # Whatever was waiting for it to land — a handoff's round, counted
+            # only now, so a message that reached nobody is not one. Failing
+            # here costs that and nothing else: the message is in.
+            try:
+                await accepted()
+            except Exception:
+                logger.exception("Could not note that a message reached %s", session_id)
         if not delivered:
             # Name what was tried. "Check the log" is the message this project
             # keeps having to replace: the person reading it is on a phone,

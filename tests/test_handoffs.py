@@ -120,6 +120,99 @@ async def test_the_navigator_gets_the_prompt_the_checks_and_the_report_in_that_o
     assert isinstance(delivery, handoffs.Delivery)
 
 
+def with_followup(tmp_path: Path) -> Handoff:
+    """A review with a text of its own for every round after the first."""
+    (tmp_path / "NOTES" / "review.md").write_text("Try to break the prompt below.")
+    (tmp_path / "NOTES" / "review-followup.md").write_text("Only the earlier ENGELs.")
+    return Handoff(
+        name="review",
+        prompt=Path("NOTES/review.md"),
+        followup_prompt=Path("NOTES/review-followup.md"),
+        to="reviewer",
+    )
+
+
+async def test_the_first_round_sends_the_prompt_and_says_which_round(tmp_path: Path) -> None:
+    a_project(tmp_path)
+
+    _, delivery = await hand(tmp_path, with_followup(tmp_path), round_number=1)
+
+    [(_, text)] = delivery.sent
+    assert "Try to break the prompt below." in text
+    assert "Only the earlier ENGELs." not in text
+    assert "- Round: 1/2" in text
+
+
+async def test_every_round_after_the_first_sends_the_followup_in_its_place(
+    tmp_path: Path,
+) -> None:
+    """A reviewer asked again is pointed at what it found, not set to review
+    everything afresh — which is how alpha-engine#361 went round three times."""
+    a_project(tmp_path)
+
+    _, delivery = await hand(tmp_path, with_followup(tmp_path), round_number=3)
+
+    [(_, text)] = delivery.sent
+    assert "Only the earlier ENGELs." in text
+    assert "Try to break the prompt below." not in text
+    assert "- Round: 3/2" in text
+    assert "- Prompt: NOTES/review-followup.md @ " in text
+
+
+async def test_a_handoff_without_a_followup_sends_its_prompt_every_round(tmp_path: Path) -> None:
+    a_project(tmp_path)
+    discovery = Handoff(name="discovery", prompt=Path("NOTES/discovery.md"))
+
+    _, delivery = await hand(tmp_path, discovery, round_number=2)
+
+    [(_, text)] = delivery.sent
+    assert "The message below is the driver's report." in text
+    assert "- Round: 2/2" in text
+
+
+async def test_the_answer_to_the_round_before_comes_ahead_of_the_reply(tmp_path: Path) -> None:
+    a_project(tmp_path)
+    answered = handoffs.Previous(
+        number=1,
+        seat="xrev (reviewer)",
+        sent="17:07",
+        text="ENGEL: the count is wrong.",
+        at="17:09",
+    )
+
+    _, delivery = await hand(tmp_path, with_followup(tmp_path), round_number=2, previous=answered)
+
+    [(_, text)] = delivery.sent
+    assert "- Previous answer: xrev (reviewer), from 17:09, to round 1" in text
+    order = [
+        text.index("xrev (reviewer)'s answer to round 1:"),
+        text.index("ENGEL: the count is wrong."),
+        text.index("All 42 tests passed."),
+    ]
+    assert order == sorted(order)
+
+
+async def test_a_seat_that_has_said_nothing_since_is_said_to_have_not(tmp_path: Path) -> None:
+    a_project(tmp_path)
+    silent = handoffs.Previous(number=1, seat="xrev (reviewer)", sent="17:07")
+
+    _, delivery = await hand(tmp_path, with_followup(tmp_path), round_number=2, previous=silent)
+
+    [(_, text)] = delivery.sent
+    assert "- Previous answer: none — xrev (reviewer) has said nothing since round 1" in text
+    assert "answer to round 1:" not in text
+
+
+async def test_a_handoff_nobody_counts_says_nothing_of_rounds(tmp_path: Path) -> None:
+    a_project(tmp_path)
+
+    _, delivery = await hand(tmp_path, with_followup(tmp_path))
+
+    [(_, text)] = delivery.sent
+    assert "Round:" not in text
+    assert "Try to break the prompt below." in text
+
+
 async def test_a_check_that_could_not_run_still_goes_marked_unmeasured(tmp_path: Path) -> None:
     """An unmeasured line is not a clean one, and the reader has to see it."""
     a_project(tmp_path)

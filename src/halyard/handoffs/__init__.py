@@ -15,10 +15,15 @@ the commands did. None of them knows a chat or a runtime — a model is reached
 through `checks.Asker`, a command through `Runner` and a seat through
 `Delivery` — and the Telegram channel is the one adapter answering them today.
 `tests/test_layering.py` keeps it that way.
+
+**Work goes round.** A reply sent back comes round again, and each time a
+handoff goes for the same work item is counted — `halyard.handoffs.rounds`. The
+count goes on the envelope, and a handoff with a `followup_prompt:` sends that
+from the second round on, with what the seat said back to the round before.
 """
 
 from halyard.handoffs.flow import hand_off
 from halyard.handoffs.message import compose
-from halyard.handoffs.spec import Delivery, Handed, Runner
+from halyard.handoffs.spec import Delivery, Handed, Previous, Runner
 
-__all__ = ["Delivery", "Handed", "Runner", "compose", "hand_off"]
+__all__ = ["Delivery", "Handed", "Previous", "Runner", "compose", "hand_off"]

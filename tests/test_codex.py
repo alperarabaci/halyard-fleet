@@ -450,6 +450,21 @@ async def test_a_thread_open_elsewhere_is_reached_by_queueing(monkeypatch) -> No
     assert seen[1][1:] == ["queue", "--thread", "abc", "--message", "carry on"]
 
 
+async def test_a_thread_open_elsewhere_is_logged_as_queued_not_as_lost(monkeypatch, caplog) -> None:
+    """Measured on alpha-engine#361: three reviews that each got an answer
+    within two minutes read, in the log, as three that never reached the
+    reviewer — an ERROR line for the refusal, and the queueing below it."""
+    answering(monkeypatch, Refusing(), FakeProcess())
+
+    with caplog.at_level("DEBUG"):
+        assert await runner_with_catalog().send("abc", "carry on", cwd="/repo") is True
+
+    assert not [record for record in caplog.records if record.levelname == "ERROR"]
+    assert any(
+        "queueing" in record.getMessage() for record in caplog.records if record.levelname == "INFO"
+    )
+
+
 async def test_a_failure_of_any_other_kind_is_not_queued(monkeypatch) -> None:
     """The guard that makes the fallback safe. A message queued for a session
     that cannot log in is a delivery reported and never made — which is the

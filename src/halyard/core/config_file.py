@@ -109,6 +109,10 @@ class Handoff:
     #: The project's own text for whoever receives it — `review.md`. Read
     #: relative to the project. Optional: a handoff can be the reply alone.
     prompt: Path | None = None
+    #: The project's text for every round after the first — each time this
+    #: handoff goes again for the same work item — `review-followup.md`. Unset
+    #: sends `prompt` every round. See `halyard.handoffs.rounds`.
+    followup_prompt: Path | None = None
     #: Whether the chat's last reply goes with it. Almost always.
     include_last_message: bool = True
     #: Checks from this project's `checks:`, run over the reply before it goes.
@@ -226,7 +230,14 @@ def _checks_from(project: str, value: Any) -> dict[str, Path]:
 #: A handoff's name rides in a button, where Telegram allows 64 bytes of
 #: callback data, and is typed after `/handoff`.
 _HANDOFF_NAME = re.compile(r"^[a-z0-9_-]{1,32}$")
-_HANDOFF_FIELDS = {"prompt", "include_last_message", "checks", "commands", "to"}
+_HANDOFF_FIELDS = {
+    "prompt",
+    "followup_prompt",
+    "include_last_message",
+    "checks",
+    "commands",
+    "to",
+}
 
 
 def _handoffs_from(
@@ -287,6 +298,7 @@ def _handoffs_from(
         if named and not carries:
             raise ValueError(f"{where} runs checks over the last message, so it has to carry it.")
         prompt = _as_text(spec.get("prompt"))
+        followup = _as_text(spec.get("followup_prompt"))
         if not prompt and not carries and not ran:
             raise ValueError(
                 f"{where} hands on nothing: give it a `prompt:`, the last message or a command."
@@ -300,6 +312,7 @@ def _handoffs_from(
         found[name] = Handoff(
             name=name,
             prompt=Path(prompt).expanduser() if prompt else None,
+            followup_prompt=Path(followup).expanduser() if followup else None,
             include_last_message=carries,
             checks=tuple(named),
             commands=tuple(ran),
@@ -704,6 +717,8 @@ def missing_files(projects: list[Project]) -> list[str]:
         for name, handoff in project.handoffs.items():
             if handoff.prompt:
                 wanted.append((f"handoffs.{name}.prompt", handoff.prompt))
+            if handoff.followup_prompt:
+                wanted.append((f"handoffs.{name}.followup_prompt", handoff.followup_prompt))
         for seat in project.seats:
             for key in ("before_compaction", "after_compaction"):
                 if written := getattr(seat, key, None):

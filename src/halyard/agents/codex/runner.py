@@ -319,6 +319,9 @@ class CodexRunner:
             cwd=cwd,
             env=os.environ.copy(),
             when_done=when_done,
+            # Not a failure: it is answered below. Logged as one, it made three
+            # reviews that each got an answer read as three that never arrived.
+            expected=held_by_another,
         )
         if accepted or not held_by_another(self._turns.last_error(session_id)):
             return accepted

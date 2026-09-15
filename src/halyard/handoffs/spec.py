@@ -41,3 +41,24 @@ class Handed:
     text: str
     answers: tuple[Answer, ...] = ()
     ran: tuple[tuple[Command, Result], ...] = ()
+
+
+@dataclass(frozen=True)
+class Previous:
+    """What the seat said back after the round before this one.
+
+    Carried into every round after the first, so a reviewer asked again is shown
+    what it found last time rather than set to find everything afresh. `text` is
+    None when the seat has said nothing since that round reached it, which it is
+    told rather than left to assume there was nothing to say.
+    """
+
+    #: The round it answered.
+    number: int
+    #: The seat, the way a sentence names it: `xrev (reviewer)`.
+    seat: str
+    #: When that round reached it, as the clock here reads.
+    sent: str
+    text: str | None = None
+    #: When the answer came, as the clock here reads.
+    at: str = ""

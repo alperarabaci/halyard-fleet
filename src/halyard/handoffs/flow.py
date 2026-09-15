@@ -10,8 +10,9 @@ from pathlib import Path
 from halyard import checks, frame
 from halyard.commands import Command, Result, summary
 from halyard.core.config_file import Handoff
+from halyard.handoffs import rounds
 from halyard.handoffs.message import compose
-from halyard.handoffs.spec import Delivery, Handed, Runner
+from halyard.handoffs.spec import Delivery, Handed, Previous, Runner
 
 logger = logging.getLogger(__name__)
 
@@ -36,6 +37,8 @@ async def hand_off(
     labeller: checks.Labeller | None = None,
     project_commands: Mapping[str, str] | None = None,
     runner: Runner | None = None,
+    round_number: int | None = None,
+    previous: Previous | None = None,
 ) -> Handed:
     """Run a handoff's commands, then its checks, write the message, deliver it.
 
@@ -53,6 +56,12 @@ async def hand_off(
     clean one, and the reader has to see it to know that. A check that finds
     something labels the task as it would run by hand: the project's `findings`
     decide, not the handoff.
+
+    `round_number` is which time this handoff goes for its work item, this one
+    included, and None where nothing is counted — see `halyard.handoffs.rounds`.
+    From the second round on, a handoff with a `followup_prompt:` sends that in
+    place of its `prompt:`, and `previous` carries what the seat said back to
+    the round before.
     """
     ran: list[tuple[Command, Result]] = []
     for name in handoff.commands:
@@ -66,7 +75,11 @@ async def hand_off(
                 logger.warning("Handoff %s could not run %s", handoff.name, name, exc_info=True)
                 result = Result(ok=False, output="it could not be run", seconds=0.0)
         ran.append((command, result))
-    envelope = [*context, *(summary(c.name, c.line, r) for c, r in ran)]
+    envelope = [
+        *context,
+        *([f"Round: {rounds.shown(round_number)}"] if round_number else []),
+        *(summary(c.name, c.line, r) for c, r in ran),
+    ]
 
     answers: tuple[checks.Answer, ...] = ()
     if handoff.checks and (asker is None or reply is None):
@@ -98,11 +111,14 @@ async def hand_off(
             )
         )
 
+    written = handoff.prompt
+    if round_number is not None and round_number > 1 and handoff.followup_prompt:
+        written = handoff.followup_prompt
     prompt, prompt_ref = "", ""
-    if handoff.prompt:
-        prompt = frame.read(handoff.prompt, project)
-        revision = await asyncio.to_thread(frame.version, handoff.prompt, project)
-        prompt_ref = f"{handoff.prompt} @ {revision}" + ("" if prompt else " — could not be read")
+    if written:
+        prompt = frame.read(written, project)
+        revision = await asyncio.to_thread(frame.version, written, project)
+        prompt_ref = f"{written} @ {revision}" + ("" if prompt else " — could not be read")
 
     text = compose(
         handoff.name,
@@ -116,6 +132,7 @@ async def hand_off(
         answers=answers,
         reply=reply,
         ran=ran,
+        previous=previous,
     )
     await delivery.to_seat(recipient_label, text)
     logger.info(
