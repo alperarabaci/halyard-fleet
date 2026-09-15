@@ -509,6 +509,32 @@ def test_a_handoff_prompt_that_is_not_there_is_named(tmp_path) -> None:
     assert "handoffs.review.prompt" in said
 
 
+def test_a_handoff_can_name_its_text_for_the_rounds_after_the_first(tmp_path) -> None:
+    [project] = a_project(
+        tmp_path,
+        lines=[
+            "handoffs:",
+            "  review:",
+            "    prompt: NOTES/handoffs/review.md",
+            "    followup_prompt: NOTES/handoffs/review-followup.md",
+            "    to: reviewer",
+        ],
+    )
+
+    review = project.handoffs["review"]
+    assert review.prompt == Path("NOTES/handoffs/review.md")
+    assert review.followup_prompt == Path("NOTES/handoffs/review-followup.md")
+
+
+def test_a_followup_prompt_that_is_not_there_is_named(tmp_path) -> None:
+    from halyard.core.config_file import missing_files
+
+    found = a_project(tmp_path, lines=["handoffs:", "  review: {followup_prompt: NOTES/GONE.md}"])
+
+    [said] = missing_files(found)
+    assert "handoffs.review.followup_prompt" in said
+
+
 def test_a_seat_prompt_file_is_checked_too(tmp_path) -> None:
     from halyard.core.config_file import missing_files, projects_from_yaml
 

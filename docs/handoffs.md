@@ -100,3 +100,34 @@ check has to compare — several targets, each with a count and an exit code —
 says all of them on its last line. The seat receiving the handoff gets the tail
 of the output as well: the last five lines when the command passed, the last
 twenty-five when it failed.
+
+## A handoff counts its rounds
+
+A reply sent back comes round again, and every time a handoff goes for the same
+work item is a round. The envelope says which — `Round: 2/2` — and so does the
+line in the chat it was sent from. The work item is the one the branch names; a
+branch without a number counts under its own name. A prompt edited between
+rounds is the same work going round again, so the count carries on.
+
+A handoff can name a second text for every round after the first:
+
+```yaml
+      review:
+        prompt: NOTES/handoffs/review.md
+        followup_prompt: NOTES/handoffs/review-followup.md
+        to: reviewer
+```
+
+From the second round on that one goes in front instead of `prompt:`, and the
+seat is handed its own answer to the round before, ahead of the reply — so a
+reviewer asked again sees what it found last time rather than being set to find
+everything afresh. A handoff without one sends its `prompt:` every round.
+
+Two rounds is what the count expects. A third still goes when somebody presses
+for it, as `3/2`: every round is a person pressing a button, and an envelope
+saying it is past the usual is worth more than a refusal.
+
+A round counts when the seat's session takes the message. One that reached
+nobody is not a round, so pressing again is the same round rather than the
+next. The count is kept on the machine, beside Halyard's database; a work item
+that moves to another machine starts again there.

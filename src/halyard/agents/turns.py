@@ -127,12 +127,20 @@ class Turns:
         cwd: str | None = None,
         env: Mapping[str, str] | None = None,
         when_done: LateFailure | None = None,
+        expected: Callable[[str], bool] | None = None,
     ) -> bool:
-        """Run `arguments` as a turn, returning once the message is accepted."""
+        """Run `arguments` as a turn, returning once the message is accepted.
+
+        `expected` names the refusals the caller has another way round, which
+        are not failures and are not logged as them. A Codex thread held open by
+        its app is refused here and reached by queueing a second later; logged
+        as a failure, three reviews that each got an answer within two minutes
+        read as three that never reached the reviewer.
+        """
         loop = asyncio.get_running_loop()
         accepted: asyncio.Future[bool] = loop.create_future()
         turn = loop.create_task(
-            self._turn(session_id, list(arguments), cwd, env, accepted, when_done),
+            self._turn(session_id, list(arguments), cwd, env, accepted, when_done, expected),
             name=f"{self._runtime}-turn-{session_id}",
         )
         self._running.add(turn)
@@ -147,10 +155,11 @@ class Turns:
         env: Mapping[str, str] | None,
         accepted: asyncio.Future[bool],
         when_done: LateFailure | None,
+        expected: Callable[[str], bool] | None = None,
     ) -> None:
         try:
             async with self._locks[session_id]:
-                await self._run(session_id, arguments, cwd, env, accepted, when_done)
+                await self._run(session_id, arguments, cwd, env, accepted, when_done, expected)
         except Exception:
             logger.exception("A turn in %s ended badly", session_id)
         finally:
@@ -168,6 +177,7 @@ class Turns:
         env: Mapping[str, str] | None,
         accepted: asyncio.Future[bool],
         when_done: LateFailure | None,
+        expected: Callable[[str], bool] | None = None,
     ) -> None:
         try:
             process = await asyncio.create_subprocess_exec(
@@ -205,12 +215,17 @@ class Turns:
             accepted.set_result(reason is None)
             if reason is not None:
                 self._last_error[session_id] = reason
-                logger.error(
-                    "Delivering a message to %s failed (exit %s): %s",
-                    session_id,
-                    process.returncode,
-                    reason,
-                )
+                if expected is not None and expected(reason):
+                    logger.debug(
+                        "%s refused the message, as its caller expected: %s", session_id, reason
+                    )
+                else:
+                    logger.error(
+                        "Delivering a message to %s failed (exit %s): %s",
+                        session_id,
+                        process.returncode,
+                        reason,
+                    )
             return
 
         try:

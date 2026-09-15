@@ -70,6 +70,8 @@ class FakeRunner:
         self.sent: list[tuple[str, str]] = []
         #: Session names this runtime claims to know, as the real one would.
         self.sessions: dict[str, object] = {}
+        #: Whether a session takes what is sent to it, as `send` answers.
+        self.accepting = True
 
     async def ask(self, text: str, *, model: str | None = None, **kwargs) -> str | None:
         self.asked.append(text)
@@ -97,7 +99,7 @@ class FakeRunner:
     ) -> bool:
         """What reaches a session, as against what reaches the chat."""
         self.sent.append((session_id, text))
-        return True
+        return self.accepting
 
 
 def git(repo: Path, *args: str) -> str:
@@ -842,6 +844,78 @@ async def test_pressing_a_seat_hands_it_on_there(tmp_path: Path, wired) -> None:
 
     [(session, _)] = runner.sent
     assert session == "id-rev"
+
+
+#: A review handoff to the reviewer, with nothing else asked of it.
+TO_THE_REVIEWER = {"prompt": Path("NOTES/review.md"), "to": "reviewer"}
+
+
+async def reviewed(channel) -> None:
+    """Press the review handoff and wait for it to land, as a person would."""
+    await channel._run_handoff("review", CHAT, None, f"tg:{APPROVER}")
+    await settled(channel)
+
+
+async def test_a_handoff_counts_its_rounds_for_the_work_item(tmp_path: Path, wired) -> None:
+    """The branch is 281-…, so both presses are rounds of alpha-engine#281's
+    review: the first with the review text, the second with the followup."""
+    channel, api, runner, repo = wired
+    review = {
+        "prompt": Path("NOTES/review.md"),
+        "followup_prompt": Path("NOTES/review-followup.md"),
+        "to": "reviewer",
+    }
+    handoffs_in(channel, repo, tmp_path, runner, review=review)
+    (repo / "NOTES" / "review-followup.md").write_text("Only the earlier ENGELs.")
+
+    await reviewed(channel)
+    await reviewed(channel)
+
+    first, second = (text for _, text in runner.sent)
+    assert "- Round: 1/2" in first and "try to break it" in first
+    assert "- Round: 2/2" in second and "Only the earlier ENGELs." in second
+    assert "try to break it" not in second
+    assert any("(round 2/2)" in sent["text"] for sent in api.sent)
+
+
+async def test_the_second_round_carries_the_reviewers_answer_to_the_first(
+    tmp_path: Path, wired
+) -> None:
+    from datetime import UTC, datetime
+
+    from halyard.channels.telegram.adapter import SAID_FILE
+    from halyard.core import last_said
+
+    channel, _, runner, repo = wired
+    handoffs_in(channel, repo, tmp_path, runner, review=TO_THE_REVIEWER)
+
+    await reviewed(channel)
+    last_said.remember(
+        channel._kept("-100888", SAID_FILE),
+        chat_id="-100888",
+        text="ENGEL: the loader skips a row.",
+        now=datetime.now(UTC) + timedelta(minutes=2),
+    )
+    await reviewed(channel)
+
+    second = runner.sent[-1][1]
+    assert "xrev (reviewer)'s answer to round 1:" in second
+    assert "ENGEL: the loader skips a row." in second
+
+
+async def test_a_round_that_reached_nobody_is_not_counted(tmp_path: Path, wired) -> None:
+    """Pressing again after a message went nowhere is the same round, not the
+    next — otherwise a followup goes to a seat that never saw the first."""
+    channel, _, runner, repo = wired
+    handoffs_in(channel, repo, tmp_path, runner, review=TO_THE_REVIEWER)
+    runner.accepting = False
+
+    await reviewed(channel)
+    runner.accepting = True
+    await reviewed(channel)
+
+    assert len(runner.sent) == 2
+    assert all("- Round: 1/2" in text for _, text in runner.sent)
 
 
 async def test_a_handoff_runs_its_checks_before_it_goes(tmp_path: Path, wired) -> None:
