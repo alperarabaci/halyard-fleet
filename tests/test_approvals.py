@@ -177,19 +177,25 @@ async def test_nobody_answering_denies_on_a_real_timer() -> None:
     assert resolution.reason is ResolutionReason.TIMEOUT
 
 
-async def test_a_decision_that_wins_the_race_by_a_hair_is_honoured() -> None:
+async def test_a_decision_that_wins_the_race_by_a_hair_is_honoured(
+    store: ApprovalStore, clock: ManualClock
+) -> None:
     # The deadline and a button press can land in the same instant. A human who
-    # answered in time keeps their answer.
-    store = ApprovalStore(ttl=timedelta(milliseconds=50))
+    # answered in time keeps their answer: the press lands a millisecond before
+    # the deadline, and the timer firing just after finds it there. On the
+    # store's clock rather than a real one — with a real 50ms deadline, a CI
+    # runner that stalled for forty milliseconds made the press the late one.
     request = await open_request(store)
+    waiting = asyncio.create_task(store.wait_for(request.request_id))
+    await asyncio.sleep(0)
 
-    async def decide() -> None:
-        await asyncio.sleep(0.01)
-        await store.resolve(request.request_id, nonce=request.nonce, decision=Decision.ALLOW)
+    clock.advance(TTL.total_seconds() - 0.001)
+    await store.resolve(request.request_id, nonce=request.nonce, decision=Decision.ALLOW)
+    clock.advance(0.001)
+    timer = await store.deny(request.request_id, reason=ResolutionReason.TIMEOUT, note="expired")
 
-    resolution, _ = await asyncio.gather(store.wait_for(request.request_id), decide())
-
-    assert resolution.allowed
+    assert (await waiting).allowed
+    assert timer.allowed
 
 
 async def test_shutdown_denies_everything_still_open(store: ApprovalStore) -> None:
