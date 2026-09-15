@@ -63,7 +63,7 @@ class Said:
     session_id: str | None = None
     agent_id: str | None = None
     #: Where the project's files stood as it arrived — the commit under them and
-    #: a fingerprint of them, see `halyard.frame.tree` — so a check run on it
+    #: the tree git writes for them, see `halyard.frame.tree` — so a check run on it
     #: hours later can tell whether it is still looking at the same code.
     head: str | None = None
     content: str | None = None

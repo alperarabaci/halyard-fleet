@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -101,7 +102,7 @@ def test_the_context_says_which_machine_and_which_files(tmp_path: Path) -> None:
     said = frame.context(tmp_path, "alpha-engine")
 
     assert f"Host: {frame.host()}" in said
-    assert f"Content: {now.content} (clean)" in said
+    assert f"Content: {now.content} (git write-tree, clean)" in said
 
 
 def test_the_context_says_whether_these_are_the_files_the_reply_was_about(
@@ -154,3 +155,33 @@ def test_the_tasks_own_labels_sit_under_the_work_item(tmp_path: Path) -> None:
 
     at = said.index("Work item: alpha-engine#359")
     assert said[at + 1] == "level: level::3"
+
+
+def test_content_is_the_tree_anybody_can_compute_with_git(tmp_path: Path) -> None:
+    """The steps a team can put in its own documents give the same id — so a
+    reviewer can tie it to a tree, and a clean tree's is HEAD's own."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    committed(repo)
+    clean = frame.tree(repo)
+    (repo / "a.txt").write_text("edited\n")
+    (repo / "new.md").write_text("untracked\n")
+    edited = frame.tree(repo)
+
+    by_hand = tmp_path / "index"
+    shutil.copyfile(repo / ".git" / "index", by_hand)
+    separate = {**os.environ, "GIT_INDEX_FILE": str(by_hand)}
+    subprocess.run(["git", "-C", str(repo), "add", "-A"], env=separate, check=True)
+    written = subprocess.run(
+        ["git", "-C", str(repo), "write-tree"],
+        env=separate,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+    assert clean is not None and edited is not None
+    assert clean.content == git(repo, "rev-parse", "HEAD^{tree}").strip()[:12]
+    assert clean.clean
+    assert edited.content == written[:12]
+    assert not edited.clean

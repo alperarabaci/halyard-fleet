@@ -192,11 +192,12 @@ started. A command refused, a check stopped, or one that runs out of time
 leaves the check unmeasured rather than clean.
 
 **Every check and handoff carries an envelope** of what Halyard reads for
-itself: the machine, the branch, HEAD, a fingerprint of the files, and — kept as
-the reply came in — where the files stood then, so a check can tell at once
-whether it is still looking at the code the report was about. The fingerprint is
-of the files, not the commits: committing them, or squash-merging the branch,
-leaves it as it was. A project can name groups of task labels under
+itself: the machine, the branch, HEAD, the files' own tree id — what
+`git write-tree` gives for the working tree, so anybody can compute it and
+compare — and, kept as the reply came in, where the files stood then, so a check
+can tell at once whether it is still looking at the code the report was about.
+It is of the files, not the commits: committing them leaves it as it was, and a
+clean tree's is `HEAD^{tree}`. A project can name groups of task labels under
 `label_groups:`, and the one the task carries from each group goes on the
 envelope too — `level: level::3`. It only reports: a task with none of them, or
 a tracker that cannot be read, adds nothing.
