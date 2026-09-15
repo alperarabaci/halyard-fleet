@@ -339,7 +339,12 @@ class Recorder:
             if not conversation:
                 return False
             record = await asyncio.wait_for(
-                runner.ask(self._prompt(instructions, conversation), model=self._model),
+                runner.ask(
+                    self._prompt(instructions, conversation),
+                    model=self._model,
+                    purpose="compaction record",
+                    project=seat.project,
+                ),
                 timeout=RECORD_TIMEOUT_SECONDS,
             )
         except TimeoutError:

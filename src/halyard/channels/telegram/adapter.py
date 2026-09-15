@@ -353,11 +353,16 @@ class _Checking:
     """
 
     def __init__(
-        self, channel: TelegramChannel, runner, destination: tuple[str, int | None]
+        self,
+        channel: TelegramChannel,
+        runner,
+        destination: tuple[str, int | None],
+        project: str | None = None,
     ) -> None:
         self._channel = channel
         self._runner = runner
         self._destination = destination
+        self._project = project
 
     async def ask(
         self,
@@ -375,7 +380,14 @@ class _Checking:
             self._destination,
             asyncio.ensure_future(
                 self._runner.ask(
-                    text, timeout=timeout, model=model, cwd=cwd, edits=edits, session_id=session
+                    text,
+                    timeout=timeout,
+                    model=model,
+                    cwd=cwd,
+                    edits=edits,
+                    session_id=session,
+                    purpose=f"check {name}" if name else "check",
+                    project=self._project,
                 )
             ),
         )
@@ -1721,7 +1733,12 @@ class TelegramChannel:
         if runner is not None and hasattr(runner, "ask"):
             try:
                 said = await asyncio.wait_for(
-                    runner.ask(commits.prompt(work, inquiry), model=MESSAGE_MODEL),
+                    runner.ask(
+                        commits.prompt(work, inquiry),
+                        model=MESSAGE_MODEL,
+                        purpose="commit message",
+                        project=self._project_name_for(chat_id),
+                    ),
                     timeout=MESSAGE_TIMEOUT_SECONDS,
                 )
             except Exception:
@@ -2318,7 +2335,9 @@ class TelegramChannel:
         """This chat's one-shot runtime, for a check whose answer goes to
         `destination` — and so does anything the check asks to run."""
         runner = self._one_shot_runner(chat_id)
-        return _Checking(self, runner, destination) if runner else None
+        if not runner:
+            return None
+        return _Checking(self, runner, destination, project=self._project_name_for(chat_id))
 
     def _destination_of(self, seat: Seat) -> tuple[str, int | None]:
         """Where a seat's traffic goes: its own chat, or the default one."""

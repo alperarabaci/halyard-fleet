@@ -285,6 +285,7 @@ missing costs orientation, never the session.
 | `halyard verify` | prove the gate stops things, by running into it |
 | `halyard wire` / `unwire` | put the gate on a project, or take it off |
 | `halyard sessions` | session names this machine can see |
+| `halyard usage` | what the turns Halyard started itself used, by model and purpose |
 | `halyard service install` | run it as a launchd service (macOS) that updates itself first |
 
 `halyard service install` sets up a launchd agent that comes back after a crash
