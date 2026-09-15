@@ -242,6 +242,7 @@ class QuestionService:
             agent_id=agent_id,
             project=project,
             role=role,
+            session_name=session_name,
             cwd=cwd,
         )
 
@@ -344,6 +345,7 @@ class MessageRelay:
                 agent_id=agent_id,
                 project=project,
                 role=role,
+                session_name=session_name,
                 cwd=cwd,
             )
             if self._gate.paused:
@@ -565,6 +567,7 @@ class ApprovalService:
             agent_id=agent_id,
             project=project,
             role=role,
+            session_name=session_name,
             cwd=cwd,
         )
 

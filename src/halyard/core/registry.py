@@ -61,6 +61,9 @@ class SessionInfo(BaseModel):
     agent_id: str
     project: str
     role: Role | None = None
+    #: The name the runtime knows the session by, when the hook carried one —
+    #: what a seat in `halyard.yaml` is matched on. See `seats.for_session`.
+    session_name: str | None = None
     cwd: str | None = None
     status: SessionStatus = SessionStatus.ACTIVE
     first_seen_at: datetime
@@ -94,14 +97,15 @@ class SessionRegistry:
         agent_id: str,
         project: str,
         role: Role | None = None,
+        session_name: str | None = None,
         cwd: str | None = None,
     ) -> SessionInfo:
         """Record that a session was just heard from, creating it if needed.
 
         On a repeat sighting only `last_seen_at` and the status are refreshed,
         plus any field that arrived with a value where the stored one was empty.
-        A later payload that omits `role` or `cwd` must not erase what an
-        earlier, richer one established.
+        A later payload that omits `role`, `session_name` or `cwd` must not
+        erase what an earlier, richer one established.
         """
         now = self._clock()
         async with self._lock:
@@ -112,6 +116,7 @@ class SessionRegistry:
                     agent_id=agent_id,
                     project=project,
                     role=role,
+                    session_name=session_name,
                     cwd=cwd,
                     status=SessionStatus.ACTIVE,
                     first_seen_at=now,
@@ -121,6 +126,9 @@ class SessionRegistry:
                 session = existing.model_copy(
                     update={
                         "role": role if role is not None else existing.role,
+                        "session_name": (
+                            session_name if session_name is not None else existing.session_name
+                        ),
                         "cwd": cwd if cwd is not None else existing.cwd,
                         "status": SessionStatus.ACTIVE,
                         "last_seen_at": now,
