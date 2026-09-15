@@ -1,0 +1,33 @@
+# The smallest halyard.yaml that does the whole job: one project, one seat,
+# one chat. Copy it to `halyard.yaml` and put in your own token, group, user
+# id, path and session name — or run `halyard init`, which asks for them and
+# writes a file like this one.
+#
+# Everything else is optional, and `halyard.yaml.example` describes all of it.
+# The file is gitignored, because the bot token lives in it.
+
+settings:
+  HALYARD_CHANNEL: telegram
+  # From @BotFather. Secret: this line is what the gitignore is for.
+  TELEGRAM_BOT_TOKEN: "123456:replace-me"
+  # The group the bot is in. The seat below speaks there, and anything no seat
+  # owns lands there too.
+  TELEGRAM_CHAT_ID: "-1001234567890"
+  # Only these Telegram users can answer an approval.
+  TELEGRAM_AUTHORIZED_USER_IDS: "11111111"
+  # INFO unless set. DEBUG says more; a level that does not exist refuses to
+  # start rather than quietly logging at INFO.
+  # HALYARD_LOG_LEVEL: DEBUG
+
+projects:
+  my-project:
+    # The repository. `halyard wire my-project` puts the gate on it, and
+    # /commit, /command and /label run in it.
+    path: ~/code/my-project
+    seats:
+      dev:
+        runtime: claude-code
+        # The name the runtime knows the session by; `halyard sessions` lists them.
+        session: my-project
+        # The same group as above, quoted: unquoted, YAML reads it as a number.
+        chat: "-1001234567890"

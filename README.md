@@ -71,6 +71,10 @@ uv run halyard           # keep this running
 already see, and reads the bot token without echoing it. It backs up any file it
 replaces and keeps settings it does not manage.
 
+Writing the file by hand instead, start from `halyard.simple.yaml.example` — one
+project, one seat, one chat — and take anything more from `halyard.yaml.example`,
+which describes all of it.
+
 One file describes a machine: the settings and the seats of every project it
 gates. `halyard.yaml` is gitignored, and a real environment variable still
 overrides it — so a container can pass a token in without writing it to disk.
@@ -155,68 +159,16 @@ projects:
       bootstrap: make bootstrap-up
     validate: test-fast               # one of commands:, run first by /review_and_commit
     labels: [andon, rework]           # narrows /label; empty means all of them
-    label_groups:                     # the task's label from each group goes on the envelope
-      level: [level::1, level::2, level::3]
     warn_if: [task-id-missing]        # the default; [] turns the warnings off
     confirmation:                     # the extra round, when a guard cannot catch it
       inquiry: NOTES/CONFIRMATION_INQUIRY.md
       review: NOTES/CONFIRMATION_REVIEW.md
-    checks:                           # /checks offers these, one button each
-      proof: NOTES/checks/proof.md
-      destructive: NOTES/checks/destructive.md
-    label_findings:                   # an answer saying one of these labels the task halyard:<check>
-      - "status: candidate"
-    handoffs:                         # /handoff offers these, one button each
-      review:                         # a prompt, handed to the reviewer
-        prompt: NOTES/handoffs/review.md
-        to: reviewer
-      discovery:                      # a report, back to the navigator, checked first
-        prompt: NOTES/handoffs/discovery.md
-        checks: [proof, destructive]
-        to: navigator
-      close:                          # the delivery: the tests run, then the checks
-        prompt: NOTES/handoffs/close.md
-        commands: [test-fast]
-        checks: [proof, destructive]
-        to: navigator
 ```
 
-**A check runs inside the project.** Each is a one-shot turn in the project's
-own directory, over its own text and the reply: it can read files, has no tool
-that edits one, and is told to run only the commands its text names. Each of
-those comes to you as a card headed **CHECKER**, naming the check and the
-handoff it runs for, in the chat the handoff is going to — or, for `/checks`,
-the chat that asked. **Deny** refuses one command and the check carries on;
-**Stop the check** refuses it and ends the check, along with anything it
-started. A command refused, a check stopped, or one that runs out of time
-leaves the check unmeasured rather than clean.
-
-**Every check and handoff carries an envelope** of what Halyard reads for
-itself: the machine, the branch, HEAD, the files' own tree id — what
-`git write-tree` gives for the working tree, so anybody can compute it and
-compare — and, kept as the reply came in, where the files stood then, so a check
-can tell at once whether it is still looking at the code the report was about.
-It is of the files, not the commits: committing them leaves it as it was, and a
-clean tree's is `HEAD^{tree}`. A project can name groups of task labels under
-`label_groups:`, and the one the task carries from each group goes on the
-envelope too — `level: level::3`. It only reports: a task with none of them, or
-a tracker that cannot be read, adds nothing.
-
-**A finding can label the task.** A project writes under `label_findings:` what
-its checks' answers say when they found something, in its own words — quoted,
-because a phrase with a colon is otherwise a YAML mapping — and whenever an
-answer says one of them the task gets `halyard:<check>`. From `/checks` and from
-a handoff alike, since both run the same check. Halyard only adds: closing a
-finding, as a false alarm or as approved, is a label somebody puts on by hand.
-A project that has not said what a finding looks like has nothing written.
-
-**A handoff can run the project's commands first.** Under `commands:` a handoff
-names entries of the project's `commands:`, and they run in that order before its
-checks — one at a time, as `/command` runs them, so a handoff does not go while
-something else is running in the project. What each did goes into the envelope
-the checks read, as one line with its exit code and last line, and what it
-printed goes into the message. A command that fails is reported and the handoff
-goes on: whoever receives it has to see that it failed.
+**Checks and handoffs** have [a page of their own](docs/handoffs.md): a
+project's own checks, run over a seat's reply, and a reply handed from one seat
+to the next with the project's prompt in front and its commands and checks run
+first. Nothing above needs either.
 
 **`confirmation:` buys a round that a guard cannot.** A test proves what it
 tests and a file of invariants proves nothing at all — an agent's attention is
@@ -302,8 +254,8 @@ systemd unit.
 ## Known limitations
 
 - **The desktop apps show an injected turn late, not never.** A message from your
-  phone reaches the session and its reply comes back to you; the app catches up when
-  its window is focused again.
+  phone reaches the session and its reply comes back to you. In the Claude Code
+  app, Reload shows it, without interrupting a turn that is running.
 - **Two things can outrun the gate.** A hook that exceeds its timeout, and a wrapper
   that cannot start at all, both let the command through. `doctor` checks for the
   second.
@@ -371,6 +323,7 @@ behalf, uncontrolled agent-to-agent messaging, or multi-user RBAC.
 | [Before you wire it in](docs/before-you-wire-it.md) | What changes, and what surprised us |
 | [When it does not work](docs/when-it-does-not-work.md) | Every way setup has gone wrong so far, and the fix |
 | [Setup](docs/setup.md) | Installing it, seats in YAML, gating a project by hand |
+| [Checks and handoffs](docs/handoffs.md) | A project's own checks, and handing a reply from one seat to the next |
 | [Telegram](docs/telegram.md) | The bot, seats, models and effort |
 | [Architecture](docs/architecture.md) | How the layers fit, and the security posture |
 | [Hook behaviour](docs/hook-payload-notes.md) | What the runtimes' hooks actually do — measured |

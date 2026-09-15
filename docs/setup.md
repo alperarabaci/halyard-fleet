@@ -8,7 +8,7 @@ Getting the control plane running, and putting the gate on a project.
 ## Running it
 
 ```bash
-cp halyard.yaml.example halyard.yaml    # then put your bot token in it
+cp halyard.simple.yaml.example halyard.yaml    # one project, one seat, one chat; then fill it in
 uv sync --extra dev
 uv run halyard
 ```
@@ -273,7 +273,8 @@ project that share both must ask for the same label. One colon by default, becau
 as a scoped label, where `claude::driver` would take `claude::navigator` off a
 task both worked on.
 
-Copy `halyard.yaml.example` and edit it. It is gitignored — along with every
+Copy `halyard.simple.yaml.example` for one project with one seat, or
+`halyard.yaml.example` for all of it, and edit the copy. It is gitignored — along with every
 backup Halyard takes of it — because the bot token is in it, and the chat ids
 and session names belong to one machine.
 
