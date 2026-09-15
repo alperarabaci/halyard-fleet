@@ -34,7 +34,7 @@ OWNED = SOURCE / "agents"
 #: Directories a runtime keeps its own files in. Named here so the check can
 #: catch the other way this leaks: not the runtime's name, but the path only
 #: that runtime uses.
-HOMES = (".claude", ".codex", ".gemini", ".antigravity")
+HOMES = (".claude", ".codex", ".gemini", ".antigravity", ".zcode")
 
 
 def _docstrings(tree: ast.AST) -> set[int]:
