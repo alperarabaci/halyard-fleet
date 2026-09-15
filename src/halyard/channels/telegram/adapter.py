@@ -1770,17 +1770,20 @@ class TelegramChannel:
         # minutes, and silence for minutes reads as nothing having happened.
         checked = commits.Checked()
         if full:
+            # `validate:` names one of the project's `commands:`, checked when
+            # the file was read; what runs is the line written there.
+            command = found.commands.get(found.validate) if found.validate else None
             skipping = commits.validation.only_documentation(work)
-            if found.validate and not skipping:
+            if command and not skipping:
                 await self._say(
-                    f"\u23f3 Running <code>{html.escape(found.validate)}</code>\u2026",
+                    f"\u23f3 Running <code>{html.escape(command)}</code>\u2026",
                     chat_id,
                     thread_id,
                 )
-            elif found.validate:
+            elif command:
                 await self._say(
                     f"\U0001f4c4 Documentation only \u2014 not running "
-                    f"<code>{html.escape(found.validate)}</code>.",
+                    f"<code>{html.escape(command)}</code>.",
                     chat_id,
                     thread_id,
                 )
@@ -1808,7 +1811,7 @@ class TelegramChannel:
                     commits.check,
                     work,
                     path,
-                    found.validate,
+                    command,
                     warn_if=found.warn_if,
                     on_progress=progress,
                 )

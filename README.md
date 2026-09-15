@@ -149,11 +149,11 @@ and the second is granted by destination under `writes:`.
 projects:
   alpha-engine:
     path: ~/code/alpha-engine
-    validate: make test-fast          # /commit runs this first, every time
     commands:                         # what /command offers, by name
       test-all: make test-all
       test-fast: make test-fast
       bootstrap: make bootstrap-up
+    validate: test-fast               # one of commands:, run first by /review_and_commit
     labels: [andon, rework]           # narrows /label; empty means all of them
     label_groups:                     # the task's label from each group goes on the envelope
       level: [level::1, level::2, level::3]
@@ -233,12 +233,12 @@ what is worth asking again is something a team learns about its own failures.
 `/commit` takes the whole working tree, has a message written for it in this
 repository's own style, and shows what changed rather than only which files —
 and stops there, which is what most changes want. `/review_and_commit` is the
-same command with everything the project asked for: `validate:` runs, the
-warnings apply, and the round is offered. A failing `validate:` means no card at
-all. Two commands rather than a list of paths that skip the gate: such a list
-has to be maintained against a repository that keeps growing and gets it wrong
-quietly, while a command is chosen by somebody who already knows which they
-meant. `/command` runs in the background and
+same command with everything the project asked for: the command `validate:`
+names runs, the warnings apply, and the round is offered. A failing one means
+no card at all. Two commands rather than a list of paths that skip the gate:
+such a list has to be maintained against a repository that keeps growing and
+gets it wrong quietly, while a command is chosen by somebody who already knows
+which they meant. `/command` runs in the background and
 reports the tail when it finishes, one at a time per project. `/label` reads
 the task number off the branch and asks its issue tracker — `HALYARD_FORGE_TOKEN`
 is the only thing it needs, and only a host that cannot name itself needs
@@ -312,9 +312,10 @@ systemd unit.
   would be refusing the only thing it was asked for. What `.gitignore` excludes
   is excluded, and the card names the files that are new.
 - **The project's own check belongs to `/review_and_commit`, not `/commit`.**
-  `validate:` under a project — `make test-fast` — runs there, and a failing
-  check means no card at all rather than a question nobody can usefully answer.
-  Plain `/commit` writes a message and stops, which is what most changes want.
+  `validate:` names one of the project's `commands:` — `test-fast` — and it runs
+  there; a failing check means no card at all rather than a question nobody can
+  usefully answer. Plain `/commit` writes a message and stops, which is what
+  most changes want.
 - **Agents can be stopped from committing at all.** `HALYARD_REFUSE_AGENT_COMMITS`
   refuses an agent's own `git commit` or `git push` before anybody is asked. Off
   by default. Unlike everything else the gate does, `/pause` does not lift it: a

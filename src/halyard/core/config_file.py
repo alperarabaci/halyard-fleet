@@ -130,10 +130,11 @@ class Project:
     #: anybody decides to gate it.
     path: Path | None
     seats: list[Seat]
-    #: What has to pass before a commit is offered from a phone — `make
-    #: test-fast`, or whatever this project calls its quick check. Optional,
-    #: and absent means no check runs rather than some guessed default: a
-    #: command invented for somebody's repository would fail on every commit.
+    #: What has to pass before `/review_and_commit` offers a commit: the name
+    #: of one of `commands:` — `test-fast` — so that everything Halyard runs for
+    #: a project is in that one list. Optional, and absent means no check runs
+    #: rather than some guessed default: a command invented for somebody's
+    #: repository would fail on every commit.
     validate: str | None = None
     #: Which of the named warnings apply here. `None` means the default set;
     #: an empty list means none, which is how somebody who does not share this
@@ -314,6 +315,25 @@ def _commands_from(project: str, value: Any) -> dict[str, str]:
     if not isinstance(value, dict):
         raise ValueError(f"Project {project!r}: `commands:` must be a mapping of name to command.")
     return {str(name): str(line) for name, line in value.items()}
+
+
+def _validate_from(project: str, value: Any, commands: dict[str, str]) -> str | None:
+    """`validate:` as the name of one of the project's `commands:`.
+
+    Not a command line of its own: what Halyard runs for a project is what
+    `commands:` lists, and a line written anywhere else is one nobody reading
+    that list can see. Checked here, as a handoff's commands are, rather than
+    when somebody presses the button.
+    """
+    name = _as_text(value)
+    if name is None or name in commands:
+        return name
+    listed = f" ({', '.join(commands)})" if commands else ""
+    raise ValueError(
+        f"Project {project!r}: `validate:` names {name!r}, which is not one of its "
+        f"`commands:`{listed}. Write the command there and its name here — "
+        "`validate: test-fast`."
+    )
 
 
 def _warnings_from(project: str, value: Any) -> tuple[str, ...] | None:
@@ -534,7 +554,7 @@ def projects_from_yaml(text: str) -> list[Project]:
                 name=project,
                 path=Path(path).expanduser() if path else None,
                 seats=seats,
-                validate=_as_text(body.get("validate")),
+                validate=_validate_from(project, body.get("validate"), commands),
                 warn_if=_warnings_from(project, body.get("warn_if")),
                 commands=commands,
                 forge=_as_text(body.get("forge")),
