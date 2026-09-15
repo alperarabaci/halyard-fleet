@@ -63,13 +63,14 @@ async def test_repeat_sighting_refreshes_last_seen_but_keeps_first_seen(
 
 
 async def test_repeat_sighting_does_not_erase_known_details(registry: SessionRegistry) -> None:
-    await observe(registry, cwd="/repo", role=Role.NAVIGATOR)
+    await observe(registry, cwd="/repo", role=Role.NAVIGATOR, session_name="alpha-engine-navigator")
     # A hook payload carries cwd but never a role, so a later, thinner
     # observation must not wipe what an earlier one established.
     session = await observe(registry)
 
     assert session.cwd == "/repo"
     assert session.role is Role.NAVIGATOR
+    assert session.session_name == "alpha-engine-navigator"
 
 
 async def test_repeat_sighting_fills_in_details_learned_later(registry: SessionRegistry) -> None:
