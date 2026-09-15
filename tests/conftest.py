@@ -47,6 +47,14 @@ def _away_from_the_real_configuration(
 
     monkeypatch.setattr(opencode, "_sessions", lambda directory=None: None)
 
+    # Nor ask ZCode anything. Whether it is installed, and whether it trusts a
+    # workspace's hooks, are both answered by the application on this machine —
+    # a wiring test would start its engine to ask about a temporary directory.
+    from halyard.agents.zcode import trust as zcode_trust
+
+    monkeypatch.setattr(zcode_trust, "app", lambda: None)
+    monkeypatch.setattr(zcode_trust, "status", lambda project: None)
+
 
 @pytest.fixture
 def anywhere(tmp_path: Path) -> Path:

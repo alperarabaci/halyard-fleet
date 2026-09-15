@@ -625,6 +625,66 @@ def test_a_claude_payload_is_still_claude(bridge_module) -> None:
     assert body["agent_id"] == "claude-code"
 
 
+#: A ZCode `PreToolUse`, as measured on 3.11.2 and cut down: Claude Code's fields
+#: with camelCase copies beside them, and a transcript in a temporary directory.
+ZCODE_PAYLOAD = {
+    "session_id": "sess_97962403-5c1c-4d92-9756-8d8e264e8aae",
+    "sessionId": "sess_97962403-5c1c-4d92-9756-8d8e264e8aae",
+    "transcript_path": "/var/folders/m8/T/zcode-claude-hook-g49FKX/transcript.jsonl",
+    "transcriptPath": "/var/folders/m8/T/zcode-claude-hook-g49FKX/transcript.jsonl",
+    "cwd": "/repo",
+    "hook_event_name": "PreToolUse",
+    "hookEventName": "PreToolUse",
+    "permission_mode": "build",
+    "tool_name": "Bash",
+    "toolName": "Bash",
+    "tool_input": {"command": "ls -la", "description": "List files in current directory"},
+    "tool_use_id": "call_9975f55e27eb444d9f895d57",
+    "turnId": "turn-1",
+}
+
+
+def test_a_zcode_hook_is_zcode_because_it_says_so(bridge_module, monkeypatch) -> None:
+    """Nothing in the call says so. Its transcript is a temporary copy in no
+    runtime's home, so the path alone reads as Claude Code's — and a card filed
+    under the wrong runtime goes to the wrong seat."""
+    monkeypatch.setenv("HALYARD_RUNTIME", "zcode")
+
+    body = bridge_module.build_body(ZCODE_PAYLOAD)
+
+    assert body["agent_id"] == "zcode"
+    assert body["command"] == "ls -la"
+    assert body["reason"] == "List files in current directory"
+
+
+def test_a_runtime_that_has_no_reason_to_declare_itself_cannot(bridge_module, monkeypatch) -> None:
+    monkeypatch.setenv("HALYARD_RUNTIME", "something-else")
+
+    assert bridge_module.build_body(ZCODE_PAYLOAD)["agent_id"] == "claude-code"
+
+
+def test_a_zcode_reply_reaches_the_control_plane_as_zcodes() -> None:
+    """ZCode's camelCase copies are what the relay took for Antigravity's; the
+    hook's own declaration settles it, and the reply is the payload's own."""
+    stop = {
+        **{k: v for k, v in ZCODE_PAYLOAD.items() if not k.startswith(("tool", "hook"))},
+        "hook_event_name": "Stop",
+        "hookEventName": "Stop",
+        "stop_hook_active": False,
+        "last_assistant_message": "All three done.",
+    }
+
+    with control_plane(body={"delivered": True}) as (url, received):
+        result = run_relay(
+            stop, HALYARD_URL=url, HALYARD_RUNTIME="zcode", CLAUDE_PROJECT_DIR="/repo"
+        )
+
+    assert result.returncode == 0
+    assert received[0]["agent_id"] == "zcode"
+    assert received[0]["text"] == "All three done."
+    assert received[0]["project_dir"] == "/repo"
+
+
 def test_a_codex_name_comes_from_the_index_not_the_transcript(
     bridge_module, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

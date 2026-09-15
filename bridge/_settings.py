@@ -264,6 +264,23 @@ def last_assistant_text(transcript_path: str | None) -> str | None:
     return None
 
 
+#: Runtimes whose hooks say which runtime they are, with `HALYARD_RUNTIME`.
+#: Only those that need to: every other one is recognised from its payload.
+DECLARED = frozenset({"zcode"})
+
+
+def declared_runtime() -> str | None:
+    """The runtime a hook's own command said it belongs to, if it said one.
+
+    ZCode's hooks do, because nothing else about a call can. Its transcript is
+    a temporary copy in no runtime's home, which reads as Claude Code's, and its
+    payload carries camelCase copies of every field, which read as Antigravity's.
+    A name outside `DECLARED` is ignored rather than trusted.
+    """
+    declared = (os.environ.get("HALYARD_RUNTIME") or "").strip()
+    return declared if declared in DECLARED else None
+
+
 def runtime_of(transcript_path: str | None) -> str:
     """Which agent produced this payload, from where it keeps its transcript.
 
@@ -271,8 +288,12 @@ def runtime_of(transcript_path: str | None) -> str:
     `~/.claude/projects/`. Nothing in either payload names its own runtime, and
     the control plane needs to know: with a Claude driver and a Codex driver
     both configured, a card that cannot say which one it came from goes to
-    neither and lands in the default chat.
+    neither and lands in the default chat. A hook that says for itself — see
+    `declared_runtime` — is taken at its word first.
     """
+    declared = declared_runtime()
+    if declared:
+        return declared
     path = str(transcript_path or "")
     if "/.codex/" in path:
         return "codex"

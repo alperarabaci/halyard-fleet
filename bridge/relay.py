@@ -41,6 +41,7 @@ from _settings import (
     antigravity_title,
     codex_thread_name,
     control_plane_url,
+    declared_runtime,
     note,
     runtime_of,
     session_name,
@@ -69,7 +70,11 @@ def main() -> int:
         # so a conversation stored anywhere unexpected is silently read as
         # Claude Code, and a runtime that is guessed wrong here is a message
         # delivered to the wrong seat rather than a message that fails.
-        runtime = "antigravity" if camel else runtime_of(transcript)
+        #
+        # A hook that says which runtime it is comes first. ZCode's payload
+        # carries camelCase copies of every field as well, and on their own
+        # those read as Antigravity's.
+        runtime = declared_runtime() or ("antigravity" if camel else runtime_of(transcript))
         workspaces = payload.get("workspacePaths")
         cwd = payload.get("cwd") or (
             workspaces[0] if isinstance(workspaces, list) and workspaces else None

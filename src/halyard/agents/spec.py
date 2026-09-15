@@ -84,6 +84,9 @@ class Hooks:
     #: runtime loads, and `settings` names that file so the rest of core can go
     #: on asking where a project's gate lives. Nothing parses it; a runtime
     #: saying `plugin` carries its own `install` and is wired by that.
+    #: `events` is ZCode's: `{"hooks": {"enabled": true, "events": {Event:
+    #: [group, ...]}}}`. Nothing in core reads that one either; the runtime
+    #: carries its own `install`.
     #: Other files this runtime also reads hooks from, checked but never
     #: written. Claude Code is the case: a committed `settings.json` beside the
     #: gitignored `settings.local.json`, and a gate may be in either.

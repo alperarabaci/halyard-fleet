@@ -329,6 +329,7 @@ behalf, uncontrolled agent-to-agent messaging, or multi-user RBAC.
 | [Hook behaviour](docs/hook-payload-notes.md) | What the runtimes' hooks actually do — measured |
 | [Session I/O](docs/session-io-notes.md) | Writing into a live session, and what forks it |
 | [Antigravity notes](docs/antigravity-payload-notes.md) | A third runtime, measured in full and not shipped — and why |
+| [ZCode notes](docs/zcode-payload-notes.md) | ZCode's hooks, measured — and the workspace trust its own guide says it lacks |
 | [Design document](docs/mobile-agent-control-plane.md) | The full plan this is built from |
 
 ## Development
