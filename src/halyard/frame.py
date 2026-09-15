@@ -201,11 +201,26 @@ def context(
         lines.append("Content: could not be read")
     else:
         lines.append(f"Content: {now.content} ({METHOD}{', clean' if now.clean else ''})")
-    changed = _git(path, "diff-index", "-M", "--shortstat", "HEAD")
-    lines.append(f"Uncommitted: {changed or 'nothing'}")
+    lines.append(f"Uncommitted: {_uncommitted(path)}")
     if replied:
         lines.append(f"At the reply: {_since(replied, reply, now)}")
     return lines
+
+
+def _uncommitted(path: Path) -> str:
+    """What is on top of HEAD: git's summary of the tracked files, and how many
+    files are new to it.
+
+    The new ones are counted apart because that summary leaves them out, and
+    `nothing` said beside three new files reads as no change at all — while
+    `Content` holds them, as `git add -A` does. What is ignored is left out of
+    both.
+    """
+    changed = _git(path, "diff-index", "-M", "--shortstat", "HEAD")
+    listed = _run(path, "ls-files", "--others", "--exclude-standard", "-z") or ""
+    count = sum(1 for name in listed.split("\0") if name)
+    new = f"{count} untracked file{'' if count == 1 else 's'}" if count else ""
+    return " · ".join(part for part in (changed, new) if part) or "nothing"
 
 
 def _since(replied: str, reply: Tree | None, now: Tree | None) -> str:
