@@ -443,3 +443,91 @@ async def test_a_stopped_turn_ends_with_everything_it_started(
 
     assert started[0]["start_new_session"] is True
     assert ended == [(4242, signal.SIGKILL)]
+
+
+class Answering:
+    """A turn that has answered, with what it printed."""
+
+    returncode = 0
+
+    def __init__(self, printed: bytes) -> None:
+        self.printed = printed
+
+    async def communicate(self) -> tuple[bytes, bytes]:
+        return self.printed, b""
+
+
+def answering(monkeypatch, printed: bytes) -> list[list[str]]:
+    """Capture the argument list, and answer with `printed`."""
+    calls: list[list[str]] = []
+
+    async def fake_exec(*arguments, **_kwargs):
+        calls.append(list(arguments))
+        return Answering(printed)
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec)
+    return calls
+
+
+async def test_a_turn_answers_as_json_and_what_it_used_is_recorded(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """What it said is still the answer. What it used goes on a row, with what
+    the turn was for."""
+    import json
+    from datetime import UTC, datetime
+
+    from halyard.core import usage
+
+    printed = {
+        "result": "loader stub and seed tweak",
+        "is_error": False,
+        "session_id": "s-1",
+        "modelUsage": {
+            "claude-sonnet-5": {
+                "inputTokens": 2,
+                "outputTokens": 4,
+                "cacheCreationInputTokens": 46103,
+                "cacheReadInputTokens": 0,
+                "costUSD": 0.18,
+            }
+        },
+    }
+    calls = answering(monkeypatch, json.dumps(printed).encode())
+    database = tmp_path / "halyard.db"
+
+    said = await runner(usage_path=database).ask(
+        "write a subject line", purpose="commit message", project="alpha-engine"
+    )
+
+    assert said == "loader stub and seed tweak"
+    [arguments] = calls
+    assert arguments[arguments.index("--output-format") + 1] == "json"
+    [row] = usage.totals(database, datetime(2026, 1, 1, tzinfo=UTC))
+    assert row[:3] == ("claude-sonnet-5", "commit message", 1)
+    assert row[5] == 46103
+
+
+async def test_output_that_is_not_json_is_the_answer_itself(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """As the CLI answered before it was asked for JSON: nothing to record, and
+    the text is still the answer."""
+    answering(monkeypatch, b"loader stub and seed tweak\n")
+    database = tmp_path / "halyard.db"
+
+    said = await runner(usage_path=database).ask("write a subject line")
+
+    assert said == "loader stub and seed tweak"
+    assert not database.exists()
+
+
+async def test_an_answer_marked_as_an_error_is_no_answer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A commit message reading "API Error: 529" would be worse than none."""
+    import json
+
+    answering(monkeypatch, json.dumps({"result": "API Error: 529", "is_error": True}).encode())
+
+    assert await runner().ask("write a subject line") is None
