@@ -15,11 +15,19 @@ the model — a seat keeps its runtime and its role, but its model is chosen at 
 desk and changes under it. Measured in one project's transcripts: five sessions
 of eighty-seven changed model partway through, and back again.
 
+**The seat is looked up, not guessed.** A session is matched to its seat the way
+a card is matched to its chat: by the name its runtime knows it by, or its id,
+always together with the runtime — or, for a runtime whose sessions have no
+name to go by, by the codebase, when only one seat of that runtime works in it.
+A role the session declared itself, with `HALYARD_ROLE`, stands in only where
+no seat matches.
+
 **Roles are optional.** A seat given none is labelled with its runtime alone —
 `claude` — which is the whole story in a project with one seat. Where a project
-does give this runtime's seats roles, a sighting without one could be any of
-them, or a session no seat owns, and it is not labelled at all rather than
-guessed at: a guess would put a second label on one seat.
+does give this runtime's seats roles, a session no seat matches and that
+declared none could be any of them, or none, and it is not labelled at all
+rather than guessed at: a guess would put a second label on one seat. That is
+said in the log, once per session.
 
 **A seat can say otherwise**, with `task_label:` — to match labels a tracker
 already uses. It is written exactly as given, so the same rule holds: a model
@@ -59,6 +67,7 @@ from pathlib import Path
 
 from halyard.core.events import Role
 from halyard.core.registry import SessionInfo
+from halyard.core.seats import for_project, for_session
 from halyard.tasks.branches import current as current_branch
 from halyard.tasks.branches import number_of
 from halyard.tasks.registry import build
@@ -93,6 +102,8 @@ class Attribution:
         self._tag_of = tag_of
         #: (project, task, label) already on the task, or already tried.
         self._done: set[tuple[str, int, str]] = set()
+        #: Sessions already said to match no seat, so each is said once.
+        self._said_no_seat: set[str] = set()
         # Strong references, so a labelling task is not collected half-way.
         self._running: set[asyncio.Task] = set()
 
@@ -104,7 +115,7 @@ class Attribution:
         if project is None:
             return
         name, settings = project
-        label = self._label_for(settings, session.agent_id, session.role)
+        label = self._label_for(name, settings, session)
         if not label:
             return
         try:
@@ -116,23 +127,63 @@ class Attribution:
         self._running.add(labelling)
         labelling.add_done_callback(self._running.discard)
 
-    def _label_for(self, settings: object, runtime: str, role: Role | None) -> str | None:
-        """The seat's own `task_label:` if it named one, else runtime and role.
+    def _label_for(self, project: str, settings: object, session: SessionInfo) -> str | None:
+        """The label of the seat this session is: the seat's own `task_label:`
+        if it named one, else runtime and role.
 
-        A seat given no role is labelled with its runtime alone. Where the project
-        gives roles to this runtime's seats, a sighting without one could be any
-        of them, or a session no seat owns — so it is left unlabelled.
+        The seat is found the way a card finds its chat: by the name the runtime
+        knows the session by, or its id, always together with the runtime; then,
+        for a runtime whose sessions have no name to go by, by the codebase,
+        which answers nothing when two seats of one runtime share it. See
+        `seats.for_session`. Before this looked, a session started from the
+        desktop app carried no role — only one launched with `HALYARD_ROLE` does
+        — and in a project whose seats all have roles no task was labelled.
+
+        Found nowhere, a role the session declared itself stands in, and a seat
+        given no role is labelled with its runtime alone. Where the project gives
+        roles to this runtime's seats, a session without one could be any of
+        them, or none — so it is left unlabelled, and that is said once.
         """
-        seats = getattr(settings, "seats", None) or ()
-        for seat in seats:
-            if seat.runtime == runtime and seat.role == role:
-                chosen = getattr(seat, "task_label", None)
-                if chosen:
-                    return chosen
-        if role is None and any(s.runtime == runtime and s.role is not None for s in seats):
-            return None
+        seats = list(getattr(settings, "seats", None) or ())
+        runtime = session.agent_id
+        seat = for_session(seats, runtime, session.session_name, session.session_id)
+        seat = seat or for_project(seats, runtime, project)
+        if seat is not None:
+            role, chosen = seat.role, seat.task_label
+        else:
+            role = session.role
+            chosen = next(
+                (
+                    s.task_label
+                    for s in seats
+                    if s.runtime == runtime and s.role == role and s.task_label
+                ),
+                None,
+            )
+            roles = any(s.runtime == runtime and s.role is not None for s in seats)
+            if role is None and not chosen and roles:
+                self._no_seat(project, session)
+                return None
+        if chosen:
+            return chosen
         tag = self._tag_of(runtime)
         return label_for(tag, role) if tag else None
+
+    def _no_seat(self, project: str, session: SessionInfo) -> None:
+        """Say, once per session, that it could not be tied to a seat.
+
+        Nothing said it before, and labelling that never happened looked the
+        same in the log as labelling nobody needed.
+        """
+        if session.session_id in self._said_no_seat:
+            return
+        self._said_no_seat.add(session.session_id)
+        logger.info(
+            "Not labelling for %s session %s in %s: it matches no seat",
+            session.agent_id,
+            session.session_name or session.session_id,
+            project,
+        )
 
     def _project_for(self, cwd: str) -> tuple[str, object] | None:
         """The opted-in project this directory is inside, if any."""

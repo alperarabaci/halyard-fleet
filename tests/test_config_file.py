@@ -349,6 +349,166 @@ def test_a_file_that_is_not_there_is_named_with_its_setting(tmp_path) -> None:
     assert "NOTES/GONE.md" in said[0]
 
 
+def test_checks_are_read_as_names_and_files(tmp_path) -> None:
+    [project] = a_project(
+        tmp_path,
+        lines=["checks:", "  proof: NOTES/checks/proof.md", "  claims: NOTES/checks/claims.md"],
+    )
+
+    assert project.checks == {
+        "proof": Path("NOTES/checks/proof.md"),
+        "claims": Path("NOTES/checks/claims.md"),
+    }
+
+
+def test_a_check_written_as_anything_but_a_file_is_refused(tmp_path) -> None:
+    """Otherwise it becomes a path spelled with its own braces, and fails only
+    when somebody runs it."""
+    with pytest.raises(ValueError, match="needs a file"):
+        a_project(tmp_path, lines=["checks:", "  proof: {prompt: NOTES/checks/proof.md}"])
+
+
+def test_a_check_file_that_is_not_there_is_named_too(tmp_path) -> None:
+    from halyard.core.config_file import missing_files
+
+    found = a_project(tmp_path, lines=["checks:", "  proof: NOTES/GONE.md"])
+
+    [said] = missing_files(found)
+    assert "checks.proof" in said
+    assert "NOTES/GONE.md" in said
+
+
+def test_label_groups_are_read_as_names_and_labels_in_order(tmp_path) -> None:
+    """In order, because that is the order a group is searched in."""
+    [project] = a_project(
+        tmp_path,
+        lines=["label_groups:", "  level: [level::1, level::2, level::3]", "  risk: risk::high"],
+    )
+
+    assert project.label_groups == {
+        "level": ("level::1", "level::2", "level::3"),
+        "risk": ("risk::high",),
+    }
+
+
+def test_label_groups_are_empty_unless_written(tmp_path) -> None:
+    [project] = a_project(tmp_path, lines=["checks:", "  proof: NOTES/checks/proof.md"])
+
+    assert project.label_groups == {}
+
+
+def test_a_label_group_written_as_a_mapping_is_refused(tmp_path) -> None:
+    with pytest.raises(ValueError, match="must be a list of labels"):
+        a_project(tmp_path, lines=["label_groups:", "  level: {one: level::1}"])
+
+
+def test_label_findings_are_read_as_phrases(tmp_path) -> None:
+    [project] = a_project(
+        tmp_path,
+        lines=["label_findings:", '  - "status: candidate"', '  - "status: evidence missing"'],
+    )
+
+    assert project.label_findings == ("status: candidate", "status: evidence missing")
+
+
+def test_a_finding_phrase_left_unquoted_is_refused_with_why(tmp_path) -> None:
+    """`- status: candidate` is a mapping to YAML, and would otherwise become
+    text no answer ever contains."""
+    with pytest.raises(ValueError, match="has to be quoted"):
+        a_project(tmp_path, lines=["label_findings:", "  - status: candidate"])
+
+
+def test_handoffs_are_read_with_what_they_carry(tmp_path) -> None:
+    [project] = a_project(
+        tmp_path,
+        lines=[
+            "checks:",
+            "  proof: NOTES/checks/proof.md",
+            "handoffs:",
+            "  review: {prompt: NOTES/handoffs/review.md, to: reviewer}",
+            "  discover_completed: {checks: [proof], to: navigator}",
+        ],
+    )
+
+    review = project.handoffs["review"]
+    assert review.prompt == Path("NOTES/handoffs/review.md")
+    assert review.include_last_message is True
+    assert review.to == "reviewer"
+    assert project.handoffs["discover_completed"].checks == ("proof",)
+
+
+def test_a_handoff_can_run_the_projects_commands_first(tmp_path) -> None:
+    [project] = a_project(
+        tmp_path,
+        lines=[
+            "commands:",
+            "  test-fast: make test-fast",
+            "  lint: make lint",
+            "handoffs:",
+            "  close: {commands: [lint, test-fast], to: navigator}",
+        ],
+    )
+
+    assert project.handoffs["close"].commands == ("lint", "test-fast")
+
+
+def test_a_handoff_naming_a_command_nobody_defined_is_refused(tmp_path) -> None:
+    """The same as a check: otherwise it fails only when somebody presses it."""
+    with pytest.raises(ValueError, match="does not define: test-all"):
+        a_project(tmp_path, lines=["handoffs:", "  close: {commands: [test-all]}"])
+
+
+def test_a_handoff_of_commands_alone_is_something_to_hand_on(tmp_path) -> None:
+    [project] = a_project(
+        tmp_path,
+        lines=[
+            "commands:",
+            "  test-fast: make test-fast",
+            "handoffs:",
+            "  tests: {commands: [test-fast], include_last_message: false}",
+        ],
+    )
+
+    assert project.handoffs["tests"].include_last_message is False
+
+
+def test_validate_names_one_of_the_projects_commands(tmp_path) -> None:
+    [project] = a_project(
+        tmp_path, lines=["commands:", "  test-fast: make test-fast", "validate: test-fast"]
+    )
+
+    assert project.validate == "test-fast"
+
+
+def test_validate_written_as_a_command_line_is_refused(tmp_path) -> None:
+    """What Halyard runs for a project is what `commands:` lists, and a line
+    written into `validate:` is one that list does not show."""
+    written = ["commands:", "  test-fast: make test-fast", "validate: make test-fast"]
+
+    with pytest.raises(ValueError, match="`validate:` names 'make test-fast'"):
+        a_project(tmp_path, lines=written)
+
+
+def test_a_handoff_naming_a_check_nobody_defined_is_refused(tmp_path) -> None:
+    """Otherwise it fails only when somebody presses it, from a phone."""
+    with pytest.raises(ValueError, match="does not define: claims"):
+        a_project(tmp_path, lines=["handoffs:", "  discovery: {checks: [claims]}"])
+
+
+def test_a_handoff_to_a_seat_that_is_not_there_is_refused(tmp_path) -> None:
+    with pytest.raises(ValueError, match="must be a role"):
+        a_project(tmp_path, lines=["handoffs:", "  review: {to: somebody}"])
+
+
+def test_a_handoff_prompt_that_is_not_there_is_named(tmp_path) -> None:
+    from halyard.core.config_file import missing_files
+
+    found = a_project(tmp_path, lines=["handoffs:", "  review: {prompt: NOTES/GONE.md}"])
+
+    [said] = missing_files(found)
+    assert "handoffs.review.prompt" in said
+
+
 def test_a_seat_prompt_file_is_checked_too(tmp_path) -> None:
     from halyard.core.config_file import missing_files, projects_from_yaml
 

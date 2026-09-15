@@ -1800,6 +1800,17 @@ async def test_the_help_text_lists_exactly_those(tmp_path: Path) -> None:
         assert f"/{name} — {description}" in said
 
 
+def test_to_answers_when_typed_but_is_off_the_menu() -> None:
+    """A handoff does from the menu what `/to` did, and one fewer button on a
+    phone is worth more than a second way to the same place. Typed, `/to` still
+    answers — so a prompt still cannot take its name."""
+    listed = {name for name, _ in adapter.COMMANDS}
+
+    assert "to" not in listed
+    assert "forward" in listed
+    assert "to" in adapter.reserved_names()
+
+
 async def test_a_refused_registration_does_not_stop_the_gate(tmp_path: Path) -> None:
     """Trading the thing for the label on it. The bot answers every command
     whether Telegram knows about them or not."""
@@ -2500,6 +2511,24 @@ async def test_forward_carries_the_whole_last_reply(tmp_path: Path) -> None:
     assert sum(len(sent["text"]) for sent in there) > 4000, "the reply was truncated"
 
 
+async def test_a_long_message_shows_in_the_seats_chat_in_pieces_telegram_takes(
+    tmp_path: Path,
+) -> None:
+    """Telegram refuses a message over 4096 characters, and the refusal was
+    swallowed: a long handoff reached the session and never showed in the
+    seat's own chat, which read as the handoff having gone nowhere."""
+    channel, api = await with_two_seats(tmp_path)
+    long_text = "the review prompt, then the report " + "x" * 9000
+
+    await channel._handle_message(typed_in(f"/to xnav {long_text}", DRV_CHAT))
+
+    there = [sent for sent in api.sent if sent["chat_id"] == "-1003333333333"]
+    assert len(there) > 1
+    assert all(len(sent["text"]) <= 4096 for sent in there)
+    assert there[0]["text"].startswith("↪ from")
+    assert sum(sent["text"].count("x") for sent in there) >= 9000
+
+
 async def test_a_bare_forward_offers_the_seats_without_a_forced_reply(tmp_path: Path) -> None:
     """No `force_reply` anywhere in this flow. Nothing has to be typed, so
     nothing should open a reply box — and an abandoned one is a reply box that
@@ -2898,3 +2927,17 @@ async def test_a_reviewer_is_a_seat_like_the_others(tmp_path: Path) -> None:
 
     assert api.sent[0]["chat_id"] == reviewer_chat
     assert "REVIEWER — PERMISSION REQUEST" in api.sent[0]["text"]
+
+
+async def test_a_card_answered_at_the_desk_says_so_and_loses_its_buttons(setup) -> None:
+    """Somebody answered in the runtime's own prompt first. A card left live
+    would go on asking a settled question until it expired."""
+    channel, api, store, _ = setup
+    request = await an_approval(store, agent_id="opencode", tool="bash", tool_use_id="per_1")
+    await channel.send_approval_request(request)
+
+    await channel.close_approval(request, decision="allow", by="opencode, at the desk")
+
+    [edit] = api.edits
+    assert edit["text"].startswith("<b>✅ ALLOWED</b> by opencode, at the desk")
+    assert edit["reply_markup"] is None

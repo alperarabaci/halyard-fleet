@@ -23,15 +23,18 @@ credentials in the user's home directory.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import os
 import re
 import shutil
+import signal
 import subprocess
 from pathlib import Path
 
 from halyard.agents.turns import WEDGED_AFTER_SECONDS, LateFailure, Turns
+from halyard.core import usage
 
 logger = logging.getLogger(__name__)
 
@@ -49,6 +52,12 @@ EFFORT_LEVELS = ("low", "medium", "high", "xhigh", "max")
 #: months ago would be worse than passing it through and letting the CLI answer.
 #: Override with HALYARD_CLAUDE_MODELS when something new appears.
 DEFAULT_MODELS = ("opus", "sonnet", "haiku", "fable")
+
+#: What a turn that may not edit anything is left with: the tools that read,
+#: and the shell — which the project's gate puts in front of a person, where an
+#: edit granted by `writes:` would go through without one. Passed with `=`, so
+#: the list cannot swallow the prompt that follows it.
+READING_TOOLS = "Read,Grep,Glob,Bash"
 
 #: No model override by default. Measured on a live Desktop-owned session:
 #: `--resume` with no `--model` continued on that session's opus model. The
@@ -190,6 +199,77 @@ def find_claude_binary(configured: str | None = None) -> str | None:
     return None
 
 
+def _tokens(value: object) -> int:
+    return value if isinstance(value, int) and value >= 0 else 0
+
+
+def _dollars(value: object) -> float | None:
+    return float(value) if isinstance(value, int | float) else None
+
+
+def turns_used(
+    answer: dict, *, purpose: str | None = None, project: str | None = None
+) -> list[usage.Turn]:
+    """What one `--output-format json` answer used, as rows for
+    `halyard.core.usage`.
+
+    One per model under `modelUsage`, since a turn can use more than one; the
+    turn's own `usage` when there is no such breakdown; nothing when there is
+    neither. The shape was measured on 2.1.270, 2026-09-15.
+    """
+    session = str(answer["session_id"]) if answer.get("session_id") else None
+    per_model = answer.get("modelUsage")
+    if isinstance(per_model, dict) and per_model:
+        return [
+            usage.Turn(
+                runtime="claude-code",
+                session_id=session,
+                model=str(model),
+                purpose=purpose,
+                project=project,
+                input_tokens=_tokens(used.get("inputTokens")),
+                output_tokens=_tokens(used.get("outputTokens")),
+                cache_write_tokens=_tokens(used.get("cacheCreationInputTokens")),
+                cache_read_tokens=_tokens(used.get("cacheReadInputTokens")),
+                cost_usd=_dollars(used.get("costUSD")),
+            )
+            for model, used in per_model.items()
+            if isinstance(used, dict)
+        ]
+    used = answer.get("usage")
+    if not isinstance(used, dict):
+        return []
+    return [
+        usage.Turn(
+            runtime="claude-code",
+            session_id=session,
+            model=None,
+            purpose=purpose,
+            project=project,
+            input_tokens=_tokens(used.get("input_tokens")),
+            output_tokens=_tokens(used.get("output_tokens")),
+            cache_write_tokens=_tokens(used.get("cache_creation_input_tokens")),
+            cache_read_tokens=_tokens(used.get("cache_read_input_tokens")),
+            cost_usd=_dollars(answer.get("total_cost_usd")),
+        )
+    ]
+
+
+def _end(process) -> None:
+    """End a one-shot turn and everything it started.
+
+    A check's turn runs commands — a test suite, say — as processes of its own,
+    and killing the CLI alone would leave them running for a check nobody is
+    waiting on. So the turn starts as a group of its own, and the group is what
+    is ended.
+    """
+    try:
+        os.killpg(process.pid, signal.SIGKILL)
+    except OSError:
+        with contextlib.suppress(ProcessLookupError):
+            process.kill()
+
+
 class ClaudeCodeRunner:
     """Delivers a message into a Claude Code session by resuming it."""
 
@@ -201,8 +281,12 @@ class ClaudeCodeRunner:
         models: tuple[str, ...] | None = None,
         default_model: str | None = DEFAULT_MODEL,
         oauth_token: str | None = None,
+        usage_path: Path | None = None,
     ) -> None:
         self._known_models = models or DEFAULT_MODELS
+        #: Where what each one-shot turn used is written: the control plane's
+        #: database. None writes nothing. See `halyard.core.usage`.
+        self._usage_path = usage_path
         self._default_model = default_model or None
         # A credential of our own for the turns this runner starts, so they do
         # not ride on the desktop login that expires while nobody is at the
@@ -357,7 +441,16 @@ class ClaudeCodeRunner:
         )
 
     async def ask(
-        self, text: str, *, timeout: float = 180.0, model: str | None = None
+        self,
+        text: str,
+        *,
+        timeout: float = 180.0,
+        model: str | None = None,
+        cwd: Path | None = None,
+        edits: bool = True,
+        session_id: str | None = None,
+        purpose: str | None = None,
+        project: str | None = None,
     ) -> str | None:
         """Run one prompt in a session of its own and return what came back.
 
@@ -367,6 +460,19 @@ class ClaudeCodeRunner:
         than part of it, has to happen somewhere else entirely. This is that
         somewhere else: a throwaway turn that reads what it is given and answers.
 
+        `cwd` stands the turn inside a project instead of wherever Halyard was
+        started — a check comparing a report against code has to be where that
+        code is. Such a turn is kept out of the project's session history:
+        nobody resumes it, and a list of every check ever run would bury the
+        sessions somebody does come back to. `edits=False` leaves it
+        `READING_TOOLS`. `session_id` is the id it runs under, chosen by the
+        caller so that what the turn asks for can be recognised as it arrives.
+
+        The answer is asked for as JSON, which carries what the turn used beside
+        what it said. `purpose` and `project` go on the row that records it —
+        see `halyard.core.usage`. Output that is not JSON is taken as the answer
+        itself, as it was before.
+
         Returns None on every failure. The caller is producing a convenience —
         a record of what a session knew before it was compacted — and a session
         must not be held up, or changed, because that could not be produced.
@@ -374,16 +480,24 @@ class ClaudeCodeRunner:
         binary = self._binary
         if not binary or not text.strip():
             return None
-        arguments = [binary, "-p"]
+        arguments = [binary, "-p", "--output-format", "json"]
         if chosen := model or self._default_model:
             arguments += ["--model", chosen]
+        if not edits:
+            arguments.append(f"--tools={READING_TOOLS}")
+        if session_id:
+            arguments += ["--session-id", session_id]
+        if cwd is not None:
+            arguments.append("--no-session-persistence")
         arguments.append(text)
         try:
             process = await asyncio.create_subprocess_exec(
                 *arguments,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
+                cwd=cwd,
                 env=self._environment(),
+                start_new_session=True,
             )
         except OSError:
             logger.warning("Could not start the claude CLI for a one-shot turn", exc_info=True)
@@ -391,10 +505,17 @@ class ClaudeCodeRunner:
         try:
             stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=timeout)
         except TimeoutError:
-            process.kill()
+            _end(process)
             await process.wait()
             logger.warning("A one-shot turn ran past %.0fs; giving up on it", timeout)
             return None
+        except asyncio.CancelledError:
+            # Stopped by somebody. What the turn started is a process of its
+            # own and would carry on for a check nobody is waiting on.
+            _end(process)
+            with contextlib.suppress(asyncio.CancelledError):
+                await process.wait()
+            raise
         if process.returncode != 0:
             reason = (
                 (stderr or b"").decode("utf-8", "replace").strip()
@@ -403,7 +524,22 @@ class ClaudeCodeRunner:
             )[:300]
             logger.warning("A one-shot turn failed (exit %s): %s", process.returncode, reason)
             return None
-        answer = (stdout or b"").decode("utf-8", "replace").strip()
+        printed = (stdout or b"").decode("utf-8", "replace").strip()
+        try:
+            answered = json.loads(printed)
+        except ValueError:
+            answered = None
+        if not isinstance(answered, dict) or "result" not in answered:
+            # How the CLI answered before it was asked for JSON: the text is
+            # the answer, and there is nothing to record.
+            return printed or None
+        if self._usage_path is not None:
+            turns = turns_used(answered, purpose=purpose, project=project)
+            await asyncio.to_thread(usage.record, self._usage_path, turns)
+        answer = str(answered.get("result") or "").strip()
+        if answered.get("is_error"):
+            logger.warning("A one-shot turn answered with an error: %s", answer[:300])
+            return None
         return answer or None
 
     def _environment(self) -> dict[str, str]:

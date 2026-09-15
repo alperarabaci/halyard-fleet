@@ -36,6 +36,7 @@ That is handled here rather than left to whoever writes the file.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -55,8 +56,12 @@ _PROJECT_FIELDS = {
     "commands",
     "forge",
     "labels",
+    "label_groups",
+    "label_findings",
     "label_work",
     "confirmation",
+    "checks",
+    "handoffs",
 }
 _SEAT_FIELDS = {
     "runtime",
@@ -90,6 +95,33 @@ class Confirmation:
 
 
 @dataclass(frozen=True)
+class Handoff:
+    """One way a reply goes from one seat to another, as a project defines it.
+
+    A button on `/handoff`'s card. It carries the chat's last reply, puts the
+    project's own text in front of it, runs whichever of the project's checks it
+    names over the reply first, and delivers the lot to a seat — the one `to:`
+    names, or whichever is pressed. Everything it reads belongs to the project;
+    Halyard adds only what it can see for itself. See `halyard.handoffs`.
+    """
+
+    name: str
+    #: The project's own text for whoever receives it — `review.md`. Read
+    #: relative to the project. Optional: a handoff can be the reply alone.
+    prompt: Path | None = None
+    #: Whether the chat's last reply goes with it. Almost always.
+    include_last_message: bool = True
+    #: Checks from this project's `checks:`, run over the reply before it goes.
+    checks: tuple[str, ...] = ()
+    #: Commands from this project's `commands:`, run one after another before
+    #: the checks. What each did goes into the envelope the checks read, and
+    #: into the message; a failure is reported, not a reason to stop.
+    commands: tuple[str, ...] = ()
+    #: A role (`navigator`) or a seat's label. Unset offers every seat.
+    to: str | None = None
+
+
+@dataclass(frozen=True)
 class Project:
     """A codebase, its location, and the seats working in it."""
 
@@ -98,10 +130,11 @@ class Project:
     #: anybody decides to gate it.
     path: Path | None
     seats: list[Seat]
-    #: What has to pass before a commit is offered from a phone — `make
-    #: test-fast`, or whatever this project calls its quick check. Optional,
-    #: and absent means no check runs rather than some guessed default: a
-    #: command invented for somebody's repository would fail on every commit.
+    #: What has to pass before `/review_and_commit` offers a commit: the name
+    #: of one of `commands:` — `test-fast` — so that everything Halyard runs for
+    #: a project is in that one list. Optional, and absent means no check runs
+    #: rather than some guessed default: a command invented for somebody's
+    #: repository would fail on every commit.
     validate: str | None = None
     #: Which of the named warnings apply here. `None` means the default set;
     #: an empty list means none, which is how somebody who does not share this
@@ -120,6 +153,18 @@ class Project:
     #: which is the right default until a project has more of them than a phone
     #: keyboard can show.
     labels: tuple[str, ...] = ()
+    #: Groups of task labels, by name — `level: [level::1, level::2, level::3]`.
+    #: The first label a task carries from each goes on the envelope checks and
+    #: handoffs are given, as `level: level::3`. Empty unless configured. A task
+    #: with none of a group's labels, or a tracker that cannot be read, adds
+    #: nothing: this reports what is there, it does not ask for anything.
+    label_groups: dict[str, tuple[str, ...]] = field(default_factory=dict)
+    #: What this project's checks answer when they found something, in its own
+    #: words — `status: candidate`. An answer that says one of them puts
+    #: `halyard:<check>` on the task, wherever the check ran. Empty unless
+    #: configured, and nothing is written without it: this writes to somebody's
+    #: tracker on its own.
+    label_findings: tuple[str, ...] = ()
     #: Whether each seat's label goes on the task its branch is for, the first
     #: time that seat works on it — `claude:navigator`. Off unless asked for:
     #: it writes to somebody's issue tracker on its own. See `tasks.attribution`.
@@ -127,6 +172,14 @@ class Project:
     #: The extra round this project asks for before closing a piece of work.
     #: `None` means no such round exists here, and `/commit` is unchanged.
     confirmation: Confirmation | None = None
+    #: What `/checks` runs over the last reply in a chat, by name — `proof:
+    #: NOTES/checks/proof.md`. Each is the project's own file, read relative to
+    #: the project and put in front of a model on its own. Empty unless
+    #: configured. See `halyard.checks`.
+    checks: dict[str, Path] = field(default_factory=dict)
+    #: How a reply is handed from one seat to another here, by name — see
+    #: `Handoff`. Empty unless configured.
+    handoffs: dict[str, Handoff] = field(default_factory=dict)
 
 
 def _confirmation_from(project: str, value: Any) -> Confirmation | None:
@@ -149,6 +202,112 @@ def _confirmation_from(project: str, value: Any) -> Confirmation | None:
     )
 
 
+def _checks_from(project: str, value: Any) -> dict[str, Path]:
+    """`checks:` as a mapping of name to the file that says what to look for.
+
+    Strict about the shape: a check written as a mapping would otherwise become
+    a path spelled with its own braces, and fail only when somebody ran it.
+    """
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        raise ValueError(f"Project {project!r}: `checks:` must be a mapping of name to file.")
+    found: dict[str, Path] = {}
+    for name, where in value.items():
+        if not str(name).strip() or not isinstance(where, str) or not where.strip():
+            raise ValueError(
+                f"Project {project!r}: check {name!r} needs a file, "
+                "like `proof: NOTES/checks/proof.md`."
+            )
+        found[str(name).strip()] = Path(where.strip()).expanduser()
+    return found
+
+
+#: A handoff's name rides in a button, where Telegram allows 64 bytes of
+#: callback data, and is typed after `/handoff`.
+_HANDOFF_NAME = re.compile(r"^[a-z0-9_-]{1,32}$")
+_HANDOFF_FIELDS = {"prompt", "include_last_message", "checks", "commands", "to"}
+
+
+def _handoffs_from(
+    project: str,
+    value: Any,
+    *,
+    checks: dict[str, Path],
+    seats: list[Seat],
+    commands: dict[str, str] | None = None,
+) -> dict[str, Handoff]:
+    """`handoffs:` as a mapping of name to how that handoff is made.
+
+    Checked against the rest of the project here, because a handoff naming a
+    check, a command or a seat nobody defined would otherwise fail only when
+    somebody pressed it — from a phone, in the middle of a piece of work.
+    """
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        raise ValueError(f"Project {project!r}: `handoffs:` must be a mapping of name to handoff.")
+    roles = {role.value for role in Role}
+    labels = {seat.label for seat in seats}
+    found: dict[str, Handoff] = {}
+    for raw, spec in value.items():
+        name = str(raw).strip()
+        where = f"Project {project!r}: handoff {name!r}"
+        if not _HANDOFF_NAME.match(name):
+            raise ValueError(
+                f"{where} needs a name of lowercase letters, digits, `-` or `_`, "
+                "up to 32 characters."
+            )
+        spec = spec or {}
+        if not isinstance(spec, dict):
+            raise ValueError(f"{where} must be a mapping.")
+        unknown = set(spec) - _HANDOFF_FIELDS
+        if unknown:
+            raise ValueError(f"{where} has unknown field(s) {', '.join(sorted(unknown))}")
+        named = spec.get("checks") or []
+        if not isinstance(named, list) or not all(isinstance(n, str) and n.strip() for n in named):
+            raise ValueError(f"{where}: `checks:` must be a list of check names.")
+        named = [n.strip() for n in named]
+        if missing := [n for n in named if n not in checks]:
+            raise ValueError(
+                f"{where} names checks this project does not define: {', '.join(missing)}"
+            )
+        ran = spec.get("commands") or []
+        if not isinstance(ran, list) or not all(isinstance(n, str) and n.strip() for n in ran):
+            raise ValueError(f"{where}: `commands:` must be a list of command names.")
+        ran = [n.strip() for n in ran]
+        if missing := [n for n in ran if n not in (commands or {})]:
+            raise ValueError(
+                f"{where} names commands this project does not define: {', '.join(missing)}"
+            )
+        carries = spec.get("include_last_message")
+        carries = (
+            True if carries is None else _as_flag(project, f"{name}.include_last_message", carries)
+        )
+        if named and not carries:
+            raise ValueError(f"{where} runs checks over the last message, so it has to carry it.")
+        prompt = _as_text(spec.get("prompt"))
+        if not prompt and not carries and not ran:
+            raise ValueError(
+                f"{where} hands on nothing: give it a `prompt:`, the last message or a command."
+            )
+        to = _as_text(spec.get("to"))
+        if to and to.lower() not in roles and to not in labels:
+            raise ValueError(
+                f"{where}: `to:` must be a role ({', '.join(sorted(roles))}) "
+                "or one of this project's seats."
+            )
+        found[name] = Handoff(
+            name=name,
+            prompt=Path(prompt).expanduser() if prompt else None,
+            include_last_message=carries,
+            checks=tuple(named),
+            commands=tuple(ran),
+            to=to.lower() if to and to.lower() in roles else to,
+        )
+    return found
+
+
 def _commands_from(project: str, value: Any) -> dict[str, str]:
     """`commands:` as a mapping of name to command line."""
     if value is None:
@@ -156,6 +315,25 @@ def _commands_from(project: str, value: Any) -> dict[str, str]:
     if not isinstance(value, dict):
         raise ValueError(f"Project {project!r}: `commands:` must be a mapping of name to command.")
     return {str(name): str(line) for name, line in value.items()}
+
+
+def _validate_from(project: str, value: Any, commands: dict[str, str]) -> str | None:
+    """`validate:` as the name of one of the project's `commands:`.
+
+    Not a command line of its own: what Halyard runs for a project is what
+    `commands:` lists, and a line written anywhere else is one nobody reading
+    that list can see. Checked here, as a handoff's commands are, rather than
+    when somebody presses the button.
+    """
+    name = _as_text(value)
+    if name is None or name in commands:
+        return name
+    listed = f" ({', '.join(commands)})" if commands else ""
+    raise ValueError(
+        f"Project {project!r}: `validate:` names {name!r}, which is not one of its "
+        f"`commands:`{listed}. Write the command there and its name here — "
+        "`validate: test-fast`."
+    )
 
 
 def _warnings_from(project: str, value: Any) -> tuple[str, ...] | None:
@@ -171,6 +349,55 @@ def _warnings_from(project: str, value: Any) -> tuple[str, ...] | None:
     if not isinstance(value, list):
         raise ValueError(f"Project {project!r}: `warn_if:` must be a list of names.")
     return tuple(str(name).strip() for name in value if str(name).strip())
+
+
+def _findings_from(project: str, value: Any) -> tuple[str, ...]:
+    """`label_findings:` as phrases, in the project's own words.
+
+    A phrase is nearly always `status: something`, which YAML reads as a
+    mapping unless it is quoted — so a mapping here is refused with that said,
+    rather than turned into text nobody's answer will ever contain.
+    """
+    if value is None:
+        return ()
+    if isinstance(value, str):
+        value = [value]
+    if not isinstance(value, list):
+        raise ValueError(f"Project {project!r}: `label_findings:` must be a list of phrases.")
+    phrases = []
+    for phrase in value:
+        if isinstance(phrase, dict):
+            raise ValueError(
+                f"Project {project!r}: a `label_findings:` phrase with a colon in it has "
+                'to be quoted — `- "status: candidate"` — or YAML reads it as a mapping.'
+            )
+        if str(phrase).strip():
+            phrases.append(str(phrase).strip())
+    return tuple(phrases)
+
+
+def _label_groups_from(project: str, value: Any) -> dict[str, tuple[str, ...]]:
+    """`label_groups:` as a mapping of group name to its labels, in order.
+
+    The order is kept because it is the order a group is searched in. A group
+    written as a lone label is read as a group of one.
+    """
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        raise ValueError(
+            f"Project {project!r}: `label_groups:` must be a mapping of name to labels."
+        )
+    groups: dict[str, tuple[str, ...]] = {}
+    for name, labels in value.items():
+        if isinstance(labels, str):
+            labels = [labels]
+        if not isinstance(labels, list):
+            raise ValueError(
+                f"Project {project!r}: label group {str(name)!r} must be a list of labels."
+            )
+        groups[str(name)] = tuple(str(label).strip() for label in labels if str(label).strip())
+    return groups
 
 
 def _as_text(value: Any) -> str | None:
@@ -320,18 +547,26 @@ def projects_from_yaml(text: str) -> list[Project]:
                 )
 
         path = _as_text(body.get("path"))
+        checks = _checks_from(project, body.get("checks"))
+        commands = _commands_from(project, body.get("commands"))
         projects.append(
             Project(
                 name=project,
                 path=Path(path).expanduser() if path else None,
                 seats=seats,
-                validate=_as_text(body.get("validate")),
+                validate=_validate_from(project, body.get("validate"), commands),
                 warn_if=_warnings_from(project, body.get("warn_if")),
-                commands=_commands_from(project, body.get("commands")),
+                commands=commands,
                 forge=_as_text(body.get("forge")),
                 labels=_warnings_from(project, body.get("labels")) or (),
+                label_groups=_label_groups_from(project, body.get("label_groups")),
+                label_findings=_findings_from(project, body.get("label_findings")),
                 label_work=_as_flag(project, "label_work", body.get("label_work")),
                 confirmation=_confirmation_from(project, body.get("confirmation")),
+                checks=checks,
+                handoffs=_handoffs_from(
+                    project, body.get("handoffs"), checks=checks, seats=seats, commands=commands
+                ),
             )
         )
     return projects
@@ -464,6 +699,11 @@ def missing_files(projects: list[Project]) -> list[str]:
                 wanted.append(("confirmation.inquiry", project.confirmation.inquiry))
             if project.confirmation.review:
                 wanted.append(("confirmation.review", project.confirmation.review))
+        for name, path in project.checks.items():
+            wanted.append((f"checks.{name}", path))
+        for name, handoff in project.handoffs.items():
+            if handoff.prompt:
+                wanted.append((f"handoffs.{name}.prompt", handoff.prompt))
         for seat in project.seats:
             for key in ("before_compaction", "after_compaction"):
                 if written := getattr(seat, key, None):

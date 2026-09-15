@@ -93,6 +93,8 @@ class Result:
     #: True when it was still going when the clock ran out. Told apart from a
     #: plain failure: nothing is known about whether it would have passed.
     timed_out: bool = False
+    #: What it exited with. None when it never started, or was stopped.
+    exit_code: int | None = None
 
 
 def _tail(text: str, lines: int) -> str:
@@ -150,6 +152,9 @@ def run(
     """
     started = time.monotonic()
     environment = _environment()
+    # Said before anything can go wrong, so a run that never reports back has
+    # still left a line saying it began — whoever asked for it, from wherever.
+    logger.info("Command started in %s: %s", path, command)
     try:
         # A command line from this machine's own configuration, run as written.
         process = subprocess.Popen(
@@ -174,6 +179,7 @@ def run(
         if now - started > timeout:
             process.kill()
             process.wait()
+            logger.warning("Command stopped after %.0fs in %s: %s", timeout, path, command)
             return Result(
                 ok=False,
                 output=f"It was still running after {timeout:.0f}s and was stopped.",
@@ -194,7 +200,9 @@ def run(
     whole = "\n".join(lines)
     if process.returncode == 0:
         logger.info("Command finished in %.1fs: %s", seconds, command)
-        return Result(ok=True, output=_tail(whole, LINES_WHEN_IT_PASSED), seconds=seconds)
+        return Result(
+            ok=True, output=_tail(whole, LINES_WHEN_IT_PASSED), seconds=seconds, exit_code=0
+        )
 
     logger.warning(
         "Command failed (exit %s) after %.1fs in %s: %s",
@@ -218,4 +226,27 @@ def run(
             "That reads like something was not on PATH. The PATH this ran with was: %s",
             environment.get("PATH", "(unset)"),
         )
-    return Result(ok=False, output=_tail(whole, LINES_WHEN_IT_FAILED), seconds=seconds)
+    return Result(
+        ok=False,
+        output=_tail(whole, LINES_WHEN_IT_FAILED),
+        seconds=seconds,
+        exit_code=process.returncode,
+    )
+
+
+def summary(name: str, line: str, result: Result) -> str:
+    """One line saying what a command did, for whoever reads it next.
+
+    Which command, how it ended, how long it took, and the last thing it
+    printed — where a test runner puts its count, and where a project's own
+    target puts its status and the file the whole run went to. What it printed
+    before that travels separately, for whoever needs more than the line.
+    """
+    if result.timed_out:
+        how = f"stopped after {result.seconds:.0f}s"
+    elif result.exit_code is None:
+        how = f"could not start: {result.output}"
+    else:
+        how = f"exit {result.exit_code} · {result.seconds:.0f}s"
+    last = result.output.splitlines()[-1] if result.output and result.exit_code is not None else ""
+    return f"Ran {name}: {line} · {how}" + (f" · last line: {last}" if last else "")

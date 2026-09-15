@@ -177,19 +177,25 @@ async def test_nobody_answering_denies_on_a_real_timer() -> None:
     assert resolution.reason is ResolutionReason.TIMEOUT
 
 
-async def test_a_decision_that_wins_the_race_by_a_hair_is_honoured() -> None:
+async def test_a_decision_that_wins_the_race_by_a_hair_is_honoured(
+    store: ApprovalStore, clock: ManualClock
+) -> None:
     # The deadline and a button press can land in the same instant. A human who
-    # answered in time keeps their answer.
-    store = ApprovalStore(ttl=timedelta(milliseconds=50))
+    # answered in time keeps their answer: the press lands a millisecond before
+    # the deadline, and the timer firing just after finds it there. On the
+    # store's clock rather than a real one — with a real 50ms deadline, a CI
+    # runner that stalled for forty milliseconds made the press the late one.
     request = await open_request(store)
+    waiting = asyncio.create_task(store.wait_for(request.request_id))
+    await asyncio.sleep(0)
 
-    async def decide() -> None:
-        await asyncio.sleep(0.01)
-        await store.resolve(request.request_id, nonce=request.nonce, decision=Decision.ALLOW)
+    clock.advance(TTL.total_seconds() - 0.001)
+    await store.resolve(request.request_id, nonce=request.nonce, decision=Decision.ALLOW)
+    clock.advance(0.001)
+    timer = await store.deny(request.request_id, reason=ResolutionReason.TIMEOUT, note="expired")
 
-    resolution, _ = await asyncio.gather(store.wait_for(request.request_id), decide())
-
-    assert resolution.allowed
+    assert (await waiting).allowed
+    assert timer.allowed
 
 
 async def test_shutdown_denies_everything_still_open(store: ApprovalStore) -> None:
@@ -282,6 +288,51 @@ async def test_only_one_of_many_simultaneous_presses_wins(store: ApprovalStore) 
 
 
 # --- retries and retention --------------------------------------------------
+
+
+async def test_a_question_answered_at_the_desk_is_closed_by_its_tool_call(
+    store: ApprovalStore,
+) -> None:
+    """No nonce — nobody here pressed anything — and whoever is waiting learns
+    it was answered elsewhere, not here."""
+    request = await open_request(store, tool_use_id="per_1")
+
+    closed = await store.answered_elsewhere(
+        session_id="session-1",
+        tool_use_id="per_1",
+        decision=Decision.ALLOW,
+        decided_by="opencode, at the desk",
+        note="Allowed in opencode itself.",
+    )
+    resolution = await store.wait_for(request.request_id)
+
+    assert closed == request
+    assert resolution.reason is ResolutionReason.ELSEWHERE
+    assert resolution.decided_by == "opencode, at the desk"
+
+
+async def test_only_an_open_question_of_that_session_is_closed_from_the_desk(
+    store: ApprovalStore,
+) -> None:
+    """Another session's question is not this one, and a question the phone
+    already answered stays answered the way the phone answered it."""
+    request = await open_request(store, tool_use_id="per_1")
+    elsewhere = {
+        "tool_use_id": "per_1",
+        "decision": Decision.ALLOW,
+        "decided_by": "opencode, at the desk",
+        "note": "Allowed in opencode itself.",
+    }
+
+    another_session = await store.answered_elsewhere(session_id="session-2", **elsewhere)
+    await store.resolve(
+        request.request_id, nonce=request.nonce, decision=Decision.DENY, decided_by="tg:1"
+    )
+    after_the_phone = await store.answered_elsewhere(session_id="session-1", **elsewhere)
+
+    assert another_session is None
+    assert after_the_phone is None
+    assert (await store.resolution_of(request.request_id)).decision is Decision.DENY
 
 
 async def test_a_retried_tool_call_reuses_its_open_request(store: ApprovalStore) -> None:

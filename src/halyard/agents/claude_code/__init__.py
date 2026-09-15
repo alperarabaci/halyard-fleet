@@ -35,6 +35,7 @@ def _runner(settings=None) -> ClaudeCodeRunner:
         models=models or None,
         default_model=(settings.claude_default_model or "").strip() or None,
         oauth_token=settings.claude_oauth_token,
+        usage_path=settings.db_path,
     )
 
 

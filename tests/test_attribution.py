@@ -9,6 +9,7 @@ half of what is under test.
 from __future__ import annotations
 
 import asyncio
+import logging
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -70,7 +71,7 @@ def wired(
     labeller = Attribution(
         token="a-token",
         projects={"alpha-engine": Opted(path=repo, seats=tuple(seats))},
-        tag_of={"claude-code": "claude", "codex": "codex"}.get,
+        tag_of={"claude-code": "claude", "codex": "codex", "opencode": "opencode"}.get,
     )
     registry = SessionRegistry()
     registry.listen(labeller.seen)
@@ -82,9 +83,22 @@ async def settled(labeller: Attribution) -> None:
         await asyncio.gather(*list(labeller._running))
 
 
-async def work(registry, cwd: Path, *, session="s-nav", runtime="claude-code", role=Role.NAVIGATOR):
+async def work(
+    registry,
+    cwd: Path,
+    *,
+    session="s-nav",
+    runtime="claude-code",
+    role=Role.NAVIGATOR,
+    name: str | None = None,
+):
     await registry.observe(
-        session_id=session, agent_id=runtime, project="alpha-engine", role=role, cwd=str(cwd)
+        session_id=session,
+        agent_id=runtime,
+        project="alpha-engine",
+        role=role,
+        session_name=name,
+        cwd=str(cwd),
     )
 
 
@@ -282,3 +296,62 @@ async def test_another_seat_s_label_is_not_borrowed(monkeypatch, repo) -> None:
     await settled(labeller)
 
     assert forge.added == [(347, "claude:navigator")]
+
+
+def seat(label: str, runtime: str, session: str, role: Role) -> Seat:
+    """A seat as `halyard.yaml` writes it: under its project, with a session."""
+    return Seat(label, runtime, session, None, role, project="alpha-engine")
+
+
+ALPHA = [
+    seat("nav", "claude-code", "alpha-engine-navigator", Role.NAVIGATOR),
+    seat("drv", "claude-code", "alpha-engine-driver", Role.DRIVER),
+    seat("opendrv", "opencode", "ses_4f1a", Role.DRIVER),
+]
+
+
+async def test_a_seat_is_found_by_its_session_name_without_declaring_a_role(
+    monkeypatch, repo
+) -> None:
+    """A session started from the desktop app has no shell to set HALYARD_ROLE
+    in. Its seat still says what it is — and until the seat was looked up, every
+    task stayed unlabelled while the startup line said labelling was on."""
+    forge = FakeForge()
+    registry, labeller = wired(monkeypatch, repo, forge, seats=ALPHA)
+
+    await work(registry, repo, session="c0ffee", role=None, name="alpha-engine-driver")
+    await settled(labeller)
+
+    assert forge.added == [(347, "claude:driver")]
+
+
+async def test_a_session_with_no_name_to_go_by_is_found_by_its_project(monkeypatch, repo) -> None:
+    """opencode titles a session from its conversation, so the codebase says
+    which seat it is — the answer its cards already get."""
+    forge = FakeForge()
+    registry, labeller = wired(monkeypatch, repo, forge, seats=ALPHA)
+
+    await work(
+        registry, repo, session="ses_9b2c", runtime="opencode", role=None, name="Fix the loader"
+    )
+    await settled(labeller)
+
+    assert forge.added == [(347, "opencode:driver")]
+
+
+async def test_a_session_that_is_no_seat_is_said_once_and_not_labelled(
+    monkeypatch, repo, caplog
+) -> None:
+    """One of Halyard's own check turns, for one: it asks through the gate in
+    the project, and it is not a seat. Two of this runtime's seats share the
+    project, so the codebase cannot say which either."""
+    caplog.set_level(logging.INFO)
+    forge = FakeForge()
+    registry, labeller = wired(monkeypatch, repo, forge, seats=ALPHA)
+
+    for _ in range(2):
+        await work(registry, repo, session="check-1", role=None)
+        await settled(labeller)
+
+    assert forge.asked == 0
+    assert sum("matches no seat" in record.getMessage() for record in caplog.records) == 1

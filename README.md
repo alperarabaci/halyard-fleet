@@ -71,6 +71,10 @@ uv run halyard           # keep this running
 already see, and reads the bot token without echoing it. It backs up any file it
 replaces and keeps settings it does not manage.
 
+Writing the file by hand instead, start from `halyard.simple.yaml.example` — one
+project, one seat, one chat — and take anything more from `halyard.yaml.example`,
+which describes all of it.
+
 One file describes a machine: the settings and the seats of every project it
 gates. `halyard.yaml` is gitignored, and a real environment variable still
 overrides it — so a container can pass a token in without writing it to disk.
@@ -92,7 +96,9 @@ reading configuration.
 | *(type anything)* | send it into that group's session |
 | `/options` | every model and effort level the runtime accepts |
 | `/model`, `/effort` | what answers, and how hard it thinks |
-| `/to` | hand a message to another seat by name |
+| `/to` | *(typed; not on the menu)* hand a message to another seat by name |
+| `/checks` | pick one of this project's own checks and run it over the chat's last reply; the answer has a button per seat to hand it on |
+| `/handoff` | hand the chat's last reply on the way this project defines it — its own prompt in front, its commands and checks run first |
 | `/md` | *(configurable)* have the agent write its answer to a file and pass the path |
 | `/commit` | commit this branch's work, with a message to approve — and push |
 | `/review_and_commit` | the same, plus this project's own checks and its review round |
@@ -140,23 +146,29 @@ One pattern covers the same tool on a local server and a production one. `Bash`
 and the file tools cannot be granted here — the first is what the gate is for,
 and the second is granted by destination under `writes:`.
 
-**The last four commands are per-project**, and each is one line under the
-project in `halyard.yaml`:
+**Several commands are per-project**, and each is one line under the project in
+`halyard.yaml`:
 
 ```yaml
 projects:
   alpha-engine:
     path: ~/code/alpha-engine
-    validate: make test-fast          # /commit runs this first, every time
     commands:                         # what /command offers, by name
       test-all: make test-all
+      test-fast: make test-fast
       bootstrap: make bootstrap-up
+    validate: test-fast               # one of commands:, run first by /review_and_commit
     labels: [andon, rework]           # narrows /label; empty means all of them
     warn_if: [task-id-missing]        # the default; [] turns the warnings off
     confirmation:                     # the extra round, when a guard cannot catch it
       inquiry: NOTES/CONFIRMATION_INQUIRY.md
       review: NOTES/CONFIRMATION_REVIEW.md
 ```
+
+**Checks and handoffs** have [a page of their own](docs/handoffs.md): a
+project's own checks, run over a seat's reply, and a reply handed from one seat
+to the next with the project's prompt in front and its commands and checks run
+first. Nothing above needs either.
 
 **`confirmation:` buys a round that a guard cannot.** A test proves what it
 tests and a file of invariants proves nothing at all — an agent's attention is
@@ -173,12 +185,12 @@ what is worth asking again is something a team learns about its own failures.
 `/commit` takes the whole working tree, has a message written for it in this
 repository's own style, and shows what changed rather than only which files —
 and stops there, which is what most changes want. `/review_and_commit` is the
-same command with everything the project asked for: `validate:` runs, the
-warnings apply, and the round is offered. A failing `validate:` means no card at
-all. Two commands rather than a list of paths that skip the gate: such a list
-has to be maintained against a repository that keeps growing and gets it wrong
-quietly, while a command is chosen by somebody who already knows which they
-meant. `/command` runs in the background and
+same command with everything the project asked for: the command `validate:`
+names runs, the warnings apply, and the round is offered. A failing one means
+no card at all. Two commands rather than a list of paths that skip the gate:
+such a list has to be maintained against a repository that keeps growing and
+gets it wrong quietly, while a command is chosen by somebody who already knows
+which they meant. `/command` runs in the background and
 reports the tail when it finishes, one at a time per project. `/label` reads
 the task number off the branch and asks its issue tracker — `HALYARD_FORGE_TOKEN`
 is the only thing it needs, and only a host that cannot name itself needs
@@ -225,22 +237,25 @@ missing costs orientation, never the session.
 | `halyard verify` | prove the gate stops things, by running into it |
 | `halyard wire` / `unwire` | put the gate on a project, or take it off |
 | `halyard sessions` | session names this machine can see |
+| `halyard usage` | what the turns Halyard started itself used, by model and purpose |
 | `halyard service install` | run it as a launchd service (macOS) that updates itself first |
 
 `halyard service install` sets up a launchd agent that comes back after a crash
 and after a reboot. Every time it starts it runs `git pull --ff-only`, then
-`uv sync`, then serves — so the machine you leave running stays current without
-you logging in to update it. The pull is fail-open: it never rewinds or touches
-local changes, and a pull it cannot fast-forward is skipped so the last
-known-good code still serves. It runs the code it pulls, so point the branch at
-a remote you control; `install` prints which one. `uninstall` and `status` do
-what they say. macOS only — on Linux, run `halyard serve` under a systemd unit.
+`uv sync --inexact`, then serves — so the machine you leave running stays
+current without you logging in to update it, and a checkout you also develop in
+keeps the tools `uv sync --extra dev` installed. The pull is fail-open: it never
+rewinds or touches local changes, and a pull it cannot fast-forward is skipped
+so the last known-good code still serves. It runs the code it pulls, so point
+the branch at a remote you control; `install` prints which one. `uninstall` and
+`status` do what they say. macOS only — on Linux, run `halyard serve` under a
+systemd unit.
 
 ## Known limitations
 
 - **The desktop apps show an injected turn late, not never.** A message from your
-  phone reaches the session and its reply comes back to you; the app catches up when
-  its window is focused again.
+  phone reaches the session and its reply comes back to you. In the Claude Code
+  app, Reload shows it, without interrupting a turn that is running.
 - **Two things can outrun the gate.** A hook that exceeds its timeout, and a wrapper
   that cannot start at all, both let the command through. `doctor` checks for the
   second.
@@ -250,9 +265,10 @@ what they say. macOS only — on Linux, run `halyard serve` under a systemd unit
   would be refusing the only thing it was asked for. What `.gitignore` excludes
   is excluded, and the card names the files that are new.
 - **The project's own check belongs to `/review_and_commit`, not `/commit`.**
-  `validate:` under a project — `make test-fast` — runs there, and a failing
-  check means no card at all rather than a question nobody can usefully answer.
-  Plain `/commit` writes a message and stops, which is what most changes want.
+  `validate:` names one of the project's `commands:` — `test-fast` — and it runs
+  there; a failing check means no card at all rather than a question nobody can
+  usefully answer. Plain `/commit` writes a message and stops, which is what
+  most changes want.
 - **Agents can be stopped from committing at all.** `HALYARD_REFUSE_AGENT_COMMITS`
   refuses an agent's own `git commit` or `git push` before anybody is asked. Off
   by default. Unlike everything else the gate does, `/pause` does not lift it: a
@@ -307,6 +323,7 @@ behalf, uncontrolled agent-to-agent messaging, or multi-user RBAC.
 | [Before you wire it in](docs/before-you-wire-it.md) | What changes, and what surprised us |
 | [When it does not work](docs/when-it-does-not-work.md) | Every way setup has gone wrong so far, and the fix |
 | [Setup](docs/setup.md) | Installing it, seats in YAML, gating a project by hand |
+| [Checks and handoffs](docs/handoffs.md) | A project's own checks, and handing a reply from one seat to the next |
 | [Telegram](docs/telegram.md) | The bot, seats, models and effort |
 | [Architecture](docs/architecture.md) | How the layers fit, and the security posture |
 | [Hook behaviour](docs/hook-payload-notes.md) | What the runtimes' hooks actually do — measured |

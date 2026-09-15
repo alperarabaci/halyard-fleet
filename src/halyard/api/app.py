@@ -121,6 +121,29 @@ class ApprovalRequestBody(BaseModel):
     patterns: list[str] | None = None
 
 
+class AnsweredBody(BaseModel):
+    """A card's question, answered where the agent runs instead.
+
+    Sent by a bridge whose runtime keeps its own prompt on the screen while a
+    card is out — opencode — when somebody answers there first. `tool_use_id`
+    is whatever the bridge sent the question under.
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    session_id: str
+    tool_use_id: str
+    decision: Decision
+    agent_id: str = runtimes.DEFAULT
+
+
+class AnsweredResponse(BaseModel):
+    """Whether a card was still open for it: false when the phone answered
+    first, or no card was ever sent."""
+
+    closed: bool
+
+
 class ApprovalResponse(BaseModel):
     """What the bridge turns into a hook decision.
 
@@ -281,11 +304,11 @@ def _build_channel(
     # Prompts are the one part of the configuration a person edits often, so a
     # mistake in them must not take the control plane down with it. Refusing to
     # start over the wording of a shortcut would lose the gate as well.
-    from halyard.channels.telegram.adapter import COMMANDS
+    from halyard.channels.telegram.adapter import reserved_names
     from halyard.core import prompts as configured_prompts
 
     try:
-        prompts = configured_prompts.load(reserved=[name for name, _ in COMMANDS])
+        prompts = configured_prompts.load(reserved=reserved_names())
     except ValueError as error:
         logger.warning("Ignoring the `prompts:` block: %s", error)
         prompts = dict(configured_prompts.DEFAULTS)
@@ -634,6 +657,17 @@ def create_app(settings: Settings, *, channel=None) -> FastAPI:
             request_id=outcome.request_id,
             risk=outcome.risk,
         )
+
+    @app.post("/v1/approvals/answered", response_model=AnsweredResponse)
+    async def answered_elsewhere(body: AnsweredBody) -> AnsweredResponse:
+        """Close the card for a question answered at the desk. Decides nothing."""
+        closed = await service.answered_elsewhere(
+            session_id=body.session_id,
+            agent_id=body.agent_id,
+            tool_use_id=body.tool_use_id,
+            decision=body.decision,
+        )
+        return AnsweredResponse(closed=closed)
 
     @app.post("/v1/questions", response_model=QuestionResponse)
     async def ask_question(body: QuestionRequestBody) -> QuestionResponse:

@@ -28,7 +28,9 @@
  *
  * The same property makes the phone and the desk equals: both can answer, and
  * the first one wins. That is the arrangement somebody working at the machine
- * actually wants.
+ * actually wants. When the desk wins, the card is told and closes, rather than
+ * asking a settled question until it expires: `permission.replied` names the
+ * question by the id the card was opened under.
  *
  * **`allow` is answered with `once`, never `always`.** opencode offers to
  * remember a pattern — the event carries the `always` it would save. Taking it
@@ -100,6 +102,20 @@ type Asked = {
 }
 
 /**
+ * An answer, from anywhere: the desk, or this plugin relaying the phone's.
+ * 1.18.30 sends `{sessionID, requestID, reply}`, read out of its own source,
+ * with `reply` one of `once`, `always`, `reject`. Older SDKs spell the last two
+ * `permissionID` and `response`, so both spellings are read.
+ */
+type Replied = {
+  sessionID?: string
+  requestID?: string
+  permissionID?: string
+  reply?: string
+  response?: string
+}
+
+/**
  * What the card is about.
  *
  * `metadata.command` is what a person needs to see for a shell call. The
@@ -140,6 +156,12 @@ export const HalyardGate = async ({ client, directory, worktree }: any) => {
   /** The last reply relayed per session, so one turn is not sent twice. */
   const relayed = new Map<string, string>()
 
+  /** Questions this plugin answered itself, whose reply event is its own echo. */
+  const answeredHere = new Set<string>()
+
+  /** Questions answered at the desk before Halyard's answer came back. */
+  const answeredThere = new Set<string>()
+
   const answer = async (asked: Asked) => {
     const command = describe(asked)
     const asks = asksAbout(asked)
@@ -154,7 +176,9 @@ export const HalyardGate = async ({ client, directory, worktree }: any) => {
           agent_id: "opencode",
           tool: asked.permission ?? "bash",
           command,
-          tool_use_id: asked.tool?.callID,
+          // The question's own id, not the tool call's: the reply event names
+          // the question by it, and one tool call can raise two questions.
+          tool_use_id: asked.id,
           cwd: directory,
           project_dir: worktree ?? directory,
           // Only where the question is not simply the command: for a shell call
@@ -172,15 +196,24 @@ export const HalyardGate = async ({ client, directory, worktree }: any) => {
       return
     }
 
+    // Answered at the desk while the card was out. Whatever came back is not
+    // news to opencode, and sending it would answer one question twice.
+    if (answeredThere.delete(asked.id)) {
+      log("answered at the desk first", { id: asked.id, decision })
+      return
+    }
+
     // Only an exact allow allows, and it allows once. A missing field, a typo
-    // or a null is not an approval — and `defer` means the gate is paused,
-    // which here means the same as not answering: the desk decides.
+    // or a null is not an approval — and `defer` means the gate is paused, or
+    // the desk got there first, which here means the same as not answering.
     const response = decision === "allow" ? "once" : decision === "deny" ? "reject" : undefined
     if (!response) {
       log("not answered", { id: asked.id, decision })
       return
     }
 
+    // Its reply event is this plugin's own echo, not an answer from the desk.
+    answeredHere.add(asked.id)
     try {
       await client.postSessionIdPermissionsPermissionId({
         path: { id: asked.sessionID, permissionID: asked.id },
@@ -190,6 +223,46 @@ export const HalyardGate = async ({ client, directory, worktree }: any) => {
     } catch (refused) {
       // Someone at the desk answering first lands here, and is not a fault.
       log("could not answer", { id: asked.id, why: String(refused) })
+    }
+  }
+
+  /**
+   * An answer to a question a card may be out for.
+   *
+   * Its own echo when this plugin relayed the phone's answer — that card is
+   * closed already. Otherwise somebody answered at the desk first, and the
+   * card is told, so the phone stops asking. Only a reply this can read as a
+   * yes or a no is passed on; anything else leaves the card to its deadline.
+   */
+  const settled = async (replied: Replied) => {
+    const id = replied.requestID ?? replied.permissionID
+    if (!id || answeredHere.delete(id)) return
+    answeredThere.add(id)
+
+    const said = replied.reply ?? replied.response
+    const decision =
+      said === "once" || said === "always" ? "allow" : said === "reject" ? "deny" : undefined
+    if (!decision) {
+      log("answered at the desk, in words this does not read", { id, said })
+      return
+    }
+
+    try {
+      const closing = await fetch(`${HALYARD}/v1/approvals/answered`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          session_id: replied.sessionID,
+          agent_id: "opencode",
+          tool_use_id: id,
+          decision,
+        }),
+        signal: AbortSignal.timeout(TIMEOUT_MS),
+      })
+      if (!closing.ok) throw new Error(`control plane answered ${closing.status}`)
+      log("closed at the desk", { id, decision })
+    } catch (unreachable) {
+      log("could not close the card", { id, why: String(unreachable) })
     }
   }
 
@@ -317,6 +390,10 @@ export const HalyardGate = async ({ client, directory, worktree }: any) => {
       // would stop the rest of them being delivered.
       if (event?.type === "permission.asked") {
         void answer(event.properties as Asked)
+        return
+      }
+      if (event?.type === "permission.replied") {
+        void settled(event.properties as Replied)
         return
       }
       if (event?.type === "session.error") {
