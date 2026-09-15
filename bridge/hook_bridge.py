@@ -45,6 +45,7 @@ from _settings import (
     note,
     runtime_of,
     session_name,
+    zcode_title,
 )
 from _settings import timeout as lookup_timeout
 
@@ -233,6 +234,8 @@ def build_body(payload: dict) -> dict:
     name = (
         codex_thread_name(payload.get("session_id"))
         if runtime == "codex"
+        else zcode_title(payload.get("session_id"))
+        if runtime == "zcode"
         else session_name(transcript)
     )
 

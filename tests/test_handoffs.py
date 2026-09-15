@@ -123,7 +123,7 @@ async def test_the_navigator_gets_the_prompt_the_checks_and_the_report_in_that_o
 def with_followup(tmp_path: Path) -> Handoff:
     """A review with a text of its own for every round after the first."""
     (tmp_path / "NOTES" / "review.md").write_text("Try to break the prompt below.")
-    (tmp_path / "NOTES" / "review-followup.md").write_text("Only the earlier ENGELs.")
+    (tmp_path / "NOTES" / "review-followup.md").write_text("Only the earlier BLOCKERs.")
     return Handoff(
         name="review",
         prompt=Path("NOTES/review.md"),
@@ -139,7 +139,7 @@ async def test_the_first_round_sends_the_prompt_and_says_which_round(tmp_path: P
 
     [(_, text)] = delivery.sent
     assert "Try to break the prompt below." in text
-    assert "Only the earlier ENGELs." not in text
+    assert "Only the earlier BLOCKERs." not in text
     assert "- Round: 1/2" in text
 
 
@@ -153,7 +153,7 @@ async def test_every_round_after_the_first_sends_the_followup_in_its_place(
     _, delivery = await hand(tmp_path, with_followup(tmp_path), round_number=3)
 
     [(_, text)] = delivery.sent
-    assert "Only the earlier ENGELs." in text
+    assert "Only the earlier BLOCKERs." in text
     assert "Try to break the prompt below." not in text
     assert "- Round: 3/2" in text
     assert "- Prompt: NOTES/review-followup.md @ " in text
@@ -176,7 +176,7 @@ async def test_the_answer_to_the_round_before_comes_ahead_of_the_reply(tmp_path:
         number=1,
         seat="xrev (reviewer)",
         sent="17:07",
-        text="ENGEL: the count is wrong.",
+        text="BLOCKER: the count is wrong.",
         at="17:09",
     )
 
@@ -186,7 +186,7 @@ async def test_the_answer_to_the_round_before_comes_ahead_of_the_reply(tmp_path:
     assert "- Previous answer: xrev (reviewer), from 17:09, to round 1" in text
     order = [
         text.index("xrev (reviewer)'s answer to round 1:"),
-        text.index("ENGEL: the count is wrong."),
+        text.index("BLOCKER: the count is wrong."),
         text.index("All 42 tests passed."),
     ]
     assert order == sorted(order)

@@ -866,14 +866,14 @@ async def test_a_handoff_counts_its_rounds_for_the_work_item(tmp_path: Path, wir
         "to": "reviewer",
     }
     handoffs_in(channel, repo, tmp_path, runner, review=review)
-    (repo / "NOTES" / "review-followup.md").write_text("Only the earlier ENGELs.")
+    (repo / "NOTES" / "review-followup.md").write_text("Only the earlier BLOCKERs.")
 
     await reviewed(channel)
     await reviewed(channel)
 
     first, second = (text for _, text in runner.sent)
     assert "- Round: 1/2" in first and "try to break it" in first
-    assert "- Round: 2/2" in second and "Only the earlier ENGELs." in second
+    assert "- Round: 2/2" in second and "Only the earlier BLOCKERs." in second
     assert "try to break it" not in second
     assert any("(round 2/2)" in sent["text"] for sent in api.sent)
 
@@ -893,14 +893,14 @@ async def test_the_second_round_carries_the_reviewers_answer_to_the_first(
     last_said.remember(
         channel._kept("-100888", SAID_FILE),
         chat_id="-100888",
-        text="ENGEL: the loader skips a row.",
+        text="BLOCKER: the loader skips a row.",
         now=datetime.now(UTC) + timedelta(minutes=2),
     )
     await reviewed(channel)
 
     second = runner.sent[-1][1]
     assert "xrev (reviewer)'s answer to round 1:" in second
-    assert "ENGEL: the loader skips a row." in second
+    assert "BLOCKER: the loader skips a row." in second
 
 
 async def test_a_round_that_reached_nobody_is_not_counted(tmp_path: Path, wired) -> None:

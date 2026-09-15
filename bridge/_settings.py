@@ -19,6 +19,8 @@ from __future__ import annotations
 import json
 import os
 import re
+import sqlite3
+from contextlib import closing
 from datetime import datetime
 from pathlib import Path
 
@@ -331,6 +333,58 @@ def codex_thread_name(session_id: str | None, home: Path | None = None) -> str |
     except OSError:
         return None
     return found
+
+
+#: Where ZCode keeps its sessions, titles included, under the home directory —
+#: none of which is in a hook call. The application's own database rather than a
+#: file meant for anybody else, so it is only ever opened read-only. Found by
+#: ZCode itself on 3.11.2; the schema was read the same day.
+ZCODE_DATABASE = Path(".zcode") / "cli" / "db" / "db.sqlite"
+
+#: A title ZCode generated or a person set. The other `title_source` is
+#: `first_input`: until a title exists, the session is shown under the first
+#: thing somebody typed into it, which is a prompt, not a name, and not for a card.
+ZCODE_NAMED = ("custom", "generated")
+
+#: How far up a chain of sessions to go. A subagent's session is a child of the
+#: one that started it, and its cards belong with that one's seat.
+ZCODE_PARENTS = 8
+
+
+def zcode_title(session_id: str | None, home: Path | None = None) -> str | None:
+    """A ZCode session's title, which no hook call carries.
+
+    ZCode keeps it in its own database under the same `sess_<uuid>` the call
+    does. The topmost session's title is the one taken, so a subagent's cards
+    go by the session somebody named. `home` is the user's home directory.
+
+    Fails quietly, like the other lookups here: a missing database or a schema
+    that has moved means no name, and a seat without one is found by its
+    project, exactly as it was before anybody looked.
+    """
+    if not session_id:
+        return None
+    database = (home or Path.home()) / ZCODE_DATABASE
+    if not database.is_file():
+        return None
+    found = None
+    try:
+        with closing(sqlite3.connect(database.as_uri() + "?mode=ro", uri=True, timeout=1.0)) as db:
+            wanted: str | None = session_id
+            for _ in range(ZCODE_PARENTS):
+                if not wanted:
+                    break
+                row = db.execute(
+                    "SELECT parent_id, title, title_source FROM session WHERE id = ?", (wanted,)
+                ).fetchone()
+                if row is None:
+                    break
+                found, wanted = row, row[0]
+    except sqlite3.Error:
+        return None
+    if found is None or found[2] not in ZCODE_NAMED or not found[1]:
+        return None
+    return str(found[1])
 
 
 def session_name(transcript_path: str | None) -> str | None:
