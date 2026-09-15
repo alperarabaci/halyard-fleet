@@ -289,9 +289,37 @@ async def test_a_chat_with_no_repository_says_so(tmp_path: Path) -> None:
     )
     try:
         await deliver(channel, typed("/commit"))
-        assert "do not know which repository" in api.sent[-1]["text"]
+        said = api.sent[-1]["text"]
+        assert "do not know which repository" in said
+        assert f"no seat has it. Give a seat <code>chat: {CHAT}</code>" in said
     finally:
         await audit.close()
+
+
+async def test_a_chat_whose_project_has_no_path_says_whose_chat_it_is(wired) -> None:
+    """The seat is the part nobody can see from the chat, and it can be one
+    nobody remembers setting up."""
+    channel, api, _, _ = wired
+    # A project written without a `path:` never reaches the channel.
+    channel._repositories.clear()
+
+    await deliver(channel, typed("/handoff"))
+
+    assert (
+        "it is <b>nav</b>'s, and nav's project <b>alpha-engine</b> has no <code>path:</code>"
+        in api.sent[-1]["text"]
+    )
+
+
+async def test_a_chat_whose_seat_is_in_no_project_says_so(wired) -> None:
+    channel, api, _, _ = wired
+    channel._seats = [replace(seat, project=None) for seat in channel._seats]
+    # With a single project every chat is about it, so there is none here.
+    channel._repositories.clear()
+
+    await deliver(channel, typed("/checks"))
+
+    assert "it is <b>nav</b>'s, and nav is under no project" in api.sent[-1]["text"]
 
 
 async def test_a_model_that_cannot_be_reached_still_offers_the_reference(wired) -> None:

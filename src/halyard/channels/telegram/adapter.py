@@ -1452,12 +1452,7 @@ class TelegramChannel:
         """
         found = self._repository_for(chat_id)
         if found is None:
-            await self._say(
-                "I do not know which repository this chat is about. Give the "
-                "project a <code>path:</code> in <code>halyard.yaml</code>.",
-                chat_id,
-                thread_id,
-            )
+            await self._say(self._no_repository(chat_id), chat_id, thread_id)
             return None
 
         branch = await asyncio.to_thread(task_tracker.current_branch, found.path)
@@ -1532,12 +1527,7 @@ class TelegramChannel:
         """`/command` — offer this project's commands, or start the named one."""
         found = self._repository_for(chat_id)
         if found is None:
-            await self._say(
-                "I do not know which repository this chat is about. Give the "
-                "project a <code>path:</code> in <code>halyard.yaml</code>.",
-                chat_id,
-                thread_id,
-            )
+            await self._say(self._no_repository(chat_id), chat_id, thread_id)
             return
 
         listed = commands_offered.offered(found.commands)
@@ -1675,6 +1665,32 @@ class TelegramChannel:
         found = self._repositories.get(self._project_name_for(chat_id) or "")
         return found if found and found.path else None
 
+    def _no_repository(self, chat_id: str) -> str:
+        """Why `_repository_for` found nothing for this chat, said as the fix.
+
+        The seat is named because it is the part nobody can see from the chat:
+        a chat can belong to a seat nobody remembers setting up, and a message
+        that only asks for a `path:` does not say whose.
+        """
+        head = "I do not know which repository this chat is about"
+        seat = for_chat(self._seats, chat_id) if chat_id else None
+        if seat is None:
+            return (
+                f"{head}: no seat has it. Give a seat "
+                f"<code>chat: {html.escape(chat_id)}</code> in <code>halyard.yaml</code>."
+            )
+        label = html.escape(seat.label)
+        if not seat.project:
+            return (
+                f"{head}: it is <b>{label}</b>'s, and {label} is under no project. "
+                "Write it under its project in <code>halyard.yaml</code>."
+            )
+        return (
+            f"{head}: it is <b>{label}</b>'s, and {label}'s project "
+            f"<b>{html.escape(seat.project)}</b> has no <code>path:</code> in "
+            "<code>halyard.yaml</code>."
+        )
+
     def _message_runner(self, chat_id: str):
         """Whichever runtime this chat's seat uses, for the one-shot turn.
 
@@ -1735,12 +1751,7 @@ class TelegramChannel:
         """
         found = self._repository_for(chat_id)
         if found is None:
-            await self._say(
-                "I do not know which repository this chat is about. Give the "
-                "project a <code>path:</code> in <code>halyard.yaml</code>.",
-                chat_id,
-                thread_id,
-            )
+            await self._say(self._no_repository(chat_id), chat_id, thread_id)
             return
         project, path = found.name, found.path
 
@@ -2142,12 +2153,7 @@ class TelegramChannel:
         """
         found = self._repository_for(chat_id)
         if found is None:
-            await self._say(
-                "I do not know which repository this chat is about. Give the "
-                "project a <code>path:</code> in <code>halyard.yaml</code>.",
-                chat_id,
-                thread_id,
-            )
+            await self._say(self._no_repository(chat_id), chat_id, thread_id)
             return
         if not found.checks:
             await self._say(
@@ -2488,12 +2494,7 @@ class TelegramChannel:
         """
         found = self._repository_for(chat_id)
         if found is None:
-            await self._say(
-                "I do not know which repository this chat is about. Give the "
-                "project a <code>path:</code> in <code>halyard.yaml</code>.",
-                chat_id,
-                thread_id,
-            )
+            await self._say(self._no_repository(chat_id), chat_id, thread_id)
             return
         if not found.handoffs:
             await self._say(
