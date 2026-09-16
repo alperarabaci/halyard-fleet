@@ -2956,6 +2956,7 @@ class TelegramChannel:
             steps=found.workflows.steps,
             taken=taken,
             seats=self._step_seats(found, flow),
+            words=found.workflows.decisions,
             sent_back_by=f"{sender}{when}" if run.back else "",
         )
         await asyncio.to_thread(flowing.save, kept, work, run.waiting_on(seat.label))
@@ -3019,9 +3020,10 @@ class TelegramChannel:
         """Take the next step, now that the seat a run was waiting for replied.
 
         Most replies are not a step: a seat nobody is waiting for costs a file
-        read and nothing else. The decision is the reply's own last line —
-        `DECISION: forward`, `back` or `wait` — or, for a step that acts on the
-        one before it, what that one decided. See `halyard.workflows`.
+        read and nothing else. The decision is the reply's own last line, in
+        the project's words for forward, back and wait — or, for a step that
+        acts on the one before it, what that one decided. See
+        `halyard.workflows`.
         """
         found = self._repositories.get(answered.project or "")
         if found is None or not found.workflows.flows:
@@ -3037,7 +3039,7 @@ class TelegramChannel:
         flow = found.workflows.flows.get(run.workflow) or ()
         tally = self._kept_for(found.name, ROUNDS_FILE)
         taken = await asyncio.to_thread(rounds.counts, tally, work) if tally else {}
-        decision = flowing.read(text)
+        decision = flowing.read(text, found.workflows.decisions)
         moving = flowing.after(
             decision, run=run, flow=flow, steps=found.workflows.steps, taken=taken
         )
@@ -3054,9 +3056,9 @@ class TelegramChannel:
             # nobody wrote a decision into is a step somebody should see taken.
             here = found.workflows.steps.get(flow[run.step]) if run.step < len(flow) else None
             if moving.decided is not None and here is not None and here.decided_by:
+                word = flowing.word_for(moving.decided, found.workflows.decisions)
                 outcome = (
-                    f"<b>{html.escape(here.decided_by)}</b>'s "
-                    f"<b>{html.escape(moving.decided)}</b> stands"
+                    f"<b>{html.escape(here.decided_by)}</b>'s <b>{html.escape(word)}</b> stands"
                 )
             else:
                 outcome = f"<b>{html.escape(run.workflow)}</b> goes on"

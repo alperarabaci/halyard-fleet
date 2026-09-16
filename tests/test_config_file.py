@@ -562,7 +562,7 @@ def test_a_step_says_nothing_but_its_name_and_is_still_a_step(tmp_path) -> None:
 
     step = project.workflows.steps["review"]
     assert (step.handoff, step.seat) == ("review", None)
-    assert step.rounds == 2, "a step sent back runs the one before it a second time"
+    assert step.rounds == 1, "a step goes once unless it says otherwise"
 
 
 def test_a_workflow_naming_a_step_nobody_defined_is_refused(tmp_path) -> None:
@@ -621,11 +621,48 @@ def test_a_step_cannot_act_on_its_own_decision(tmp_path) -> None:
         with_workflows(tmp_path, "  steps:", "    review: {decided_by: review}", "  l3: [review]")
 
 
+def test_decisions_are_their_own_names_unless_a_project_renames_them(tmp_path) -> None:
+    """Like a key written once standing for its own value: nothing to write
+    for `forward`, `back` and `wait`, and any of them can be renamed."""
+    from halyard.core.config_file import Decisions
+
+    [project] = with_workflows(
+        tmp_path,
+        "  decisions: {forward: go, wait: hold}",
+        "  steps:",
+        "    review: {}",
+        "  level3: [review]",
+    )
+
+    assert project.workflows.decisions == Decisions(forward="go", back="back", wait="hold")
+    assert set(project.workflows.flows) == {"level3"}, "`decisions` is not a workflow"
+
+
+def test_an_unknown_decision_is_refused(tmp_path) -> None:
+    with pytest.raises(ValueError, match="unknown field"):
+        with_workflows(tmp_path, "  decisions: {forward: go, sideways: nope}")
+
+
+def test_two_decisions_cannot_share_a_word(tmp_path) -> None:
+    """Otherwise a reply saying it could mean either."""
+    with pytest.raises(ValueError, match="cannot share a word"):
+        with_workflows(tmp_path, "  decisions: {forward: back}")
+
+
+def test_a_decision_word_cannot_hold_a_colon(tmp_path) -> None:
+    """The word is read after the last colon, so it could never be read."""
+    with pytest.raises(ValueError, match="cannot contain"):
+        with_workflows(tmp_path, '  decisions: {forward: "go: on"}')
+
+
 def test_a_project_with_no_workflows_has_none(tmp_path) -> None:
+    from halyard.core.config_file import Decisions
+
     [project] = a_project(tmp_path, lines=["checks:", "  proof: NOTES/checks/proof.md"])
 
     assert project.workflows.flows == {}
     assert project.workflows.steps == {}
+    assert project.workflows.decisions == Decisions()
 
 
 def test_a_followup_prompt_that_is_not_there_is_named(tmp_path) -> None:

@@ -126,10 +126,10 @@ class Handoff:
     to: str | None = None
 
 
-#: How many rounds a step may have before a run stops and asks. Two rather than
-#: one because a step sent back runs the one before it a second time, and a flow
-#: that stopped there would stop on the ordinary case.
-_DEFAULT_ROUNDS = 2
+#: How many rounds a step may have before a run stops and asks. A step goes once
+#: unless it says otherwise; one the work is meant to come back to says how
+#: often, so going round is something a project wrote down rather than assumed.
+_DEFAULT_ROUNDS = 1
 
 
 @dataclass(frozen=True)
@@ -158,13 +158,29 @@ class Step:
 
 
 @dataclass(frozen=True)
+class Decisions:
+    """The words a reply's last line decides in.
+
+    Each is its own name unless a project says otherwise — `forward`, `back`,
+    `wait` — so a project whose prompts ask for those writes nothing, and one
+    whose prompts ask for other words names them: `decisions: {forward: go}`.
+    """
+
+    forward: str = "forward"
+    back: str = "back"
+    wait: str = "wait"
+
+
+@dataclass(frozen=True)
 class Workflows:
-    """A project's workflows: the steps they share, and each flow as the order
-    it takes its steps in. See `halyard.workflows`."""
+    """A project's workflows: the steps they share, the words that decide, and
+    each flow as the order it takes its steps in. See `halyard.workflows`."""
 
     steps: dict[str, Step] = field(default_factory=dict)
-    #: Each flow by name, as the step names it takes in order. `steps` is not a
-    #: flow, which is why a workflow cannot be called that.
+    decisions: Decisions = field(default_factory=Decisions)
+    #: Each flow by name, as the step names it takes in order. `steps` and
+    #: `decisions` are not flows, which is why a workflow cannot be called
+    #: either of them.
     flows: dict[str, tuple[str, ...]] = field(default_factory=dict)
 
 
@@ -367,9 +383,11 @@ def _handoffs_from(
     return found
 
 
-#: What a step may say, and the name under `workflows:` that is not a flow.
+#: What a step may say, the words a decision can be given, and the two names
+#: under `workflows:` that are not flows.
 _STEP_FIELDS = {"handoff", "seat", "rounds", "decided_by"}
-_NOT_A_FLOW = "steps"
+_DECISION_FIELDS = ("forward", "back", "wait")
+_NOT_A_FLOW = ("steps", "decisions")
 
 
 def _workflows_from(
@@ -379,8 +397,8 @@ def _workflows_from(
     handoffs: dict[str, Handoff],
     seats: list[Seat],
 ) -> Workflows:
-    """`workflows:` — the steps every flow shares, and the flows themselves,
-    each a list of step names in the order it takes them.
+    """`workflows:` — the steps every flow shares, the words that decide, and
+    the flows themselves, each a list of step names in the order it takes them.
 
     Checked against the rest of the project here, the way a handoff is: a flow
     naming a step, a step naming a handoff, or a step naming a seat that nobody
@@ -390,20 +408,20 @@ def _workflows_from(
         return Workflows()
     if not isinstance(value, dict):
         raise ValueError(
-            f"Project {project!r}: `workflows:` must be a mapping — `steps:`, "
+            f"Project {project!r}: `workflows:` must be a mapping — `steps:`, `decisions:`, "
             "and a list of step names for each workflow."
         )
-    steps = _steps_from(project, value.get(_NOT_A_FLOW), handoffs=handoffs, seats=seats)
+    steps = _steps_from(project, value.get("steps"), handoffs=handoffs, seats=seats)
     flows: dict[str, tuple[str, ...]] = {}
     for raw, listed in value.items():
         name = str(raw).strip()
-        if name == _NOT_A_FLOW:
+        if name in _NOT_A_FLOW:
             continue
         where = f"Project {project!r}: workflow {name!r}"
         if not isinstance(listed, list) or not listed:
             raise ValueError(
                 f"{where} must be a list of step names, in the order it takes them. "
-                f"(`{_NOT_A_FLOW}` is the one name here that is not a workflow.)"
+                f"({' and '.join(_NOT_A_FLOW)} are the two names here that are not workflows.)"
             )
         wanted = [str(step).strip() for step in listed]
         if missing := [step for step in wanted if step not in steps]:
@@ -412,7 +430,34 @@ def _workflows_from(
                 f"`workflows: steps:`: {', '.join(missing)}"
             )
         flows[name] = tuple(wanted)
-    return Workflows(steps=steps, flows=flows)
+    return Workflows(
+        steps=steps,
+        decisions=_decisions_from(project, value.get("decisions")),
+        flows=flows,
+    )
+
+
+def _decisions_from(project: str, value: Any) -> Decisions:
+    """`workflows: decisions:` — the words to read instead of `forward`, `back`
+    and `wait`. Any left out keep their own name."""
+    if value is None:
+        return Decisions()
+    where = f"Project {project!r}: `workflows: decisions:`"
+    if not isinstance(value, dict):
+        raise ValueError(
+            f"{where} must be a mapping of {', '.join(_DECISION_FIELDS)} to the word a reply "
+            "ends with."
+        )
+    if unknown := set(value) - set(_DECISION_FIELDS):
+        raise ValueError(f"{where} has unknown field(s) {', '.join(sorted(unknown))}")
+    words = {key: _as_text(value.get(key)) or key for key in _DECISION_FIELDS}
+    if any(":" in word for word in words.values()):
+        # The word is read after the last colon on the line, so one holding a
+        # colon could never be read at all.
+        raise ValueError(f"{where}: a word cannot contain `:`.")
+    if len({word.casefold() for word in words.values()}) < len(words):
+        raise ValueError(f"{where}: two decisions cannot share a word.")
+    return Decisions(**words)
 
 
 def _steps_from(

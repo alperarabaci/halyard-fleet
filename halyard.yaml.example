@@ -165,12 +165,14 @@ projects:
     #     checks: [proof, destructive]
     #     to: navigator
     # Workflows take those handoffs in an order, each step to a seat, and go on by
-    # the last line of each reply: DECISION: forward, back or wait. See docs/workflows.md.
+    # the last line of each reply: forward, back or wait. A step goes once unless
+    # `rounds:` says more. See docs/workflows.md.
     # workflows:
+    #   decisions: {forward: forward, back: back, wait: wait}   # the defaults; rename any
     #   steps:
     #     review: {seat: reviewer, rounds: 2}
-    #     reviewed: {seat: navigator, decided_by: review}
-    #     discovered: {handoff: discover_completed, seat: navigator, rounds: 2}
+    #     reviewed: {seat: navigator, decided_by: review, rounds: 2}
+    #     discovered: {handoff: discover_completed, seat: navigator}
     #     close: {seat: navigator}
     #   level3: [review, reviewed, discovered, close]
     # Groups of task labels. The first one the task carries from each group
