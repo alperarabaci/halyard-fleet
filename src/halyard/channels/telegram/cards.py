@@ -112,6 +112,10 @@ _CHOOSABLE = frozenset(
         "result",
         "handoff",
         "handto",
+        "flow",
+        "flowat",
+        "flowgo",
+        "flowstop",
     }
 )
 
@@ -534,6 +538,50 @@ def check_choices(names: tuple[str, ...]) -> dict | None:
     if not buttons:
         return None
     return _keyboard([buttons[i : i + 3] for i in range(0, len(buttons), 3)])
+
+
+def workflow_choices(names: tuple[str, ...]) -> dict | None:
+    """A button per workflow a project defines, as `check_choices` is for checks."""
+    buttons = []
+    for name in names:
+        try:
+            buttons.append({"text": name, "callback_data": choice_data("flow", name)})
+        except ValueError:
+            continue
+    if not buttons:
+        return None
+    return _keyboard([buttons[i : i + 3] for i in range(0, len(buttons), 3)])
+
+
+def workflow_steps(workflow: str, flow: tuple[str, ...]) -> dict | None:
+    """A button per step of a workflow, in its order: start it there.
+
+    Numbered, because the order is the point, and carrying the step's place
+    rather than its name — a flow may take the same step twice.
+    """
+    buttons = []
+    for index, step in enumerate(flow):
+        try:
+            data = choice_data("flowat", f"{workflow}>{index}")
+        except ValueError:
+            continue
+        buttons.append({"text": f"{index + 1} · {step}", "callback_data": data})
+    if not buttons:
+        return None
+    return _keyboard([buttons[i : i + 3] for i in range(0, len(buttons), 3)])
+
+
+def workflow_keyboard(workflow: str, *, go: bool = False) -> dict:
+    """What can be done with a run: send the step it stopped before, or stop it.
+
+    No cancel row. Leaving this card alone *is* leaving the run alone, and a
+    third button that did neither is the one somebody presses by mistake.
+    """
+    row = []
+    if go:
+        row.append({"text": "▶️ Send it anyway", "callback_data": choice_data("flowgo", workflow)})
+    row.append({"text": "⏹ Stop the workflow", "callback_data": choice_data("flowstop", workflow)})
+    return {"inline_keyboard": [row]}
 
 
 def result_choices(check: str, labels: tuple[str, ...]) -> dict | None:

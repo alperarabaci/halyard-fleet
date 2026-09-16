@@ -526,6 +526,108 @@ def test_a_handoff_can_name_its_text_for_the_rounds_after_the_first(tmp_path) ->
     assert review.followup_prompt == Path("NOTES/handoffs/review-followup.md")
 
 
+def with_workflows(tmp_path, *lines: str):
+    """A project with two handoffs and whatever `workflows:` says here."""
+    return a_project(
+        tmp_path,
+        lines=[
+            "handoffs:",
+            "  review: {prompt: NOTES/handoffs/review.md, to: reviewer}",
+            "  driver_discover: {prompt: NOTES/handoffs/forward.md}",
+            "workflows:",
+            *lines,
+        ],
+    )
+
+
+def test_a_workflow_is_the_steps_it_takes_in_order(tmp_path) -> None:
+    [project] = with_workflows(
+        tmp_path,
+        "  steps:",
+        "    review: {seat: reviewer, rounds: 2}",
+        "    discover: {handoff: driver_discover, seat: reviewer}",
+        "  level3: [review, discover, review]",
+    )
+
+    flows = project.workflows
+    assert flows.flows["level3"] == ("review", "discover", "review")
+    assert (flows.steps["review"].handoff, flows.steps["review"].rounds) == ("review", 2)
+    assert flows.steps["discover"].handoff == "driver_discover"
+    assert flows.steps["discover"].decided_by is None
+
+
+def test_a_step_says_nothing_but_its_name_and_is_still_a_step(tmp_path) -> None:
+    """The handoff is the step's own name, and `to:` says where it goes."""
+    [project] = with_workflows(tmp_path, "  steps:", "    review: {}", "  short: [review]")
+
+    step = project.workflows.steps["review"]
+    assert (step.handoff, step.seat) == ("review", None)
+    assert step.rounds == 2, "a step sent back runs the one before it a second time"
+
+
+def test_a_workflow_naming_a_step_nobody_defined_is_refused(tmp_path) -> None:
+    """Otherwise it fails part-way through a flow, from a phone."""
+    with pytest.raises(ValueError, match="does not define under"):
+        with_workflows(tmp_path, "  steps:", "    review: {}", "  level3: [review, gone]")
+
+
+def test_a_step_naming_a_handoff_nobody_defined_is_refused(tmp_path) -> None:
+    with pytest.raises(ValueError, match="names the handoff 'close'"):
+        with_workflows(tmp_path, "  steps:", "    close: {}", "  level3: [close]")
+
+
+def test_a_step_seat_that_is_not_there_is_refused(tmp_path) -> None:
+    with pytest.raises(ValueError, match="must be a role"):
+        with_workflows(tmp_path, "  steps:", "    review: {seat: somebody}", "  level3: [review]")
+
+
+def test_rounds_have_to_be_a_whole_number_of_at_least_one(tmp_path) -> None:
+    with pytest.raises(ValueError, match="whole number"):
+        with_workflows(tmp_path, "  steps:", "    review: {rounds: 0}", "  level3: [review]")
+
+
+def test_a_workflow_written_as_anything_but_a_list_is_refused(tmp_path) -> None:
+    """Including the mistake of writing `steps:` under a workflow's own name."""
+    with pytest.raises(ValueError, match="must be a list of step names"):
+        with_workflows(tmp_path, "  steps:", "    review: {}", "  level3: {step1: review}")
+
+
+def test_a_step_can_act_on_the_decision_of_a_step_named_after_it(tmp_path) -> None:
+    """`reviewed` before `review` in the file: the name is checked once every
+    step is known."""
+    [project] = with_workflows(
+        tmp_path,
+        "  steps:",
+        "    reviewed: {handoff: review, decided_by: review}",
+        "    review: {}",
+        "  level3: [review, reviewed]",
+    )
+
+    assert project.workflows.steps["reviewed"].decided_by == "review"
+
+
+def test_decided_by_naming_no_step_is_refused(tmp_path) -> None:
+    with pytest.raises(ValueError, match="must name another step"):
+        with_workflows(
+            tmp_path,
+            "  steps:",
+            "    reviewed: {handoff: review, decided_by: gone}",
+            "  level3: [reviewed]",
+        )
+
+
+def test_a_step_cannot_act_on_its_own_decision(tmp_path) -> None:
+    with pytest.raises(ValueError, match="must name another step"):
+        with_workflows(tmp_path, "  steps:", "    review: {decided_by: review}", "  l3: [review]")
+
+
+def test_a_project_with_no_workflows_has_none(tmp_path) -> None:
+    [project] = a_project(tmp_path, lines=["checks:", "  proof: NOTES/checks/proof.md"])
+
+    assert project.workflows.flows == {}
+    assert project.workflows.steps == {}
+
+
 def test_a_followup_prompt_that_is_not_there_is_named(tmp_path) -> None:
     from halyard.core.config_file import missing_files
 

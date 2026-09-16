@@ -45,7 +45,12 @@ def _crossings(files: list[Path], forbidden: tuple[str, ...]) -> list[str]:
 
 def test_checks_and_handoffs_know_no_chat_and_no_runtime() -> None:
     """A model through `Asker`, a seat through `Delivery`, and nothing else."""
-    files = [*_package("checks"), *_package("handoffs"), SOURCE / "frame.py"]
+    files = [
+        *_package("checks"),
+        *_package("handoffs"),
+        *_package("workflows"),
+        SOURCE / "frame.py",
+    ]
     assert len(files) > 3, "the packages were not found, so this check proves nothing"
 
     crossings = _crossings(files, ("halyard.channels", "halyard.agents"))
