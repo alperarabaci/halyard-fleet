@@ -324,6 +324,7 @@ behalf, uncontrolled agent-to-agent messaging, or multi-user RBAC.
 | [When it does not work](docs/when-it-does-not-work.md) | Every way setup has gone wrong so far, and the fix |
 | [Setup](docs/setup.md) | Installing it, seats in YAML, gating a project by hand |
 | [Checks and handoffs](docs/handoffs.md) | A project's own checks, and handing a reply from one seat to the next |
+| [Workflows](docs/workflows.md) | A project's handoffs taken in order, each reply's last line deciding what comes next |
 | [Telegram](docs/telegram.md) | The bot, seats, models and effort |
 | [Architecture](docs/architecture.md) | How the layers fit, and the security posture |
 | [Hook behaviour](docs/hook-payload-notes.md) | What the runtimes' hooks actually do — measured |

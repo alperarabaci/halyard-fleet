@@ -65,9 +65,13 @@ def work_of(branch: str | None, project: str) -> str | None:
     return f"{project}#{number}" if number is not None else branch
 
 
-def shown(number: int) -> str:
-    """A round the way the envelope and the chat say it: `2/2`."""
-    return f"{number}/{EXPECTED}"
+def shown(number: int, expected: int = EXPECTED) -> str:
+    """A round the way the envelope and the chat say it: `2/2`.
+
+    `expected` is what this round counts against — a workflow's step says how
+    many it allows, and a handoff pressed by hand has the two above.
+    """
+    return f"{number}/{expected}"
 
 
 def _load(where: Path) -> dict:
@@ -97,6 +101,20 @@ def taken(where: Path, work: str, handoff: str) -> list[Round]:
             Round(at=at if at.tzinfo else at.replace(tzinfo=UTC), to=str(entry.get("to") or ""))
         )
     return found
+
+
+def counts(where: Path, work: str) -> dict[str, int]:
+    """How many rounds each of this work's handoffs has had, by name.
+
+    One read for all of them: a workflow asks about every step it might take
+    next, and asking per handoff would open the same file as many times.
+    """
+    handoffs = _load(where).get(work)
+    if not isinstance(handoffs, dict):
+        return {}
+    return {
+        str(name): len(entries) for name, entries in handoffs.items() if isinstance(entries, list)
+    }
 
 
 def record(where: Path, work: str, handoff: str, *, to: str, now: datetime | None = None) -> int:

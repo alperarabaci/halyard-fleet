@@ -38,6 +38,7 @@ async def hand_off(
     project_commands: Mapping[str, str] | None = None,
     runner: Runner | None = None,
     round_number: int | None = None,
+    expected: int = rounds.EXPECTED,
     previous: Previous | None = None,
 ) -> Handed:
     """Run a handoff's commands, then its checks, write the message, deliver it.
@@ -61,7 +62,8 @@ async def hand_off(
     included, and None where nothing is counted — see `halyard.handoffs.rounds`.
     From the second round on, a handoff with a `followup_prompt:` sends that in
     place of its `prompt:`, and `previous` carries what the seat said back to
-    the round before.
+    the round before. `expected` is how many rounds this one is counted against,
+    which a workflow's step decides for the steps it takes.
     """
     ran: list[tuple[Command, Result]] = []
     for name in handoff.commands:
@@ -77,7 +79,7 @@ async def hand_off(
         ran.append((command, result))
     envelope = [
         *context,
-        *([f"Round: {rounds.shown(round_number)}"] if round_number else []),
+        *([f"Round: {rounds.shown(round_number, expected)}"] if round_number else []),
         *(summary(c.name, c.line, r) for c, r in ran),
     ]
 

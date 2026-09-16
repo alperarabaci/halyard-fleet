@@ -62,6 +62,7 @@ _PROJECT_FIELDS = {
     "confirmation",
     "checks",
     "handoffs",
+    "workflows",
 }
 _SEAT_FIELDS = {
     "runtime",
@@ -125,6 +126,48 @@ class Handoff:
     to: str | None = None
 
 
+#: How many rounds a step may have before a run stops and asks. Two rather than
+#: one because a step sent back runs the one before it a second time, and a flow
+#: that stopped there would stop on the ordinary case.
+_DEFAULT_ROUNDS = 2
+
+
+@dataclass(frozen=True)
+class Step:
+    """One step of a workflow: a handoff, the seat it goes to, how often it may go.
+
+    Named once, under `workflows: steps:`, because every flow uses the same
+    ones — and one handoff going to two different drivers is two steps, which
+    is where a Codex driver and a ZCode one are told apart.
+    """
+
+    name: str
+    #: One of the project's `handoffs:`. The step's own name when it says none.
+    handoff: str
+    #: A seat's label or a role. Unset leaves it to the handoff's `to:`, which
+    #: is enough until one role is held by two seats.
+    seat: str | None = None
+    #: How many rounds this step may have for one piece of work — counting
+    #: every time its handoff has gone, pressed by hand as well, since the seat
+    #: read it either way.
+    rounds: int = _DEFAULT_ROUNDS
+    #: Another step, whose decision this one acts on when its own reply decides
+    #: nothing — `reviewed` after `review`, so a reviewer's back reaches the
+    #: navigator first and the navigator's reply goes back to the reviewer.
+    decided_by: str | None = None
+
+
+@dataclass(frozen=True)
+class Workflows:
+    """A project's workflows: the steps they share, and each flow as the order
+    it takes its steps in. See `halyard.workflows`."""
+
+    steps: dict[str, Step] = field(default_factory=dict)
+    #: Each flow by name, as the step names it takes in order. `steps` is not a
+    #: flow, which is why a workflow cannot be called that.
+    flows: dict[str, tuple[str, ...]] = field(default_factory=dict)
+
+
 @dataclass(frozen=True)
 class Project:
     """A codebase, its location, and the seats working in it."""
@@ -184,6 +227,9 @@ class Project:
     #: How a reply is handed from one seat to another here, by name — see
     #: `Handoff`. Empty unless configured.
     handoffs: dict[str, Handoff] = field(default_factory=dict)
+    #: The flows this project takes its handoffs in, and the steps they share
+    #: — see `Workflows`. Empty unless configured.
+    workflows: Workflows = field(default_factory=Workflows)
 
 
 def _confirmation_from(project: str, value: Any) -> Confirmation | None:
@@ -318,6 +364,118 @@ def _handoffs_from(
             commands=tuple(ran),
             to=to.lower() if to and to.lower() in roles else to,
         )
+    return found
+
+
+#: What a step may say, and the name under `workflows:` that is not a flow.
+_STEP_FIELDS = {"handoff", "seat", "rounds", "decided_by"}
+_NOT_A_FLOW = "steps"
+
+
+def _workflows_from(
+    project: str,
+    value: Any,
+    *,
+    handoffs: dict[str, Handoff],
+    seats: list[Seat],
+) -> Workflows:
+    """`workflows:` — the steps every flow shares, and the flows themselves,
+    each a list of step names in the order it takes them.
+
+    Checked against the rest of the project here, the way a handoff is: a flow
+    naming a step, a step naming a handoff, or a step naming a seat that nobody
+    defined would otherwise fail when somebody started it from a phone.
+    """
+    if value is None:
+        return Workflows()
+    if not isinstance(value, dict):
+        raise ValueError(
+            f"Project {project!r}: `workflows:` must be a mapping — `steps:`, "
+            "and a list of step names for each workflow."
+        )
+    steps = _steps_from(project, value.get(_NOT_A_FLOW), handoffs=handoffs, seats=seats)
+    flows: dict[str, tuple[str, ...]] = {}
+    for raw, listed in value.items():
+        name = str(raw).strip()
+        if name == _NOT_A_FLOW:
+            continue
+        where = f"Project {project!r}: workflow {name!r}"
+        if not isinstance(listed, list) or not listed:
+            raise ValueError(
+                f"{where} must be a list of step names, in the order it takes them. "
+                f"(`{_NOT_A_FLOW}` is the one name here that is not a workflow.)"
+            )
+        wanted = [str(step).strip() for step in listed]
+        if missing := [step for step in wanted if step not in steps]:
+            raise ValueError(
+                f"{where} names steps this project does not define under "
+                f"`workflows: steps:`: {', '.join(missing)}"
+            )
+        flows[name] = tuple(wanted)
+    return Workflows(steps=steps, flows=flows)
+
+
+def _steps_from(
+    project: str,
+    value: Any,
+    *,
+    handoffs: dict[str, Handoff],
+    seats: list[Seat],
+) -> dict[str, Step]:
+    """`workflows: steps:` as a mapping of name to what that step does."""
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        raise ValueError(
+            f"Project {project!r}: `workflows: steps:` must be a mapping of name to step."
+        )
+    roles = {role.value for role in Role}
+    labels = {seat.label for seat in seats}
+    found: dict[str, Step] = {}
+    for raw, spec in value.items():
+        name = str(raw).strip()
+        where = f"Project {project!r}: step {name!r}"
+        if not _HANDOFF_NAME.match(name):
+            raise ValueError(
+                f"{where} needs a name of lowercase letters, digits, `-` or `_`, "
+                "up to 32 characters."
+            )
+        spec = spec or {}
+        if not isinstance(spec, dict):
+            raise ValueError(f"{where} must be a mapping.")
+        unknown = set(spec) - _STEP_FIELDS
+        if unknown:
+            raise ValueError(f"{where} has unknown field(s) {', '.join(sorted(unknown))}")
+        handoff = _as_text(spec.get("handoff")) or name
+        if handoff not in handoffs:
+            raise ValueError(
+                f"{where} names the handoff {handoff!r}, which this project does not define."
+            )
+        seat = _as_text(spec.get("seat"))
+        if seat and seat.lower() not in roles and seat not in labels:
+            raise ValueError(
+                f"{where}: `seat:` must be a role ({', '.join(sorted(roles))}) "
+                "or one of this project's seats."
+            )
+        rounds = spec.get("rounds", _DEFAULT_ROUNDS)
+        if isinstance(rounds, bool) or not isinstance(rounds, int) or rounds < 1:
+            raise ValueError(f"{where}: `rounds:` must be a whole number of at least 1.")
+        found[name] = Step(
+            name=name,
+            handoff=handoff,
+            seat=seat.lower() if seat and seat.lower() in roles else seat,
+            rounds=rounds,
+            decided_by=_as_text(spec.get("decided_by")),
+        )
+    for step in found.values():
+        # Checked once every step is known: the one it names may come later.
+        if step.decided_by is not None and (
+            step.decided_by == step.name or step.decided_by not in found
+        ):
+            raise ValueError(
+                f"Project {project!r}: step {step.name!r}: `decided_by:` must name another "
+                "step under `workflows: steps:`."
+            )
     return found
 
 
@@ -562,6 +720,9 @@ def projects_from_yaml(text: str) -> list[Project]:
         path = _as_text(body.get("path"))
         checks = _checks_from(project, body.get("checks"))
         commands = _commands_from(project, body.get("commands"))
+        handoffs = _handoffs_from(
+            project, body.get("handoffs"), checks=checks, seats=seats, commands=commands
+        )
         projects.append(
             Project(
                 name=project,
@@ -577,8 +738,9 @@ def projects_from_yaml(text: str) -> list[Project]:
                 label_work=_as_flag(project, "label_work", body.get("label_work")),
                 confirmation=_confirmation_from(project, body.get("confirmation")),
                 checks=checks,
-                handoffs=_handoffs_from(
-                    project, body.get("handoffs"), checks=checks, seats=seats, commands=commands
+                handoffs=handoffs,
+                workflows=_workflows_from(
+                    project, body.get("workflows"), handoffs=handoffs, seats=seats
                 ),
             )
         )

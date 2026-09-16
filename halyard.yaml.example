@@ -150,6 +150,7 @@ projects:
     #   proof: NOTES/halyard/checks/proof.md
     #   destructive: NOTES/halyard/checks/destructive.md
     # handoffs:
+    #   reviewed: {to: navigator}        # the reply alone, with no prompt of its own
     #   review:
     #     prompt: NOTES/halyard/handoffs/review.md
     #     followup_prompt: NOTES/halyard/handoffs/review-followup.md   # rounds after the first
@@ -163,6 +164,15 @@ projects:
     #     commands: [test-fast]          # from `commands:`, run before the checks
     #     checks: [proof, destructive]
     #     to: navigator
+    # Workflows take those handoffs in an order, each step to a seat, and go on by
+    # the last line of each reply: DECISION: forward, back or wait. See docs/workflows.md.
+    # workflows:
+    #   steps:
+    #     review: {seat: reviewer, rounds: 2}
+    #     reviewed: {seat: navigator, decided_by: review}
+    #     discovered: {handoff: discover_completed, seat: navigator, rounds: 2}
+    #     close: {seat: navigator}
+    #   level3: [review, reviewed, discovered, close]
     # Groups of task labels. The first one the task carries from each group
     # goes on the envelope checks and handoffs are given, as `level: level::3`.
     # Nothing is required or refused: a task with none of them adds nothing.
