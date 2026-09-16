@@ -8,7 +8,7 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
-from halyard.core.config_file import Step
+from halyard.core.config_file import Decisions, Step
 from halyard.workflows import Decision, Next, Run, after, clear, current, lines_for, read, save
 
 AT = datetime(2026, 9, 16, 18, 21, tzinfo=UTC)
@@ -17,18 +17,21 @@ FLOW = ("to_nav", "review", "discover", "discovered")
 STEPS = {
     "to_nav": Step(name="to_nav", handoff="to_nav", seat="nav"),
     "review": Step(name="review", handoff="review", seat="xreview", rounds=2),
-    "discover": Step(name="discover", handoff="driver_discover", seat="xdrv"),
+    "discover": Step(name="discover", handoff="driver_discover", seat="xdrv", rounds=2),
     "discovered": Step(name="discovered", handoff="discover_completed", seat="nav", rounds=2),
 }
 
 #: The review of level 3: the reviewer's decision is the navigator's to act on.
 REVIEWED = ("review", "reviewed", "discover", "discovered")
 REVIEWED_STEPS = {
-    "review": Step(name="review", handoff="review", seat="xreview"),
-    "reviewed": Step(name="reviewed", handoff="to_nav", seat="nav", decided_by="review"),
-    "discover": Step(name="discover", handoff="driver_discover", seat="xdrv"),
-    "discovered": Step(name="discovered", handoff="discover_completed", seat="nav"),
+    "review": Step(name="review", handoff="review", seat="xreview", rounds=2),
+    "reviewed": Step(name="reviewed", handoff="to_nav", seat="nav", rounds=2, decided_by="review"),
+    "discover": Step(name="discover", handoff="driver_discover", seat="xdrv", rounds=2),
+    "discovered": Step(name="discovered", handoff="discover_completed", seat="nav", rounds=2),
 }
+
+#: A project whose prompts ask for words of their own, and one left as it was.
+GO_HOLD = Decisions(forward="go", wait="hold")
 SEATS = {"review": "xreview", "reviewed": "nav", "discover": "xdrv", "discovered": "nav"}
 
 
@@ -86,9 +89,10 @@ def test_case_spacing_and_emphasis_do_not_matter() -> None:
     assert read("- DECISION: forward.") is Decision.FORWARD
 
 
-def test_another_label_is_not_a_decision() -> None:
-    assert read("Status: back") is None
-    assert read("RESULT: forward") is None
+def test_the_label_is_the_project_s_own() -> None:
+    """Whatever comes before the colon is not read: a project names its line."""
+    assert read("RESULT: back") is Decision.BACK
+    assert read("DECISION: back") is Decision.BACK
 
 
 def test_a_reply_that_decides_nothing_is_nothing() -> None:
@@ -96,6 +100,16 @@ def test_a_reply_that_decides_nothing_is_nothing() -> None:
     assert read("DECISION: sideways") is None
     assert read("") is None
     assert read(None) is None
+
+
+def test_a_project_s_own_words_are_read_instead_of_the_defaults() -> None:
+    assert read("RESULT: go", GO_HOLD) is Decision.FORWARD
+    assert read("hold", GO_HOLD) is Decision.WAIT
+    assert read("RESULT: forward", GO_HOLD) is None, "a word renamed is no longer said"
+
+
+def test_a_word_a_project_left_out_keeps_its_own_name() -> None:
+    assert read("RESULT: back", GO_HOLD) is Decision.BACK
 
 
 # --- where the run goes next ---------------------------------------------------
@@ -146,6 +160,15 @@ def test_a_step_past_its_rounds_is_offered_rather_than_taken(monkeypatch) -> Non
 
     assert moving.step == 1
     assert "round 3 of 2" in moving.stop
+
+
+def test_a_step_goes_once_unless_it_says_otherwise() -> None:
+    """Going round is something a project writes down: `to_nav` says nothing,
+    so sending the work back to it waits for the operator."""
+    moving = next_after(Decision.BACK, step=1, to_nav=1, review=1)
+
+    assert moving.step == 0
+    assert "round 2 of 1" in moving.stop
 
 
 def test_rounds_are_counted_by_the_handoff_the_step_names() -> None:
@@ -226,13 +249,21 @@ def test_only_the_step_that_names_it_acts_on_a_carried_decision() -> None:
 # --- what each step is told ----------------------------------------------------
 
 
-def told(step: int, *, carried: str = "", sent_back_by: str = "", **taken) -> list[str]:
+def told(
+    step: int,
+    *,
+    carried: str = "",
+    sent_back_by: str = "",
+    words: Decisions | None = None,
+    **taken,
+) -> list[str]:
     return lines_for(
         a_run(step, carried=carried),
         flow=REVIEWED,
         steps=REVIEWED_STEPS,
         taken=taken,
         seats=SEATS,
+        words=words,
         sent_back_by=sent_back_by,
     )
 
@@ -240,14 +271,21 @@ def told(step: int, *, carried: str = "", sent_back_by: str = "", **taken) -> li
 def test_a_step_says_where_each_word_on_its_last_line_takes_the_work() -> None:
     assert told(3, driver_discover=1, discover_completed=1) == [
         "Workflow: level3 · step 4 of 4 · discovered",
-        "Decide on your last line: DECISION: forward (→ the workflow ends) · "
+        "Decide on your last line: forward (→ the workflow ends) · "
         "back (→ discover, xdrv, round 2 of 2) · wait (→ the operator)",
     ]
 
 
+def test_a_step_is_told_the_project_s_own_words() -> None:
+    assert told(3, words=GO_HOLD, driver_discover=1, discover_completed=1)[1] == (
+        "Decide on your last line: go (→ the workflow ends) · "
+        "back (→ discover, xdrv, round 2 of 2) · hold (→ the operator)"
+    )
+
+
 def test_a_review_is_told_its_decision_goes_to_the_step_that_acts_on_it() -> None:
     assert told(0, review=1)[1] == (
-        "Decide on your last line: DECISION: forward or back "
+        "Decide on your last line: forward or back "
         "(→ reviewed, nav, who acts on it) · wait (→ the operator)"
     )
 
@@ -256,13 +294,14 @@ def test_the_navigator_is_told_what_the_review_decided_and_how_to_overrule_it() 
     assert told(1, carried="back", review=1, to_nav=1) == [
         "Workflow: level3 · step 2 of 4 · reviewed",
         "Already decided by review (xreview): back (→ review, xreview, round 2 of 2)",
-        "To overrule it, end with DECISION: forward (→ discover, xdrv) or wait (→ the operator)",
+        "To overrule it, decide on your last line: forward (→ discover, xdrv) "
+        "or wait (→ the operator)",
     ]
 
 
 def test_a_navigator_with_nothing_carried_decides_for_itself() -> None:
     assert told(1, review=1, to_nav=1)[1] == (
-        "Decide on your last line: DECISION: forward (→ discover, xdrv) · "
+        "Decide on your last line: forward (→ discover, xdrv) · "
         "back (→ review, xreview, round 2 of 2) · wait (→ the operator)"
     )
 

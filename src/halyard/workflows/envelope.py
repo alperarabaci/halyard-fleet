@@ -7,16 +7,17 @@ the work — which step, which seat, which round — worked out by the same `aft
 that moves the run when the reply comes, so what a seat is told and what
 happens cannot disagree.
 
-One template for every step of every project. The workflow knows all of it,
-and a project's prompts only have to ask for the decision line.
+One template for every step of every project, in the words that project
+decides in. The workflow knows all of it, and a project's prompts only have to
+ask for the decision line.
 """
 
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 
-from halyard.core.config_file import Step
-from halyard.workflows.decisions import LABEL, Decision, carried
+from halyard.core.config_file import Decisions, Step
+from halyard.workflows.decisions import Decision, carried, word_for
 from halyard.workflows.flow import after, lends
 from halyard.workflows.runs import Run
 
@@ -28,14 +29,16 @@ def lines_for(
     steps: Mapping[str, Step],
     taken: Mapping[str, int],
     seats: Mapping[str, str],
+    words: Decisions | None = None,
     sent_back_by: str = "",
 ) -> list[str]:
     """The workflow's lines for the step `run` is on, one fact to a line.
 
     `taken` is how many rounds each handoff has had for this piece of work,
     this step's own included, since it is on its way. `seats` is the label of
-    the seat each step goes to, by step name. `sent_back_by` names who sent the
-    work back to this step, and when, if it came back.
+    the seat each step goes to, by step name. `words` are the project's words
+    for each decision. `sent_back_by` names who sent the work back to this
+    step, and when, if it came back.
     """
     name = flow[run.step] if 0 <= run.step < len(flow) else ""
     said = [f"Workflow: {run.workflow} · step {run.step + 1} of {len(flow)} · {name}"]
@@ -48,10 +51,14 @@ def lines_for(
     def to(decision: Decision) -> str:
         return _where(decision, run=run, flow=flow, steps=steps, taken=taken, seats=seats)
 
+    def word(decision: Decision) -> str:
+        return word_for(decision, words)
+
     if lends(run.step, flow=flow, steps=steps):
         said.append(
-            f"Decide on your last line: {LABEL}: forward or back "
-            f"({to(Decision.FORWARD)}, who acts on it) · wait ({to(Decision.WAIT)})"
+            f"Decide on your last line: {word(Decision.FORWARD)} or {word(Decision.BACK)} "
+            f"({to(Decision.FORWARD)}, who acts on it) · "
+            f"{word(Decision.WAIT)} ({to(Decision.WAIT)})"
         )
         return said
     already = carried(run.carried) if step.decided_by else None
@@ -59,15 +66,15 @@ def lines_for(
         by = step.decided_by or ""
         who = f" ({seats[by]})" if seats.get(by) else ""
         others = [decision for decision in Decision if decision is not already]
-        said.append(f"Already decided by {by}{who}: {already} ({to(already)})")
+        said.append(f"Already decided by {by}{who}: {word(already)} ({to(already)})")
         said.append(
-            f"To overrule it, end with {LABEL}: "
-            + " or ".join(f"{decision} ({to(decision)})" for decision in others)
+            "To overrule it, decide on your last line: "
+            + " or ".join(f"{word(decision)} ({to(decision)})" for decision in others)
         )
         return said
     said.append(
-        f"Decide on your last line: {LABEL}: "
-        + " · ".join(f"{decision} ({to(decision)})" for decision in Decision)
+        "Decide on your last line: "
+        + " · ".join(f"{word(decision)} ({to(decision)})" for decision in Decision)
     )
     return said
 

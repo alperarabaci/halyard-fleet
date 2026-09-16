@@ -921,9 +921,18 @@ async def test_a_round_that_reached_nobody_is_not_counted(tmp_path: Path, wired)
 # --- /workflow: the handoffs taken in the order the project wrote them down ---
 
 
-def flow_in(channel, repo: Path, tmp_path: Path, runner, *, flows: dict, steps: dict) -> None:
-    """Two handoffs, and the steps a flow takes them in."""
-    from halyard.core.config_file import Step, Workflows
+def flow_in(
+    channel,
+    repo: Path,
+    tmp_path: Path,
+    runner,
+    *,
+    flows: dict,
+    steps: dict,
+    decisions: dict | None = None,
+) -> None:
+    """Two handoffs, the steps a flow takes them in, and any words of its own."""
+    from halyard.core.config_file import Decisions, Step, Workflows
 
     handoffs_in(
         channel,
@@ -938,16 +947,18 @@ def flow_in(channel, repo: Path, tmp_path: Path, runner, *, flows: dict, steps: 
         found,
         workflows=Workflows(
             steps={name: Step(name=name, **spec) for name, spec in steps.items()},
+            decisions=Decisions(**(decisions or {})),
             flows={name: tuple(order) for name, order in flows.items()},
         ),
     )
 
 
-#: A flow of two steps: the reviewer, then the navigator.
+#: A flow of two steps: the reviewer, which the work may come back to once, then
+#: the navigator.
 TWO_STEPS = {
     "flows": {"level3": ["review", "to_nav"]},
     "steps": {
-        "review": {"handoff": "review", "seat": "xrev"},
+        "review": {"handoff": "review", "seat": "xrev", "rounds": 2},
         "to_nav": {"handoff": "to_nav", "seat": "nav"},
     },
 }
@@ -1039,10 +1050,24 @@ async def test_a_workflow_starts_at_its_first_step(tmp_path: Path, wired) -> Non
     assert session == "id-rev"
     assert "- Workflow: level3 · step 1 of 2 · review" in text
     assert (
-        "- Decide on your last line: DECISION: forward (→ to_nav, nav) · back (→ the operator) "
+        "- Decide on your last line: forward (→ to_nav, nav) · back (→ the operator) "
         "· wait (→ the operator)"
     ) in text
     assert any("level3</b> 1/2" in sent["text"] for sent in api.sent)
+
+
+async def test_a_project_s_own_words_move_the_run_and_are_the_ones_it_is_told(
+    tmp_path: Path, wired
+) -> None:
+    channel, _, runner, repo = wired
+    flow_in(channel, repo, tmp_path, runner, **TWO_STEPS, decisions={"forward": "go"})
+    await started(channel)
+
+    assert "- Decide on your last line: go (→ to_nav, nav)" in runner.sent[0][1]
+
+    await answered(channel, "xrev", "Nothing blocking.\nRESULT: go")
+
+    assert runner.sent[-1][0] == "id-nav"
 
 
 async def test_a_handoff_pressed_by_hand_says_nothing_of_a_workflow(tmp_path: Path, wired) -> None:
@@ -1055,7 +1080,7 @@ async def test_a_handoff_pressed_by_hand_says_nothing_of_a_workflow(tmp_path: Pa
 
     [(_, text)] = runner.sent
     assert "Workflow:" not in text
-    assert "DECISION" not in text
+    assert "Decide on your last line" not in text
 
 
 async def test_the_word_for_forward_takes_the_next_step_with_the_reply(
@@ -1183,8 +1208,8 @@ async def test_a_run_that_is_going_says_where_it_is_rather_than_starting_again(
 REVIEWED = {
     "flows": {"level3": ["review", "reviewed"]},
     "steps": {
-        "review": {"handoff": "review", "seat": "xrev"},
-        "reviewed": {"handoff": "to_nav", "seat": "nav", "decided_by": "review"},
+        "review": {"handoff": "review", "seat": "xrev", "rounds": 2},
+        "reviewed": {"handoff": "to_nav", "seat": "nav", "rounds": 2, "decided_by": "review"},
     },
 }
 
@@ -1245,7 +1270,7 @@ async def test_a_review_that_says_wait_stops_before_the_navigator(tmp_path: Path
     assert session == "id-nav"
     assert "The scope needs a decision." in text, "it carries the reviewer's reply"
     assert "Already decided" not in text
-    assert "- Decide on your last line: DECISION:" in text
+    assert "- Decide on your last line: forward" in text
 
 
 async def test_a_handoff_runs_its_checks_before_it_goes(tmp_path: Path, wired) -> None:
