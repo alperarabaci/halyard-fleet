@@ -116,6 +116,7 @@ _CHOOSABLE = frozenset(
         "flowat",
         "flowgo",
         "flowstop",
+        "pick",
     }
 )
 
@@ -569,6 +570,38 @@ def workflow_steps(workflow: str, flow: tuple[str, ...]) -> dict | None:
     if not buttons:
         return None
     return _keyboard([buttons[i : i + 3] for i in range(0, len(buttons), 3)])
+
+
+#: What a label picked for a command goes on to do: the handoff, the command, or
+#: the workflow step that needed it, pressed again.
+PICKED_FOR_HANDOFF = "h"
+PICKED_FOR_COMMAND = "c"
+PICKED_FOR_WORKFLOW = "w"
+
+
+def label_picks(
+    kind: str, name: str, group: int, labels: tuple[str, ...], *, workflow: str | None = None
+) -> dict | None:
+    """A button per label of a group, for a command the task gave no value.
+
+    The button carries what to do after the tap — `kind` and `name` — with the
+    group's and the label's places rather than their spellings, which a phone's
+    64 bytes would not hold. Under a workflow's step the way out is stopping
+    the workflow; anywhere else it is cancelling the press.
+    """
+    buttons = []
+    for place, label in enumerate(labels):
+        try:
+            data = choice_data("pick", f"{kind}{name}>{group}>{place}")
+        except ValueError:
+            continue
+        buttons.append({"text": label, "callback_data": data})
+    if not buttons:
+        return None
+    rows = [buttons[i : i + 3] for i in range(0, len(buttons), 3)]
+    if workflow is None:
+        return _keyboard(rows)
+    return {"inline_keyboard": [*rows, *workflow_keyboard(workflow)["inline_keyboard"]]}
 
 
 def workflow_keyboard(workflow: str, *, go: bool = False) -> dict:

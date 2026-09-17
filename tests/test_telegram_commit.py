@@ -1669,6 +1669,149 @@ async def test_a_handoff_labels_like_a_check_run_by_hand(
     assert tracker.added == [(281, "halyard:proof")]
 
 
+def scoped(channel: TelegramChannel, monkeypatch) -> list:
+    """An end-to-end suite taking its scope from the task's `ddd-scope` label,
+    and a run of it that answers at once."""
+    from halyard.channels.telegram import adapter as under_test
+    from halyard.commands import Result
+
+    found = channel._repositories["alpha-engine"]
+    channel._repositories["alpha-engine"] = replace(
+        found,
+        commands={"e2e-scope": "make test-e2e-scope SCOPE={label_groups.ddd-scope}"},
+        label_groups={"ddd-scope": ("ddd:capstone", "ddd:refining", "ddd:all")},
+    )
+    ran: list = []
+
+    def running(line, path, *, timeout=None, on_progress=None):
+        ran.append(line)
+        return Result(ok=True, output="12 passed", seconds=3.0, exit_code=0)
+
+    monkeypatch.setattr(under_test.commands_running, "run", running)
+    return ran
+
+
+def picked(value: str) -> dict:
+    return pressed_handoff("pick", value)
+
+
+async def test_a_command_takes_its_value_from_the_tasks_labels(
+    tmp_path: Path, wired, monkeypatch
+) -> None:
+    """Every label of the group the task carries, in the group's order."""
+    channel, _, runner, repo = wired
+    handoffs_in(channel, repo, tmp_path, runner, close={"commands": ("e2e-scope",), "to": "xrev"})
+    ran = scoped(channel, monkeypatch)
+    behind_a_tracker(channel, monkeypatch, Tracker(labels=("ddd:refining", "ddd:capstone")))
+
+    await channel._run_handoff("close", CHAT, None, f"tg:{APPROVER}")
+    await settled(channel)
+
+    assert ran == ["make test-e2e-scope SCOPE=capstone,refining"]
+    [(_, text)] = runner.sent
+    assert "Ran e2e-scope: make test-e2e-scope SCOPE=capstone,refining · exit 0" in text
+
+
+async def test_a_task_without_the_label_is_asked_for_one_and_it_goes_on_the_task(
+    tmp_path: Path, wired, monkeypatch
+) -> None:
+    channel, api, runner, repo = wired
+    handoffs_in(channel, repo, tmp_path, runner, close={"commands": ("e2e-scope",), "to": "xrev"})
+    ran = scoped(channel, monkeypatch)
+    tracker = behind_a_tracker(channel, monkeypatch, Tracker(labels=("backend",)))
+
+    await channel._run_handoff("close", CHAT, None, f"tg:{APPROVER}")
+    await settled(channel)
+
+    assert (ran, runner.sent) == ([], []), "nothing runs with the braces still in the line"
+    asking = api.sent[-1]
+    assert "takes the task's <b>ddd-scope</b> label" in asking["text"]
+    keys = [key["text"] for key in asking["reply_markup"]["inline_keyboard"][0]]
+    assert keys == ["ddd:capstone", "ddd:refining", "ddd:all"]
+
+    await channel._handle_callback(picked("hclose>0>1"))
+    await settled(channel)
+
+    assert tracker.added == [(281, "ddd:refining")]
+    assert ran == ["make test-e2e-scope SCOPE=refining"]
+    assert len(runner.sent) == 1
+
+
+async def test_a_branch_naming_no_task_keeps_the_pick_for_this_work(
+    tmp_path: Path, wired, monkeypatch
+) -> None:
+    """Nothing to put the label on, so it is used for this work until Halyard
+    restarts — the second press is not asked again."""
+    channel, api, runner, repo = wired
+    handoffs_in(channel, repo, tmp_path, runner, close={"commands": ("e2e-scope",), "to": "xrev"})
+    ran = scoped(channel, monkeypatch)
+
+    await channel._run_handoff("close", CHAT, None, f"tg:{APPROVER}")
+    await settled(channel)
+    assert "names no task" in api.sent[-1]["text"]
+
+    await channel._handle_callback(picked("hclose>0>2"))
+    await settled(channel)
+    await channel._run_handoff("close", CHAT, None, f"tg:{APPROVER}")
+    await settled(channel)
+
+    assert ran == ["make test-e2e-scope SCOPE=all", "make test-e2e-scope SCOPE=all"]
+
+
+async def test_command_fills_the_label_in_as_a_handoff_does(
+    tmp_path: Path, wired, monkeypatch
+) -> None:
+    channel, api, _, _ = wired
+    ran = scoped(channel, monkeypatch)
+    behind_a_tracker(channel, monkeypatch, Tracker(labels=("ddd:all",)))
+    channel._said_path = tmp_path / "last-said.json"
+
+    await channel._run_command("e2e-scope", CHAT, None)
+    await settled(channel)
+
+    assert ran == ["make test-e2e-scope SCOPE=all"]
+    assert any("Running <code>make test-e2e-scope SCOPE=all</code>" in s["text"] for s in api.sent)
+
+
+async def test_a_workflow_step_waits_for_the_label_and_the_pick_sends_it(
+    tmp_path: Path, wired, monkeypatch
+) -> None:
+    """A label is somebody's to pick, so the run stops there — and the tap
+    puts it on the task and sends the step."""
+    from halyard.core.config_file import Step, Workflows
+
+    channel, api, runner, repo = wired
+    handoffs_in(channel, repo, tmp_path, runner, close={"commands": ("e2e-scope",), "to": "xrev"})
+    ran = scoped(channel, monkeypatch)
+    tracker = behind_a_tracker(channel, monkeypatch, Tracker())
+    found = channel._repositories["alpha-engine"]
+    channel._repositories["alpha-engine"] = replace(
+        found,
+        workflows=Workflows(
+            steps={"close": Step(name="close", handoff="close", seat="xrev")},
+            flows={"level3": ("close",)},
+        ),
+    )
+
+    await channel._run_workflow("level3", CHAT, None, f"tg:{APPROVER}", start=0)
+    await settled(channel)
+
+    assert runner.sent == []
+    asking = api.sent[-1]
+    assert asking["text"].startswith("⏸ <b>level3</b> 1/1 · close — ")
+    keys = [key["text"] for row in asking["reply_markup"]["inline_keyboard"] for key in row]
+    assert "ddd:capstone" in keys and "⏹ Stop the workflow" in keys
+
+    await channel._handle_callback(picked("wlevel3>0>0"))
+    await settled(channel)
+
+    assert tracker.added == [(281, "ddd:capstone")]
+    assert ran == ["make test-e2e-scope SCOPE=capstone"]
+    [(session, text)] = runner.sent
+    assert session == "id-rev"
+    assert "- Workflow: level3 · step 1 of 1 · close" in text
+
+
 async def test_pressing_a_check_runs_that_one_over_the_last_reply(tmp_path: Path, wired) -> None:
     """Its own instructions, the whole reply, and what Halyard can see."""
     from halyard.channels.telegram.adapter import CHECK_MODEL

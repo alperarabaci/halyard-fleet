@@ -140,6 +140,7 @@ projects:
     # name entries from here rather than a command line of their own.
     # commands:
     #   test-fast: make test-fast
+    #   e2e: make test-e2e SCOPE={label_groups.area}   # the task's `area` label; asked for if missing
     # validate: test-fast             # run first by /review_and_commit
     # Checks `/checks` offers over a chat's last reply, and handoffs `/handoff`
     # offers — each the project's own file, read relative to `path`. A handoff
@@ -180,6 +181,7 @@ projects:
     # Nothing is required or refused: a task with none of them adds nothing.
     # label_groups:
     #   level: [level::1, level::2, level::3]
+    #   area: [area:api, area:web, area:all]   # a command can take one: {label_groups.area}
     # What the checks' answers say when they found something, in the project's
     # own words — quoted, since a phrase with a colon is otherwise a mapping. An
     # answer saying one of them puts `halyard:<check>` on the task. This writes
