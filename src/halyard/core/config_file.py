@@ -208,6 +208,10 @@ class Project:
     #: machine the control plane is on, so the list is what somebody wrote down
     #: and never a guess about what a project probably supports.
     commands: dict[str, str] = field(default_factory=dict)
+    #: Commands that run other commands, in order, stopping at the first that
+    #: fails — `next-task: [cleanup, pull-branch]`, written under `commands:`
+    #: like the rest and offered by `/command` with them.
+    command_lists: dict[str, tuple[str, ...]] = field(default_factory=dict)
     #: Which kind of issue tracker this project's remote points at. Only needed
     #: for a host that does not name itself — `gitlab.com` does, and
     #: `git.example.com` cannot.
@@ -524,27 +528,80 @@ def _steps_from(
     return found
 
 
-def _commands_from(project: str, value: Any) -> dict[str, str]:
-    """`commands:` as a mapping of name to command line."""
+def _commands_from(project: str, value: Any) -> tuple[dict[str, str], dict[str, tuple[str, ...]]]:
+    """`commands:` as command lines by name, and the lists of them by name.
+
+    A command is a line — `cleanup: make cleanup` — or the names of other
+    commands to run in order: `next-task: [cleanup, pull-branch]`. A list names
+    lines only, so what runs is always something written down as a line.
+    """
     if value is None:
-        return {}
+        return {}, {}
     if not isinstance(value, dict):
         raise ValueError(f"Project {project!r}: `commands:` must be a mapping of name to command.")
-    return {str(name): str(line) for name, line in value.items()}
+    lines: dict[str, str] = {}
+    lists: dict[str, tuple[str, ...]] = {}
+    for raw, spec in value.items():
+        if isinstance(spec, list):
+            lists[str(raw)] = tuple(str(name).strip() for name in spec if str(name).strip())
+        else:
+            lines[str(raw)] = str(spec)
+    for name, listed in lists.items():
+        where = f"Project {project!r}: command {name!r}"
+        if not listed:
+            raise ValueError(f"{where} is an empty list — name the commands it runs, in order.")
+        if nested := [entry for entry in listed if entry in lists]:
+            raise ValueError(
+                f"{where} runs {', '.join(nested)}, which is a list itself — name the "
+                "commands in it instead."
+            )
+        if missing := [entry for entry in listed if entry not in lines]:
+            raise ValueError(
+                f"{where} runs commands this project does not define: {', '.join(missing)}"
+            )
+    return lines, lists
 
 
-def _labels_in_commands_checked(
+def _not_a_list(project: str, body: dict, command_lists: dict[str, tuple[str, ...]]) -> None:
+    """A handoff or `validate:` names commands themselves, never a list of them.
+
+    Said before either is read, which would otherwise call a list's name a
+    command this project does not define — true, and no help.
+    """
+    handoffs = body.get("handoffs")
+    for handoff, spec in (handoffs if isinstance(handoffs, dict) else {}).items():
+        ran = spec.get("commands") if isinstance(spec, dict) else None
+        for name in ran if isinstance(ran, list) else []:
+            if str(name).strip() in command_lists:
+                raise ValueError(
+                    f"Project {project!r}: handoff {str(handoff)!r} names {str(name).strip()!r}, "
+                    "which is a list of commands — name the commands in it instead."
+                )
+    if (validate := _as_text(body.get("validate"))) in command_lists:
+        raise ValueError(
+            f"Project {project!r}: `validate:` names {validate!r}, which is a list of "
+            "commands — `validate:` names one command."
+        )
+
+
+def _placeholders_checked(
     project: str,
     commands: dict[str, str],
     label_groups: dict[str, tuple[str, ...]],
     *,
     validate: str | None,
+    handoffs: dict[str, Handoff],
 ) -> None:
-    """A command taking `{label_groups.<group>}` names a group this project has.
+    """What a command line fills in is something that can be filled in.
 
-    Refused here rather than when the command runs, where the line would go to
-    the shell with the braces still in it. See `halyard.commands.labels`.
+    `{label_groups.<group>}` names a group this project has, with labels in
+    it. `{input.<name>}` is typed by somebody, so only `/command` can run it: a
+    handoff has nobody to ask, and neither does a commit's `validate:`, which
+    takes no label either. Refused here rather than when the command runs,
+    where the line would reach the shell with its braces still in it. See
+    `halyard.commands.labels` and `halyard.commands.inputs`.
     """
+    from halyard.commands.inputs import names_in
     from halyard.commands.labels import groups_in
 
     for name, line in commands.items():
@@ -555,12 +612,20 @@ def _labels_in_commands_checked(
                 raise ValueError(f"{where}, but `label_groups:` has no group {group!r}{defined}.")
             if not label_groups[group]:
                 raise ValueError(f"{where}, and that group lists no labels to take one from.")
-        if name == validate and groups_in(line):
+        if name == validate and (groups_in(line) or names_in(line)):
             raise ValueError(
-                f"Project {project!r}: `validate:` names {name!r}, which takes a task's "
-                "label — and a commit has nowhere to ask for one. Give `validate:` a "
-                "command of its own."
+                f"Project {project!r}: `validate:` names {name!r}, which takes a value — a "
+                "task's label or something typed — and a commit has nowhere to ask for one. "
+                "Give `validate:` a command of its own."
             )
+    for handoff in handoffs.values():
+        for name in handoff.commands:
+            if typed := names_in(commands.get(name, "")):
+                raise ValueError(
+                    f"Project {project!r}: handoff {handoff.name!r} runs {name!r}, which takes "
+                    f"{{input.{typed[0]}}} — typed by somebody, and a handoff has nobody to "
+                    "ask. Run it with /command."
+                )
 
 
 def _validate_from(project: str, value: Any, commands: dict[str, str]) -> str | None:
@@ -794,13 +859,14 @@ def projects_from_yaml(text: str) -> list[Project]:
 
         path = _as_text(body.get("path"))
         checks = _checks_from(project, body.get("checks"))
-        commands = _commands_from(project, body.get("commands"))
+        commands, command_lists = _commands_from(project, body.get("commands"))
+        _not_a_list(project, body, command_lists)
         handoffs = _handoffs_from(
             project, body.get("handoffs"), checks=checks, seats=seats, commands=commands
         )
         label_groups = _label_groups_from(project, body.get("label_groups"))
         validate = _validate_from(project, body.get("validate"), commands)
-        _labels_in_commands_checked(project, commands, label_groups, validate=validate)
+        _placeholders_checked(project, commands, label_groups, validate=validate, handoffs=handoffs)
         projects.append(
             Project(
                 name=project,
@@ -809,6 +875,7 @@ def projects_from_yaml(text: str) -> list[Project]:
                 validate=validate,
                 warn_if=_warnings_from(project, body.get("warn_if")),
                 commands=commands,
+                command_lists=command_lists,
                 forge=_as_text(body.get("forge")),
                 labels=_warnings_from(project, body.get("labels")) or (),
                 label_groups=label_groups,
