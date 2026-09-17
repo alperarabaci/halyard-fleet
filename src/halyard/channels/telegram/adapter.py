@@ -38,6 +38,7 @@ from halyard.applications import catalogue, desktop
 from halyard.channels.telegram import cards, commit_card
 from halyard.channels.telegram.api import TelegramApi
 from halyard.commands import catalogue as commands_offered
+from halyard.commands import inputs as command_inputs
 from halyard.commands import labels as command_labels
 from halyard.commands import running as commands_running
 from halyard.core import last_said, transcripts
@@ -285,6 +286,19 @@ class _Lines:
     needing: str = ""
     #: The task the branch is for, when it names one that could be reached.
     task: int | None = None
+
+
+@dataclass(frozen=True)
+class _Asked:
+    """A value a command asked for, answered by the next message in its chat."""
+
+    project: str
+    #: The command, or the list of commands, it is for.
+    command: str
+    #: What it asked for — `task` in `{input.task}`.
+    name: str
+    #: What was already given for the same run.
+    values: dict[str, str]
 
 
 @dataclass(frozen=True)
@@ -582,6 +596,9 @@ class TelegramChannel:
         #: before the tracker says it has it. Gone on a restart: the task is
         #: where a pick is kept for good.
         self._picked: dict[tuple[str, str], dict[str, str]] = {}
+        #: A value a command asked for, by the chat and thread it was asked in,
+        #: with when — the next message there answers it, for a few minutes.
+        self._inputs: dict[tuple[str, int | None], tuple[_Asked, datetime]] = {}
         #: Commits proposed and not yet answered. Owned by `halyard.commits`,
         #: which is where taking-once and going-stale are decided.
         self._proposals = commits.Proposals(self._clock)
@@ -1010,6 +1027,10 @@ class TelegramChannel:
             # the words are for; a normal forward could not run anyway. Checked
             # before anything else for that reason.
             if here and await self._answer_open_question_with_text(here, text, user_id):
+                return
+            # A value a command asked for takes the next message in its chat,
+            # before a seat could: it was asked for a moment ago, right here.
+            if here and await self._answer_input(here, thread, text):
                 return
 
             replied = (message.get("reply_to_message") or {}).get("text") or ""
@@ -1590,14 +1611,22 @@ class TelegramChannel:
         return f"{int(seconds // 60)}m {int(seconds % 60):02d}s"
 
     async def _run_command(self, typed: str, chat_id: str, thread_id: int | None) -> None:
-        """`/command` — offer this project's commands, or start the named one."""
+        """`/command` — offer this project's commands, or start the named one.
+
+        A command is a line or a list of them, run in order. Whatever follows
+        the name answers the first value it asks for: `/command next-task 369`.
+        """
         found = self._repository_for(chat_id)
         if found is None:
             await self._say(self._no_repository(chat_id), chat_id, thread_id)
             return
+        # A command started is a new question: one left open here is dropped,
+        # so its answer cannot land on something else.
+        self._inputs.pop((chat_id, thread_id), None)
 
         listed = commands_offered.offered(found.commands)
-        if not listed:
+        names = (*(command.name for command in listed), *found.command_lists)
+        if not names:
             await self._say(
                 f"<b>{html.escape(found.name)}</b> lists no commands. Add a "
                 "<code>commands:</code> block to it in <code>halyard.yaml</code>.",
@@ -1611,50 +1640,153 @@ class TelegramChannel:
                 "Run which one?",
                 chat_id,
                 thread_id,
-                reply_markup=cards.command_choices(tuple(c.name for c in listed)),
+                reply_markup=cards.command_choices(names),
             )
             return
 
-        command = commands_offered.resolve(found.commands, typed)
-        if command is None:
+        wanted, _, given = typed.strip().partition(" ")
+        named = self._commands_named(found, wanted)
+        if named is None:
             await self._say(
                 f"<b>{html.escape(found.name)}</b> has no command called "
-                f"<b>{html.escape(typed)}</b>.",
+                f"<b>{html.escape(wanted)}</b>.",
                 chat_id,
                 thread_id,
             )
             await self._run_command("", chat_id, thread_id)
             return
+        name, order = named
 
-        if command_labels.groups_in(command.line):
-            # Detached: its value is read from the task's tracker first, and
-            # this loop answers everybody else's buttons meanwhile.
-            self._detach(self._run_labelled_command(found, command, chat_id, thread_id), "/command")
+        asks = any(command_inputs.names_in(command.line) for command in order)
+        if given.strip() and not asks:
+            # Said rather than dropped: somebody who typed a value believes it
+            # went somewhere.
+            await self._say(
+                f"<b>{html.escape(name)}</b> takes nothing after its name.", chat_id, thread_id
+            )
             return
-        await self._start_command(found, command, chat_id, thread_id)
+        if asks or any(command_labels.groups_in(command.line) for command in order):
+            # Detached: a label is read from the task's tracker, and a value
+            # may have to be asked for; this loop answers everybody meanwhile.
+            self._detach(
+                self._run_filled(found, name, order, chat_id, thread_id, given=given.strip()),
+                "/command",
+            )
+            return
+        await self._start_commands(found, name, order, chat_id, thread_id)
 
-    async def _run_labelled_command(
-        self, found: Project, command, chat_id: str, thread_id: int | None
+    def _commands_named(
+        self, found: Project, wanted: str
+    ) -> tuple[str, tuple[commands_offered.Command, ...]] | None:
+        """A command by the name somebody typed or pressed, as what runs: one
+        line, or the lines of a list in their order."""
+        one = commands_offered.resolve(found.commands, wanted)
+        if one is not None:
+            return one.name, (one,)
+        name = next(
+            (key for key in found.command_lists if key.casefold() == wanted.casefold()), None
+        )
+        if name is None:
+            return None
+        return name, tuple(
+            commands_offered.Command(name=entry, line=found.commands[entry])
+            for entry in found.command_lists[name]
+        )
+
+    async def _run_filled(
+        self,
+        found: Project,
+        name: str,
+        order: tuple[commands_offered.Command, ...],
+        chat_id: str,
+        thread_id: int | None,
+        *,
+        given: str = "",
+        typed: Mapping[str, str] | None = None,
     ) -> None:
-        """A command taking a task's label: filled in, or the label asked for."""
-        lines = await self._command_lines(found, (command.name,))
+        """Commands with something to fill in, filled — or what is missing asked for.
+
+        A task's label first, then a typed value, and all of it before anything
+        runs: a list stopping half way to wait for an answer would leave the
+        project between two of its own commands.
+        """
+        lines = await self._command_lines(found, tuple(command.name for command in order))
         if lines.missing:
             await self._ask_for_label(
                 found,
                 lines,
                 kind=cards.PICKED_FOR_COMMAND,
-                name=command.name,
+                name=name,
                 chat_id=chat_id,
                 thread_id=thread_id,
             )
             return
-        filled = commands_offered.Command(name=command.name, line=lines.lines[command.name])
-        await self._start_command(found, filled, chat_id, thread_id)
+        asks = tuple(dict.fromkeys(n for c in order for n in command_inputs.names_in(c.line)))
+        values = dict(typed or {})
+        if given and asks:
+            values.setdefault(asks[0], given)
+        if missing := [asked for asked in asks if asked not in values]:
+            self._inputs[(chat_id, thread_id)] = (
+                _Asked(project=found.name, command=name, name=missing[0], values=values),
+                self._clock(),
+            )
+            await self._say(
+                f"✍️ <b>{html.escape(name)}</b> takes <b>{html.escape(missing[0])}</b> "
+                "— send it as your next message here.",
+                chat_id,
+                thread_id,
+            )
+            return
+        filled = tuple(
+            commands_offered.Command(
+                name=command.name, line=command_inputs.filled(lines.lines[command.name], values)
+            )
+            for command in order
+        )
+        for before, after in zip(order, filled, strict=True):
+            if command_inputs.names_in(before.line):
+                logger.info("%s in %s runs as: %s", after.name, found.name, after.line)
+        await self._start_commands(found, name, filled, chat_id, thread_id)
 
-    async def _start_command(
-        self, found: Project, command, chat_id: str, thread_id: int | None
+    async def _answer_input(self, chat_id: str, thread_id: int | None, text: str) -> bool:
+        """Whether this message answered a value a command asked for here.
+
+        Taken rather than read, as a hand-off to a seat is: it answers the next
+        thing said and nothing after it, and not once the moment has passed.
+        """
+        held = self._inputs.pop((chat_id, thread_id), None)
+        if held is None:
+            return False
+        asked, when = held
+        if self._clock() - when > timedelta(seconds=HANDOFF_SECONDS):
+            return False
+        found = self._repositories.get(asked.project)
+        named = self._commands_named(found, asked.command) if found else None
+        if found is None or named is None:
+            return False
+        name, order = named
+        self._detach(
+            self._run_filled(
+                found,
+                name,
+                order,
+                chat_id,
+                thread_id,
+                typed={**asked.values, asked.name: text.strip()},
+            ),
+            "/command",
+        )
+        return True
+
+    async def _start_commands(
+        self,
+        found: Project,
+        name: str,
+        order: tuple[commands_offered.Command, ...],
+        chat_id: str,
+        thread_id: int | None,
     ) -> None:
-        """Start one command in its project, unless another is running there."""
+        """Start a command, or a list of them, unless another is running in the project."""
         # One at a time per project. Two `make` runs in one directory fight over
         # the same build outputs, and the second one's failure is a mystery.
         if busy := self._working.get(found.name):
@@ -1666,24 +1798,62 @@ class TelegramChannel:
             )
             return
 
-        self._working[found.name] = command.name
-        await self._say(
-            f"\u25b6\ufe0f Running <code>{html.escape(command.line)}</code>\u2026",
-            chat_id,
-            thread_id,
-        )
+        self._working[found.name] = name
+        if len(order) == 1:
+            said = f"\u25b6\ufe0f Running <code>{html.escape(order[0].line)}</code>\u2026"
+        else:
+            steps = " then ".join(html.escape(command.name) for command in order)
+            said = f"\u25b6\ufe0f Running <b>{html.escape(name)}</b>: {steps}\u2026"
+        await self._say(said, chat_id, thread_id)
         # Detached, because this can run for the better part of an hour and the
         # poller has approval cards to keep delivering while it does.
         task = asyncio.create_task(
-            self._carry_out(found.name, found.path, command, chat_id, thread_id)
+            self._carry_out(found.name, found.path, name, order, chat_id, thread_id)
         )
         self._sending.add(task)
         task.add_done_callback(self._sending.discard)
 
     async def _carry_out(
-        self, project: str, path: Path, command, chat_id: str, thread_id: int | None
+        self,
+        project: str,
+        path: Path,
+        name: str,
+        order: tuple[commands_offered.Command, ...],
+        chat_id: str,
+        thread_id: int | None,
     ) -> None:
-        """Run it to the end, then say what happened."""
+        """Run them to the end, one after another, saying how each went. The
+        first that does not pass stops the rest, and says which did not run."""
+        try:
+            for place, command in enumerate(order):
+                if len(order) > 1:
+                    await self._say(
+                        f"▶️ Running <code>{html.escape(command.line)}</code>…",
+                        chat_id,
+                        thread_id,
+                    )
+                result = await self._run_and_say(path, command, chat_id, thread_id)
+                if result is not None and result.ok:
+                    continue
+                if rest := [later.name for later in order[place + 1 :]]:
+                    await self._say(
+                        f"⏹ <b>{html.escape(name)}</b> stopped at "
+                        f"<b>{html.escape(command.name)}</b>, so "
+                        f"{html.escape(', '.join(rest))} did not run.",
+                        chat_id,
+                        thread_id,
+                    )
+                return
+        finally:
+            # Released whatever happened. A project left marked busy by a crash
+            # would refuse every command afterwards for no reason anybody could see.
+            self._working.pop(project, None)
+
+    async def _run_and_say(
+        self, path: Path, command, chat_id: str, thread_id: int | None
+    ) -> commands_running.Result | None:
+        """Run one command to the end, and say what happened. None when it
+        could not be started at all."""
         try:
             result = await asyncio.to_thread(commands_running.run, command.line, path)
         except Exception:
@@ -1693,11 +1863,7 @@ class TelegramChannel:
                 chat_id,
                 thread_id,
             )
-            return
-        finally:
-            # Released whatever happened. A project left marked busy by a crash
-            # would refuse every command afterwards for no reason anybody could see.
-            self._working.pop(project, None)
+            return None
 
         if result.timed_out:
             head = f"\u23f1 <b>{html.escape(command.name)}</b> was stopped after "
@@ -1709,6 +1875,7 @@ class TelegramChannel:
         if result.output:
             said += f"\n\n<pre>{html.escape(result.output)}</pre>"
         await self._say(said, chat_id, thread_id)
+        return result
 
     # --- committing what an agent wrote ------------------------------------
     #

@@ -125,6 +125,32 @@ A command naming a group the project does not define, or one with no labels, is
 refused when the file is read; so is `validate:` naming one, since a commit has
 nowhere to ask.
 
+## A command can be a list, and take a value you type
+
+What comes after a piece of work is often a few commands in a row — tidy up, then
+move to the next task — and one of them needs something only you know:
+
+```yaml
+    commands:
+      cleanup: make cleanup
+      pull-branch: make pull-branch TASK={input.task}
+      next-task: [cleanup, pull-branch]
+```
+
+A list runs its commands one after another, as `/command` runs one, and the
+first that does not pass stops the rest; the chat says which did not run.
+`{input.task}` is typed by you: `/command next-task` asks for `task` before
+anything runs, and your next message in that chat answers — for a few minutes,
+and not once another command has been started there. `/command next-task 369`
+gives it outright. What you type goes into the line as one word for the shell,
+whatever it holds; whether it is a sensible task number is the command's own
+business.
+
+`/command` offers a list beside the commands, and only `/command` runs one. A
+handoff names commands themselves, so naming a list there is refused when the
+file is read, and so is a handoff or `validate:` naming a command that asks for
+a typed value: neither has anybody to ask.
+
 ## A handoff counts its rounds
 
 A reply sent back comes round again, and every time a handoff goes for the same

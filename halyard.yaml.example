@@ -141,6 +141,9 @@ projects:
     # commands:
     #   test-fast: make test-fast
     #   e2e: make test-e2e SCOPE={label_groups.area}   # the task's `area` label; asked for if missing
+    #   cleanup: make cleanup
+    #   pull-branch: make pull-branch TASK={input.task}   # typed when /command runs it
+    #   next-task: [cleanup, pull-branch]              # a list: one after another, stops at a failure
     # validate: test-fast             # run first by /review_and_commit
     # Checks `/checks` offers over a chat's last reply, and handoffs `/handoff`
     # offers — each the project's own file, read relative to `path`. A handoff

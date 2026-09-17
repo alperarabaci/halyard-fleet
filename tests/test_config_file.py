@@ -426,9 +426,70 @@ def test_a_command_taking_a_group_with_no_labels_is_refused(tmp_path) -> None:
         a_project(tmp_path, lines=["label_groups:", "  ddd-scope: []", "commands:", E2E])
 
 
+def test_a_command_can_be_a_list_of_commands_run_in_order(tmp_path) -> None:
+    [project] = a_project(
+        tmp_path,
+        lines=[
+            "commands:",
+            "  cleanup: make cleanup",
+            "  pull-branch: make pull-branch TASK={input.task}",
+            "  next-task: [cleanup, pull-branch]",
+        ],
+    )
+
+    assert project.command_lists == {"next-task": ("cleanup", "pull-branch")}
+    assert set(project.commands) == {"cleanup", "pull-branch"}, "a list is not a line"
+
+
+def test_a_list_naming_a_command_nobody_defined_is_refused(tmp_path) -> None:
+    with pytest.raises(ValueError, match="does not define: gone"):
+        a_project(tmp_path, lines=["commands:", "  cleanup: make x", "  both: [cleanup, gone]"])
+
+
+def test_a_list_inside_a_list_is_refused(tmp_path) -> None:
+    with pytest.raises(ValueError, match="which is a list itself"):
+        a_project(
+            tmp_path,
+            lines=["commands:", "  a: make a", "  inner: [a]", "  outer: [inner, a]"],
+        )
+
+
+def test_an_empty_list_is_refused(tmp_path) -> None:
+    with pytest.raises(ValueError, match="empty list"):
+        a_project(tmp_path, lines=["commands:", "  nothing: []"])
+
+
+def test_a_handoff_naming_a_list_is_told_to_name_its_commands(tmp_path) -> None:
+    with pytest.raises(ValueError, match="which is a list of commands"):
+        a_project(
+            tmp_path,
+            lines=[
+                "commands:",
+                "  a: make a",
+                "  both: [a]",
+                "handoffs:",
+                "  close: {commands: [both]}",
+            ],
+        )
+
+
+def test_a_handoff_cannot_run_a_command_that_asks_for_a_typed_value(tmp_path) -> None:
+    """A handoff has nobody to ask."""
+    with pytest.raises(ValueError, match="nobody to ask"):
+        a_project(
+            tmp_path,
+            lines=[
+                "commands:",
+                "  pull: make pull TASK={input.task}",
+                "handoffs:",
+                "  close: {commands: [pull]}",
+            ],
+        )
+
+
 def test_validate_cannot_name_a_command_that_takes_a_label(tmp_path) -> None:
     """A commit has nowhere to ask for one."""
-    with pytest.raises(ValueError, match="takes a task's label"):
+    with pytest.raises(ValueError, match="takes a value"):
         a_project(
             tmp_path,
             lines=[
