@@ -256,7 +256,7 @@ of them is special to routing: a card goes to the seat it came from and says
 which role that is.
 
 **`label_work: true`** puts each seat's label on the task its branch is for —
-`claude:navigator`, `codex:reviewer` — the first time that seat works on it.
+`navigator:claude`, `reviewer:codex` — the first time that seat works on it.
 The task comes from the branch name (`347-power-gen-fixes` is task 347), and a
 label already on the task is never written again. It needs a forge token that
 may label issues, and it is off unless a project asks, because it writes to an
@@ -264,14 +264,14 @@ issue tracker on its own. A seat without a role is labelled with its runtime
 alone, `claude`; in a project that does give roles, a session without one is
 not labelled, since it could be any of them.
 
-A seat can choose its own label with `task_label:` — `agent:navigator`, to
+A seat can choose its own label with `task_label:` — `navigator:agent`, to
 match labels the tracker already uses. It is written as given, so leave the
 model out of it: a seat keeps its runtime and its role, but its model is chosen
 at the desk and changes under it, and a label naming one would go on naming it
 afterwards. Seats are told apart by runtime and role, so two seats in one
 project that share both must ask for the same label. One colon by default, because GitLab's paid tiers read `::`
-as a scoped label, where `claude::driver` would take `claude::navigator` off a
-task both worked on.
+as a scoped label, where `driver::codex` would take `driver::claude` off a task
+both drivers worked on.
 
 Copy `halyard.simple.yaml.example` for one project with one seat, or
 `halyard.yaml.example` for all of it, and edit the copy. It is gitignored — along with every

@@ -132,8 +132,8 @@ projects:
   alpha-engine:
     # Where `halyard wire` puts the gate.
     path: ~/code/alpha-engine
-    # Put each seat's label on the task its branch is for — `claude:navigator`,
-    # `codex:reviewer` — the first time that seat works on it. Needs a forge
+    # Put each seat's label on the task its branch is for — `navigator:claude`,
+    # `reviewer:codex` — the first time that seat works on it. Needs a forge
     # token that may label issues; off unless set. See docs/setup.md.
     # label_work: true
     # What `/command` offers, by name. `validate:` and a handoff's `commands:`
@@ -240,10 +240,10 @@ projects:
         # Two seats may share a role; that is the point of having four.
         role: navigator
         # Optional. The label this seat puts on a task when `label_work` is on —
-        # runtime and role unless set, `claude:navigator`, or `claude` alone for a
+        # role and runtime unless set, `navigator:claude`, or `claude` alone for a
         # seat with no role. Set it to match labels your tracker already uses.
         # Leave the model out: that changes under a seat, and this never does.
-        # task_label: agent:navigator
+        # task_label: navigator:agent
 
       drv:
         runtime: claude-code
