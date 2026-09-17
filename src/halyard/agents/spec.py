@@ -225,7 +225,7 @@ class RuntimeSpec:
     #: not all `drv1`. Matches what people were already writing by hand:
     #: `nav`/`drv`, `xnav`/`xdrv`, `gnav`/`gdrv`.
     prefix: str = ""
-    #: The short name a task is labelled with — `claude` in `claude:navigator`.
+    #: The short name a task is labelled with — `claude` in `navigator:claude`.
     #: Empty means the runtime's own name, which is already short for the rest.
     tag: str = ""
     #: Whether this runtime is on the machine, when a PATH lookup is not the

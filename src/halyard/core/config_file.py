@@ -229,7 +229,7 @@ class Project:
     #: tracker on its own.
     label_findings: tuple[str, ...] = ()
     #: Whether each seat's label goes on the task its branch is for, the first
-    #: time that seat works on it — `claude:navigator`. Off unless asked for:
+    #: time that seat works on it — `navigator:claude`. Off unless asked for:
     #: it writes to somebody's issue tracker on its own. See `tasks.attribution`.
     label_work: bool = False
     #: The extra round this project asks for before closing a piece of work.

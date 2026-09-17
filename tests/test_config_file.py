@@ -859,10 +859,10 @@ def _seats(*lines: str) -> str:
 
 def test_a_seat_can_name_its_own_task_label() -> None:
     [project] = projects_from_yaml(
-        _seats("nav: {runtime: claude-code, role: navigator, task_label: 'agent:navigator'}")
+        _seats("nav: {runtime: claude-code, role: navigator, task_label: 'navigator:agent'}")
     )
 
-    assert project.seats[0].task_label == "agent:navigator"
+    assert project.seats[0].task_label == "navigator:agent"
 
 
 def test_a_task_label_with_a_comma_is_refused() -> None:

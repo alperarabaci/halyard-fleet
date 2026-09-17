@@ -92,8 +92,8 @@ class Seat:
     #: reading the transcript, and handed back afterwards with the file above.
     before_compaction: str | None = None
     #: The label this seat puts on the task its branch is for, when the tracker
-    #: already has its own — `agent:navigator`. Unset means runtime and role,
-    #: `claude:navigator`. Never a model, which changes under a seat while this
+    #: already has its own — `navigator:agent`. Unset means role and runtime,
+    #: `navigator:claude`. Never a model, which changes under a seat while this
     #: stays as written. See `tasks.attribution`.
     task_label: str | None = None
 
