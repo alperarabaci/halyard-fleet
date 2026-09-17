@@ -17,11 +17,13 @@ projects:
     path: ~/code/alpha-engine
     commands:                         # what /command offers; a handoff names these too
       test-fast: make test-fast
+      e2e: make test-e2e SCOPE={label_groups.area}   # takes the task's area label
     checks:                           # /checks offers these, one button each
       proof: NOTES/checks/proof.md
       destructive: NOTES/checks/destructive.md
     label_groups:                     # the task's label from each group goes on the envelope
       level: [level::1, level::2, level::3]
+      area: [area:api, area:web, area:all]
     label_findings:                   # an answer saying one of these labels the task halyard:<check>
       - "status: candidate"
     handoffs:                         # /handoff offers these, one button each
@@ -34,7 +36,7 @@ projects:
         to: navigator
       close:                          # the delivery: the tests run, then the checks
         prompt: NOTES/handoffs/close.md
-        commands: [test-fast]
+        commands: [test-fast, e2e]
         checks: [proof, destructive]
         to: navigator
 ```
@@ -100,6 +102,28 @@ check has to compare — several targets, each with a count and an exit code —
 says all of them on its last line. The seat receiving the handoff gets the tail
 of the output as well: the last five lines when the command passed, the last
 twenty-five when it failed.
+
+## A command can take a value from the task's labels
+
+Some commands need to know what the work is about — which part of the codebase
+an end-to-end suite covers. The task says so: somebody labels it when the work is
+planned, from a group the project lists under `label_groups:`, and a command
+names that group in full — `SCOPE={label_groups.area}` above. What goes in the
+line is the part of each label after its last colon, every one the task carries
+from the group, in the group's order: `area:api` and `area:web` run
+`make test-e2e SCOPE=api,web`. The envelope's `Ran e2e: …` line shows the line as
+it ran.
+
+A task carrying none of the group's labels is asked for one before anything runs:
+a button per label, and the one pressed goes on the task, so a second round — or
+the other machine — is not asked again. A branch that names no task has nothing
+to put it on, and the label pressed is kept for that work until Halyard restarts.
+The same happens wherever the command runs: `/command`, a handoff, a workflow's
+step, which waits for the tap.
+
+A command naming a group the project does not define, or one with no labels, is
+refused when the file is read; so is `validate:` naming one, since a commit has
+nowhere to ask.
 
 ## A handoff counts its rounds
 

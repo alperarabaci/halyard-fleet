@@ -533,6 +533,36 @@ def _commands_from(project: str, value: Any) -> dict[str, str]:
     return {str(name): str(line) for name, line in value.items()}
 
 
+def _labels_in_commands_checked(
+    project: str,
+    commands: dict[str, str],
+    label_groups: dict[str, tuple[str, ...]],
+    *,
+    validate: str | None,
+) -> None:
+    """A command taking `{label_groups.<group>}` names a group this project has.
+
+    Refused here rather than when the command runs, where the line would go to
+    the shell with the braces still in it. See `halyard.commands.labels`.
+    """
+    from halyard.commands.labels import groups_in
+
+    for name, line in commands.items():
+        for group in groups_in(line):
+            where = f"Project {project!r}: command {name!r} takes {{label_groups.{group}}}"
+            if group not in label_groups:
+                defined = f" ({', '.join(label_groups)})" if label_groups else ""
+                raise ValueError(f"{where}, but `label_groups:` has no group {group!r}{defined}.")
+            if not label_groups[group]:
+                raise ValueError(f"{where}, and that group lists no labels to take one from.")
+        if name == validate and groups_in(line):
+            raise ValueError(
+                f"Project {project!r}: `validate:` names {name!r}, which takes a task's "
+                "label — and a commit has nowhere to ask for one. Give `validate:` a "
+                "command of its own."
+            )
+
+
 def _validate_from(project: str, value: Any, commands: dict[str, str]) -> str | None:
     """`validate:` as the name of one of the project's `commands:`.
 
@@ -768,17 +798,20 @@ def projects_from_yaml(text: str) -> list[Project]:
         handoffs = _handoffs_from(
             project, body.get("handoffs"), checks=checks, seats=seats, commands=commands
         )
+        label_groups = _label_groups_from(project, body.get("label_groups"))
+        validate = _validate_from(project, body.get("validate"), commands)
+        _labels_in_commands_checked(project, commands, label_groups, validate=validate)
         projects.append(
             Project(
                 name=project,
                 path=Path(path).expanduser() if path else None,
                 seats=seats,
-                validate=_validate_from(project, body.get("validate"), commands),
+                validate=validate,
                 warn_if=_warnings_from(project, body.get("warn_if")),
                 commands=commands,
                 forge=_as_text(body.get("forge")),
                 labels=_warnings_from(project, body.get("labels")) or (),
-                label_groups=_label_groups_from(project, body.get("label_groups")),
+                label_groups=label_groups,
                 label_findings=_findings_from(project, body.get("label_findings")),
                 label_work=_as_flag(project, "label_work", body.get("label_work")),
                 confirmation=_confirmation_from(project, body.get("confirmation")),

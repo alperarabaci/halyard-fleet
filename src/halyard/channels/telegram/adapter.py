@@ -38,6 +38,7 @@ from halyard.applications import catalogue, desktop
 from halyard.channels.telegram import cards, commit_card
 from halyard.channels.telegram.api import TelegramApi
 from halyard.commands import catalogue as commands_offered
+from halyard.commands import labels as command_labels
 from halyard.commands import running as commands_running
 from halyard.core import last_said, transcripts
 from halyard.core import prompts as configured_prompts
@@ -270,6 +271,20 @@ def _commit_being_asked_for(text: str) -> str | None:
 
 def _default_clock() -> datetime:
     return datetime.now(UTC)
+
+
+@dataclass(frozen=True)
+class _Lines:
+    """What a project's commands run as, once the task's labels are in them."""
+
+    #: Each command's line, filled. Empty when one could not be.
+    lines: dict[str, str]
+    #: The first label group a command takes a value from and nothing gave one.
+    missing: str = ""
+    #: The command that takes it.
+    needing: str = ""
+    #: The task the branch is for, when it names one that could be reached.
+    task: int | None = None
 
 
 @dataclass(frozen=True)
@@ -562,6 +577,11 @@ class TelegramChannel:
         #: Which command is running in which project, so a second one is
         #: refused rather than started on top of it.
         self._working: dict[str, str] = {}
+        #: Labels somebody picked for a command, by project and work item — the
+        #: value it runs with when the task could not be given the label, or
+        #: before the tracker says it has it. Gone on a restart: the task is
+        #: where a pick is kept for good.
+        self._picked: dict[tuple[str, str], dict[str, str]] = {}
         #: Commits proposed and not yet answered. Owned by `halyard.commits`,
         #: which is where taking-once and going-stale are decided.
         self._proposals = commits.Proposals(self._clock)
@@ -1606,6 +1626,35 @@ class TelegramChannel:
             await self._run_command("", chat_id, thread_id)
             return
 
+        if command_labels.groups_in(command.line):
+            # Detached: its value is read from the task's tracker first, and
+            # this loop answers everybody else's buttons meanwhile.
+            self._detach(self._run_labelled_command(found, command, chat_id, thread_id), "/command")
+            return
+        await self._start_command(found, command, chat_id, thread_id)
+
+    async def _run_labelled_command(
+        self, found: Project, command, chat_id: str, thread_id: int | None
+    ) -> None:
+        """A command taking a task's label: filled in, or the label asked for."""
+        lines = await self._command_lines(found, (command.name,))
+        if lines.missing:
+            await self._ask_for_label(
+                found,
+                lines,
+                kind=cards.PICKED_FOR_COMMAND,
+                name=command.name,
+                chat_id=chat_id,
+                thread_id=thread_id,
+            )
+            return
+        filled = commands_offered.Command(name=command.name, line=lines.lines[command.name])
+        await self._start_command(found, filled, chat_id, thread_id)
+
+    async def _start_command(
+        self, found: Project, command, chat_id: str, thread_id: int | None
+    ) -> None:
+        """Start one command in its project, unless another is running there."""
         # One at a time per project. Two `make` runs in one directory fight over
         # the same build outputs, and the second one's failure is a mystery.
         if busy := self._working.get(found.name):
@@ -2466,6 +2515,154 @@ class TelegramChannel:
             return
         logger.info("Labelled %s#%d %s", found.name, number, label)
 
+    async def _labels_on_task(self, found: Project) -> tuple[int | None, tuple[str, ...]]:
+        """The task this project's branch is for, and the labels it carries.
+
+        `(None, ())` for a branch naming no task that can be reached, and the
+        number with no labels when the tracker would not say. Quiet, as
+        `_task_labels` is: a command that needed a label asks for it anyway.
+        """
+        reached = await self._reach_quietly(found)
+        if reached is None:
+            return None, ()
+        forge, number = reached
+        try:
+            task = await asyncio.wait_for(forge.task(number), timeout=LABELS_TIMEOUT_SECONDS)
+        except (task_tracker.ForgeError, TimeoutError) as refused:
+            logger.info(
+                "No labels read from %s#%d for its commands: %s",
+                found.name,
+                number,
+                str(refused) or "no answer in time",
+            )
+            return number, ()
+        except Exception:
+            logger.warning(
+                "Could not read %s#%d's labels for its commands", found.name, number, exc_info=True
+            )
+            return number, ()
+        return number, tuple(task.labels)
+
+    async def _command_lines(self, found: Project, names: Sequence[str]) -> _Lines:
+        """The lines these commands run as, each label they take filled in.
+
+        From the task the branch is for, then from a label picked for this work
+        since Halyard started — the task wins, being where a label is kept. A
+        command taking none runs as written, and costs no call to the tracker.
+        See `halyard.commands.labels`.
+        """
+        written = {name: found.commands.get(name, "") for name in names}
+        wanted = {group for line in written.values() for group in command_labels.groups_in(line)}
+        if not wanted:
+            return _Lines(lines=written)
+        task, carried = await self._labels_on_task(found)
+        work = await self._work_item(found) or ""
+        groups = {group: found.label_groups.get(group, ()) for group in wanted}
+        values = {
+            **self._picked.get((found.name, work), {}),
+            **command_labels.values_from(groups, carried),
+        }
+        for name, line in written.items():
+            if gaps := command_labels.missing(line, values):
+                return _Lines(lines={}, missing=gaps[0], needing=name, task=task)
+        filled = {name: command_labels.filled(line, values) for name, line in written.items()}
+        for name in written:
+            if filled[name] != written[name]:
+                logger.info("%s for %s runs as: %s", name, work or found.name, filled[name])
+        return _Lines(lines=filled, task=task)
+
+    async def _ask_for_label(
+        self,
+        found: Project,
+        lines: _Lines,
+        *,
+        kind: str,
+        name: str,
+        chat_id: str,
+        thread_id: int | None,
+        workflow: str | None = None,
+        lead: str = "",
+    ) -> None:
+        """Offer a group's labels for a command the task gave no value.
+
+        The tap puts the label on the task, so the next time — a second round,
+        the other machine — nobody is asked; with no task to put it on, it is
+        kept for this work until Halyard restarts.
+        """
+        group = lines.missing
+        offered = found.label_groups.get(group, ())
+        buttons = cards.label_picks(
+            kind, name, list(found.label_groups).index(group), offered, workflow=workflow
+        )
+        if lines.task is not None:
+            where = f"<b>{html.escape(found.name)}#{lines.task}</b> has none"
+            after = "it goes on the task"
+        else:
+            where = "this branch names no task to read one from"
+            after = "it is kept for this work until Halyard restarts"
+        pick = f"Pick one — {after}." if buttons else "Put one on the task and press it again."
+        await self._say(
+            f"{lead}\U0001f3f7 <b>{html.escape(lines.needing)}</b> takes the task's "
+            f"<b>{html.escape(group)}</b> label, and {where}. {pick}",
+            chat_id,
+            thread_id,
+            reply_markup=buttons,
+        )
+
+    async def _label_picked(
+        self, value: str, chat_id: str, thread_id: int | None, actor: str
+    ) -> None:
+        """A label tapped for a command: onto the task, kept for this work, and
+        whatever needed it pressed again."""
+        head, _, place = value.rpartition(">")
+        head, _, group_place = head.rpartition(">")
+        kind, name = head[:1], head[1:]
+        found = self._repository_for(chat_id)
+        if found is None:
+            await self._say(self._no_repository(chat_id), chat_id, thread_id)
+            return
+        try:
+            group = list(found.label_groups)[int(group_place)]
+            label = found.label_groups[group][int(place)]
+        except (ValueError, IndexError):
+            await self._say(
+                "That list has changed since it was offered — press it again.", chat_id, thread_id
+            )
+            return
+
+        work = await self._work_item(found) or ""
+        self._picked.setdefault((found.name, work), {})[group] = command_labels.value_of(label)
+        logger.info("%s picked %s for %s in %s", actor, label, name, work or found.name)
+        reached = await self._reach_quietly(found)
+        if reached is not None:
+            forge, number = reached
+            task = f"<b>{html.escape(found.name)}#{number}</b>"
+            try:
+                await asyncio.wait_for(
+                    task_tracker.put_on(forge, number, label), timeout=LABELS_TIMEOUT_SECONDS
+                )
+            except (task_tracker.ForgeError, TimeoutError) as refused:
+                logger.warning("Could not put %s on %s#%d: %s", label, found.name, number, refused)
+                await self._say(
+                    f"\U0001f3f7 Could not put <b>{html.escape(label)}</b> on {task}: "
+                    f"{html.escape(str(refused) or 'no answer in time')}. It is used for this "
+                    "work until Halyard restarts.",
+                    chat_id,
+                    thread_id,
+                )
+            else:
+                logger.info("Labelled %s#%d %s", found.name, number, label)
+                await self._say(
+                    f"\U0001f3f7 <b>{html.escape(label)}</b> is on {task}.", chat_id, thread_id
+                )
+
+        if kind == cards.PICKED_FOR_HANDOFF:
+            await self._run_handoff(name, chat_id, thread_id, actor)
+        elif kind == cards.PICKED_FOR_COMMAND:
+            await self._run_command(name, chat_id, thread_id)
+        elif kind == cards.PICKED_FOR_WORKFLOW:
+            await self._resume_workflow(True, chat_id, thread_id)
+
     async def _task_labels(self, found: Project) -> dict[str, str]:
         """The task's labels from this project's own groups, for the envelope.
 
@@ -2642,6 +2839,17 @@ class TelegramChannel:
             return
         [seat] = seats
 
+        lines = await self._command_lines(found, handoff.commands)
+        if lines.missing:
+            await self._ask_for_label(
+                found,
+                lines,
+                kind=cards.PICKED_FOR_HANDOFF,
+                name=name,
+                chat_id=chat_id,
+                thread_id=thread_id,
+            )
+            return
         await self._hand_off_once(
             found,
             name,
@@ -2653,6 +2861,7 @@ class TelegramChannel:
             thread_id=thread_id,
             actor=actor,
             sender=_seat_name(for_chat(self._seats, chat_id)) or "this chat",
+            command_lines=lines.lines,
         )
 
     async def _hand_off_once(
@@ -2672,6 +2881,7 @@ class TelegramChannel:
         expected: int = rounds.EXPECTED,
         lead: str = "",
         buttons: dict | None = None,
+        command_lines: Mapping[str, str] | None = None,
     ) -> None:
         """Make one handoff: count the round, say so, run it, deliver it.
 
@@ -2679,7 +2889,8 @@ class TelegramChannel:
         this chose *which* handoff goes where, and this is the making of it.
         `extra` are facts the caller adds to the envelope, `lead` goes in front
         of the line in the chat and `buttons` under it, which is how a step says
-        which flow it belongs to and offers to stop it.
+        which flow it belongs to and offers to stop it. `command_lines` are its
+        commands as they run, with any task label in them — see `_command_lines`.
         """
         # One at a time per project, as for `/command`: two `make` runs in one
         # directory fight over the same outputs, and the second one's failure
@@ -2764,7 +2975,7 @@ class TelegramChannel:
                 ),
                 findings=found.label_findings,
                 labeller=_Labelling(self, found),
-                project_commands=found.commands,
+                project_commands={**found.commands, **(command_lines or {})},
                 runner=_Running(self, found.path, chat_id, thread_id),
                 round_number=number,
                 expected=expected,
@@ -2944,6 +3155,28 @@ class TelegramChannel:
             return
         [seat] = seats
 
+        lines = await self._command_lines(found, handoff.commands)
+        if lines.missing:
+            # A label is somebody's to pick, so the run waits here for it; the
+            # tap puts it on the task and sends this step on.
+            held = run.held(f"{lines.needing} takes a {lines.missing} label the task does not have")
+            await asyncio.to_thread(flowing.save, kept, work, held)
+            logger.info("Workflow %s for %s stopped: %s", run.workflow, work, held.stopped)
+            await self._ask_for_label(
+                found,
+                lines,
+                kind=cards.PICKED_FOR_WORKFLOW,
+                name=run.workflow,
+                chat_id=run.chat,
+                thread_id=run.thread,
+                workflow=run.workflow,
+                lead=(
+                    f"⏸ <b>{html.escape(run.workflow)}</b> {run.step + 1}/{len(flow)} · "
+                    f"{html.escape(step.name)} — "
+                ),
+            )
+            return
+
         tally = self._kept_for(found.name, ROUNDS_FILE)
         taken = dict(await asyncio.to_thread(rounds.counts, tally, work)) if tally else {}
         # This step's own round is counted when it arrives, and what the
@@ -2984,6 +3217,7 @@ class TelegramChannel:
             expected=step.rounds,
             lead=f"<b>{html.escape(run.workflow)}</b> {run.step + 1}/{len(flow)} · ",
             buttons=cards.workflow_keyboard(run.workflow),
+            command_lines=lines.lines,
         )
 
     def _step_seats(self, found: Project, flow: Sequence[str]) -> dict[str, str]:
@@ -3706,6 +3940,16 @@ class TelegramChannel:
                         start=int(index) if what == "flowat" and index.isdigit() else None,
                     ),
                     "/workflow",
+                )
+                return
+            if what == "pick":
+                # Detached: it writes to the task's tracker, then runs whatever
+                # needed the label — a handoff, a command, a workflow's step.
+                self._detach(
+                    self._label_picked(
+                        value, here or "", message.get("message_thread_id"), f"tg:{user_id}"
+                    ),
+                    "/pick",
                 )
                 return
             if what in ("flowgo", "flowstop"):

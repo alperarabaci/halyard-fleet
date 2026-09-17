@@ -402,6 +402,45 @@ def test_a_label_group_written_as_a_mapping_is_refused(tmp_path) -> None:
         a_project(tmp_path, lines=["label_groups:", "  level: {one: level::1}"])
 
 
+#: A command taking its scope from the task's `ddd-scope` label.
+E2E = "  e2e-scope: scripts/halyard-validate.sh test-e2e-scope SCOPE={label_groups.ddd-scope}"
+
+
+def test_a_command_can_take_a_value_from_a_label_group(tmp_path) -> None:
+    [project] = a_project(
+        tmp_path,
+        lines=["label_groups:", "  ddd-scope: [ddd:capstone, ddd:rag]", "commands:", E2E],
+    )
+
+    assert project.commands["e2e-scope"].endswith("SCOPE={label_groups.ddd-scope}")
+
+
+def test_a_command_taking_a_group_nobody_defined_is_refused(tmp_path) -> None:
+    """Otherwise the braces would reach the shell as they were written."""
+    with pytest.raises(ValueError, match="has no group 'ddd-scope'"):
+        a_project(tmp_path, lines=["label_groups:", "  level: [level::3]", "commands:", E2E])
+
+
+def test_a_command_taking_a_group_with_no_labels_is_refused(tmp_path) -> None:
+    with pytest.raises(ValueError, match="lists no labels"):
+        a_project(tmp_path, lines=["label_groups:", "  ddd-scope: []", "commands:", E2E])
+
+
+def test_validate_cannot_name_a_command_that_takes_a_label(tmp_path) -> None:
+    """A commit has nowhere to ask for one."""
+    with pytest.raises(ValueError, match="takes a task's label"):
+        a_project(
+            tmp_path,
+            lines=[
+                "label_groups:",
+                "  ddd-scope: [ddd:capstone]",
+                "commands:",
+                E2E,
+                "validate: e2e-scope",
+            ],
+        )
+
+
 def test_label_findings_are_read_as_phrases(tmp_path) -> None:
     [project] = a_project(
         tmp_path,
