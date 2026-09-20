@@ -28,7 +28,7 @@ WORKSPACE = {"workspacePath": "/tmp/somewhere"}
 ENGINE = """
 import json, os, sys
 
-record = {"calls": [], "auth": None, "permissions": []}
+record = {"calls": [], "auth": None, "permissions": [], "headers": []}
 where = os.environ["FAKE_RECORD"]
 repeat = int(os.environ.get("FAKE_REPEAT", "1"))
 after = os.environ.get("FAKE_AFTER", "completed")
@@ -75,9 +75,21 @@ for line in sys.stdin:
             say({"id": message["id"], "result": {}})
         continue
     result = message.get("result") or {}
-    if "requestAuth" in result:
-        record["auth"] = result
+    if "headersApplied" in result:
+        record["headers"].append(result)
+        if "requestAuth" in result:
+            record["auth"] = result
         keep()
+        if os.environ.get("FAKE_CAPTCHA") and len(record["headers"]) == 1:
+            # What the engine does when the provider demands a captcha: it asks
+            # the same question again, for a token a solved one produces.
+            say({"id": 3, "method": "interaction/requestProviderRuntimeHeaders",
+                 "params": {"reason": "captcha-retry", "providerId": "account:plan"}})
+        elif os.environ.get("FAKE_CAPTCHA"):
+            say({"method": "session/update", "params": {"type": "turn.failed",
+                 "payload": {"turnPhase": "execution", "error": {
+                     "type": "ProviderError", "code": "3007",
+                     "message": "Captcha verification request timed out"}}}})
         continue
     if "decision" in result:
         record["permissions"].append(result)
@@ -149,7 +161,7 @@ def said(record: Path) -> dict:
     try:
         return json.loads(record.read_text())
     except (OSError, ValueError):
-        return {"calls": [], "auth": None, "permissions": []}
+        return {"calls": [], "auth": None, "permissions": [], "headers": []}
 
 
 def a_runner(asking, **more) -> delivery.ZCodeRunner:
@@ -255,6 +267,29 @@ async def test_a_turn_that_fails_is_told_to_whoever_asked(zcode, monkeypatch) ->
     # The engine's own words, where it keeps them: inside `error`, with the
     # phase it died in. "it failed" is not something anybody can act on.
     assert failures == ["the model refused (3103) in model_creation"]
+
+
+async def test_a_captcha_is_refused_and_named_rather_than_waited_on(zcode, monkeypatch) -> None:
+    """The provider demands a captcha by asking the host for the token a solved
+    one produces. Only ZCode's own window can get that, so Halyard says so and
+    the turn ends — rather than sending the same key again and leaving the seat
+    on a turn that has already stopped meaning anything."""
+    monkeypatch.setenv("FAKE_CAPTCHA", "1")
+    _, record = zcode
+    failures: list[str] = []
+
+    async def note(why: str) -> None:
+        failures.append(why)
+
+    assert await a_runner(allowing).send(SESSION, "look at this", when_done=note) is True
+
+    assert await until(lambda: failures, seconds=8.0)
+    assert await until(lambda: len(said(record)["headers"]) == 2, seconds=8.0)
+    assert said(record)["headers"][-1] == {
+        "headersApplied": False,
+        "errorMessage": "Halyard cannot answer a captcha; it has no window",
+    }
+    assert "captcha" in failures[0] and "ZCode's own window" in failures[0]
 
 
 def test_a_failure_shape_nobody_knows_is_repeated_rather_than_swallowed() -> None:
