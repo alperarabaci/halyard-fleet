@@ -16,7 +16,7 @@ from pathlib import Path
 import pytest
 
 from halyard.agents.base import SessionRef
-from halyard.agents.zcode import account
+from halyard.agents.zcode import account, protocol
 from halyard.agents.zcode import runner as delivery
 from halyard.agents.zcode.protocol import Answer, Permission
 
@@ -108,6 +108,8 @@ def zcode(tmp_path: Path, monkeypatch):
 
     record = tmp_path / "said.json"
     monkeypatch.setenv("FAKE_RECORD", str(record))
+    # The wait for models to materialise is the real engine's, not this one's.
+    monkeypatch.setattr(delivery, "SETTLE_SECONDS", 0.0)
     monkeypatch.setattr(delivery.trust, "app", lambda: app)
     monkeypatch.setattr(
         delivery.sessions,
@@ -263,6 +265,22 @@ async def test_a_runner_with_no_gate_refuses_every_tool(zcode) -> None:
 
     assert await until(lambda: said(record)["permissions"])
     assert said(record)["permissions"][0]["decision"] == "deny"
+
+
+async def test_an_engine_that_will_not_run_is_said_so_rather_than_waited_out(zcode, caplog) -> None:
+    """A machine where the engine dies at once must not hold the seat for half
+    a minute per call and then report a timeout, which reads like a slow engine
+    rather than a missing one."""
+    app, _ = zcode
+    (app / "Contents/Resources/glm/zcode.cjs").write_text("raise SystemExit(1)\n")
+
+    began = asyncio.get_running_loop().time()
+    sent = await a_runner(allowing).send(SESSION, "look at this")
+    took = asyncio.get_running_loop().time() - began
+
+    assert sent is False
+    assert took < protocol.LISTENING_SECONDS
+    assert "stopped" in caplog.text
 
 
 # --- the account the engine is shown, and the gate it is answered from ---------

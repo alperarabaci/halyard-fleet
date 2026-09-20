@@ -50,6 +50,10 @@ REASONING = "max"
 #: `account:zai-individual-coding-plan/GLM-5.3-Flash`.
 SEPARATOR = "/"
 
+#: How long the engine takes to turn the account it was just shown into models
+#: it will run on. A send that arrives first is refused for having none.
+SETTLE_SECONDS = 2.0
+
 
 class ZCodeRunner:
     """A seat in ZCode, reachable from the phone."""
@@ -184,7 +188,10 @@ class ZCodeRunner:
     ) -> bool:
         """Open the session the way the desktop does, and send the message."""
         await bridge.start()
+        # It speaks first, and until it does it is not reading its input.
+        await bridge.listening()
         await bridge.call("provider/updateAccountConfig", shown.snapshot())
+        await asyncio.sleep(SETTLE_SECONDS)
         workspace = await self._workspace(bridge, session_id)
         if workspace is None:
             logger.warning("ZCode does not have a session %s to resume", session_id)

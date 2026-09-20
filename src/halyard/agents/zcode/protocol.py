@@ -56,6 +56,10 @@ ASKING = "build"
 #: bounds a machine where it does not.
 CALL_SECONDS = 30.0
 
+#: How long to wait for the engine to speak first before asking it anything.
+#: It comes up in about a second; this is the machine having a bad morning.
+LISTENING_SECONDS = 15.0
+
 
 @dataclass(frozen=True)
 class Permission:
@@ -116,6 +120,7 @@ class Bridge:
         self._about = dict(about or {})
         self._process: asyncio.subprocess.Process | None = None
         self._reader: asyncio.Task | None = None
+        self._stderr: asyncio.Task | None = None
         self._answers: dict[int, asyncio.Future] = {}
         self._asked: dict[str, asyncio.Task] = {}
         self._next = 0
@@ -124,6 +129,13 @@ class Bridge:
         self.reply: str | None = None
         self.failure: str | None = None
         self._ended = asyncio.Event()
+        #: Set when the engine has spoken first — which is how it says it is
+        #: listening. A call written before that is written into a process that
+        #: is still starting, and is never answered.
+        self._listening = asyncio.Event()
+        #: Set when its output has closed, which is what a process that will
+        #: not run at all looks like from here.
+        self._gone = asyncio.Event()
 
     async def start(self) -> None:
         """Start the engine and begin answering it."""
@@ -137,11 +149,28 @@ class Bridge:
             start_new_session=True,
         )
         self._reader = asyncio.create_task(self._read(), name="zcode-bridge")
+        self._stderr = asyncio.create_task(self._complaints(), name="zcode-bridge-stderr")
+
+    async def listening(self, timeout: float = LISTENING_SECONDS) -> bool:
+        """Wait until the engine has said something of its own.
+
+        It asks for the host's preferences as it comes up, and until it does it
+        is not reading its input: a message written then is lost, and what that
+        looks like from here is a call that is never answered.
+        """
+        try:
+            await asyncio.wait_for(self._listening.wait(), timeout)
+        except TimeoutError:
+            logger.info("The ZCode engine said nothing in %.0fs; asking anyway", timeout)
+            return False
+        return not self._gone.is_set()
 
     async def call(self, method: str, params: dict, timeout: float = CALL_SECONDS) -> dict:
         """Ask the engine something and wait for its answer."""
         if self._process is None or self._process.stdin is None:
             raise RuntimeError("the ZCode bridge is not running")
+        if self._gone.is_set():
+            raise RuntimeError("ZCode's engine stopped")
         self._next += 1
         where = self._next
         waiting: asyncio.Future = asyncio.get_running_loop().create_future()
@@ -149,6 +178,10 @@ class Bridge:
         self._write({"id": where, "method": method, "params": params})
         try:
             return await asyncio.wait_for(waiting, timeout)
+        except TimeoutError:
+            # Said with the method in it: an empty timeout in a log is a puzzle
+            # somebody has to reproduce before they can read it.
+            raise TimeoutError(f"{method} went unanswered for {timeout:.0f}s") from None
         finally:
             self._answers.pop(where, None)
 
@@ -164,8 +197,9 @@ class Bridge:
         """End the engine, and everything waiting on it."""
         for asked in list(self._asked.values()):
             asked.cancel()
-        if self._reader is not None:
-            self._reader.cancel()
+        for watching in (self._reader, self._stderr):
+            if watching is not None:
+                watching.cancel()
         process, self._process = self._process, None
         if process is None or process.returncode is not None:
             return
@@ -181,10 +215,24 @@ class Bridge:
         if self._process is not None and self._process.stdin is not None:
             self._process.stdin.write((json.dumps(message) + "\n").encode("utf-8"))
 
+    async def _complaints(self) -> None:
+        """Whatever the engine writes to its standard error.
+
+        Read rather than ignored for two reasons: it is where it says why it
+        will not do something, and a pipe nobody empties fills up and stops the
+        process that is writing to it.
+        """
+        assert self._process is not None and self._process.stderr is not None
+        while line := await self._process.stderr.readline():
+            said = line.decode("utf-8", "replace").strip()
+            if said:
+                logger.info("ZCode's engine: %s", said[:400])
+
     async def _read(self) -> None:
         """Every line the engine says, until it stops saying anything."""
         assert self._process is not None and self._process.stdout is not None
         while line := await self._process.stdout.readline():
+            self._listening.set()
             try:
                 message = json.loads(line.decode("utf-8").strip() or "{}")
             except ValueError:
@@ -199,7 +247,24 @@ class Bridge:
                     waiting.set_result(message)
             else:
                 self._notified(message)
+        self._stopped()
+
+    def _stopped(self) -> None:
+        """The engine has stopped talking, which is the end of everything.
+
+        An engine that will not start — the wrong application, a machine that
+        refuses it — says nothing and closes its output. Whoever is waiting for
+        an answer is told now rather than after half a minute of a timeout that
+        reads like a slow engine instead of a missing one. Counted as having
+        spoken for the same reason: waiting out the rest of a timeout for a
+        process that has closed its output helps nobody.
+        """
+        self._gone.set()
         self._ended.set()
+        self._listening.set()
+        for waiting in self._answers.values():
+            if not waiting.done():
+                waiting.set_exception(RuntimeError("ZCode's engine stopped"))
 
     def _asked_of_us(self, message: dict) -> None:
         """A question from the engine. Every one of them is answered."""
