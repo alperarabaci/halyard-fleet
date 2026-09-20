@@ -85,7 +85,9 @@ for line in sys.stdin:
         if len(record["permissions"]) >= repeat:
             if after == "failed":
                 say({"method": "session/update", "params": {"type": "turn.failed",
-                     "payload": {"underlyingErrorMessage": "the model refused"}}})
+                     "payload": {"turnPhase": "model_creation", "error": {
+                         "type": "ProviderError", "message": "the model refused",
+                         "code": "3103"}}}})
             else:
                 say({"method": "session/update", "params": {"type": "turn.completed",
                      "payload": {"response": "DONE"}}})
@@ -250,7 +252,14 @@ async def test_a_turn_that_fails_is_told_to_whoever_asked(zcode, monkeypatch) ->
     await a_runner(allowing).send(SESSION, "write something", when_done=note)
 
     assert await until(lambda: failures, seconds=8.0)
-    assert failures == ["the model refused"]
+    # The engine's own words, where it keeps them: inside `error`, with the
+    # phase it died in. "it failed" is not something anybody can act on.
+    assert failures == ["the model refused (3103) in model_creation"]
+
+
+def test_a_failure_shape_nobody_knows_is_repeated_rather_than_swallowed() -> None:
+    assert "3101" in protocol._why({"error": {"unexpected": "3101"}})
+    assert protocol._why({}) == "it failed"
 
 
 async def test_nothing_is_sent_without_a_token_or_a_model(zcode, caplog) -> None:

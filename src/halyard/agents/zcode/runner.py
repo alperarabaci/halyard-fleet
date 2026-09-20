@@ -142,6 +142,7 @@ class ZCodeRunner:
             env={
                 "ELECTRON_RUN_AS_NODE": "1",
                 "ZCODE_BUILTIN_PROVIDER_CONFIG_FILE": str(shown.catalog),
+                **_talking(),
             },
             token=self._token,
             asking=self._asking or _refuse,
@@ -243,6 +244,19 @@ class ZCodeRunner:
         finally:
             self._running.pop(session_id, None)
             await bridge.close()
+
+
+def _talking() -> dict[str, str]:
+    """Ask the engine to say what it is doing, when Halyard is listening.
+
+    It keeps its own log to itself and writes nothing to its standard error
+    unless told — and that silence is what made an answered call look like a
+    dead engine for a day. So when Halyard runs at DEBUG, so does it, and its
+    log arrives on the standard error the bridge already reads.
+    """
+    if not logger.isEnabledFor(logging.DEBUG):
+        return {}
+    return {"ZCODE_DEBUG": "1", "ZCODE_LOG_CONSOLE": "1"}
 
 
 async def _refuse(asked: Permission) -> Answer:
