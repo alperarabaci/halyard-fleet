@@ -198,6 +198,14 @@ each of those is there for a reason measured the hard way:
   auth answer instead, which the provider accepts.
 - **`resume` wants the workspace**, which `session/list` carries beside each
   session's `title` and `titleSource`.
+- **`resume` answers with the whole session, on one line.** Every message of it:
+  megabytes for a seat a fortnight old. A reader with the usual 64 KiB line
+  limit stops in the middle of that answer and, having no way to find the end of
+  the line, never reads anything the engine says again — the turn then hangs on
+  a call that was answered. It cost a day to see, because it looks exactly like
+  an engine that went quiet: the process is alive, its standard error is empty,
+  and its own log says `session.resume_completed`. `session/list` fits under the
+  limit, which is why the failure only began at the seat.
 - **The mode has to be set after opening, every time.** `build` is "Ask before
   changes", `edit` is "Edit automatically", and a session whose stored mode is
   already `build` still runs a `Write` unasked until `session/setMode` is
@@ -214,6 +222,13 @@ Headless (`--prompt`) is not a way round any of this: workspace hooks are
 `feature_disabled` there, user-scope hooks fire but decide nothing, `--mode
 build` refuses every side-effect tool with "No permission client configured",
 and no flag or environment variable attaches one.
+
+**Making the engine talk about itself.** `ZCODE_DEBUG=1 ZCODE_LOG_CONSOLE=1` puts
+its own log on the engine's standard error, event by event
+(`zcode_protocol.session.resume_started`, `…resume_completed`, `mcp.server.connected`,
+`config.project_hooks.pending_trust`). Without it the engine says nothing at all
+about what it is doing. The desktop's own log is `~/.zcode/v2/logs/<date>.log`,
+and an `app-server` Halyard starts does not write there.
 
 ## Still to measure
 

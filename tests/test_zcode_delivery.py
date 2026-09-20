@@ -32,6 +32,9 @@ record = {"calls": [], "auth": None, "permissions": []}
 where = os.environ["FAKE_RECORD"]
 repeat = int(os.environ.get("FAKE_REPEAT", "1"))
 after = os.environ.get("FAKE_AFTER", "completed")
+# How big the session it hands back on resume is. The real one sends every
+# message of it, on one line.
+snapshot = int(os.environ.get("FAKE_SNAPSHOT", "0"))
 
 
 def say(message):
@@ -58,6 +61,8 @@ for line in sys.stdin:
         if method == "session/list":
             say({"id": message["id"], "result": {"sessions": [
                 {"sessionId": %r, "workspace": %r, "title": "a seat"}]}})
+        elif method == "session/resume":
+            say({"id": message["id"], "result": {"messages": "m" * snapshot}})
         elif method == "session/send":
             say({"id": message["id"], "result": {"accepted": True}})
             for _ in range(repeat):
@@ -265,6 +270,18 @@ async def test_a_runner_with_no_gate_refuses_every_tool(zcode) -> None:
 
     assert await until(lambda: said(record)["permissions"])
     assert said(record)["permissions"][0]["decision"] == "deny"
+
+
+async def test_a_session_bigger_than_a_readers_usual_line_still_arrives(zcode, monkeypatch) -> None:
+    """`session/resume` answers with the whole session on one line, and a seat
+    that has been working for a fortnight is megabytes of it. A reader that
+    stops at the usual 64 KiB hears nothing the engine says afterwards — which
+    is what the first live delivery was, and it looked like silence."""
+    monkeypatch.setenv("FAKE_SNAPSHOT", str(256 * 1024))
+    _, record = zcode
+
+    assert await a_runner(allowing).send(SESSION, "look at this") is True
+    assert [call["method"] for call in said(record)["calls"]][-1] == "session/send"
 
 
 async def test_an_engine_that_will_not_run_is_said_so_rather_than_waited_out(zcode, caplog) -> None:
