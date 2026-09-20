@@ -47,6 +47,12 @@ PREFERENCES = {
     "modelContextBudgetStrategy": "preflight-v1",
 }
 
+#: Why the engine is asking for headers. `model-request` is the credential for
+#: the model call. `captcha-retry` is the provider demanding a captcha (its own
+#: code 3007) and asking the host for the token a solved one produces — which
+#: the application gets from a window Halyard does not have.
+CREDENTIAL, CAPTCHA = "model-request", "captcha-retry"
+
 #: The mode that asks before a change — "Ask before changes" in the app. Set
 #: after the session is open, every time: a session whose stored mode is
 #: already this one still does not enforce until it is set again. Measured.
@@ -136,6 +142,10 @@ class Bridge:
         #: failure the engine reported.
         self.reply: str | None = None
         self.failure: str | None = None
+        #: Whether the provider asked for a captcha during this turn, which is
+        #: the difference between a turn that failed and a turn nobody could
+        #: have made succeed from a phone.
+        self.captcha = False
         self._ended = asyncio.Event()
         #: Set when the engine has spoken first — which is how it says it is
         #: listening. A call written before that is written into a process that
@@ -296,19 +306,43 @@ class Bridge:
             self._write({"id": where, "result": PREFERENCES})
             return
         if method == "interaction/requestProviderRuntimeHeaders":
-            # The one place the token is used, and it goes no further: the
-            # engine signs and sends the model request itself.
-            self._write(
-                {
-                    "id": where,
-                    "result": {"headersApplied": True, "requestAuth": {"apiKey": self._token}},
-                }
-            )
+            self._headers(message)
             return
         if method == "interaction/requestPermission":
             self._permission(message)
             return
         self._write({"id": where, "result": {}})
+
+    def _headers(self, message: dict) -> None:
+        """What the model call is signed with — or why it cannot be.
+
+        The engine asks this question for two reasons. `model-request` wants
+        the credential, and that is the one place the token is used: the engine
+        signs and sends the model request itself. `captcha-retry` wants
+        something else entirely — the provider has demanded a captcha, and what
+        it is asking for is the token a solved one produces, which only the
+        application's own window can get.
+
+        Halyard has no window, so it says so. Sending the same key again would
+        buy nothing but the engine's own timeout, which is a seat that sits
+        there for minutes on a turn that has already stopped meaning anything.
+        """
+        where = message.get("id")
+        if str((message.get("params") or {}).get("reason") or CREDENTIAL) == CAPTCHA:
+            self.captcha = True
+            logger.warning("ZCode's provider wants a captcha; only its own window can answer that")
+            self._write(
+                {
+                    "id": where,
+                    "result": {
+                        "headersApplied": False,
+                        "errorMessage": "Halyard cannot answer a captcha; it has no window",
+                    },
+                }
+            )
+            return
+        signing = {"headersApplied": True, "requestAuth": {"apiKey": self._token}}
+        self._write({"id": where, "result": signing})
 
     def _permission(self, message: dict) -> None:
         """Hand one tool to whoever answers for this seat, without stopping the
@@ -353,6 +387,11 @@ class Bridge:
             self._ended.set()
         elif kind == "turn.failed":
             self.failure = _why(payload)
+            if self.captcha:
+                self.failure += (
+                    ". ZCode's provider asked for a captcha, and only ZCode's own window can"
+                    " answer it — solve it there and send again"
+                )
             self._ended.set()
 
 

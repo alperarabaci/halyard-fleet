@@ -223,6 +223,17 @@ and repeats of one `requestId` are one question.
 gate all belong to that session, and the desktop shows them once its view is
 refreshed — it does not follow along live while another host drives it.
 
+**A captcha is where a host without a window runs out.** The provider demands one
+with its own code `3007`, and the engine then asks the host for headers a second
+time with `reason: "captcha-retry"` — wanting `x-aliyun-captcha-verify-param`,
+the token a solved captcha produces. Only the application can get it: the captcha
+script and its window live in `app.asar`, which is also where the timeout the
+person sees comes from ("Captcha verification request timed out. Please send your
+message again."). The engine's own automatic retry applies to `start-plan`
+accounts only. Halyard answers `{headersApplied: false, errorMessage}` instead of
+sending the same key again, so the turn ends with what happened rather than
+sitting on the engine's timeout.
+
 **Why a turn failed is inside `error`, not beside it.** `turn.failed` carries
 `{error: {type, message, stack?, code?, underlyingErrorMessage?, …}, turnPhase}`
 and `turn.completed` carries `{response, tokenCount, toolCallCount, duration,

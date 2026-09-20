@@ -259,6 +259,12 @@ systemd unit.
 - **Two things can outrun the gate.** A hook that exceeds its timeout, and a wrapper
   that cannot start at all, both let the command through. `doctor` checks for the
   second.
+- **A ZCode seat stops at a captcha.** Messages reach a ZCode session and its gate
+  answers from your phone, but its provider asks for a captcha from time to time,
+  and the token a solved one produces can only be got in ZCode's own window.
+  Halyard says so and ends the turn rather than waiting on it; you solve it at the
+  desk and send again. If you would rather not meet that at all, drive the seat
+  with another runtime — opencode runs the same models and is gated the same way.
 - **One bot token per machine.** Telegram's `getUpdates` has a single consumer.
 - **`/commit` reads the whole working tree, not the staging area.** Agents write
   code and stage nothing, so a control plane that answered "nothing is staged"
