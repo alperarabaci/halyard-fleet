@@ -60,6 +60,14 @@ CALL_SECONDS = 30.0
 #: It comes up in about a second; this is the machine having a bad morning.
 LISTENING_SECONDS = 15.0
 
+#: How much of one line the reader will take. The engine answers `session/resume`
+#: with the whole session — every message, on a single line — which is megabytes
+#: for a seat that has been working for a fortnight. The usual 64 KiB is where a
+#: reader stops mid-answer and, having no way to find the end of the line, hears
+#: nothing the engine says ever again. Measured: that is what an unanswered
+#: `session/resume` was, and it took the turn with it.
+LINE_LIMIT = 32 * 1024 * 1024
+
 
 @dataclass(frozen=True)
 class Permission:
@@ -147,6 +155,7 @@ class Bridge:
             cwd=self._cwd,
             env=self._env,
             start_new_session=True,
+            limit=LINE_LIMIT,
         )
         self._reader = asyncio.create_task(self._read(), name="zcode-bridge")
         self._stderr = asyncio.create_task(self._complaints(), name="zcode-bridge-stderr")
@@ -223,15 +232,29 @@ class Bridge:
         process that is writing to it.
         """
         assert self._process is not None and self._process.stderr is not None
-        while line := await self._process.stderr.readline():
+        while line := await self._line(self._process.stderr):
             said = line.decode("utf-8", "replace").strip()
             if said:
                 logger.info("ZCode's engine: %s", said[:400])
 
+    @staticmethod
+    async def _line(stream: asyncio.StreamReader) -> bytes:
+        """One line, or nothing at all when it is longer than `LINE_LIMIT`.
+
+        Said out loud rather than raised: a reader that dies here dies inside
+        its own task, where nothing is watching, and everything after it looks
+        like an engine that went quiet.
+        """
+        try:
+            return await stream.readline()
+        except (ValueError, asyncio.LimitOverrunError) as too_long:
+            logger.warning("ZCode said more in one line than Halyard reads: %s", too_long)
+            return b""
+
     async def _read(self) -> None:
         """Every line the engine says, until it stops saying anything."""
         assert self._process is not None and self._process.stdout is not None
-        while line := await self._process.stdout.readline():
+        while line := await self._line(self._process.stdout):
             self._listening.set()
             try:
                 message = json.loads(line.decode("utf-8").strip() or "{}")
