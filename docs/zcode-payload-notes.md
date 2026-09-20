@@ -218,6 +218,16 @@ the operator's permission gate"); an unanswered request is repeated every few
 seconds and the turn never ends — so an expired card must be answered `deny`,
 and repeats of one `requestId` are one question.
 
+**A turn Halyard ran lands in the seat the person is looking at**, measured
+2026-09-20 on a session the desktop had open: the message, the reply and the
+gate all belong to that session, and the desktop shows them once its view is
+refreshed — it does not follow along live while another host drives it.
+
+**Why a turn failed is inside `error`, not beside it.** `turn.failed` carries
+`{error: {type, message, stack?, code?, underlyingErrorMessage?, …}, turnPhase}`
+and `turn.completed` carries `{response, tokenCount, toolCallCount, duration,
+resultType}` — where `resultType` can itself be `error_max_turns` and the like.
+
 Headless (`--prompt`) is not a way round any of this: workspace hooks are
 `feature_disabled` there, user-scope hooks fire but decide nothing, `--mode
 build` refuses every side-effect tool with "No permission client configured",
@@ -237,5 +247,4 @@ and an `app-server` Halyard starts does not write there.
 - Whether a trusted workspace `PreToolUse` hook decides before the permission
   client in `app-server` mode, or both fire — which decides whether a tool can
   raise two cards.
-- Whether the desktop shows a turn Halyard ran on a session it has open.
 - What MCP tools are called.
