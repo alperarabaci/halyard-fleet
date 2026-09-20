@@ -2,9 +2,10 @@
 
 **Version:** ZCode 3.11.2 (`/Applications/ZCode.app`), macOS · **Measured:** 2026-09-15 ·
 **Calls captured:** 15, from a probe workspace whose hooks wrote down every one ·
-**Status:** the gate (`PreToolUse`) and the reply relay (`Stop`) are wired, and a
-session's title is read from ZCode's own database; putting a message into a session is
-not.
+**Status:** the gate (`PreToolUse`) and the reply relay (`Stop`) are wired, a session's
+title is read from ZCode's own database, and a message goes into a session over the
+engine's own protocol — see [Delivery](#delivery-measured-2026-09-19-and-2026-09-20-engine-0165),
+measured on engine 0.16.5.
 
 Each section says whether it was **measured** here or only **documented** by ZCode's
 own guide — the built-in `zcode-guide` plugin's `diagnosing-hooks` and
@@ -23,6 +24,8 @@ it is the one that decides whether anything runs.
   reason reaches the agent.
 - A call carries no session name, but ZCode keeps every session's title in its own
   database, under the same `session_id`.
+- A message can be delivered from outside, by starting the engine as the application
+  does and answering what it asks — including every permission, which is the gate.
 
 ## Where hooks are read (documented, then measured)
 
@@ -167,9 +170,57 @@ the temporary transcript reads as Claude Code's, and the camelCase copies read a
 Antigravity's. Then `wire` asks ZCode whether it trusts the result, and prints the
 `grant` command for Halyard's hooks when it does not.
 
+## Delivery (measured, 2026-09-19 and 2026-09-20, engine 0.16.5)
+
+ZCode listens on no port and has no send command, but the engine it ships runs
+as `app-server --stdio` and speaks the protocol the application drives it with.
+Whoever starts it is the *host*, and the host answers three questions — which
+is how Halyard both delivers and keeps its gate. See `halyard.agents.zcode`.
+
+| The engine asks | Halyard answers |
+|---|---|
+| `session/requestRuntimePreferences` | the four preferences the desktop sends; a session materialises for nobody without them |
+| `interaction/requestProviderRuntimeHeaders` | `{"headersApplied": true, "requestAuth": {"apiKey": …}}` — the `ZCODE_TOKEN` from `halyard.yaml`, which the anthropic adapter sends as `x-api-key`. `requestAuth.headers` is refused |
+| `interaction/requestPermission` | the gate: `{"decision": "allow"\|"deny", "reason"}` for every side-effect tool |
+
+Sending is `provider/updateAccountConfig` → `session/resume {sessionId,
+workspace}` → `session/setMode` → `session/subscribe` → `session/send
+{content, modelSelection {providerId, modelId, options {reasoningLevel}}}`, and
+each of those is there for a reason measured the hard way:
+
+- **The account snapshot or no models.** Every provider in the application's own
+  `~/.zcode/v2/runtime/provider/**/zcode-builtin.json`, each entitled, one
+  marked `current`, under `basedOnZCodeBuiltinRevision` of
+  `zcode-builtin:<revision>:<sha256 of the catalog's resolved path>` — the hash
+  is of the path string, not of the file. A wrong one is answered "received"
+  and then materialises nothing at all. `access` must say `zhipu-account`: the
+  schema refuses `zhipu-coding-plan-api-key`, and a plan key travels in the
+  auth answer instead, which the provider accepts.
+- **`resume` wants the workspace**, which `session/list` carries beside each
+  session's `title` and `titleSource`.
+- **The mode has to be set after opening, every time.** `build` is "Ask before
+  changes", `edit` is "Edit automatically", and a session whose stored mode is
+  already `build` still runs a `Write` unasked until `session/setMode` is
+  called again on the resumed session.
+- **Reasoning is mandatory** in the model selection.
+
+What the gate does, measured live on fresh sessions: `allow` runs the tool;
+`deny` stops it and the reason reaches the model in its own words ("denied by
+the operator's permission gate"); an unanswered request is repeated every few
+seconds and the turn never ends — so an expired card must be answered `deny`,
+and repeats of one `requestId` are one question.
+
+Headless (`--prompt`) is not a way round any of this: workspace hooks are
+`feature_disabled` there, user-scope hooks fire but decide nothing, `--mode
+build` refuses every side-effect tool with "No permission client configured",
+and no flag or environment variable attaches one.
+
 ## Still to measure
 
 - The answer a `PermissionRequest` hook accepts. Not needed while `PreToolUse` gates.
 - Whether a hook that times out or fails blocks the call or lets it through.
-- Any way to put a message into a session from outside the application.
+- Whether a trusted workspace `PreToolUse` hook decides before the permission
+  client in `app-server` mode, or both fire — which decides whether a tool can
+  raise two cards.
+- Whether the desktop shows a turn Halyard ran on a session it has open.
 - What MCP tools are called.

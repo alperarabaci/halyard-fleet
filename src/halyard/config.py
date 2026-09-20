@@ -292,6 +292,23 @@ class Settings(BaseSettings):
     claude_oauth_token: str | None = Field(
         default=None, validation_alias="HALYARD_CLAUDE_OAUTH_TOKEN"
     )
+    #: What a ZCode turn Halyard starts pays with. Its engine keeps no
+    #: credential of its own when something else drives it: it asks its host
+    #: for the model call's header, and Halyard answers with this and nothing
+    #: else. A coding-plan key from Z.AI's console is the long-lived kind; the
+    #: application's own login is short-lived, and refreshing it from here
+    #: would log the desk out — which is the failure this whole setting exists
+    #: to avoid. Without it a ZCode seat takes its messages at the desk.
+    #:
+    #: Secret, like the bot token, and lives in the same gitignored file.
+    zcode_token: str | None = Field(default=None, validation_alias="ZCODE_TOKEN")
+    #: Which model those turns run on, written the way ZCode writes it:
+    #: `account:zai-individual-coding-plan/GLM-5.3-Flash`. The engine refuses a
+    #: send without one, and it has no default of its own to fall back on.
+    zcode_model: str | None = Field(default=None, validation_alias="ZCODE_MODEL")
+    #: How hard those turns think — ZCode refuses a send that carries no
+    #: reasoning level at all.
+    zcode_reasoning: str = Field(default="max", validation_alias="ZCODE_REASONING")
     #: For reaching an issue tracker — today only to add a label to the task a
     #: branch is for. Named for the idea rather than for GitLab, because the
     #: provider is chosen by the repository's remote and a second one is a

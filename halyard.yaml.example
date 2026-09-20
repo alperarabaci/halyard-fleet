@@ -42,6 +42,17 @@ settings:
   # Note: ANTHROPIC_API_KEY, if it is set anywhere in the environment, outranks
   # the token and bills the API instead of your plan. `halyard doctor` says so.
 
+  # What a ZCode seat's turns pay with, and which model they run. ZCode's engine
+  # keeps no credential when something else drives it: it asks Halyard for the
+  # model call's header, and this is the answer. A coding-plan key from Z.AI's
+  # console is the long-lived kind; the application's own login is short-lived,
+  # and refreshing it from here would log the desk out. Without these two a
+  # ZCode seat still approves and replies, but takes its messages at the desk.
+  #
+  # ZCODE_TOKEN: "replace-me"
+  # ZCODE_MODEL: account:zai-individual-coding-plan/GLM-5.3-Flash
+  # ZCODE_REASONING: max
+
   # What a card calls this codebase.
   CLAUDE_PROJECT_NAME: alpha-engine
 

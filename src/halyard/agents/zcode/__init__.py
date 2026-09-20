@@ -18,15 +18,16 @@ the snake_case ones. Nothing in a call says which runtime made it — its
 transcript is a temporary copy in no runtime's home — so the hooks this package
 writes say it for themselves. See `wiring`.
 
-Delivery is not here yet. Nothing outside the application is known to put a
-message into a ZCode session, so a seat on this runtime gets its approvals and
-its replies on the phone and takes new instructions at the desk.
+Delivery is Halyard driving the engine the way the application does — see
+`runner` and `protocol`. It is the one runtime whose gate Halyard answers
+directly rather than through a hook: the engine asks its host about every
+side-effect tool, and here the host is the control plane.
 """
 
 from __future__ import annotations
 
 from halyard.agents.spec import Hooks, RuntimeSpec
-from halyard.agents.zcode import sessions, trust, wiring
+from halyard.agents.zcode import gate, sessions, trust, wiring
 from halyard.agents.zcode.runner import ZCodeRunner
 
 
@@ -36,7 +37,21 @@ def _present() -> bool:
 
 
 def _runner(settings=None) -> ZCodeRunner:
-    return ZCodeRunner()
+    """Built from settings when there are any.
+
+    The token and the model are this runtime's; the gate is the control plane's
+    own, reached the way every bridge reaches it — see `gate`.
+    """
+    if settings is None:
+        return ZCodeRunner()
+    return ZCodeRunner(
+        token=settings.zcode_token,
+        model=settings.zcode_model,
+        reasoning=settings.zcode_reasoning,
+        asking=gate.through(
+            f"http://{settings.bind}", timeout=float(settings.bridge_timeout_seconds)
+        ),
+    )
 
 
 def check_available(**_context) -> list[tuple[str, str]]:
