@@ -352,7 +352,26 @@ class Bridge:
             self.reply = str(payload.get("response") or "")
             self._ended.set()
         elif kind == "turn.failed":
-            self.failure = str(
-                payload.get("underlyingErrorMessage") or payload.get("message") or "it failed"
-            )
+            self.failure = _why(payload)
             self._ended.set()
+
+
+def _why(payload: Mapping) -> str:
+    """Why a turn failed, in the engine's own words.
+
+    The reason is *inside* `error`, not beside it: `{error: {type, message,
+    underlyingErrorMessage, code, …}, turnPhase}`. Worth the care — a turn
+    that ends with "it failed" is one nobody can do anything about, so the
+    phase it died in and the code it died with come too, and a shape this does
+    not recognise is repeated whole rather than swallowed.
+    """
+    failed = payload.get("error")
+    failed = failed if isinstance(failed, Mapping) else {}
+    said = str(failed.get("underlyingErrorMessage") or failed.get("message") or "").strip()
+    if not said:
+        said = json.dumps(payload)[:300] if payload else "it failed"
+    code = str(failed.get("code") or "").strip()
+    if code and code not in said:
+        said = f"{said} ({code})"
+    phase = str(payload.get("turnPhase") or "").strip()
+    return f"{said} in {phase}" if phase else said
