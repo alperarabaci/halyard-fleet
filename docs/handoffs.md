@@ -1,12 +1,16 @@
-# Checks and handoffs
+# Inspections and handoffs
 
 Two things a project can add once the basics work, and nothing else needs
-either of them. A **check** is the project's own text, run over a seat's reply
-as a turn of its own: `/checks` offers each one, and its answer comes back with
-a button per seat to hand it on. A **handoff** carries a reply from one seat to
-the next the way the project defines it: `/handoff` puts the project's prompt
-in front, runs its commands and then its checks, and delivers all of it
-together.
+either of them. An **inspection** is the project's own text, run over a seat's
+reply as a turn of its own: `/inspect` offers each one, and its answer comes
+back with a button per seat to hand it on. A **handoff** carries a reply from
+one seat to the next the way the project defines it: `/handoff` puts the
+project's prompt in front, runs its commands and then its inspections, and
+delivers all of it together.
+
+Inspections were called checks until 2026-09-23. A configuration that still
+says `checks:` works as it did, `/checks` still answers, and `halyard doctor`
+says what to rename.
 
 Everything here sits under the project in `halyard.yaml`, and every file it
 names is the project's own, read relative to its `path:`.
@@ -18,52 +22,53 @@ projects:
     commands:                         # what /command offers; a handoff names these too
       test-fast: make test-fast
       e2e: make test-e2e SCOPE={label_groups.area}   # takes the task's area label
-    checks:                           # /checks offers these, one button each
-      proof: NOTES/checks/proof.md
-      destructive: NOTES/checks/destructive.md
+    inspections:                      # /inspect offers these, one button each
+      proof: NOTES/inspections/proof.md
+      destructive: NOTES/inspections/destructive.md
     label_groups:                     # the task's label from each group goes on the envelope
       level: [level::1, level::2, level::3]
       area: [area:api, area:web, area:all]
-    label_findings:                   # an answer saying one of these labels the task halyard:<check>
+    label_findings:                   # an answer saying one of these labels the task halyard:<inspection>
       - "status: candidate"
     handoffs:                         # /handoff offers these, one button each
       review:                         # a prompt, handed to the reviewer
         prompt: NOTES/handoffs/review.md
         to: reviewer
-      discovery:                      # a report, back to the navigator, checked first
+      discovery:                      # a report, back to the navigator, inspected first
         prompt: NOTES/handoffs/discovery.md
-        checks: [proof, destructive]
+        inspect: [proof, destructive]
         to: navigator
-      close:                          # the delivery: the tests run, then the checks
+      close:                          # the delivery: the tests run, then the inspections
         prompt: NOTES/handoffs/close.md
         commands: [test-fast, e2e]
-        checks: [proof, destructive]
+        inspect: [proof, destructive]
         to: navigator
 ```
 
 A handoff carries the chat's last reply unless it says
 `include_last_message: false`, and goes to the seat or role in `to:` — every
-seat is offered when it names none. A check, a command or a seat it names that
+seat is offered when it names none. An inspection, a command or a seat it names that
 the project does not define is refused when the file is read, rather than when
 somebody presses the button from a phone.
 
-## A check runs inside the project
+## An inspection runs inside the project
 
 Each is a one-shot turn in the project's own directory, over its own text and
 the reply: it can read files, has no tool that edits one, and is told to run
 only the commands its text names. Each of those comes to you as a card headed
-**CHECKER**, naming the check and the handoff it runs for, in the chat the
-handoff is going to — or, for `/checks`, the chat that asked. **Deny** refuses
-one command and the check carries on; **Stop the check** refuses it and ends
-the check, along with anything it started. A command refused, a check stopped,
-or one that runs out of time leaves the check unmeasured rather than clean.
+**INSPECTION**, naming the inspection and the handoff it runs for, in the chat
+the handoff is going to — or, for `/inspect`, the chat that asked. **Deny**
+refuses one command and the inspection carries on; **Stop the inspection**
+refuses it and ends the inspection, along with anything it started. A command
+refused, an inspection stopped, or one that runs out of time leaves the
+inspection unmeasured rather than clean.
 
-## Every check and handoff carries an envelope
+## Every inspection and handoff carries an envelope
 
 What Halyard reads for itself: the machine, the branch, HEAD, the files' own
 tree id — what `git write-tree` gives for the working tree, so anybody can
 compute it and compare — and, kept as the reply came in, where the files stood
-then, so a check can tell at once whether it is still looking at the code the
+then, so an inspection can tell at once whether it is still looking at the code the
 report was about. It is of the files, not the commits: committing them leaves
 it as it was, and a clean tree's is `HEAD^{tree}`.
 
@@ -79,26 +84,26 @@ nothing.
 
 ## A finding can label the task
 
-A project writes under `label_findings:` what its checks' answers say when they
-found something, in its own words — quoted, because a phrase with a colon is
-otherwise a YAML mapping — and whenever an answer says one of them the task gets
-`halyard:<check>`. From `/checks` and from a handoff alike, since both run the
-same check. Halyard only adds: closing a finding, as a false alarm or as
+A project writes under `label_findings:` what its inspections' answers say when
+they found something, in its own words — quoted, because a phrase with a colon
+is otherwise a YAML mapping — and whenever an answer says one of them the task
+gets `halyard:<inspection>`. From `/inspect` and from a handoff alike, since
+both run the same inspection. Halyard only adds: closing a finding, as a false alarm or as
 approved, is a label somebody puts on by hand. A project that has not said what
 a finding looks like has nothing written.
 
 ## A handoff can run the project's commands first
 
 Under `commands:` a handoff names entries of the project's `commands:`, and they
-run in that order before its checks — one at a time, as `/command` runs them, so
+run in that order before its inspections — one at a time, as `/command` runs them, so
 a handoff does not go while something else is running in the project. What
-each did goes into the envelope the checks read, as one line with its exit code
+each did goes into the envelope the inspections read, as one line with its exit code
 and last line, and what it printed goes into the message. A command that fails
 is reported and the handoff goes on: whoever receives it has to see that it
 failed. One still running after ten minutes is stopped, and its line says so.
 
-The checks read that one line and nothing more, so a command whose results a
-check has to compare — several targets, each with a count and an exit code —
+The inspections read that one line and nothing more, so a command whose results
+an inspection has to compare — several targets, each with a count and an exit code —
 says all of them on its last line. The seat receiving the handoff gets the tail
 of the output as well: the last five lines when the command passed, the last
 twenty-five when it failed.

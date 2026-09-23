@@ -156,14 +156,15 @@ projects:
     #   pull-branch: make pull-branch TASK={input.task}   # typed when /command runs it
     #   next-task: [cleanup, pull-branch]              # a list: one after another, stops at a failure
     # validate: test-fast             # run first by /review_and_commit
-    # Checks `/checks` offers over a chat's last reply, and handoffs `/handoff`
-    # offers — each the project's own file, read relative to `path`. A handoff
-    # carries the last reply, puts its prompt in front, runs its commands and then
-    # the checks it names, and goes to the seat or role in `to:` (every seat is
-    # offered if unset). All of it is described in docs/handoffs.md.
-    # checks:
-    #   proof: NOTES/halyard/checks/proof.md
-    #   destructive: NOTES/halyard/checks/destructive.md
+    # Inspections `/inspect` offers over a chat's last reply, and handoffs
+    # `/handoff` offers — each the project's own file, read relative to `path`. A
+    # handoff carries the last reply, puts its prompt in front, runs its commands
+    # and then the inspections it names under `inspect:`, and goes to the seat or
+    # role in `to:` (every seat is offered if unset). All of it is described in
+    # docs/handoffs.md. Written `checks:` before 2026-09-23, which still works.
+    # inspections:
+    #   proof: NOTES/halyard/inspections/proof.md
+    #   destructive: NOTES/halyard/inspections/destructive.md
     # handoffs:
     #   reviewed: {to: navigator}        # the reply alone, with no prompt of its own
     #   review:
@@ -174,12 +175,12 @@ projects:
     #   driver_develop: {prompt: NOTES/halyard/handoffs/forward.md, to: driver}
     #   discover_completed:
     #     prompt: NOTES/halyard/handoffs/discovery.md
-    #     checks: [proof, destructive]
+    #     inspect: [proof, destructive]
     #     to: navigator
     #   close:
     #     prompt: NOTES/halyard/handoffs/close.md
-    #     commands: [test-fast]          # from `commands:`, run before the checks
-    #     checks: [proof, destructive]
+    #     commands: [test-fast]          # from `commands:`, run before the inspections
+    #     inspect: [proof, destructive]
     #     to: navigator
     # Workflows take those handoffs in an order, each step to a seat, and go on by
     # the last line of each reply: forward, back or wait. A step goes once unless
@@ -200,14 +201,14 @@ projects:
     #     close: {seat: navigator}
     #   level3: [review, reviewed, [discover, discovered, develop, verified], close]
     # Groups of task labels. The first one the task carries from each group
-    # goes on the envelope checks and handoffs are given, as `level: level::3`.
+    # goes on the envelope inspections and handoffs are given, as `level: level::3`.
     # Nothing is required or refused: a task with none of them adds nothing.
     # label_groups:
     #   level: [level::1, level::2, level::3]
     #   area: [area:api, area:web, area:all]   # a command can take one: {label_groups.area}
-    # What the checks' answers say when they found something, in the project's
-    # own words — quoted, since a phrase with a colon is otherwise a mapping. An
-    # answer saying one of them puts `halyard:<check>` on the task. This writes
+    # What the inspections' answers say when they found something, in the
+    # project's own words — quoted, since a phrase with a colon is otherwise a
+    # mapping. An answer saying one of them puts `halyard:<inspection>` on the task. This writes
     # to the tracker, so nothing is written unless it is set.
     # label_findings:
     #   - "status: candidate"

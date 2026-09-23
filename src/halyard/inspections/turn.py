@@ -1,4 +1,4 @@
-"""One check, run as a model turn of its own over a reply."""
+"""One inspection, run as a model turn of its own over a reply."""
 
 from __future__ import annotations
 
@@ -9,18 +9,23 @@ from collections.abc import Sequence
 from pathlib import Path
 
 from halyard import frame
-from halyard.checks.spec import Answer, Asker, Labeller, StoppedError
+from halyard.inspections.spec import Answer, Asker, Labeller, StoppedError
 
 logger = logging.getLogger(__name__)
 
 #: What a finding puts on the task: Halyard's corner of the tracker, then the
-#: check's name — `halyard:claims`. One colon, not a scope; see
+#: inspection's name — `halyard:claims`. One colon, not a scope; see
 #: `halyard.tasks.attribution` for why.
 LABEL_PREFIX = "halyard:"
 
 
 def prompt(instructions: str, *, context: list[str], note: str, text: str) -> str:
-    """One check's turn: its own instructions, what Halyard knows, and the text."""
+    """One inspection's turn: its own instructions, what Halyard knows, and the text.
+
+    It still says "check" to the model, as it did before these were called
+    inspections: what a model is told stays the same, so that answers from
+    before the name changed and after it can be compared.
+    """
     parts = [
         instructions,
         "",
@@ -62,7 +67,7 @@ def unfenced(answer: str) -> str:
 def finding(answer: str, findings: Sequence[str]) -> str | None:
     """Which of the project's finding phrases an answer says, if any.
 
-    In the project's own words, as its check files have the model write them —
+    In the project's own words, as its inspection files have the model write them —
     `status: candidate` — matched regardless of case; the first that matches. No
     phrases, no finding: a project that has not said what a finding looks like
     is never guessed for.
@@ -84,7 +89,7 @@ def handed_on(
     findings: str,
     reply: str,
 ) -> str:
-    """What a seat is handed when somebody sends it a check's answer.
+    """What a seat is handed when somebody sends it an inspection's answer.
 
     Written to be read cold by a session that saw none of it happen: what ran,
     on whose reply, where, what it found — and the reply itself, because a
@@ -94,11 +99,11 @@ def handed_on(
     """
     return "\n".join(
         [
-            f"The operator ran this project's `{name}` check on {author}'s reply "
-            f"from {arrived} and is handing you the result: what the check found, "
-            "then the reply it checked.",
+            f"The operator ran this project's `{name}` inspection on {author}'s reply "
+            f"from {arrived} and is handing you the result: what the inspection "
+            "found, then the reply it inspected.",
             "",
-            f"Check: {name} — {path} @ {version}",
+            f"Inspection: {name} — {path} @ {version}",
             "",
             *frame.envelope(context),
             "",
@@ -106,7 +111,7 @@ def handed_on(
             "",
             findings,
             "",
-            f"The reply it checked ({len(reply):,} characters):",
+            f"The reply it inspected ({len(reply):,} characters):",
             "",
             reply,
         ]
@@ -129,33 +134,33 @@ async def run(
     findings: Sequence[str] = (),
     labeller: Labeller | None = None,
 ) -> Answer:
-    """Run one check over a reply: its own text, what Halyard can see, the reply.
+    """Run one inspection over a reply: its own text, what Halyard can see, the reply.
 
     The turn stands in the project, because a report is compared against the
-    code it is about: it may read, and run what the check's text sends it to,
-    and edits nothing. It goes by the check's name — and the handoff's, when it
-    runs for one — so that a command it wants run reaches a person as that
-    check's rather than a stranger's.
+    code it is about: it may read, and run what the inspection's text sends it
+    to, and edits nothing. It goes by the inspection's name — and the handoff's,
+    when it runs for one — so that a command it wants run reaches a person as
+    that inspection's rather than a stranger's.
 
-    An answer that says one of the project's `findings` puts the check's label
-    on the task through `labeller`. Decided here, from the project's own words,
-    so whoever runs the check has no say in it.
+    An answer that says one of the project's `findings` puts the inspection's
+    label on the task through `labeller`. Decided here, from the project's own
+    words, so whoever runs it has no say in it.
 
-    Never raises. A check that cannot be read, or a model that does not answer,
+    Never raises. An inspection that cannot be read, or a model that does not answer,
     comes back as an `Answer` with no text and the reason — never as nothing,
     because a missing line reads exactly like a clean one.
 
     Logged as a frame rather than the files — enough to say afterwards what a
-    finding was about and which revision of the check found it — and then the
+    finding was about and which revision of the inspection found it — and then the
     answer as it came.
     """
     instructions = frame.read(path, project)
     version = await asyncio.to_thread(frame.version, path, project)
     if not instructions:
-        logger.warning("Check %s did not run: could not read %s", name, path)
+        logger.warning("Inspection %s did not run: could not read %s", name, path)
         return Answer(name, path, version, why=f"could not read {path}")
     logger.info(
-        "Check %s asked · %s · %s · check %s @ %s, %d chars · note %r · model %s",
+        "Inspection %s asked · %s · %s · file %s @ %s, %d chars · note %r · model %s",
         name,
         " · ".join(context),
         about or f"reply {len(reply)} chars",
@@ -177,27 +182,27 @@ async def run(
         )
     except StoppedError as stopped:
         took = time.monotonic() - started
-        logger.info("Check %s %s after %.1fs", name, stopped, took)
+        logger.info("Inspection %s %s after %.1fs", name, stopped, took)
         return Answer(name, path, version, why=str(stopped), took=took)
     except Exception:
-        logger.warning("Check %s failed", name, exc_info=True)
+        logger.warning("Inspection %s failed", name, exc_info=True)
         said = None
     took = time.monotonic() - started
     if not said:
-        logger.info("Check %s got no answer in %.1fs", name, took)
+        logger.info("Inspection %s got no answer in %.1fs", name, took)
         return Answer(name, path, version, why="the model did not answer", took=took)
-    logger.info("Check %s answered in %.1fs:\n%s", name, took, said)
+    logger.info("Inspection %s answered in %.1fs:\n%s", name, took, said)
     if labeller is not None and (phrase := finding(said, findings)):
         await _label(name, phrase, labeller)
     return Answer(name, path, version, text=unfenced(said), took=took)
 
 
 async def _label(name: str, phrase: str, labeller: Labeller) -> None:
-    """Put the check's label on the task. Never raises: a label that could not
+    """Put the inspection's label on the task. Never raises: a label that could not
     be written is a gap in a record, and the answer is worth more."""
     label = f"{LABEL_PREFIX}{name}"
-    logger.info("Check %s found something (%r); %s goes on the task", name, phrase, label)
+    logger.info("Inspection %s found something (%r); %s goes on the task", name, phrase, label)
     try:
         await labeller.label(label)
     except Exception:
-        logger.warning("Check %s could not put %s on the task", name, label, exc_info=True)
+        logger.warning("Inspection %s could not put %s on the task", name, label, exc_info=True)

@@ -97,8 +97,8 @@ reading configuration.
 | `/options` | every model and effort level the runtime accepts |
 | `/model`, `/effort` | what answers, and how hard it thinks |
 | `/to` | *(typed; not on the menu)* hand a message to another seat by name |
-| `/checks` | pick one of this project's own checks and run it over the chat's last reply; the answer has a button per seat to hand it on |
-| `/handoff` | hand the chat's last reply on the way this project defines it — its own prompt in front, its commands and checks run first |
+| `/inspect` | pick one of this project's own inspections and run it over the chat's last reply; the answer has a button per seat to hand it on |
+| `/handoff` | hand the chat's last reply on the way this project defines it — its own prompt in front, its commands and inspections run first |
 | `/md` | *(configurable)* have the agent write its answer to a file and pass the path |
 | `/commit` | commit this branch's work, with a message to approve — and push |
 | `/review_and_commit` | the same, plus this project's own checks and its review round |
@@ -165,10 +165,10 @@ projects:
       review: NOTES/CONFIRMATION_REVIEW.md
 ```
 
-**Checks and handoffs** have [a page of their own](docs/handoffs.md): a
-project's own checks, run over a seat's reply, and a reply handed from one seat
-to the next with the project's prompt in front and its commands and checks run
-first. Nothing above needs either.
+**Inspections and handoffs** have [a page of their own](docs/handoffs.md): a
+project's own inspections, run over a seat's reply, and a reply handed from one
+seat to the next with the project's prompt in front and its commands and
+inspections run first. Nothing above needs either.
 
 **`confirmation:` buys a round that a guard cannot.** A test proves what it
 tests and a file of invariants proves nothing at all — an agent's attention is
@@ -329,7 +329,7 @@ behalf, uncontrolled agent-to-agent messaging, or multi-user RBAC.
 | [Before you wire it in](docs/before-you-wire-it.md) | What changes, and what surprised us |
 | [When it does not work](docs/when-it-does-not-work.md) | Every way setup has gone wrong so far, and the fix |
 | [Setup](docs/setup.md) | Installing it, seats in YAML, gating a project by hand |
-| [Checks and handoffs](docs/handoffs.md) | A project's own checks, and handing a reply from one seat to the next |
+| [Inspections and handoffs](docs/handoffs.md) | A project's own inspections, and handing a reply from one seat to the next |
 | [Workflows](docs/workflows.md) | A project's handoffs taken in order, each reply's last line deciding what comes next |
 | [Telegram](docs/telegram.md) | The bot, seats, models and effort |
 | [Architecture](docs/architecture.md) | How the layers fit, and the security posture |

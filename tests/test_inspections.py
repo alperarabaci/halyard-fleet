@@ -1,10 +1,10 @@
-"""Tests for `halyard.checks` — one check, run over a reply, through `Asker`."""
+"""Tests for `halyard.inspections` — one inspection, run over a reply, through `Asker`."""
 
 from __future__ import annotations
 
 from pathlib import Path
 
-from halyard import checks
+from halyard import inspections
 
 
 class Asking:
@@ -48,9 +48,9 @@ class Labelling:
 
 async def checked(
     tmp_path: Path, says: str | None, labeller: Labelling, findings=("status: candidate",)
-) -> checks.Answer:
+) -> inspections.Answer:
     (tmp_path / "proof.md").write_text("# proof\n")
-    return await checks.run(
+    return await inspections.run(
         "proof",
         Path("proof.md"),
         project=tmp_path,
@@ -67,8 +67,8 @@ async def checked(
 
 async def ran(
     tmp_path: Path, asker: Asking, check: str = "proof.md", *, handoff: str = ""
-) -> checks.Answer:
-    return await checks.run(
+) -> inspections.Answer:
+    return await inspections.run(
         "proof",
         Path(check),
         project=tmp_path,
@@ -88,7 +88,7 @@ def test_the_prompt_says_where_the_check_stands_and_what_it_may_do() -> None:
     check ran the suite test by test, wrote probes of its own and made scratch
     copies — and reading for the check rather than through everything the
     project's own instructions name."""
-    asked = checks.prompt(
+    asked = inspections.prompt(
         "# proof", context=["Project: alpha-engine"], note="delivery", text="42 passed"
     )
 
@@ -104,15 +104,15 @@ def test_the_prompt_says_where_the_check_stands_and_what_it_may_do() -> None:
 
 
 def test_a_fenced_answer_loses_its_fence() -> None:
-    assert checks.unfenced("```\nproof · no finding\n```") == "proof · no finding"
-    assert checks.unfenced("proof · no finding") == "proof · no finding"
+    assert inspections.unfenced("```\nproof · no finding\n```") == "proof · no finding"
+    assert inspections.unfenced("proof · no finding") == "proof · no finding"
 
 
 def test_what_a_seat_is_handed_can_be_read_cold() -> None:
     """What ran, on whose reply, where, what it found — and the reply itself,
     because a navigator handed the findings alone could not tell what they
     were about."""
-    text = checks.handed_on(
+    text = inspections.handed_on(
         "proof",
         path=Path("NOTES/proof.md"),
         version="3e8c847",
@@ -123,8 +123,8 @@ def test_what_a_seat_is_handed_can_be_read_cold() -> None:
         reply="All 42 tests passed.",
     )
 
-    assert "`proof` check on drv (driver)'s reply from 00:21" in text
-    assert "Check: proof — NOTES/proof.md @ 3e8c847" in text
+    assert "`proof` inspection on drv (driver)'s reply from 00:21" in text
+    assert "Inspection: proof — NOTES/proof.md @ 3e8c847" in text
     assert "Envelope:\n- Work item: alpha-engine#355" in text
     assert text.index("evidence missing") < text.index("All 42 tests passed.")
 
@@ -143,7 +143,7 @@ async def test_a_check_runs_its_own_text_over_the_reply(tmp_path: Path) -> None:
     assert model == "sonnet"
     assert answer.measured
     assert answer.text == "proof · no finding"
-    assert isinstance(asker, checks.Asker)
+    assert isinstance(asker, inspections.Asker)
 
 
 async def test_the_turn_stands_in_the_project_and_cannot_change_it(tmp_path: Path) -> None:
@@ -194,7 +194,7 @@ async def test_a_check_somebody_stopped_says_so(tmp_path: Path) -> None:
 
     class Stopping(Asking):
         async def ask(self, text: str, **_) -> str | None:
-            raise checks.StoppedError("stopped by tg:4242")
+            raise inspections.StoppedError("stopped by tg:4242")
 
     answer = await ran(tmp_path, Stopping())
 
@@ -208,10 +208,11 @@ def test_a_finding_is_the_projects_own_words_whatever_their_case() -> None:
     findings = ("status: candidate", "status: evidence missing")
 
     assert (
-        checks.finding("proof · #355 · Status: Candidate\n- one", findings) == "status: candidate"
+        inspections.finding("proof · #355 · Status: Candidate\n- one", findings)
+        == "status: candidate"
     )
-    assert checks.finding("proof · #355 · status: no finding", findings) is None
-    assert checks.finding("proof · #355 · status: candidate", ()) is None
+    assert inspections.finding("proof · #355 · status: no finding", findings) is None
+    assert inspections.finding("proof · #355 · status: candidate", ()) is None
 
 
 async def test_a_check_that_finds_something_labels_the_task(tmp_path: Path) -> None:

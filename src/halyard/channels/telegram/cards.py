@@ -33,7 +33,7 @@ PREFIX = "hf"
 ALLOW = "a"
 DENY = "d"
 SHOW_FULL = "f"
-#: A check's card only: refuse the command, and end the check that asked.
+#: An inspection's card only: refuse the command, and end the inspection that asked.
 STOP = "s"
 
 _RISK_BADGE = {
@@ -107,6 +107,8 @@ _CHOOSABLE = frozenset(
         "open",
         "run",
         "label",
+        "inspect",
+        # What `inspect` was until 2026-09-23; buttons still in chats send it.
         "check",
         "cancel",
         "result",
@@ -339,23 +341,24 @@ def _asked(request: ApprovalRequest) -> list[str]:
     return lines
 
 
-def _checked_by(checker: str | None) -> list[str]:
-    """Which check a command came from, when a check asked for it."""
-    return [f"Check: <b>{html.escape(checker)}</b>"] if checker else []
+def _inspected_by(inspection: str | None) -> list[str]:
+    """Which inspection a command came from, when an inspection asked for it."""
+    return [f"Inspection: <b>{html.escape(inspection)}</b>"] if inspection else []
 
 
-def render(request: ApprovalRequest, *, now: datetime, checker: str | None = None) -> str:
+def render(request: ApprovalRequest, *, now: datetime, inspection: str | None = None) -> str:
     """The approval card.
 
-    `checker` names the check a command came from. A check's turn is nobody's
-    seat, so without it the card would say AGENT over a session nobody has seen
-    — and what is being allowed is a check looking, not a seat working.
+    `inspection` names the inspection a command came from. An inspection's turn
+    is nobody's seat, so without it the card would say AGENT over a session
+    nobody has seen — and what is being allowed is an inspection looking, not a
+    seat working.
     """
-    role = "checker" if checker else (request.role.value if request.role else "agent")
+    role = "inspection" if inspection else (request.role.value if request.role else "agent")
     lines = [
         f"<b>[{role.upper()} — PERMISSION REQUEST]</b>  {_RISK_BADGE[request.risk]}",
         "",
-        *_checked_by(checker),
+        *_inspected_by(inspection),
         f"Project: <code>{html.escape(request.project)}</code>",
         f"Session: <code>{html.escape(_short_session(request.session_id))}</code>",
         f"Tool: <code>{html.escape(request.tool)}</code>",
@@ -370,14 +373,14 @@ def render(request: ApprovalRequest, *, now: datetime, checker: str | None = Non
 
 
 def render_resolved(
-    request: ApprovalRequest, *, decision: str, by: str | None, checker: str | None = None
+    request: ApprovalRequest, *, decision: str, by: str | None, inspection: str | None = None
 ) -> str:
     """What the card becomes once it has been answered.
 
     The message is edited in place rather than replaced, so scrolling back
     through a chat shows what was decided instead of a row of live-looking
-    buttons on questions that were settled hours ago. A check's card stays a
-    check's, so the chat still says what was allowed to look.
+    buttons on questions that were settled hours ago. An inspection's card
+    stays an inspection's, so the chat still says what was allowed to look.
     """
     mark = {"allow": "✅ ALLOWED", "stop": "⏹ STOPPED"}.get(decision, "⛔ DENIED")
     who = f" by {html.escape(by)}" if by else ""
@@ -385,7 +388,7 @@ def render_resolved(
         [
             f"<b>{mark}</b>{who}",
             "",
-            *_checked_by(checker),
+            *_inspected_by(inspection),
             f"Project: <code>{html.escape(request.project)}</code>",
             f"Tool: <code>{html.escape(request.tool)}</code>",
             *_asked(request),
@@ -399,9 +402,10 @@ def keyboard(request: ApprovalRequest, *, include_full: bool, stoppable: bool = 
     """The buttons under a card.
 
     Allow and Deny sit on their own row, away from anything harmless, so a
-    mistimed tap on 'show the rest of this' cannot land on 'allow'. A check's
-    card can also stop the check: Deny refuses one command and the check tries
-    the next, which is not what somebody watching a check run away wants.
+    mistimed tap on 'show the rest of this' cannot land on 'allow'. An
+    inspection's card can also stop the inspection: Deny refuses one command
+    and the inspection tries the next, which is not what somebody watching one
+    run away wants.
     """
     rows = [
         [
@@ -414,7 +418,9 @@ def keyboard(request: ApprovalRequest, *, include_full: bool, stoppable: bool = 
             [{"text": "Show full command", "callback_data": callback_data(request, SHOW_FULL)}]
         )
     if stoppable:
-        rows.append([{"text": "⏹ Stop the check", "callback_data": callback_data(request, STOP)}])
+        rows.append(
+            [{"text": "⏹ Stop the inspection", "callback_data": callback_data(request, STOP)}]
+        )
     return {"inline_keyboard": rows}
 
 
@@ -526,16 +532,16 @@ def label_choices(names: tuple[str, ...]) -> dict | None:
     return _keyboard([buttons[i : i + 2] for i in range(0, len(buttons), 2)])
 
 
-def check_choices(names: tuple[str, ...]) -> dict | None:
-    """A button per check a project defines.
+def inspection_choices(names: tuple[str, ...]) -> dict | None:
+    """A button per inspection a project defines.
 
-    No `default` row, as with commands: there is no default check, and each
+    No `default` row, as with commands: there is no default inspection, and each
     button runs exactly the one it names.
     """
     buttons = []
     for name in names:
         try:
-            buttons.append({"text": name, "callback_data": choice_data("check", name)})
+            buttons.append({"text": name, "callback_data": choice_data("inspect", name)})
         except ValueError:
             continue
     if not buttons:
@@ -544,7 +550,7 @@ def check_choices(names: tuple[str, ...]) -> dict | None:
 
 
 def workflow_choices(names: tuple[str, ...]) -> dict | None:
-    """A button per workflow a project defines, as `check_choices` is for checks."""
+    """A button per workflow a project defines, as `inspection_choices` is for inspections."""
     buttons = []
     for name in names:
         try:
@@ -631,17 +637,17 @@ def workflow_keyboard(
     return {"inline_keyboard": [row for row in (moving, steering) if row]}
 
 
-def result_choices(check: str, labels: tuple[str, ...]) -> dict | None:
-    """Buttons under a check's answer, one per seat: hand the answer there.
+def result_choices(inspection: str, labels: tuple[str, ...]) -> dict | None:
+    """Buttons under an inspection's answer, one per seat: hand the answer there.
 
-    The check travels in the button with the seat, because a chat can hold the
-    answers of several checks, and the button under `proof` has to send proof's
+    The inspection travels in the button with the seat, because a chat can hold
+    the answers of several inspections, and the button under `proof` has to send proof's
     answer even after `claims` has answered below it.
     """
     buttons = []
     for label in labels:
         try:
-            data = choice_data("result", f"{check}>{label}")
+            data = choice_data("result", f"{inspection}>{label}")
         except ValueError:
             continue
         buttons.append({"text": f"→ {label}", "callback_data": data})
@@ -651,7 +657,7 @@ def result_choices(check: str, labels: tuple[str, ...]) -> dict | None:
 
 
 def handoff_choices(names: tuple[str, ...]) -> dict | None:
-    """A button per handoff a project defines, the way `/checks` offers checks.
+    """A button per handoff a project defines, the way `/inspect` offers inspections.
 
     Two to a row: a handoff's name says where work goes next —
     `discover_completed` — and three of those wrap on a phone.

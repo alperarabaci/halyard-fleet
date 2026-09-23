@@ -28,9 +28,9 @@ from datetime import UTC, datetime, timedelta
 from functools import partial
 from pathlib import Path
 
-from halyard import checks as checking
 from halyard import commits, frame
 from halyard import handoffs as handing
+from halyard import inspections as inspecting
 from halyard import tasks as task_tracker
 from halyard import workflows as flowing
 from halyard.agents.base import AgentRunner
@@ -112,7 +112,7 @@ POLL_RETRY_MAX_SECONDS = 30.0
 COMMANDS: tuple[tuple[str, str], ...] = (
     ("chat", "Send a message into this seat's session"),
     ("forward", "Hand this chat's last reply to another seat"),
-    ("checks", "Run one of this project's checks over this chat's last reply"),
+    ("inspect", "Run one of this project's inspections over this chat's last reply"),
     ("handoff", "Hand this chat's last reply on, the way this project defines it"),
     ("workflow", "Take this project's handoffs in the order it wrote them down"),
     ("commit", "Commit this branch's work, with a message to approve"),
@@ -187,22 +187,23 @@ MESSAGE_MODEL = "sonnet"
 #: than this has gone wrong, and the phone should hear that rather than hold.
 MESSAGE_TIMEOUT_SECONDS = 120.0
 
-#: The one-shot model each of a project's checks runs on, named here for the
-#: reason `MESSAGE_MODEL` is. One turn per check.
-CHECK_MODEL = "sonnet"
+#: The one-shot model each of a project's inspections runs on, named here for
+#: the reason `MESSAGE_MODEL` is. One turn per inspection.
+INSPECTION_MODEL = "sonnet"
 
-#: How long one check may take. It reads a whole report and may run what the
+#: How long one inspection may take. It reads a whole report and may run what the
 #: report says was run, each command waiting on a tap first — the bound
 #: `validate:` has, for the same kind of work.
-CHECK_TIMEOUT_SECONDS = 600.0
+INSPECTION_TIMEOUT_SECONDS = 600.0
 
 #: How long a reply waits for its project's files to be read. A local
 #: repository answers in well under a second, and one that does not costs the
 #: record of where the files stood, never the reply.
 TREE_TIMEOUT_SECONDS = 5.0
 
-#: How long a check or a handoff waits for its task's labels. A tracker that has
-#: not answered by then leaves them off the envelope; nothing else waits on it.
+#: How long an inspection or a handoff waits for its task's labels. A tracker
+#: that has not answered by then leaves them off the envelope; nothing else
+#: waits on it.
 LABELS_TIMEOUT_SECONDS = 10.0
 
 #: How long one of a handoff's commands may run. The bound `validate:` has:
@@ -210,7 +211,7 @@ LABELS_TIMEOUT_SECONDS = 10.0
 #: suites are for `/command`, which reports when it is done.
 HANDOFF_COMMAND_TIMEOUT_SECONDS = 600.0
 
-#: What each chat last heard, each chat's last answer per check, and where each
+#: What each chat last heard, each chat's last answer per inspection, and where each
 #: piece of work's workflow has got to, with its rounds. Kept per project — see
 #: `_kept`.
 SAID_FILE = "last-said.json"
@@ -400,9 +401,9 @@ def _ended(result: commands_running.Result) -> str:
 
 
 @dataclass
-class _Check:
-    """A check's turn while it runs: what it is, where its answer is going, and
-    the task running it — which is what Stop cancels."""
+class _Inspection:
+    """An inspection's turn while it runs: what it is, where its answer is going,
+    and the task running it — which is what Stop cancels."""
 
     name: str
     destination: tuple[str, int | None]
@@ -411,14 +412,15 @@ class _Check:
     stopped_by: str | None = None
 
 
-class _Checking:
-    """The channel's side of `checks.Asker`: a runtime's turn, known by its id.
+class _Inspecting:
+    """The channel's side of `inspections.Asker`: a runtime's turn, known by its id.
 
-    Each turn starts under an id chosen here, kept with what the check is and
-    where its answer is going for as long as it runs. A command the check asks
-    to run is then a card that says which check wants it, in the chat the
-    answer is headed for — rather than one from a session nobody has seen, in
-    whichever chat an unknown session falls to. The card can stop the check.
+    Each turn starts under an id chosen here, kept with what the inspection is
+    and where its answer is going for as long as it runs. A command the
+    inspection asks to run is then a card that says which inspection wants it,
+    in the chat the answer is headed for — rather than one from a session nobody
+    has seen, in whichever chat an unknown session falls to. The card can stop
+    the inspection.
     """
 
     def __init__(
@@ -444,8 +446,8 @@ class _Checking:
         edits: bool = True,
     ) -> str | None:
         session = str(uuid.uuid4())
-        running = _Check(
-            name or "check",
+        running = _Inspection(
+            name or "inspection",
             self._destination,
             asyncio.ensure_future(
                 self._runner.ask(
@@ -455,27 +457,27 @@ class _Checking:
                     cwd=cwd,
                     edits=edits,
                     session_id=session,
-                    purpose=f"check {name}" if name else "check",
+                    purpose=f"inspect {name}" if name else "inspect",
                     project=self._project,
                 )
             ),
         )
-        self._channel._checking[session] = running
-        logger.info("Check %s runs as session %s", running.name, session)
+        self._channel._inspecting[session] = running
+        logger.info("Inspection %s runs as session %s", running.name, session)
         try:
             return await running.turn
         except asyncio.CancelledError:
             if running.stopped_by is None:
                 raise
-            raise checking.StoppedError(f"stopped by {running.stopped_by}") from None
+            raise inspecting.StoppedError(f"stopped by {running.stopped_by}") from None
         finally:
-            self._channel._checking.pop(session, None)
+            self._channel._inspecting.pop(session, None)
 
 
 class _Labelling:
-    """The channel's side of `checks.Labeller`: a label onto this project's task.
+    """The channel's side of `inspections.Labeller`: a label onto this project's task.
 
-    Written off to one side, so a check's answer and a handoff never wait on an
+    Written off to one side, so an inspection's answer and a handoff never wait on an
     issue tracker, and quietly — the log says what happened, nobody is asked.
     """
 
@@ -639,10 +641,11 @@ class TelegramChannel:
         #: derive the destination again — and could disagree with where the
         #: card actually is.
         self._open: dict[str, tuple[ApprovalRequest, int, str, int | None]] = {}
-        #: The checks running now, by the session id each was started under:
-        #: what the check is, where its answer is headed — which is where a
-        #: command it asks to run goes — and how to stop it. See `_Checking`.
-        self._checking: dict[str, _Check] = {}
+        #: The inspections running now, by the session id each was started
+        #: under: what the inspection is, where its answer is headed — which is
+        #: where a command it asks to run goes — and how to stop it. See
+        #: `_Inspecting`.
+        self._inspecting: dict[str, _Inspection] = {}
         # Questions are held apart from approvals: a different store answers
         # them, and their button carries an option index rather than allow/deny.
         # Same shape otherwise — handle to (request, message id, chat).
@@ -757,13 +760,14 @@ class TelegramChannel:
         the alternative is a bridge blocked on a question nobody was asked.
         """
         self._forget_expired()
-        # A check's turn is nobody's seat. Its command goes where the check's
-        # answer is going, says it is a check's, and can stop the check; routed
+        # An inspection's turn is nobody's seat. Its command goes where the
+        # inspection's answer is going, says it is an inspection's, and can stop
+        # the inspection; routed
         # like a seat's, it would land wherever an unknown session falls, over
         # a session id nobody has seen.
-        running = self._checking.get(request.session_id)
-        checker = running.name if running else None
-        text = cards.render(request, now=self._clock(), checker=checker)
+        running = self._inspecting.get(request.session_id)
+        inspection = running.name if running else None
+        text = cards.render(request, now=self._clock(), inspection=inspection)
         markup = cards.keyboard(
             request,
             include_full=request.command_full != request.command_summary,
@@ -788,7 +792,7 @@ class TelegramChannel:
             "Card for %s (%s, session %r) sent to %s",
             request.project,
             request.agent_id,
-            f"check {checker}" if checker else request.session_name or "unnamed",
+            f"inspection {inspection}" if inspection else request.session_name or "unnamed",
             chat_id,
         )
         return str(message_id)
@@ -869,7 +873,7 @@ class TelegramChannel:
                 content=files.content if files else None,
             )
         # A workflow waiting on this seat takes its next step — off this path,
-        # which is relaying a reply: the step ahead may run commands and checks,
+        # which is relaying a reply: the step ahead may run commands and inspections,
         # and none of that should hold up what the seat just said.
         answered = for_session(self._seats, agent_id, session_name, session_id) or for_project(
             self._seats, agent_id, project
@@ -1126,18 +1130,19 @@ class TelegramChannel:
         if command == "forward":
             await self._forward_last(argument, actor, here or "", thread)
             return
-        if command == "checks":
-            # Detached: each check is a model turn of its own over a whole
+        if command in ("inspect", "checks"):
+            # `/checks` is what it was called until 2026-09-23, and still works.
+            # Detached: each inspection is a model turn of its own over a whole
             # report, and the poller has everybody else's buttons to answer.
-            self._detach(self._run_checks(argument, here or "", thread), "/checks")
+            self._detach(self._run_inspection(argument, here or "", thread), "/inspect")
             return
         if command == "workflow":
             # Detached like `/handoff`, and for longer: this one takes a step
-            # that may run commands and checks, and then waits for a seat.
+            # that may run commands and inspections, and then waits for a seat.
             self._detach(self._run_workflow(argument, here or "", thread, actor), "/workflow")
             return
         if command == "handoff":
-            # Detached for the same reason: a handoff may run checks first.
+            # Detached for the same reason: a handoff may run inspections first.
             self._detach(self._run_handoff(argument, here or "", thread, actor), "/handoff")
             return
         if command in ("commit", "review_and_commit"):
@@ -2447,26 +2452,26 @@ class TelegramChannel:
         logger.info("Forwarding to seat %s from %s: %r", label, actor, said.text[:60])
         await self._forward_to_seat(f"{label} {said.text}", actor, chat_id, thread_id)
 
-    async def _run_checks(self, typed: str, chat_id: str, thread_id: int | None) -> None:
-        """`/checks` — offer this project's checks, or run the named one.
+    async def _run_inspection(self, typed: str, chat_id: str, thread_id: int | None) -> None:
+        """`/inspect` — offer this project's inspections, or run the named one.
 
-        The shape `/label` and `/command` have: a button per check, and the one
-        pressed runs. It runs over the last reply in this chat, as a model turn
-        of its own, with the check's text and what Halyard can see of the
+        The shape `/label` and `/command` have: a button per inspection, and the
+        one pressed runs. It runs over the last reply in this chat, as a model
+        turn of its own, with the inspection's text and what Halyard can see of the
         repository. A turn that could not be had is said as unmeasured rather
         than left out, because a missing answer reads exactly like a clean one.
 
-        Whatever follows the name goes in as a note: `/checks proof delivery`
-        says which stage the reply belongs to, which is what most checks ask
-        first.
+        Whatever follows the name goes in as a note: `/inspect proof delivery`
+        says which stage the reply belongs to, which is what most inspections
+        ask first.
         """
         found = self._repository_for(chat_id)
         if found is None:
             await self._say(self._no_repository(chat_id), chat_id, thread_id)
             return
-        if not found.checks:
+        if not found.inspections:
             await self._say(
-                f"<b>{html.escape(found.name)}</b> has no <code>checks:</code> in "
+                f"<b>{html.escape(found.name)}</b> has no <code>inspections:</code> in "
                 "<code>halyard.yaml</code>.",
                 chat_id,
                 thread_id,
@@ -2476,7 +2481,7 @@ class TelegramChannel:
         said = last_said.last(kept, chat_id) if kept else None
         if said is None:
             await self._say(
-                "Nothing has been said in this chat yet, so there is nothing to check.",
+                "Nothing has been said in this chat yet, so there is nothing to inspect.",
                 chat_id,
                 thread_id,
             )
@@ -2485,29 +2490,29 @@ class TelegramChannel:
         wanted, _, note = typed.strip().partition(" ")
         if not wanted:
             await self._say(
-                f"Check the reply from <b>{_local(said.at):%H:%M}</b> with which one?",
+                f"Inspect the reply from <b>{_local(said.at):%H:%M}</b> with which one?",
                 chat_id,
                 thread_id,
-                reply_markup=cards.check_choices(tuple(found.checks)),
+                reply_markup=cards.inspection_choices(tuple(found.inspections)),
             )
             return
-        name = next((key for key in found.checks if key.casefold() == wanted.casefold()), None)
+        name = next((key for key in found.inspections if key.casefold() == wanted.casefold()), None)
         if name is None:
             await self._say(
-                f"<b>{html.escape(found.name)}</b> has no check called "
+                f"<b>{html.escape(found.name)}</b> has no inspection called "
                 f"<b>{html.escape(wanted)}</b>.",
                 chat_id,
                 thread_id,
             )
-            await self._run_checks("", chat_id, thread_id)
+            await self._run_inspection("", chat_id, thread_id)
             return
 
-        asker = self._checker(chat_id, (chat_id, thread_id))
+        asker = self._inspector(chat_id, (chat_id, thread_id))
         if asker is None:
             await self._say("No runtime here can take a one-shot turn.", chat_id, thread_id)
             return
 
-        path = found.checks[name]
+        path = found.inspections[name]
         arrived = _local(said.at).strftime("%H:%M")
         await self._say(
             f"\U0001f50e <b>{html.escape(name)}</b> is reading the last reply here "
@@ -2527,7 +2532,7 @@ class TelegramChannel:
                 labels=labels,
             )
         )
-        answer = await checking.run(
+        answer = await inspecting.run(
             name,
             path,
             project=found.path,
@@ -2535,8 +2540,8 @@ class TelegramChannel:
             note=note.strip(),
             reply=said.text,
             asker=asker,
-            model=CHECK_MODEL,
-            timeout=CHECK_TIMEOUT_SECONDS,
+            model=INSPECTION_MODEL,
+            timeout=INSPECTION_TIMEOUT_SECONDS,
             findings=found.label_findings,
             labeller=_Labelling(self, found),
             about=(
@@ -2559,7 +2564,7 @@ class TelegramChannel:
             last_said.remember(
                 results,
                 chat_id=f"{chat_id}|{name}",
-                text=checking.handed_on(
+                text=inspecting.handed_on(
                     name,
                     path=path,
                     version=answer.version,
@@ -2584,27 +2589,29 @@ class TelegramChannel:
     async def _send_result(
         self, value: str, actor: str, chat_id: str, thread_id: int | None
     ) -> None:
-        """Hand a check's answer to a seat: the whole of it, as it was kept.
+        """Hand an inspection's answer to a seat: the whole of it, as it was kept.
 
         Not the piece the button sits under — a long answer is split for
         Telegram — and with the line that says what it is, so the session it
         lands in can tell a finding from an instruction.
         """
-        check, _, label = value.partition(">")
+        inspection, _, label = value.partition(">")
         results = self._kept(chat_id, RESULTS_FILE)
         kept = (
-            last_said.last(results, f"{chat_id}|{check}") if results and check and label else None
+            last_said.last(results, f"{chat_id}|{inspection}")
+            if results and inspection and label
+            else None
         )
         if kept is None:
             await self._say(
-                "That result is no longer kept here. Run the check again.",
+                "That result is no longer kept here. Run the inspection again.",
                 chat_id,
                 thread_id,
             )
             return
-        logger.info("Check %s result sent to %s by %s", check, label, actor)
+        logger.info("Inspection %s result sent to %s by %s", inspection, label, actor)
         # Who it is for, in the words the configuration already has: the seat
-        # and its role. The rest was written when the check answered.
+        # and its role. The rest was written when the inspection answered.
         target = next((s for s in self._seats if s.label.casefold() == label.casefold()), None)
         greeting = f"To {_seat_name(target) or label}, from Halyard."
         await self._forward_to_seat(f"{label} {greeting}\n\n{kept.text}", actor, chat_id, thread_id)
@@ -2613,32 +2620,32 @@ class TelegramChannel:
         """A runtime that can take a turn apart from any session, or None.
 
         This chat's own if it can, and the default one otherwise, so a report
-        from any seat can be checked — the channel's side of `checks.Asker`.
+        from any seat can be inspected — the channel's side of `inspections.Asker`.
         """
         runner = self._message_runner(chat_id)
         if not hasattr(runner, "ask"):
             runner = self._runner
         return runner if hasattr(runner, "ask") else None
 
-    def _checker(self, chat_id: str, destination: tuple[str, int | None]) -> _Checking | None:
-        """This chat's one-shot runtime, for a check whose answer goes to
-        `destination` — and so does anything the check asks to run."""
+    def _inspector(self, chat_id: str, destination: tuple[str, int | None]) -> _Inspecting | None:
+        """This chat's one-shot runtime, for an inspection whose answer goes to
+        `destination` — and so does anything the inspection asks to run."""
         runner = self._one_shot_runner(chat_id)
         if not runner:
             return None
-        return _Checking(self, runner, destination, project=self._project_name_for(chat_id))
+        return _Inspecting(self, runner, destination, project=self._project_name_for(chat_id))
 
     def _destination_of(self, seat: Seat) -> tuple[str, int | None]:
         """Where a seat's traffic goes: its own chat, or the default one."""
         return (parse_destination(seat.chat) if seat.chat else None) or (self._chat_id, None)
 
-    async def _stop_check(self, session: str, actor: str) -> None:
-        """End a check's turn, closing any other card it still has open.
+    async def _stop_inspection(self, session: str, actor: str) -> None:
+        """End an inspection's turn, closing any other card it still has open.
 
         Those are denied and closed before the turn is cancelled, while the
-        check is still known and its cards can still say whose they were.
+        inspection is still known and its cards can still say whose they were.
         """
-        running = self._checking.get(session)
+        running = self._inspecting.get(session)
         if running is None:
             return
         running.stopped_by = actor
@@ -2651,10 +2658,10 @@ class TelegramChannel:
                 await self._store.deny(
                     request.request_id,
                     reason=ResolutionReason.USER,
-                    note=f"Denied: {actor} stopped the check that asked for this.",
+                    note=f"Denied: {actor} stopped the inspection that asked for this.",
                 )
             await self._settle_card(request, message_id, chat_id, "stop", actor)
-        logger.info("Check %s stopped by %s", running.name, actor)
+        logger.info("Inspection %s stopped by %s", running.name, actor)
         running.turn.cancel()
 
     async def _reach_quietly(self, found: Project):
@@ -2893,7 +2900,7 @@ class TelegramChannel:
     ) -> frame.Tree | None:
         """Where the project's files stood as a reply came in.
 
-        Kept with the reply, so a check run on it later can say whether it is
+        Kept with the reply, so an inspection run on it later can say whether it is
         still looking at the code the reply was about. Bounded, because this is
         on the path that delivers the reply.
         """
@@ -2968,11 +2975,11 @@ class TelegramChannel:
     ) -> None:
         """`/handoff` — offer this project's handoffs, or make the named one.
 
-        The shape `/checks` has: a button per handoff, and the one pressed goes.
+        The shape `/inspect` has: a button per handoff, and the one pressed goes.
         It carries the last reply in this chat, the project's own text for the
-        seat receiving it, and the answers of whichever checks it names — run
-        first, so they arrive together. Whatever follows the name goes in as a
-        note, the way it does for a check.
+        seat receiving it, and the answers of whichever inspections it names —
+        run first, so they arrive together. Whatever follows the name goes in as
+        a note, the way it does for an inspection.
         """
         found = self._repository_for(chat_id)
         if found is None:
@@ -3121,7 +3128,7 @@ class TelegramChannel:
 
         steps = [
             *([f"running {', '.join(handoff.commands)}"] if handoff.commands else []),
-            *([f"checking {', '.join(handoff.checks)}"] if handoff.checks else []),
+            *([f"inspecting {', '.join(handoff.inspections)}"] if handoff.inspections else []),
         ]
         first = f", {' then '.join(steps)} first" if steps else ""
         which = f" (round {rounds.shown(number, expected)})" if number and number > 1 else ""
@@ -3156,12 +3163,14 @@ class TelegramChannel:
                 sender=sender,
                 recipient_label=seat.label,
                 recipient=_seat_name(seat),
-                project_checks=found.checks,
+                project_inspections=found.inspections,
                 asker=(
-                    self._checker(chat_id, self._destination_of(seat)) if handoff.checks else None
+                    self._inspector(chat_id, self._destination_of(seat))
+                    if handoff.inspections
+                    else None
                 ),
-                model=CHECK_MODEL,
-                timeout=CHECK_TIMEOUT_SECONDS,
+                model=INSPECTION_MODEL,
+                timeout=INSPECTION_TIMEOUT_SECONDS,
                 delivery=_SeatDelivery(
                     self, actor, chat_id, thread_id, accepted=reached if number else None
                 ),
@@ -4288,12 +4297,13 @@ class TelegramChannel:
             if what == "run":
                 await self._run_command(value, here or "", message.get("message_thread_id"))
                 return
-            if what == "check":
-                # Detached, as the command is: a check is a model turn over a
-                # whole report, and this loop answers everybody else's buttons.
+            if what in ("inspect", "check"):
+                # `check` is what a card said until 2026-09-23; its buttons still
+                # work. Detached, as the command is: an inspection is a model turn
+                # over a whole report, and this loop answers everybody else's.
                 self._detach(
-                    self._run_checks(value, here or "", message.get("message_thread_id")),
-                    "/checks",
+                    self._run_inspection(value, here or "", message.get("message_thread_id")),
+                    "/inspect",
                 )
                 return
             if what == "result":
@@ -4469,11 +4479,11 @@ class TelegramChannel:
             return
 
         if action == cards.STOP:
-            # Refused like any denial, and then the check that asked is ended:
+            # Refused like any denial, and then the inspection that asked is ended:
             # Deny alone leaves it free to try the next thing, which is exactly
             # what somebody pressing Stop wants to stop.
             await self._settle_card(request, message_id, chat_id, "stop", actor)
-            await self._stop_check(request.session_id, actor)
+            await self._stop_inspection(request.session_id, actor)
             await self._dismiss(query_id, "Stopped.")
             return
         await self._settle_card(request, message_id, chat_id, decision.value, actor)
@@ -4494,13 +4504,13 @@ class TelegramChannel:
         by: str | None,
     ) -> None:
         """Rewrite the card to show the outcome and drop the buttons."""
-        running = self._checking.get(request.session_id)
+        running = self._inspecting.get(request.session_id)
         try:
             await self._api.edit_message_text(
                 chat_id,
                 message_id,
                 cards.render_resolved(
-                    request, decision=decision, by=by, checker=running.name if running else None
+                    request, decision=decision, by=by, inspection=running.name if running else None
                 ),
                 reply_markup=None,
             )

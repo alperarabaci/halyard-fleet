@@ -335,7 +335,7 @@ async def test_a_chat_whose_seat_is_in_no_project_says_so(wired) -> None:
     # With a single project every chat is about it, so there is none here.
     channel._repositories.clear()
 
-    await deliver(channel, typed("/checks"))
+    await deliver(channel, typed("/inspect"))
 
     assert "it is <b>nav</b>'s, and nav is under no project" in api.sent[-1]["text"]
 
@@ -520,14 +520,14 @@ def test_commit_is_registered_so_it_appears_when_you_type_a_slash() -> None:
 # --- saying it happened, and pushing ----------------------------------------
 
 
-# --- /checks: a project's own checks over the last reply ----------------------
+# --- /inspect: a project's own inspections over the last reply ---------------
 #
 # Here because it runs on the same two things `/commit` does: the project's
 # repository, and a one-shot model turn.
 
 
-def checks_in(channel: TelegramChannel, repo: Path, tmp_path: Path, **texts: str) -> None:
-    """Give the project checks on disk, and a reply in the chat to check."""
+def inspections_in(channel: TelegramChannel, repo: Path, tmp_path: Path, **texts: str) -> None:
+    """Give the project inspections on disk, and a reply in the chat to inspect."""
     from halyard.channels.telegram.adapter import SAID_FILE
     from halyard.core import last_said
 
@@ -536,20 +536,20 @@ def checks_in(channel: TelegramChannel, repo: Path, tmp_path: Path, **texts: str
         (repo / "NOTES" / f"{name}.md").write_text(text)
     found = channel._repositories["alpha-engine"]
     channel._repositories["alpha-engine"] = replace(
-        found, checks={name: Path(f"NOTES/{name}.md") for name in texts}
+        found, inspections={name: Path(f"NOTES/{name}.md") for name in texts}
     )
     channel._said_path = tmp_path / "last-said.json"
     last_said.remember(channel._kept(CHAT, SAID_FILE), chat_id=CHAT, text="All 42 tests passed.")
 
 
-def pressed_check(name: str) -> dict:
-    """The button a check is offered on, pressed by somebody allowed to."""
+def pressed_inspection(name: str, what: str = "inspect") -> dict:
+    """The button an inspection is offered on, pressed by somebody allowed to."""
     from halyard.channels.telegram import cards
 
     return {
         "id": "cb1",
         "from": {"id": int(APPROVER)},
-        "data": cards.choice_data("check", name),
+        "data": cards.choice_data(what, name),
         "message": {"message_id": 5, "chat": {"id": CHAT}},
     }
 
@@ -560,9 +560,9 @@ async def test_a_bare_checks_offers_each_check_as_a_button(tmp_path: Path, wired
     from halyard.channels.telegram import cards
 
     channel, api, runner, repo = wired
-    checks_in(channel, repo, tmp_path, proof="# proof", claims="# claims")
+    inspections_in(channel, repo, tmp_path, proof="# proof", claims="# claims")
 
-    await channel._run_checks("", CHAT, None)
+    await channel._run_inspection("", CHAT, None)
 
     rows = api.sent[-1]["reply_markup"]["inline_keyboard"]
     assert [key["text"] for key in rows[0]] == ["proof", "claims"]
@@ -576,7 +576,7 @@ async def test_cancelling_a_choice_card_takes_its_buttons_away(tmp_path: Path, w
     from halyard.channels.telegram import cards
 
     channel, api, runner, repo = wired
-    checks_in(channel, repo, tmp_path, proof="# proof")
+    inspections_in(channel, repo, tmp_path, proof="# proof")
 
     await channel._handle_callback(
         {
@@ -601,16 +601,18 @@ async def test_a_check_is_logged_as_what_it_was_given_and_what_it_said(
     import logging
 
     channel, _, runner, repo = wired
-    checks_in(channel, repo, tmp_path, proof="# proof")
+    inspections_in(channel, repo, tmp_path, proof="# proof")
     caplog.set_level(logging.INFO)
 
-    await channel._run_checks("proof delivery", CHAT, None)
+    await channel._run_inspection("proof delivery", CHAT, None)
 
-    asked = next(r.getMessage() for r in caplog.records if "Check proof asked" in r.getMessage())
+    asked = next(
+        r.getMessage() for r in caplog.records if "Inspection proof asked" in r.getMessage()
+    )
     assert "alpha-engine#281" in asked
     assert "NOTES/proof.md @ uncommitted" in asked
     assert "'delivery'" in asked
-    assert "Check proof answered" in caplog.text
+    assert "Inspection proof answered" in caplog.text
     assert runner.says in caplog.text
 
 
@@ -626,7 +628,7 @@ async def test_the_reply_is_timed_by_this_machines_clock(
     from halyard.core import last_said
 
     channel, api, _, repo = wired
-    checks_in(channel, repo, tmp_path, proof="# proof")
+    inspections_in(channel, repo, tmp_path, proof="# proof")
     last_said.remember(
         channel._kept(CHAT, SAID_FILE),
         chat_id=CHAT,
@@ -636,7 +638,7 @@ async def test_the_reply_is_timed_by_this_machines_clock(
     monkeypatch.setenv("TZ", "Europe/Istanbul")
     time.tzset()
     try:
-        await channel._run_checks("", CHAT, None)
+        await channel._run_inspection("", CHAT, None)
     finally:
         monkeypatch.undo()
         time.tzset()
@@ -661,9 +663,9 @@ async def test_the_answer_carries_a_button_per_seat(tmp_path: Path, wired) -> No
     from halyard.channels.telegram import cards
 
     channel, api, _, repo = wired
-    checks_in(channel, repo, tmp_path, proof="# proof")
+    inspections_in(channel, repo, tmp_path, proof="# proof")
 
-    await channel._run_checks("proof", CHAT, None)
+    await channel._run_inspection("proof", CHAT, None)
 
     rows = api.sent[-1]["reply_markup"]["inline_keyboard"]
     assert rows[0][0]["text"] == "→ nav"
@@ -676,8 +678,8 @@ async def test_a_seats_button_hands_it_the_whole_answer_and_what_it_is(
     """With the line that says what it is, so the session can tell a finding
     from an instruction."""
     channel, _, runner, repo = wired
-    checks_in(channel, repo, tmp_path, proof="# proof")
-    await channel._run_checks("proof", CHAT, None)
+    inspections_in(channel, repo, tmp_path, proof="# proof")
+    await channel._run_inspection("proof", CHAT, None)
 
     await channel._handle_callback(pressed_result("proof>nav"))
     await settled(channel)
@@ -685,7 +687,7 @@ async def test_a_seats_button_hands_it_the_whole_answer_and_what_it_is(
     [(session, text)] = runner.sent
     assert session == "id-nav"
     assert "To nav (navigator), from Halyard." in text
-    assert "Check: proof — NOTES/proof.md @ uncommitted" in text
+    assert "Inspection: proof — NOTES/proof.md @ uncommitted" in text
     assert "alpha-engine#281" in text
     # The findings, then the reply they are about: a finding about a report the
     # reader does not have is a finding nobody can weigh.
@@ -695,11 +697,11 @@ async def test_a_seats_button_hands_it_the_whole_answer_and_what_it_is(
 async def test_the_button_under_one_check_sends_that_checks_answer(tmp_path: Path, wired) -> None:
     """A chat holds several checks' answers; the one under `proof` sends proof's."""
     channel, _, runner, repo = wired
-    checks_in(channel, repo, tmp_path, proof="# proof", claims="# claims")
+    inspections_in(channel, repo, tmp_path, proof="# proof", claims="# claims")
     runner.says = "proof found this"
-    await channel._run_checks("proof", CHAT, None)
+    await channel._run_inspection("proof", CHAT, None)
     runner.says = "claims found that"
-    await channel._run_checks("claims", CHAT, None)
+    await channel._run_inspection("claims", CHAT, None)
 
     await channel._handle_callback(pressed_result("proof>nav"))
     await settled(channel)
@@ -711,7 +713,7 @@ async def test_the_button_under_one_check_sends_that_checks_answer(tmp_path: Pat
 
 async def test_an_answer_no_longer_kept_says_so(tmp_path: Path, wired) -> None:
     channel, api, runner, repo = wired
-    checks_in(channel, repo, tmp_path, proof="# proof")
+    inspections_in(channel, repo, tmp_path, proof="# proof")
 
     await channel._handle_callback(pressed_result("proof>nav"))
     await settled(channel)
@@ -787,7 +789,7 @@ def handoffs_in(channel, repo: Path, tmp_path: Path, runner, **specs: dict) -> N
     found = channel._repositories["alpha-engine"]
     channel._repositories["alpha-engine"] = replace(
         found,
-        checks={"proof": Path("NOTES/proof.md")},
+        inspections={"proof": Path("NOTES/proof.md")},
         handoffs={name: Handoff(name=name, **spec) for name, spec in specs.items()},
     )
     channel._said_path = tmp_path / "last-said.json"
@@ -1539,14 +1541,16 @@ async def test_a_handoff_runs_its_checks_before_it_goes(tmp_path: Path, wired) -
     """The reply and what the checks made of it arrive together, and the chat
     it was sent from is told which checks answered."""
     channel, api, runner, repo = wired
-    handoffs_in(channel, repo, tmp_path, runner, discovery={"checks": ("proof",), "to": "xrev"})
+    handoffs_in(
+        channel, repo, tmp_path, runner, discovery={"inspections": ("proof",), "to": "xrev"}
+    )
 
     await channel._run_handoff("discovery delivery", CHAT, None, f"tg:{APPROVER}")
     await settled(channel)
 
     assert len(runner.asked) == 1
     [(_, text)] = runner.sent
-    assert "Check proof — NOTES/proof.md" in text
+    assert "Inspection proof — NOTES/proof.md" in text
     assert runner.says in text
     assert "Said by whoever asked: delivery" in text
     assert any("<b>proof</b>: answered" in sent["text"] for sent in api.sent)
@@ -1609,7 +1613,9 @@ async def test_a_command_a_check_asks_for_reaches_where_the_handoff_goes(
     the seat the handoff is for, saying which check and which handoff want it
     — and the turn stands in the project, with nothing that edits."""
     channel, api, runner, repo = wired
-    handoffs_in(channel, repo, tmp_path, runner, discovery={"checks": ("proof",), "to": "xrev"})
+    handoffs_in(
+        channel, repo, tmp_path, runner, discovery={"inspections": ("proof",), "to": "xrev"}
+    )
     check = CheckAsking(channel, runner)
 
     await channel._run_handoff("discovery", CHAT, None, f"tg:{APPROVER}")
@@ -1620,25 +1626,25 @@ async def test_a_command_a_check_asks_for_reaches_where_the_handoff_goes(
     assert how["edits"] is False
     [card] = [sent for sent in api.sent if "PERMISSION REQUEST" in sent["text"]]
     assert card["chat_id"] == "-100888"
-    assert card["text"].startswith("<b>[CHECKER — PERMISSION REQUEST]</b>")
-    assert "Check: <b>proof · handoff discovery</b>" in card["text"]
+    assert card["text"].startswith("<b>[INSPECTION — PERMISSION REQUEST]</b>")
+    assert "Inspection: <b>proof · handoff discovery</b>" in card["text"]
     keys = [key["text"] for row in card["reply_markup"]["inline_keyboard"] for key in row]
-    assert keys[-1] == "⏹ Stop the check"
-    assert channel._checking == {}
+    assert keys[-1] == "⏹ Stop the inspection"
+    assert channel._inspecting == {}
 
 
 async def test_a_command_a_check_asks_for_here_is_carded_here(tmp_path: Path, wired) -> None:
     """`/checks` hands nothing on: the card says which check, in the chat that asked."""
     channel, api, runner, repo = wired
-    checks_in(channel, repo, tmp_path, proof="# proof")
+    inspections_in(channel, repo, tmp_path, proof="# proof")
     CheckAsking(channel, runner)
 
-    await channel._handle_callback(pressed_check("proof"))
+    await channel._handle_callback(pressed_inspection("proof"))
     await settled(channel)
 
     [card] = [sent for sent in api.sent if "PERMISSION REQUEST" in sent["text"]]
     assert card["chat_id"] == CHAT
-    assert "Check: <b>proof</b>" in card["text"]
+    assert "Inspection: <b>proof</b>" in card["text"]
 
 
 async def test_stop_on_a_checks_card_ends_the_check_and_says_who(tmp_path: Path, wired) -> None:
@@ -1650,10 +1656,10 @@ async def test_stop_on_a_checks_card_ends_the_check_and_says_who(tmp_path: Path,
     from halyard.core.approvals import Decision
 
     channel, api, runner, repo = wired
-    checks_in(channel, repo, tmp_path, proof="# proof")
+    inspections_in(channel, repo, tmp_path, proof="# proof")
     check = CheckAsking(channel, runner, waits=True)
 
-    await channel._handle_callback(pressed_check("proof"))
+    await channel._handle_callback(pressed_inspection("proof"))
     await check.until_asked()
     [request] = check.asked
     await channel._handle_callback(stopping(request))
@@ -1664,14 +1670,16 @@ async def test_stop_on_a_checks_card_ends_the_check_and_says_who(tmp_path: Path,
     assert any(edit["text"].startswith(f"<b>⏹ STOPPED</b> by tg:{APPROVER}") for edit in api.edits)
     said = [sent["text"] for sent in api.sent]
     assert f"<b>proof</b> · unmeasured — stopped by tg:{APPROVER}" in said
-    assert channel._checking == {}
+    assert channel._inspecting == {}
 
 
 async def test_a_handoff_goes_on_without_a_check_somebody_stopped(tmp_path: Path, wired) -> None:
     """Stop ends that check, not the handoff: the seat still gets the reply,
     with the stopped check said to be unmeasured and why."""
     channel, _, runner, repo = wired
-    handoffs_in(channel, repo, tmp_path, runner, discovery={"checks": ("proof",), "to": "xrev"})
+    handoffs_in(
+        channel, repo, tmp_path, runner, discovery={"inspections": ("proof",), "to": "xrev"}
+    )
     check = CheckAsking(channel, runner, waits=True)
 
     handing = asyncio.ensure_future(channel._run_handoff("discovery", CHAT, None, f"tg:{APPROVER}"))
@@ -1696,7 +1704,7 @@ async def test_a_check_is_told_whether_the_files_moved_since_the_reply(
 
     caplog.set_level("INFO")
     channel, _, runner, repo = wired
-    checks_in(channel, repo, tmp_path, proof="# proof")
+    inspections_in(channel, repo, tmp_path, proof="# proof")
     await channel.send_message(
         "id-nav",
         "All 42 tests passed.",
@@ -1707,7 +1715,7 @@ async def test_a_check_is_told_whether_the_files_moved_since_the_reply(
     said = last_said.last(channel._kept(CHAT, SAID_FILE), CHAT)
     (repo / "seed.txt").write_text("changed after the report\n")
 
-    await channel._handle_callback(pressed_check("proof"))
+    await channel._handle_callback(pressed_inspection("proof"))
     await settled(channel)
 
     assert said is not None and said.content
@@ -1773,11 +1781,11 @@ async def test_the_tasks_level_goes_on_the_envelope(tmp_path: Path, wired, monke
     """Read from the tracker, one label from each of the project's groups, and
     put under the work item it belongs to."""
     channel, _, runner, repo = wired
-    checks_in(channel, repo, tmp_path, proof="# proof")
+    inspections_in(channel, repo, tmp_path, proof="# proof")
     levels(channel)
     tracker = behind_a_tracker(channel, monkeypatch, Tracker(labels=("backend", "level::3")))
 
-    await channel._handle_callback(pressed_check("proof"))
+    await channel._handle_callback(pressed_inspection("proof"))
     await settled(channel)
 
     [asked] = runner.asked
@@ -1793,11 +1801,11 @@ async def test_a_tracker_that_cannot_be_read_leaves_the_envelope_as_it_was(
     from halyard.tasks.spec import ForgeError
 
     channel, _, runner, repo = wired
-    checks_in(channel, repo, tmp_path, proof="# proof")
+    inspections_in(channel, repo, tmp_path, proof="# proof")
     levels(channel)
     behind_a_tracker(channel, monkeypatch, Tracker(refuse=ForgeError("GitLab says 401")))
 
-    await channel._handle_callback(pressed_check("proof"))
+    await channel._handle_callback(pressed_inspection("proof"))
     await settled(channel)
 
     [asked] = runner.asked
@@ -1810,10 +1818,10 @@ async def test_a_project_without_label_groups_never_asks_the_tracker(
 ) -> None:
     """Not everybody needs this, and whoever does not never pays for it."""
     channel, _, runner, repo = wired
-    checks_in(channel, repo, tmp_path, proof="# proof")
+    inspections_in(channel, repo, tmp_path, proof="# proof")
     tracker = behind_a_tracker(channel, monkeypatch, Tracker(labels=("level::3",)))
 
-    await channel._handle_callback(pressed_check("proof"))
+    await channel._handle_callback(pressed_inspection("proof"))
     await settled(channel)
 
     assert tracker.asked == []
@@ -1833,12 +1841,12 @@ async def test_a_check_that_finds_something_labels_its_task(
     """Off to one side: the answer arrives as it always did, and the task gets
     the check's label."""
     channel, api, runner, repo = wired
-    checks_in(channel, repo, tmp_path, proof="# proof")
+    inspections_in(channel, repo, tmp_path, proof="# proof")
     findings_in(channel)
     tracker = behind_a_tracker(channel, monkeypatch, Tracker(labels=("backend",)))
     runner.says = "proof · alpha-engine#281 · status: candidate"
 
-    await channel._handle_callback(pressed_check("proof"))
+    await channel._handle_callback(pressed_inspection("proof"))
     await settled(channel)
 
     assert tracker.added == [(281, "halyard:proof")]
@@ -1849,12 +1857,12 @@ async def test_a_findings_label_already_on_the_task_is_not_written_again(
     tmp_path: Path, wired, monkeypatch
 ) -> None:
     channel, _, runner, repo = wired
-    checks_in(channel, repo, tmp_path, proof="# proof")
+    inspections_in(channel, repo, tmp_path, proof="# proof")
     findings_in(channel)
     tracker = behind_a_tracker(channel, monkeypatch, Tracker(labels=("halyard:proof",)))
     runner.says = "proof · status: candidate"
 
-    await channel._handle_callback(pressed_check("proof"))
+    await channel._handle_callback(pressed_inspection("proof"))
     await settled(channel)
 
     assert tracker.added == []
@@ -1920,7 +1928,9 @@ async def test_a_handoff_labels_like_a_check_run_by_hand(
 ) -> None:
     """The same check, so the same label — handoffs are no exception."""
     channel, _, runner, repo = wired
-    handoffs_in(channel, repo, tmp_path, runner, discovery={"checks": ("proof",), "to": "xrev"})
+    handoffs_in(
+        channel, repo, tmp_path, runner, discovery={"inspections": ("proof",), "to": "xrev"}
+    )
     findings_in(channel)
     tracker = behind_a_tracker(channel, monkeypatch, Tracker())
     runner.says = "proof · status: candidate"
@@ -2076,28 +2086,28 @@ async def test_a_workflow_step_waits_for_the_label_and_the_pick_sends_it(
 
 async def test_pressing_a_check_runs_that_one_over_the_last_reply(tmp_path: Path, wired) -> None:
     """Its own instructions, the whole reply, and what Halyard can see."""
-    from halyard.channels.telegram.adapter import CHECK_MODEL
+    from halyard.channels.telegram.adapter import INSPECTION_MODEL
 
     channel, api, runner, repo = wired
-    checks_in(channel, repo, tmp_path, proof="# proof: find the evidence", claims="# claims")
+    inspections_in(channel, repo, tmp_path, proof="# proof: find the evidence", claims="# claims")
 
-    await channel._handle_callback(pressed_check("proof"))
+    await channel._handle_callback(pressed_inspection("proof"))
     await settled(channel)
 
     [asked] = runner.asked
     assert asked.startswith("# proof: find the evidence")
     assert "All 42 tests passed." in asked
     assert "alpha-engine#281" in asked
-    assert runner.models == [CHECK_MODEL]
+    assert runner.models == [INSPECTION_MODEL]
     assert api.sent[-1]["text"].startswith("<b>proof</b>")
 
 
 async def test_a_check_named_after_the_command_runs_with_the_note(tmp_path: Path, wired) -> None:
-    """`/checks proof delivery` — the note says which stage the reply belongs to."""
+    """`/inspect proof delivery` — the note says which stage the reply belongs to."""
     channel, _, runner, repo = wired
-    checks_in(channel, repo, tmp_path, proof="# proof")
+    inspections_in(channel, repo, tmp_path, proof="# proof")
 
-    await channel._handle_message(typed("/checks proof delivery"))
+    await channel._handle_message(typed("/inspect proof delivery"))
     await settled(channel)
 
     [asked] = runner.asked
@@ -2106,11 +2116,11 @@ async def test_a_check_named_after_the_command_runs_with_the_note(tmp_path: Path
 
 async def test_a_check_nobody_defined_is_said_and_the_rest_offered(tmp_path: Path, wired) -> None:
     channel, api, runner, repo = wired
-    checks_in(channel, repo, tmp_path, proof="# proof")
+    inspections_in(channel, repo, tmp_path, proof="# proof")
 
-    await channel._run_checks("nope", CHAT, None)
+    await channel._run_inspection("nope", CHAT, None)
 
-    assert "no check called <b>nope</b>" in api.sent[-2]["text"]
+    assert "no inspection called <b>nope</b>" in api.sent[-2]["text"]
     assert api.sent[-1]["reply_markup"]["inline_keyboard"]
     assert runner.asked == []
 
@@ -2121,9 +2131,9 @@ async def test_a_check_the_model_could_not_answer_is_said_not_skipped(
     """A missing answer reads exactly like a clean one."""
     channel, api, runner, repo = wired
     runner.says = None
-    checks_in(channel, repo, tmp_path, proof="# proof")
+    inspections_in(channel, repo, tmp_path, proof="# proof")
 
-    await channel._run_checks("proof", CHAT, None)
+    await channel._run_inspection("proof", CHAT, None)
 
     assert "unmeasured" in api.sent[-1]["text"]
 
@@ -2131,32 +2141,47 @@ async def test_a_check_the_model_could_not_answer_is_said_not_skipped(
 async def test_a_project_without_checks_says_so(wired) -> None:
     channel, api, runner, _ = wired
 
-    await channel._run_checks("", CHAT, None)
+    await channel._run_inspection("", CHAT, None)
 
-    assert "no <code>checks:</code>" in api.sent[-1]["text"]
+    assert "no <code>inspections:</code>" in api.sent[-1]["text"]
     assert runner.asked == []
 
 
 async def test_nothing_is_checked_before_anything_was_said(tmp_path: Path, wired) -> None:
     channel, api, runner, repo = wired
-    checks_in(channel, repo, tmp_path, proof="# proof")
+    inspections_in(channel, repo, tmp_path, proof="# proof")
     channel._said_path = tmp_path / "elsewhere" / "last-said.json"
 
-    await channel._run_checks("", CHAT, None)
+    await channel._run_inspection("", CHAT, None)
 
-    assert "nothing to check" in api.sent[-1]["text"]
+    assert "nothing to inspect" in api.sent[-1]["text"]
     assert runner.asked == []
 
 
-async def test_checks_answers_from_a_phone(tmp_path: Path, wired) -> None:
+async def test_inspect_answers_from_a_phone(tmp_path: Path, wired) -> None:
     channel, api, runner, repo = wired
-    checks_in(channel, repo, tmp_path, proof="# proof")
+    inspections_in(channel, repo, tmp_path, proof="# proof")
 
-    await channel._handle_message(typed("/checks"))
+    await channel._handle_message(typed("/inspect"))
     await settled(channel)
 
     assert api.sent[-1]["reply_markup"]["inline_keyboard"]
     assert runner.asked == []
+
+
+async def test_the_names_inspections_had_before_still_work(tmp_path: Path, wired) -> None:
+    """`/checks` and the buttons it left in chats, until 2026-09-23."""
+    channel, api, runner, repo = wired
+    inspections_in(channel, repo, tmp_path, proof="# proof")
+
+    await channel._handle_message(typed("/checks"))
+    await settled(channel)
+    offered = api.sent[-1]["reply_markup"]["inline_keyboard"]
+    await channel._handle_callback(pressed_inspection("proof", what="check"))
+    await settled(channel)
+
+    assert offered
+    assert len(runner.asked) == 1
 
 
 def a_bare_remote(tmp_path: Path, repo: Path) -> Path:

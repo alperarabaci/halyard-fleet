@@ -5,9 +5,9 @@ from __future__ import annotations
 from collections.abc import Sequence
 
 from halyard import frame
-from halyard.checks import Answer
 from halyard.commands import Command, Result
 from halyard.handoffs.spec import Previous
+from halyard.inspections import Answer
 
 
 def compose(
@@ -33,7 +33,7 @@ def compose(
     itself — the task, the machine, the tree, which round this is and which
     revision of the prompt — one fact to a line, because the project's prompts
     refuse to guess at any of it. Then what its commands printed, and the
-    checks' answers, measured or not. Then, on a round after the first, what the
+    inspections' answers, measured or not. Then, on a round after the first, what the
     seat said back to the round before. Then the reply itself, last, where the
     prompt said it would be.
     """
@@ -54,7 +54,7 @@ def compose(
         parts += ["", f"Command {command.name} — {command.line}:", ""]
         parts.append(result.output or "(it printed nothing)")
     for answer in answers:
-        parts += ["", f"Check {answer.name} — {answer.path} @ {answer.version}:", ""]
+        parts += ["", f"Inspection {answer.name} — {answer.path} @ {answer.version}:", ""]
         parts.append(answer.text if answer.measured else f"unmeasured — {answer.why}")
     if previous is not None and previous.text is not None:
         parts += ["", f"{previous.seat}'s answer to round {previous.number}:", "", previous.text]

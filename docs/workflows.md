@@ -6,7 +6,7 @@ the project wrote them down, each step going to one seat, and each reply's own l
 saying whether the work goes on, comes back a step, or waits for a person.
 
 Everything here sits under the project in `halyard.yaml`, beside the `handoffs:` its
-steps name — see [Checks and handoffs](handoffs.md).
+steps name — see [Inspections and handoffs](handoffs.md).
 
 ```yaml
 projects:
