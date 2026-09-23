@@ -241,10 +241,23 @@ def _without_a_path(where: dict[str, Path | None], seats) -> list[str]:
     machine this printed "Everything checks out" for.
     """
     return [
-        f"{WARN}{name} has no `path:`, so /commit, /command, /checks, /handoff "
+        f"{WARN}{name} has no `path:`, so /commit, /command, /inspect, /handoff "
         "and /label have nowhere to run for it"
         for name, path in where.items()
         if path is None and any(seat.project == name for seat in seats)
+    ]
+
+
+def _older_spellings(projects) -> list[str]:
+    """Names a configuration still uses from before they were renamed.
+
+    They work, so this is a warning and never a problem: it says what to
+    rename, whenever somebody gets round to it.
+    """
+    return [
+        f"{WARN}{project.name} — {older}; the old name still works"
+        for project in projects
+        for older in project.older
     ]
 
 
@@ -669,14 +682,17 @@ def run() -> int:
     from halyard.core.config_file import missing_files
 
     try:
-        absent = missing_files(described_projects())
+        described = described_projects()
     except ValueError:
-        absent = []
+        described = []
+    absent = missing_files(described)
     for line in absent:
         problems += 1
         print(f"{FAIL}{line}")
     if seats and not absent:
         print(f"{OK}every file the configuration names is where it says")
+    for line in _older_spellings(described):
+        print(line)
     if seats:
         print()
 

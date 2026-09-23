@@ -1,4 +1,4 @@
-"""Making a handoff: its commands, then its checks, then the message, then the seat."""
+"""Making a handoff: its commands, then its inspections, then the message, then the seat."""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ import logging
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 
-from halyard import checks, frame
+from halyard import frame, inspections
 from halyard.commands import Command, Result, summary
 from halyard.core.config_file import Handoff
 from halyard.handoffs import rounds
@@ -28,33 +28,33 @@ async def hand_off(
     sender: str,
     recipient_label: str,
     recipient: str,
-    project_checks: Mapping[str, Path],
-    asker: checks.Asker | None,
+    project_inspections: Mapping[str, Path],
+    asker: inspections.Asker | None,
     model: str,
     timeout: float,
     delivery: Delivery,
     findings: Sequence[str] = (),
-    labeller: checks.Labeller | None = None,
+    labeller: inspections.Labeller | None = None,
     project_commands: Mapping[str, str] | None = None,
     runner: Runner | None = None,
     round_number: int | None = None,
     expected: int | None = None,
     previous: Previous | None = None,
 ) -> Handed:
-    """Run a handoff's commands, then its checks, write the message, deliver it.
+    """Run a handoff's commands, then its inspections, write the message, deliver it.
 
     The one place the parts of a handoff meet, in this order, each handed what
     came before it. The commands run first, one after another, where the
-    project is; what each did becomes a line of the envelope, so the checks read
+    project is; what each did becomes a line of the envelope, so the inspections read
     Halyard's own run rather than setting out to make one. A command that fails
     is reported and the handoff goes on — whoever receives it has to see that it
     failed.
 
-    The checks run side by side, each a turn of its own, and all before the
-    message is written: the seat receives the reply and what the checks made of
-    it together. A check that could not run goes as unmeasured rather than
+    The inspections run side by side, each a turn of its own, and all before
+    the message is written: the seat receives the reply and what they made of
+    it together. An inspection that could not run goes as unmeasured rather than
     being left out — the project's prompts say an unmeasured line is not a
-    clean one, and the reader has to see it to know that. A check that finds
+    clean one, and the reader has to see it to know that. An inspection that finds
     something labels the task as it would run by hand: the project's `findings`
     decide, not the handoff.
 
@@ -83,19 +83,20 @@ async def hand_off(
         *(summary(c.name, c.line, r) for c, r in ran),
     ]
 
-    answers: tuple[checks.Answer, ...] = ()
-    if handoff.checks and (asker is None or reply is None):
+    answers: tuple[inspections.Answer, ...] = ()
+    if handoff.inspections and (asker is None or reply is None):
         why = "no runtime here can take a one-shot turn" if asker is None else "there was no reply"
         answers = tuple(
-            checks.Answer(name, project_checks[name], "not run", why=why) for name in handoff.checks
+            inspections.Answer(name, project_inspections[name], "not run", why=why)
+            for name in handoff.inspections
         )
-    elif handoff.checks:
+    elif handoff.inspections:
         answers = tuple(
             await asyncio.gather(
                 *(
-                    checks.run(
+                    inspections.run(
                         name,
-                        project_checks[name],
+                        project_inspections[name],
                         project=project,
                         context=envelope,
                         note=note,
@@ -108,7 +109,7 @@ async def hand_off(
                         findings=findings,
                         labeller=labeller,
                     )
-                    for name in handoff.checks
+                    for name in handoff.inspections
                 )
             )
         )
@@ -138,7 +139,7 @@ async def hand_off(
     )
     await delivery.to_seat(recipient_label, text)
     logger.info(
-        "Handoff %s: %s → %s, %d chars, checks: %s · %s",
+        "Handoff %s: %s → %s, %d chars, inspections: %s · %s",
         handoff.name,
         sender,
         recipient,

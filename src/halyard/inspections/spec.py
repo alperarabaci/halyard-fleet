@@ -1,4 +1,4 @@
-"""What a check needs from outside, and what it gives back."""
+"""What an inspection needs from outside, and what it gives back."""
 
 from __future__ import annotations
 
@@ -11,9 +11,9 @@ from typing import Protocol, runtime_checkable
 class Asker(Protocol):
     """A turn apart from any session: text in, an answer out, or None.
 
-    The one port a check runs through. The channel answers it today, with
+    The one port an inspection runs through. The channel answers it today, with
     Claude Code's runner behind it; any runtime that can take a turn of its own
-    can, and that is where a check stops depending on one model.
+    can, and that is where an inspection stops depending on one model.
 
     `cwd` is where the turn runs. `name` is what it goes by wherever it is shown
     to a person — a command it asks to run is a card, and the card has to say
@@ -35,34 +35,34 @@ class Asker(Protocol):
 
 @runtime_checkable
 class Labeller(Protocol):
-    """What a check may do to the task it ran on: put one more label on it.
+    """What an inspection may do to the task it ran on: put one more label on it.
 
     The channel answers it — it knows which task, which tracker and which
-    token. A check knows only what it found, and never waits on the writing.
+    token. An inspection knows only what it found, and never waits on the writing.
     """
 
     async def label(self, label: str) -> None: ...
 
 
 class StoppedError(Exception):
-    """A check's turn ended by a person before it answered.
+    """An inspection's turn ended by a person before it answered.
 
     Raised by whatever runs the turn, and kept as the reason on an unmeasured
-    answer: a check somebody stopped says so, rather than reading as a model
+    answer: an inspection somebody stopped says so, rather than reading as a model
     that went quiet.
     """
 
 
 @dataclass(frozen=True)
 class Answer:
-    """One check's answer — or why there is none, which is an answer too."""
+    """One inspection's answer — or why there is none, which is an answer too."""
 
     name: str
-    #: The check's own file, and the commit that last changed it.
+    #: The inspection's own file, and the commit that last changed it.
     path: Path
     version: str
     #: What the model said, with a wrapping code fence taken off. None when the
-    #: check did not run or the model did not answer.
+    #: inspection did not run or the model did not answer.
     text: str | None = None
     #: Why there is no text, when there is none.
     why: str = ""
@@ -71,6 +71,6 @@ class Answer:
 
     @property
     def measured(self) -> bool:
-        """Whether there is anything to read. An unmeasured check is never a
+        """Whether there is anything to read. An unmeasured inspection is never a
         clean one."""
         return self.text is not None

@@ -349,32 +349,67 @@ def test_a_file_that_is_not_there_is_named_with_its_setting(tmp_path) -> None:
     assert "NOTES/GONE.md" in said[0]
 
 
-def test_checks_are_read_as_names_and_files(tmp_path) -> None:
+def test_inspections_are_read_as_names_and_files(tmp_path) -> None:
     [project] = a_project(
         tmp_path,
-        lines=["checks:", "  proof: NOTES/checks/proof.md", "  claims: NOTES/checks/claims.md"],
+        lines=[
+            "inspections:",
+            "  proof: NOTES/inspections/proof.md",
+            "  claims: NOTES/inspections/claims.md",
+        ],
     )
 
-    assert project.checks == {
-        "proof": Path("NOTES/checks/proof.md"),
-        "claims": Path("NOTES/checks/claims.md"),
+    assert project.inspections == {
+        "proof": Path("NOTES/inspections/proof.md"),
+        "claims": Path("NOTES/inspections/claims.md"),
     }
+    assert project.older == ()
 
 
-def test_a_check_written_as_anything_but_a_file_is_refused(tmp_path) -> None:
+def test_the_name_inspections_had_before_is_still_read_and_said(tmp_path) -> None:
+    """`checks:` until 2026-09-23. A configuration written then keeps working,
+    and `doctor` says what to rename."""
+    [project] = a_project(
+        tmp_path,
+        lines=[
+            "checks:",
+            "  proof: NOTES/checks/proof.md",
+            "handoffs:",
+            "  discovery: {checks: [proof]}",
+        ],
+    )
+
+    assert project.inspections == {"proof": Path("NOTES/checks/proof.md")}
+    assert project.handoffs["discovery"].inspections == ("proof",)
+    assert project.older == (
+        "the project: `checks:` is now `inspections:`",
+        "handoff 'discovery': `checks:` is now `inspect:`",
+    )
+
+
+def test_the_old_name_and_the_new_one_together_are_refused(tmp_path) -> None:
+    """Which of the two was meant is not something to guess."""
+    with pytest.raises(ValueError, match="both `inspections:` and `checks:`"):
+        a_project(
+            tmp_path,
+            lines=["checks:", "  proof: NOTES/p.md", "inspections:", "  claims: NOTES/c.md"],
+        )
+
+
+def test_an_inspection_written_as_anything_but_a_file_is_refused(tmp_path) -> None:
     """Otherwise it becomes a path spelled with its own braces, and fails only
     when somebody runs it."""
     with pytest.raises(ValueError, match="needs a file"):
-        a_project(tmp_path, lines=["checks:", "  proof: {prompt: NOTES/checks/proof.md}"])
+        a_project(tmp_path, lines=["inspections:", "  proof: {prompt: NOTES/proof.md}"])
 
 
-def test_a_check_file_that_is_not_there_is_named_too(tmp_path) -> None:
+def test_an_inspection_file_that_is_not_there_is_named_too(tmp_path) -> None:
     from halyard.core.config_file import missing_files
 
-    found = a_project(tmp_path, lines=["checks:", "  proof: NOTES/GONE.md"])
+    found = a_project(tmp_path, lines=["inspections:", "  proof: NOTES/GONE.md"])
 
     [said] = missing_files(found)
-    assert "checks.proof" in said
+    assert "inspections.proof" in said
     assert "NOTES/GONE.md" in said
 
 
@@ -392,7 +427,7 @@ def test_label_groups_are_read_as_names_and_labels_in_order(tmp_path) -> None:
 
 
 def test_label_groups_are_empty_unless_written(tmp_path) -> None:
-    [project] = a_project(tmp_path, lines=["checks:", "  proof: NOTES/checks/proof.md"])
+    [project] = a_project(tmp_path, lines=["inspections:", "  proof: NOTES/proof.md"])
 
     assert project.label_groups == {}
 
@@ -522,11 +557,11 @@ def test_handoffs_are_read_with_what_they_carry(tmp_path) -> None:
     [project] = a_project(
         tmp_path,
         lines=[
-            "checks:",
-            "  proof: NOTES/checks/proof.md",
+            "inspections:",
+            "  proof: NOTES/inspections/proof.md",
             "handoffs:",
             "  review: {prompt: NOTES/handoffs/review.md, to: reviewer}",
-            "  discover_completed: {checks: [proof], to: navigator}",
+            "  discover_completed: {inspect: [proof], to: navigator}",
         ],
     )
 
@@ -534,7 +569,7 @@ def test_handoffs_are_read_with_what_they_carry(tmp_path) -> None:
     assert review.prompt == Path("NOTES/handoffs/review.md")
     assert review.include_last_message is True
     assert review.to == "reviewer"
-    assert project.handoffs["discover_completed"].checks == ("proof",)
+    assert project.handoffs["discover_completed"].inspections == ("proof",)
 
 
 def test_a_handoff_can_run_the_projects_commands_first(tmp_path) -> None:
@@ -589,10 +624,10 @@ def test_validate_written_as_a_command_line_is_refused(tmp_path) -> None:
         a_project(tmp_path, lines=written)
 
 
-def test_a_handoff_naming_a_check_nobody_defined_is_refused(tmp_path) -> None:
+def test_a_handoff_naming_an_inspection_nobody_defined_is_refused(tmp_path) -> None:
     """Otherwise it fails only when somebody presses it, from a phone."""
     with pytest.raises(ValueError, match="does not define: claims"):
-        a_project(tmp_path, lines=["handoffs:", "  discovery: {checks: [claims]}"])
+        a_project(tmp_path, lines=["handoffs:", "  discovery: {inspect: [claims]}"])
 
 
 def test_a_handoff_to_a_seat_that_is_not_there_is_refused(tmp_path) -> None:
@@ -818,7 +853,7 @@ def test_next_is_a_decision_word_a_project_can_rename_too(tmp_path) -> None:
 def test_a_project_with_no_workflows_has_none(tmp_path) -> None:
     from halyard.core.config_file import Decisions
 
-    [project] = a_project(tmp_path, lines=["checks:", "  proof: NOTES/checks/proof.md"])
+    [project] = a_project(tmp_path, lines=["inspections:", "  proof: NOTES/proof.md"])
 
     assert project.workflows.flows == {}
     assert project.workflows.steps == {}

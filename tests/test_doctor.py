@@ -464,3 +464,24 @@ def test_a_project_whose_seats_have_no_path_is_a_warning() -> None:
     # Described before anybody decided where its code lives, and no seat in it
     # yet: nothing asks it for a path.
     assert doctor._without_a_path({"gamma": None}, [nav]) == []
+
+
+def test_a_name_from_before_a_rename_is_a_warning_that_says_what_to_rename() -> None:
+    """`checks:` became `inspections:` on 2026-09-23. It still works, so doctor
+    only says what to rename — never a problem that fails the check."""
+    from halyard.core.config_file import projects_from_yaml
+
+    [project] = projects_from_yaml(
+        "projects:\n  alpha-engine:\n    checks:\n      proof: NOTES/proof.md\n"
+        "    handoffs:\n      close: {checks: [proof]}\n"
+    )
+
+    lines = doctor._older_spellings([project])
+
+    assert lines == [
+        f"{doctor.WARN}alpha-engine — the project: `checks:` is now `inspections:`; "
+        "the old name still works",
+        f"{doctor.WARN}alpha-engine — handoff 'close': `checks:` is now `inspect:`; "
+        "the old name still works",
+    ]
+    assert doctor._older_spellings(projects_from_yaml("projects:\n  a:\n    path: /x\n")) == []

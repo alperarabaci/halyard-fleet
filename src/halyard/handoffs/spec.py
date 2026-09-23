@@ -5,8 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Protocol, runtime_checkable
 
-from halyard.checks import Answer
 from halyard.commands import Command, Result
+from halyard.inspections import Answer
 
 
 @runtime_checkable
@@ -36,7 +36,7 @@ class Runner(Protocol):
 @dataclass(frozen=True)
 class Handed:
     """What a handoff did: the message it delivered, the commands it ran and
-    the checks that went with it."""
+    the inspections that went with it."""
 
     text: str
     answers: tuple[Answer, ...] = ()

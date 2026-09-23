@@ -77,7 +77,7 @@ async def hand(tmp_path: Path, handoff: Handoff, *, asker: Asking | None = None,
         sender="drv (driver)",
         recipient_label="nav",
         recipient="nav (navigator)",
-        project_checks={"proof": Path("NOTES/proof.md"), "claims": Path("NOTES/claims.md")},
+        project_inspections={"proof": Path("NOTES/proof.md"), "claims": Path("NOTES/claims.md")},
         asker=asker,
         model="sonnet",
         timeout=5,
@@ -97,7 +97,7 @@ async def test_the_navigator_gets_the_prompt_the_checks_and_the_report_in_that_o
     discovery = Handoff(
         name="discovery",
         prompt=Path("NOTES/discovery.md"),
-        checks=("proof", "claims"),
+        inspections=("proof", "claims"),
         to="navigator",
     )
 
@@ -108,8 +108,8 @@ async def test_the_navigator_gets_the_prompt_the_checks_and_the_report_in_that_o
     assert text.startswith("To nav (navigator), from Halyard — handoff: discovery.")
     order = [
         text.index("The message below"),
-        text.index("Check proof"),
-        text.index("Check claims"),
+        text.index("Inspection proof"),
+        text.index("Inspection claims"),
         text.index("All 42 tests passed."),
     ]
     assert order == sorted(order)
@@ -217,7 +217,7 @@ async def test_a_check_that_could_not_run_still_goes_marked_unmeasured(tmp_path:
     """An unmeasured line is not a clean one, and the reader has to see it."""
     a_project(tmp_path)
 
-    handed, delivery = await hand(tmp_path, Handoff(name="discovery", checks=("proof",)))
+    handed, delivery = await hand(tmp_path, Handoff(name="discovery", inspections=("proof",)))
 
     [(_, text)] = delivery.sent
     assert "unmeasured — no runtime here can take a one-shot turn" in text
@@ -249,7 +249,7 @@ async def test_each_check_a_handoff_runs_goes_by_the_handoffs_name_too(tmp_path:
     a_project(tmp_path)
     asker = Asking()
 
-    await hand(tmp_path, Handoff(name="discovery", checks=("proof", "claims")), asker=asker)
+    await hand(tmp_path, Handoff(name="discovery", inspections=("proof", "claims")), asker=asker)
 
     assert sorted(asker.names) == ["claims · handoff discovery", "proof · handoff discovery"]
 
@@ -276,7 +276,7 @@ async def test_a_check_in_a_handoff_labels_the_task_as_it_would_by_hand(tmp_path
             put.append(label)
 
     await handoffs.hand_off(
-        Handoff(name="discovery", checks=("proof",)),
+        Handoff(name="discovery", inspections=("proof",)),
         project=tmp_path,
         context=[],
         note="",
@@ -285,7 +285,7 @@ async def test_a_check_in_a_handoff_labels_the_task_as_it_would_by_hand(tmp_path
         sender="drv (driver)",
         recipient_label="nav",
         recipient="nav (navigator)",
-        project_checks={"proof": Path("NOTES/proof.md")},
+        project_inspections={"proof": Path("NOTES/proof.md")},
         asker=Asking(says="proof · status: candidate"),
         model="sonnet",
         timeout=5,
@@ -308,7 +308,7 @@ async def test_commands_run_first_and_the_checks_read_what_they_did(tmp_path: Pa
 
     handed, delivery = await hand(
         tmp_path,
-        Handoff(name="close", commands=("test-fast",), checks=("claims",)),
+        Handoff(name="close", commands=("test-fast",), inspections=("claims",)),
         asker=asker,
         project_commands=COMMANDS,
         runner=runner,
@@ -320,7 +320,7 @@ async def test_commands_run_first_and_the_checks_read_what_they_did(tmp_path: Pa
     [(_, text)] = delivery.sent
     assert f"- {ran}" in text
     assert "Command test-fast — make test-fast:\n\ncollected\n1420 passed" in text
-    assert text.index("Command test-fast") < text.index("Check claims")
+    assert text.index("Command test-fast") < text.index("Inspection claims")
     assert [command.name for command, _ in handed.ran] == ["test-fast"]
 
 

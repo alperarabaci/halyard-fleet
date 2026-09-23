@@ -60,6 +60,8 @@ _PROJECT_FIELDS = {
     "label_findings",
     "label_work",
     "confirmation",
+    "inspections",
+    # The name `inspections:` had until 2026-09-23, still read.
     "checks",
     "handoffs",
     "workflows",
@@ -100,8 +102,8 @@ class Handoff:
     """One way a reply goes from one seat to another, as a project defines it.
 
     A button on `/handoff`'s card. It carries the chat's last reply, puts the
-    project's own text in front of it, runs whichever of the project's checks it
-    names over the reply first, and delivers the lot to a seat — the one `to:`
+    project's own text in front of it, runs whichever of the project's inspections
+    it names over the reply first, and delivers the lot to a seat — the one `to:`
     names, or whichever is pressed. Everything it reads belongs to the project;
     Halyard adds only what it can see for itself. See `halyard.handoffs`.
     """
@@ -116,11 +118,12 @@ class Handoff:
     followup_prompt: Path | None = None
     #: Whether the chat's last reply goes with it. Almost always.
     include_last_message: bool = True
-    #: Checks from this project's `checks:`, run over the reply before it goes.
-    checks: tuple[str, ...] = ()
+    #: Inspections from this project's `inspections:`, run over the reply before
+    #: it goes — written `inspect:` on the handoff.
+    inspections: tuple[str, ...] = ()
     #: Commands from this project's `commands:`, run one after another before
-    #: the checks. What each did goes into the envelope the checks read, and
-    #: into the message; a failure is reported, not a reason to stop.
+    #: the inspections. What each did goes into the envelope the inspections
+    #: read, and into the message; a failure is reported, not a reason to stop.
     commands: tuple[str, ...] = ()
     #: A role (`navigator`) or a seat's label. Unset offers every seat.
     to: str | None = None
@@ -233,14 +236,15 @@ class Project:
     #: keyboard can show.
     labels: tuple[str, ...] = ()
     #: Groups of task labels, by name — `level: [level::1, level::2, level::3]`.
-    #: The first label a task carries from each goes on the envelope checks and
-    #: handoffs are given, as `level: level::3`. Empty unless configured. A task
-    #: with none of a group's labels, or a tracker that cannot be read, adds
-    #: nothing: this reports what is there, it does not ask for anything.
+    #: The first label a task carries from each goes on the envelope that
+    #: inspections and handoffs are given, as `level: level::3`. Empty unless
+    #: configured. A task with none of a group's labels, or a tracker that
+    #: cannot be read, adds nothing: this reports what is there, it does not ask
+    #: for anything.
     label_groups: dict[str, tuple[str, ...]] = field(default_factory=dict)
-    #: What this project's checks answer when they found something, in its own
-    #: words — `status: candidate`. An answer that says one of them puts
-    #: `halyard:<check>` on the task, wherever the check ran. Empty unless
+    #: What this project's inspections answer when they found something, in its
+    #: own words — `status: candidate`. An answer that says one of them puts
+    #: `halyard:<inspection>` on the task, wherever it ran. Empty unless
     #: configured, and nothing is written without it: this writes to somebody's
     #: tracker on its own.
     label_findings: tuple[str, ...] = ()
@@ -251,14 +255,17 @@ class Project:
     #: The extra round this project asks for before closing a piece of work.
     #: `None` means no such round exists here, and `/commit` is unchanged.
     confirmation: Confirmation | None = None
-    #: What `/checks` runs over the last reply in a chat, by name — `proof:
-    #: NOTES/checks/proof.md`. Each is the project's own file, read relative to
-    #: the project and put in front of a model on its own. Empty unless
-    #: configured. See `halyard.checks`.
-    checks: dict[str, Path] = field(default_factory=dict)
+    #: What `/inspect` runs over the last reply in a chat, by name — `proof:
+    #: NOTES/inspections/proof.md`. Each is the project's own file, read relative
+    #: to the project and put in front of a model on its own. Empty unless
+    #: configured. See `halyard.inspections`.
+    inspections: dict[str, Path] = field(default_factory=dict)
     #: How a reply is handed from one seat to another here, by name — see
     #: `Handoff`. Empty unless configured.
     handoffs: dict[str, Handoff] = field(default_factory=dict)
+    #: The spellings this project's configuration still uses from before they
+    #: were renamed, as a sentence each, for `doctor` to mention. They work.
+    older: tuple[str, ...] = ()
     #: The flows this project takes its handoffs in, and the steps they share
     #: — see `Workflows`. Empty unless configured.
     workflows: Workflows = field(default_factory=Workflows)
@@ -284,22 +291,36 @@ def _confirmation_from(project: str, value: Any) -> Confirmation | None:
     )
 
 
-def _checks_from(project: str, value: Any) -> dict[str, Path]:
-    """`checks:` as a mapping of name to the file that says what to look for.
+def _spelled(project: str, body: dict, new: str, old: str, where: str) -> tuple[Any, str | None]:
+    """The value under `new`, or under the `old` name it had before — and, when
+    it was the old one, a sentence saying so. Both at once is refused: which of
+    the two was meant is not something to guess."""
+    if new in body and old in body:
+        raise ValueError(
+            f"Project {project!r}: {where} has both `{new}:` and `{old}:` — "
+            f"they are the same thing; keep `{new}:`."
+        )
+    if old in body:
+        return body.get(old), f"{where}: `{old}:` is now `{new}:`"
+    return body.get(new), None
 
-    Strict about the shape: a check written as a mapping would otherwise become
-    a path spelled with its own braces, and fail only when somebody ran it.
+
+def _inspections_from(project: str, value: Any) -> dict[str, Path]:
+    """`inspections:` as a mapping of name to the file that says what to look for.
+
+    Strict about the shape: an inspection written as a mapping would otherwise
+    become a path spelled with its own braces, and fail only when somebody ran it.
     """
     if value is None:
         return {}
     if not isinstance(value, dict):
-        raise ValueError(f"Project {project!r}: `checks:` must be a mapping of name to file.")
+        raise ValueError(f"Project {project!r}: `inspections:` must be a mapping of name to file.")
     found: dict[str, Path] = {}
     for name, where in value.items():
         if not str(name).strip() or not isinstance(where, str) or not where.strip():
             raise ValueError(
-                f"Project {project!r}: check {name!r} needs a file, "
-                "like `proof: NOTES/checks/proof.md`."
+                f"Project {project!r}: inspection {name!r} needs a file, "
+                "like `proof: NOTES/inspections/proof.md`."
             )
         found[str(name).strip()] = Path(where.strip()).expanduser()
     return found
@@ -312,6 +333,8 @@ _HANDOFF_FIELDS = {
     "prompt",
     "followup_prompt",
     "include_last_message",
+    "inspect",
+    # The name `inspect:` had until 2026-09-23, still read.
     "checks",
     "commands",
     "to",
@@ -322,9 +345,10 @@ def _handoffs_from(
     project: str,
     value: Any,
     *,
-    checks: dict[str, Path],
+    inspections: dict[str, Path],
     seats: list[Seat],
     commands: dict[str, str] | None = None,
+    older: list[str] | None = None,
 ) -> dict[str, Handoff]:
     """`handoffs:` as a mapping of name to how that handoff is made.
 
@@ -353,13 +377,16 @@ def _handoffs_from(
         unknown = set(spec) - _HANDOFF_FIELDS
         if unknown:
             raise ValueError(f"{where} has unknown field(s) {', '.join(sorted(unknown))}")
-        named = spec.get("checks") or []
+        named, spelled = _spelled(project, spec, "inspect", "checks", f"handoff {name!r}")
+        if spelled is not None and older is not None:
+            older.append(spelled)
+        named = named or []
         if not isinstance(named, list) or not all(isinstance(n, str) and n.strip() for n in named):
-            raise ValueError(f"{where}: `checks:` must be a list of check names.")
+            raise ValueError(f"{where}: `inspect:` must be a list of inspection names.")
         named = [n.strip() for n in named]
-        if missing := [n for n in named if n not in checks]:
+        if missing := [n for n in named if n not in inspections]:
             raise ValueError(
-                f"{where} names checks this project does not define: {', '.join(missing)}"
+                f"{where} names inspections this project does not define: {', '.join(missing)}"
             )
         ran = spec.get("commands") or []
         if not isinstance(ran, list) or not all(isinstance(n, str) and n.strip() for n in ran):
@@ -374,7 +401,9 @@ def _handoffs_from(
             True if carries is None else _as_flag(project, f"{name}.include_last_message", carries)
         )
         if named and not carries:
-            raise ValueError(f"{where} runs checks over the last message, so it has to carry it.")
+            raise ValueError(
+                f"{where} runs inspections over the last message, so it has to carry it."
+            )
         prompt = _as_text(spec.get("prompt"))
         followup = _as_text(spec.get("followup_prompt"))
         if not prompt and not carries and not ran:
@@ -392,7 +421,7 @@ def _handoffs_from(
             prompt=Path(prompt).expanduser() if prompt else None,
             followup_prompt=Path(followup).expanduser() if followup else None,
             include_last_message=carries,
-            checks=tuple(named),
+            inspections=tuple(named),
             commands=tuple(ran),
             to=to.lower() if to and to.lower() in roles else to,
         )
@@ -912,11 +941,20 @@ def projects_from_yaml(text: str) -> list[Project]:
                 )
 
         path = _as_text(body.get("path"))
-        checks = _checks_from(project, body.get("checks"))
+        older: list[str] = []
+        written, spelled = _spelled(project, body, "inspections", "checks", "the project")
+        if spelled is not None:
+            older.append(spelled)
+        inspections = _inspections_from(project, written)
         commands, command_lists = _commands_from(project, body.get("commands"))
         _not_a_list(project, body, command_lists)
         handoffs = _handoffs_from(
-            project, body.get("handoffs"), checks=checks, seats=seats, commands=commands
+            project,
+            body.get("handoffs"),
+            inspections=inspections,
+            seats=seats,
+            commands=commands,
+            older=older,
         )
         label_groups = _label_groups_from(project, body.get("label_groups"))
         validate = _validate_from(project, body.get("validate"), commands)
@@ -936,11 +974,12 @@ def projects_from_yaml(text: str) -> list[Project]:
                 label_findings=_findings_from(project, body.get("label_findings")),
                 label_work=_as_flag(project, "label_work", body.get("label_work")),
                 confirmation=_confirmation_from(project, body.get("confirmation")),
-                checks=checks,
+                inspections=inspections,
                 handoffs=handoffs,
                 workflows=_workflows_from(
                     project, body.get("workflows"), handoffs=handoffs, seats=seats
                 ),
+                older=tuple(older),
             )
         )
     return projects
@@ -1073,8 +1112,8 @@ def missing_files(projects: list[Project]) -> list[str]:
                 wanted.append(("confirmation.inquiry", project.confirmation.inquiry))
             if project.confirmation.review:
                 wanted.append(("confirmation.review", project.confirmation.review))
-        for name, path in project.checks.items():
-            wanted.append((f"checks.{name}", path))
+        for name, path in project.inspections.items():
+            wanted.append((f"inspections.{name}", path))
         for name, handoff in project.handoffs.items():
             if handoff.prompt:
                 wanted.append((f"handoffs.{name}.prompt", handoff.prompt))
