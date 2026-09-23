@@ -353,6 +353,7 @@ def _build_channel(
         # has to survive a restart and is not worth a schema.
         said_path=settings.db_path.parent / "last-said.json",
         database=settings.db_path,
+        keep_inspections=settings.keep_inspections,
     )
 
 

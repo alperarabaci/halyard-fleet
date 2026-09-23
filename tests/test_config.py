@@ -43,6 +43,14 @@ def test_the_defaults_keep_the_service_local() -> None:
     assert settings.claude_default_model == ""
 
 
+def test_inspections_are_kept_only_when_asked_for(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The one place Halyard would keep text, so off until somebody turns it on."""
+    assert build(HALYARD_CHANNEL="stub_deny").keep_inspections is False
+    assert from_env(
+        monkeypatch, HALYARD_CHANNEL="stub_deny", HALYARD_KEEP_INSPECTIONS="true"
+    ).keep_inspections
+
+
 def test_the_claude_binary_can_be_pinned() -> None:
     settings = build(
         HALYARD_CHANNEL="stub_deny",
