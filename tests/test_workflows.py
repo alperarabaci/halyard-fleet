@@ -370,6 +370,26 @@ def test_a_phase_that_ends_undecided_stops_with_the_next_one_ready() -> None:
     assert (moving.step, moving.phase, moving.leaving) == (1, 2, 4)
 
 
+def test_a_wait_at_the_end_of_a_phase_offers_the_next_one_or_the_way_out() -> None:
+    """Between parts the operator applies what was made; what follows is the
+    next part or the end of them, not whichever step comes next in the list."""
+    moving = phased_after(Decision.WAIT, 3)
+
+    assert moving.stop == "it was asked to wait"
+    assert (moving.step, moving.phase, moving.leaving, moving.decided) == (
+        1,
+        2,
+        4,
+        Decision.WAIT,
+    )
+
+
+def test_a_wait_inside_a_phase_stops_as_any_wait_does() -> None:
+    moving = phased_after(Decision.WAIT, 2)
+
+    assert (moving.step, moving.leaving, moving.stop) == (None, None, "it was asked to wait")
+
+
 def test_the_phases_stop_past_their_count_with_that_phase_ready() -> None:
     moving = phased_after(Decision.NEXT, 3, phase=3)
 
@@ -440,10 +460,12 @@ def test_the_end_of_a_phase_is_told_where_next_and_forward_go() -> None:
     lines = phased_told(3, phase=2)
 
     assert "forward (→ close, nav)" in lines[2]
+    assert "wait (→ the operator)" in lines[2]
     assert lines[3] == (
         "This step ends phase 2: next (→ discover, xdrv, phase 3) starts the next one, "
         "and next <step> starts it at another of discover, develop, verified; forward "
-        "leaves the phases. A reply with no decision waits for the operator."
+        "leaves the phases. wait, or a reply with no decision, stops for the operator, "
+        "who starts the next phase or leaves them."
     )
 
 

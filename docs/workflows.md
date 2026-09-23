@@ -112,6 +112,11 @@ seat meant, and so does a phase that ends with **no decision at all**: carrying 
 leave the phases with nobody having said the work was done. The stop offers the next
 phase and the way out of them as buttons, so the work stays in the run whichever it is.
 
+A `wait` at the end of a phase stops with the same two buttons. That is the operator's
+moment between parts — accepting on screen, publishing, bringing the stack up with what
+was just made — and what follows it is the next part or the end of them, not whichever
+step happens to come next in the list.
+
 `phases:` under `workflows:` says how many phases go before the run stops and asks —
 three unless a project writes another number. Past it, the next phase is the
 operator's to send, the way a round past `rounds:` is.
@@ -148,7 +153,7 @@ take the work, with the seat, the round and the phase it would be:
 The last step of the phases is told what `next` does as well:
 
 ```
-- This step ends phase 1: next (→ discover, xdrv, phase 2) starts the next one, and next <step> starts it at another of discover, discovered, develop, verified; forward leaves the phases. A reply with no decision waits for the operator.
+- This step ends phase 1: next (→ discover, xdrv, phase 2) starts the next one, and next <step> starts it at another of discover, discovered, develop, verified; forward leaves the phases. wait, or a reply with no decision, stops for the operator, who starts the next phase or leaves them.
 ```
 
 The review is told where its decision goes, and the navigator what was decided:
@@ -195,7 +200,7 @@ a step's seat could be more than one seat. The card it stops with keeps the work
 run:
 
 - **▶️ Send it anyway** — or **↻ Phase 2 at discover** — sends what is ready;
-- **⏭ On to close** leaves the phases instead, where a phase just ended;
+- **⏭ On to close** leaves the phases instead, where a phase just ended or waited;
 - **🧭 Pick a step** offers the flow's steps, and the one pressed goes next, with the
   run's rounds and phase kept — a loop it stopped in is not reset by a tap. Typing
   `/workflow level3 develop` does the same for a stopped run;

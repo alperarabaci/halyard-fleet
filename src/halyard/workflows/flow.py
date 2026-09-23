@@ -30,7 +30,9 @@ decides between `next` — another phase, from the first of them or from the one
 it names — and `forward`, out of the phases to whatever comes after. Only
 there: a `next` anywhere else stops the run, and so does a phase that ends
 with no decision at all, because carrying on would leave the phases with
-nobody having said the work was done.
+nobody having said the work was done. A `wait` there stops with the same two
+ways on ready, since what the operator does between parts is apply the one
+just made, and what follows is the next part or the end of them.
 
 **Rounds and phases are what stop a loop.** A step may go as many times as its
 `rounds:` allows in one run — in each phase, inside the phases — and the phases
@@ -108,11 +110,18 @@ def after(
     deciding = decision
     if deciding is None and here is not None and here.decided_by:
         deciding = carried(run.carried)
-    if deciding is Decision.WAIT:
-        return Next(stop="it was asked to wait", decided=deciding)
-
     ending = stretch is not None and run.step == stretch[1]
     lending = lends(run.step, flow=flow, steps=steps)
+    if deciding is Decision.WAIT and ending and not lending:
+        # A wait at the end of a phase is the operator's moment between parts —
+        # applying what was made, before the next one starts on it — and what
+        # comes after it is the next phase or the way out of them, not the step
+        # that happens to follow in the list.
+        ready = _next_phase(run, flow=flow, steps=steps, taken=taken, stretch=stretch, most=most)
+        assert stretch is not None  # `ending` said so
+        return replace(ready, stop="it was asked to wait", decided=deciding, leaving=stretch[1] + 1)
+    if deciding is Decision.WAIT:
+        return Next(stop="it was asked to wait", decided=deciding)
     if deciding is Decision.NEXT:
         return _next_phase(
             run, flow=flow, steps=steps, taken=taken, stretch=stretch, most=most, named=named

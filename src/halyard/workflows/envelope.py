@@ -102,7 +102,8 @@ def lines_for(
             f"This step ends phase {run.phase}: {word(Decision.NEXT)} ({to(Decision.NEXT)}) "
             f"starts the next one, and {word(Decision.NEXT)} <step> starts it at another of "
             f"{', '.join(phases)}; {word(Decision.FORWARD)} leaves the phases. "
-            "A reply with no decision waits for the operator."
+            f"{word(Decision.WAIT)}, or a reply with no decision, stops for the operator, "
+            "who starts the next phase or leaves them."
         )
     return said
 
@@ -119,6 +120,9 @@ def _where(
     most: int,
 ) -> str:
     """Where a decision takes the work from this step: `→ discover, xdrv, round 2 of 2`."""
+    if decision is Decision.WAIT:
+        # Whatever the run makes ready while it waits, the next move is a person's.
+        return "→ the operator"
     going = after(
         decision, run=run, flow=flow, steps=steps, taken=taken, stretch=stretch, most=most
     )
