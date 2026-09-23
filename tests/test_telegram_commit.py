@@ -1372,6 +1372,27 @@ async def test_a_phase_that_ends_undecided_offers_the_next_one_or_the_way_out(
     assert "- Phase: 2" in runner.sent[-1][1]
 
 
+async def test_a_wait_at_the_end_of_a_phase_offers_the_next_one_or_the_way_out(
+    tmp_path: Path, wired
+) -> None:
+    """The operator applies the part just made, then picks what follows."""
+    channel, api, runner, repo = wired
+    flow_in(channel, repo, tmp_path, runner, **PHASED)
+    await started(channel)
+    await answered(channel, "xrev", "DECISION: forward")
+
+    await answered(channel, "nav", "Accepted; publish it first.\nDECISION: wait")
+
+    assert len(runner.sent) == 2
+    keys = [key["text"] for row in api.sent[-1]["reply_markup"]["inline_keyboard"] for key in row]
+    assert keys == [
+        "↻ Phase 2 at review",
+        "⏭ On to the end",
+        "🧭 Pick a step",
+        "⏹ Stop the workflow",
+    ]
+
+
 async def test_leaving_the_phases_from_the_card_goes_on_past_them(tmp_path: Path, wired) -> None:
     channel, api, runner, repo = wired
     flow_in(channel, repo, tmp_path, runner, **PHASED)
