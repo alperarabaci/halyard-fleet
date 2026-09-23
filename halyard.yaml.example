@@ -71,6 +71,12 @@ settings:
   # that sleeps denies every command on the machine and says nothing.
   # HALYARD_KEEP_AWAKE: false
 
+  # Keep every inspection run in the database — what the model was given, word
+  # for word, and what it said — to compare models on the same input later.
+  # Off unless set, because it is the one place Halyard keeps text: the input
+  # holds the reply that was inspected. See docs/handoffs.md.
+  # HALYARD_KEEP_INSPECTIONS: true
+
   # How much the log says. INFO unless set; DEBUG says more. A level that does
   # not exist refuses to start rather than quietly logging at INFO.
   # HALYARD_LOG_LEVEL: DEBUG

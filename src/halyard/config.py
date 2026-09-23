@@ -196,6 +196,15 @@ class Settings(BaseSettings):
     #: Idle sleep only. A person can still close the lid or choose Sleep.
     keep_awake: bool = Field(default=True, validation_alias="HALYARD_KEEP_AWAKE")
 
+    #: Whether every inspection run is kept whole in the database — what the
+    #: model was given, word for word, and what it said — so it can be compared
+    #: and run again later. See `halyard.inspections.record`.
+    #:
+    #: Off unless asked for, because it is the one place Halyard would keep text:
+    #: the input holds the reply that was inspected. Turned on, it never holds
+    #: anything up — the row is written off to one side, after the answer.
+    keep_inspections: bool = Field(default=False, validation_alias="HALYARD_KEEP_INSPECTIONS")
+
     log_level: str = Field(default="INFO", validation_alias="HALYARD_LOG_LEVEL")
     #: A ceiling on one week, so an always-on service cannot fill a disk before
     #: the next Monday. Reaching it rolls early and keeps both halves.

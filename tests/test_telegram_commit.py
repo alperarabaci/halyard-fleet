@@ -2179,9 +2179,11 @@ async def test_an_inspection_run_by_hand_is_kept_under_its_tokens_id(tmp_path: P
 
     channel, _, runner, repo = wired
     channel._database = tmp_path / "halyard.db"
+    channel._keep_inspections = True
     inspections_in(channel, repo, tmp_path, proof="# proof: find the evidence")
 
     await channel._run_inspection("proof delivery", CHAT, None)
+    await settled(channel)
 
     with sqlite3.connect(channel._database) as db:
         [row] = db.execute(
@@ -2223,6 +2225,7 @@ async def test_an_inspection_a_workflow_step_ran_is_kept_against_that_step(
 
     channel, _, runner, repo = wired
     channel._database = tmp_path / "halyard.db"
+    channel._keep_inspections = True
     flow_in(channel, repo, tmp_path, runner, **TWO_STEPS)
     (repo / "NOTES" / "proof.md").write_text("# proof")
     found = channel._repositories["alpha-engine"]
@@ -2244,6 +2247,69 @@ async def test_an_inspection_a_workflow_step_ran_is_kept_against_that_step(
     inspection, handoff, workflow_run, step, phase, number = row
     assert (inspection, handoff, step, phase, number) == ("proof", "review", "review", None, 1)
     assert workflow_run.startswith("alpha-engine#281 ")
+
+
+async def test_inspections_are_not_kept_unless_asked_for(tmp_path: Path, wired) -> None:
+    """The one place Halyard would keep text, so it waits to be turned on."""
+    channel, _, _, repo = wired
+    channel._database = tmp_path / "halyard.db"
+    inspections_in(channel, repo, tmp_path, proof="# proof")
+
+    await channel._run_inspection("proof", CHAT, None)
+    await settled(channel)
+
+    assert not channel._database.exists()
+
+
+async def test_keeping_an_inspection_holds_nobody_up(tmp_path: Path, wired, monkeypatch) -> None:
+    """The row is written off to one side: a database busy with the audit log
+    must not keep an answer from reaching anybody."""
+    import threading
+
+    from halyard import inspections
+    from halyard.channels.telegram.adapter import _Keeping
+
+    channel, _, _, _ = wired
+    channel._database = tmp_path / "halyard.db"
+    released = threading.Event()
+    written: list[str] = []
+
+    def slow_keep(path, kept, **_) -> None:
+        released.wait(5)
+        written.append(kept.name)
+
+    monkeypatch.setattr(inspections.record, "keep", slow_keep)
+    keeper = _Keeping(channel, project="alpha-engine", work="alpha-engine#281", runtime="x")
+
+    await asyncio.wait_for(keeper.keep(a_kept_inspection()), timeout=1)
+
+    assert written == [], "it returned before the write finished"
+    released.set()
+    await settled(channel)
+    assert written == ["proof"]
+
+
+def a_kept_inspection():
+    from datetime import UTC, datetime
+
+    from halyard import inspections
+
+    return inspections.Kept(
+        session="sess-1",
+        at=datetime(2026, 9, 23, 18, 0, tzinfo=UTC),
+        name="proof",
+        path=Path("NOTES/proof.md"),
+        version="3e8c847",
+        handoff="",
+        model="sonnet",
+        asked="# proof",
+        context=(),
+        note="",
+        answer="proof · no finding",
+        why="",
+        finding=None,
+        took=1.0,
+    )
 
 
 async def test_the_names_inspections_had_before_still_work(tmp_path: Path, wired) -> None:

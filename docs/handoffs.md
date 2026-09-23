@@ -92,9 +92,16 @@ both run the same inspection. Halyard only adds: closing a finding, as a false
 alarm or as approved, is a label somebody puts on by hand. A project that has
 not said what a finding looks like has nothing written.
 
-## Every inspection is kept
+## Every inspection can be kept
 
-Each run — by `/inspect`, by a handoff, by a workflow's step — is a row in
+Turned on with one setting, and off until it is:
+
+```yaml
+settings:
+  HALYARD_KEEP_INSPECTIONS: true
+```
+
+Then each run — by `/inspect`, by a handoff, by a workflow's step — is a row in
 `inspection_runs`, in Halyard's database beside the tokens the turns Halyard
 starts use: the inspection, its file and the revision of it, the model, what the
 model was given word for word, what it said, how long it took, whether it
@@ -120,6 +127,10 @@ FROM inspection_runs r JOIN workflow_steps s
 
 `experimental` and `repeat_of` are for runs somebody makes on purpose to compare
 models, so they never mix with the ones the work made.
+
+Keeping never holds anything up: the row is written off to one side once the
+answer is in, so a database busy with the audit log cannot keep an answer from
+reaching anybody, and a row that cannot be written costs the row alone.
 
 ## A handoff can run the project's commands first
 

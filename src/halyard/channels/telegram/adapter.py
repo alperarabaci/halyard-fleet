@@ -491,7 +491,8 @@ class _Inspecting:
 class _Keeping:
     """The channel's side of `inspections.Keeper`: a finished inspection run into
     the database, with the project, the work and — for a workflow's step — the
-    step it ran for. Nothing to do without a database, and nothing that fails."""
+    step it ran for. Only made when `keep_inspections` is on; nothing that fails,
+    and nothing that holds anybody up."""
 
     def __init__(
         self,
@@ -509,11 +510,14 @@ class _Keeping:
         self._counted = counted
 
     async def keep(self, kept: inspecting.Kept) -> None:
+        """Written off to one side, as a label is: the answer is on its way to
+        somebody, and a row in a database shares its file with the audit log,
+        which may be writing. Nothing waits for it."""
         database = self._channel._database
         if database is None:
             return
         step = self._counted
-        await asyncio.to_thread(
+        write = asyncio.to_thread(
             partial(
                 inspecting.record.keep,
                 database,
@@ -527,6 +531,7 @@ class _Keeping:
                 round=len(step.before) + 1 if step else None,
             )
         )
+        self._channel._detach(write, f"keep inspection {kept.name}")
 
 
 class _Labelling:
@@ -619,6 +624,9 @@ class TelegramChannel:
         #: The database the audit log and turn usage share, where a finished
         #: workflow run is kept for reading later. None keeps none.
         database: Path | None = None,
+        #: Whether every inspection run is kept there too, text and all. Off
+        #: unless asked for — see `Settings.keep_inspections`.
+        keep_inspections: bool = False,
         #: Each runtime's own availability-check context, by runtime name — see
         #: `RuntimeSpec.check_context`. Asked only when a seat's session cannot
         #: be found, to say *why*; each check is handed its own and nobody else's.
@@ -633,6 +641,7 @@ class TelegramChannel:
         self._chat_id = chat_id
         self._said_path = said_path
         self._database = database
+        self._keep_inspections = keep_inspections
         # Two seats and a default. A role with nowhere of its own falls back to
         # the main chat, so an existing single-chat setup keeps working
         # untouched by any of this.
@@ -2599,12 +2608,7 @@ class TelegramChannel:
             timeout=INSPECTION_TIMEOUT_SECONDS,
             findings=found.label_findings,
             labeller=_Labelling(self, found),
-            keeper=_Keeping(
-                self,
-                project=found.name,
-                work=await self._work_item(found),
-                runtime=asker.runtime,
-            ),
+            keeper=await self._keeper(found, asker.runtime),
             about=(
                 f"reply {arrived}, {len(said.text)} chars, "
                 f"from {said.agent_id or '?'} {said.session_id or '?'}"
@@ -2695,6 +2699,21 @@ class TelegramChannel:
         if not runner:
             return None
         return _Inspecting(self, runner, destination, project=self._project_name_for(chat_id))
+
+    async def _keeper(
+        self, found: Project, runtime: str, counted: StepRounds | None = None
+    ) -> _Keeping | None:
+        """Where this project's inspection runs are kept, or None when they are
+        not — `keep_inspections` off, or no database to keep them in."""
+        if not self._keep_inspections or self._database is None:
+            return None
+        return _Keeping(
+            self,
+            project=found.name,
+            work=await self._work_item(found),
+            runtime=runtime,
+            counted=counted,
+        )
 
     def _destination_of(self, seat: Seat) -> tuple[str, int | None]:
         """Where a seat's traffic goes: its own chat, or the default one."""
@@ -3220,13 +3239,7 @@ class TelegramChannel:
                 else None
             )
             keeper = (
-                _Keeping(
-                    self,
-                    project=found.name,
-                    work=await self._work_item(found),
-                    runtime=inspector.runtime,
-                    counted=counted,
-                )
+                await self._keeper(found, inspector.runtime, counted)
                 if inspector is not None
                 else None
             )
@@ -3607,14 +3620,20 @@ class TelegramChannel:
         """
         finished = self._clock()
         if self._database is not None:
-            await asyncio.to_thread(
-                flowing.journal.record,
-                self._database,
-                run,
-                project=found.name,
-                work=work,
-                outcome=outcome,
-                finished=finished,
+            # Off to one side: the report below is what somebody is waiting for.
+            self._detach(
+                asyncio.to_thread(
+                    partial(
+                        flowing.journal.record,
+                        self._database,
+                        run,
+                        project=found.name,
+                        work=work,
+                        outcome=outcome,
+                        finished=finished,
+                    )
+                ),
+                f"keep workflow {run.workflow}",
             )
         kept = self._kept_for(found.name, WORKFLOW_FILE)
         if kept is not None:
