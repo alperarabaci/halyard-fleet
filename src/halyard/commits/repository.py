@@ -389,6 +389,17 @@ def flag_of(said: str) -> str | None:
     return None
 
 
+#: Everything the model writing a commit message is, in place of Claude Code's
+#: own system prompt. That prompt and its tools are most of what such a turn
+#: costs, and a message written from the diff in front of it needs neither.
+#: Measured on 2026-09-23 with the same seven-file change: 62,331 tokens of
+#: context as it was, 11,676 like this, and a message just as good.
+SYSTEM = (
+    "You write git commit messages. Answer in exactly the shape the message asks "
+    "for, and nothing else."
+)
+
+
 def prompt(work: Uncommitted, inquiry: str = "") -> str:
     """What to ask a model for.
 

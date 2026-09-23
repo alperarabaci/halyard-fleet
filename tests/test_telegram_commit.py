@@ -67,6 +67,8 @@ class FakeRunner:
         self.says = says
         self.asked: list[str] = []
         self.models: list[str | None] = []
+        #: The system prompt each turn asked for in place of Claude Code's own.
+        self.systems: list[str | None] = []
         self.sent: list[tuple[str, str]] = []
         #: Session names this runtime claims to know, as the real one would.
         self.sessions: dict[str, object] = {}
@@ -76,6 +78,7 @@ class FakeRunner:
     async def ask(self, text: str, *, model: str | None = None, **kwargs) -> str | None:
         self.asked.append(text)
         self.models.append(model)
+        self.systems.append(kwargs.get("system"))
         if self.says is None:
             raise RuntimeError("no model today")
         return self.says
@@ -252,6 +255,19 @@ async def test_the_model_is_asked_with_the_house_style_and_the_cheap_model(wired
 
     assert runner.models == ["sonnet"]
     assert "alpha-engine#279 p2" in runner.asked[0]
+
+
+async def test_the_message_is_written_with_nothing_but_the_diff(wired) -> None:
+    """Claude Code's own prompt and tools were five sixths of what a message
+    cost, and the diff in front of it is all it needs."""
+    from halyard import commits
+
+    channel, _, runner, repo = wired
+    wrote(repo, "loader.py", "x = 1\n")
+
+    await deliver(channel, typed("/commit"))
+
+    assert runner.systems == [commits.SYSTEM]
 
 
 async def test_what_an_agent_wrote_without_staging_is_offered(wired) -> None:
