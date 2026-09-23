@@ -88,9 +88,38 @@ A project writes under `label_findings:` what its inspections' answers say when
 they found something, in its own words — quoted, because a phrase with a colon
 is otherwise a YAML mapping — and whenever an answer says one of them the task
 gets `halyard:<inspection>`. From `/inspect` and from a handoff alike, since
-both run the same inspection. Halyard only adds: closing a finding, as a false alarm or as
-approved, is a label somebody puts on by hand. A project that has not said what
-a finding looks like has nothing written.
+both run the same inspection. Halyard only adds: closing a finding, as a false
+alarm or as approved, is a label somebody puts on by hand. A project that has
+not said what a finding looks like has nothing written.
+
+## Every inspection is kept
+
+Each run — by `/inspect`, by a handoff, by a workflow's step — is a row in
+`inspection_runs`, in Halyard's database beside the tokens the turns Halyard
+starts use: the inspection, its file and the revision of it, the model, what the
+model was given word for word, what it said, how long it took, whether it
+answered, the finding phrase it said if any, and where the files stood — `HEAD`
+and the content id from the envelope. A run stopped or left unanswered is kept
+too, with why. This is the one place Halyard keeps text: the input holds the
+reply that was inspected, and an inspection cannot be compared or run again
+without it.
+
+The row's id is the session the turn ran under, which is the key its tokens are
+recorded by, and a run a workflow's step made carries that step — its run, name,
+phase and round — so both join without guessing:
+
+```sql
+SELECT r.inspection, r.model, r.took, u.output_tokens, u.cache_read_tokens
+FROM inspection_runs r JOIN turn_usage u ON u.session_id = r.id;
+
+SELECT s.step, s.phase, s.round, r.inspection, r.finding
+FROM inspection_runs r JOIN workflow_steps s
+  ON s.run_id = r.workflow_run AND s.step = r.step AND s.round = r.round
+ AND (s.phase IS r.phase);
+```
+
+`experimental` and `repeat_of` are for runs somebody makes on purpose to compare
+models, so they never mix with the ones the work made.
 
 ## A handoff can run the project's commands first
 

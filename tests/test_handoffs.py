@@ -27,6 +27,7 @@ class Asking:
         cwd: Path | None = None,
         name: str | None = None,
         edits: bool = True,
+        session_id: str | None = None,
     ) -> str | None:
         self.asked.append(text)
         self.names.append(name)

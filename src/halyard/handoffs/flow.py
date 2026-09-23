@@ -40,6 +40,7 @@ async def hand_off(
     round_number: int | None = None,
     expected: int | None = None,
     previous: Previous | None = None,
+    keeper: inspections.Keeper | None = None,
 ) -> Handed:
     """Run a handoff's commands, then its inspections, write the message, deliver it.
 
@@ -63,7 +64,8 @@ async def hand_off(
     see `halyard.handoffs.rounds`. From the second round on, a handoff with a
     `followup_prompt:` sends that in place of its `prompt:`, and `previous`
     carries what the seat said back to the round before. `expected` is how many
-    rounds the step allows.
+    rounds the step allows. `keeper` keeps each inspection it runs — see
+    `halyard.inspections.record`.
     """
     ran: list[tuple[Command, Result]] = []
     for name in handoff.commands:
@@ -108,6 +110,7 @@ async def hand_off(
                         handoff=handoff.name,
                         findings=findings,
                         labeller=labeller,
+                        keeper=keeper,
                     )
                     for name in handoff.inspections
                 )

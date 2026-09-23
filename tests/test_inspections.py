@@ -15,6 +15,8 @@ class Asking:
         self.asked: list[tuple[str, str | None]] = []
         #: Where each turn was to run, what it went by, and whether it could edit.
         self.how: list[dict] = []
+        #: The id each turn was asked to run under.
+        self.sessions: list[str | None] = []
 
     async def ask(
         self,
@@ -25,9 +27,11 @@ class Asking:
         cwd: Path | None = None,
         name: str | None = None,
         edits: bool = True,
+        session_id: str | None = None,
     ) -> str | None:
         self.asked.append((text, model))
         self.how.append({"cwd": cwd, "name": name, "edits": edits})
+        self.sessions.append(session_id)
         if self.says is None:
             raise RuntimeError("no model today")
         return self.says
@@ -244,3 +248,165 @@ async def test_a_label_that_cannot_be_written_costs_the_label_not_the_answer(
 
     assert answer.measured
     assert answer.text == "proof · status: candidate"
+
+
+# --- every run, kept whole --------------------------------------------------
+
+
+class Keeping:
+    """A `Keeper` that keeps what it was given, or fails when told to."""
+
+    def __init__(self, *, fails: bool = False) -> None:
+        self.kept: list[inspections.Kept] = []
+        self.fails = fails
+
+    async def keep(self, kept: inspections.Kept) -> None:
+        if self.fails:
+            raise RuntimeError("the disk is full")
+        self.kept.append(kept)
+
+
+async def kept_run(tmp_path: Path, asker, keeper: Keeping, *, says_finding: bool = False):
+    (tmp_path / "proof.md").write_text("# proof\n")
+    return await inspections.run(
+        "proof",
+        Path("proof.md"),
+        project=tmp_path,
+        context=["Work item: alpha-engine#386", "HEAD: 2cdcab9c", "Content: 5df40c87 (write-tree)"],
+        note="delivery",
+        reply="42 passed",
+        asker=asker,
+        model="sonnet",
+        timeout=5,
+        handoff="close",
+        findings=("status: candidate",) if says_finding else (),
+        keeper=keeper,
+    )
+
+
+async def test_every_run_is_kept_whole_under_the_id_it_ran_under(tmp_path: Path) -> None:
+    """Word for word what the model was given, what it said, and the id its
+    tokens are recorded by — which is what makes a run comparable later."""
+    asker, keeper = Asking(says="proof · status: candidate"), Keeping()
+
+    await kept_run(tmp_path, asker, keeper, says_finding=True)
+
+    [kept] = keeper.kept
+    [(text, _)] = asker.asked
+    assert kept.asked == text
+    assert kept.session == asker.sessions[0]
+    assert (kept.name, kept.handoff, kept.model) == ("proof", "close", "sonnet")
+    assert kept.answer == "proof · status: candidate"
+    assert kept.finding == "status: candidate"
+    assert kept.context[1] == "HEAD: 2cdcab9c"
+    assert "42 passed" in kept.asked
+
+
+async def test_a_run_with_no_answer_is_kept_as_well(tmp_path: Path) -> None:
+    keeper = Keeping()
+
+    await kept_run(tmp_path, Asking(says=None), keeper)
+
+    [kept] = keeper.kept
+    assert kept.answer is None
+    assert kept.why == "the model did not answer"
+
+
+async def test_a_stopped_run_is_kept_with_who_stopped_it(tmp_path: Path) -> None:
+    class Stopping(Asking):
+        async def ask(self, text: str, **_) -> str | None:
+            raise inspections.StoppedError("stopped by tg:4242")
+
+    keeper = Keeping()
+
+    await kept_run(tmp_path, Stopping(), keeper)
+
+    [kept] = keeper.kept
+    assert (kept.answer, kept.why) == (None, "stopped by tg:4242")
+
+
+async def test_an_inspection_that_never_reached_a_model_is_not_kept(tmp_path: Path) -> None:
+    keeper = Keeping()
+
+    await inspections.run(
+        "proof",
+        Path("gone.md"),
+        project=tmp_path,
+        context=[],
+        note="",
+        reply="42 passed",
+        asker=Asking(),
+        model="sonnet",
+        timeout=5,
+        keeper=keeper,
+    )
+
+    assert keeper.kept == []
+
+
+async def test_a_record_that_cannot_be_kept_costs_the_record_only(tmp_path: Path) -> None:
+    answer = await kept_run(tmp_path, Asking(), Keeping(fails=True))
+
+    assert answer.measured
+
+
+def test_a_kept_run_joins_the_tokens_it_used(tmp_path: Path) -> None:
+    """One table for what was said, one for what it cost, one id between them."""
+    import sqlite3
+    from datetime import UTC, datetime
+
+    from halyard.core import usage
+
+    database = tmp_path / "halyard.db"
+    kept = inspections.Kept(
+        session="sess-1",
+        at=datetime(2026, 9, 23, 18, 0, tzinfo=UTC),
+        name="proof",
+        path=Path("NOTES/proof.md"),
+        version="3e8c847",
+        handoff="close",
+        model="sonnet",
+        asked="# proof\n\nText to check:\n\n42 passed",
+        context=("Work item: alpha-engine#386", "HEAD: 2cdcab9c", "Content: 5df40c87 (write-tree)"),
+        note="",
+        answer="proof · no finding",
+        why="",
+        finding=None,
+        took=41.5,
+    )
+    inspections.record.keep(
+        database,
+        kept,
+        project="alpha-engine",
+        work="alpha-engine#386",
+        runtime="claude-code",
+        workflow_run="alpha-engine#386 2026-09-23T17:00:00+00:00",
+        step="developed",
+        phase=2,
+        round=1,
+    )
+    usage.record(
+        database,
+        [
+            usage.Turn(
+                "claude-code",
+                "sess-1",
+                "claude-sonnet-5",
+                "inspect proof",
+                "alpha-engine",
+                12,
+                3400,
+                21000,
+                164000,
+                0.23,
+            )
+        ],
+    )
+
+    with sqlite3.connect(database) as db:
+        [row] = db.execute(
+            "SELECT r.inspection, r.head, r.content, r.outcome, r.step, r.phase, r.round, "
+            "r.experimental, u.output_tokens "
+            "FROM inspection_runs r JOIN turn_usage u ON u.session_id = r.id"
+        ).fetchall()
+    assert row == ("proof", "2cdcab9c", "5df40c87", "answered", "developed", 2, 1, 0, 3400)

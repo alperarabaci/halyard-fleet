@@ -69,6 +69,8 @@ class FakeRunner:
         self.models: list[str | None] = []
         #: The system prompt each turn asked for in place of Claude Code's own.
         self.systems: list[str | None] = []
+        #: The id each one-shot turn ran under — what its tokens are recorded by.
+        self.session_ids: list[str | None] = []
         self.sent: list[tuple[str, str]] = []
         #: Session names this runtime claims to know, as the real one would.
         self.sessions: dict[str, object] = {}
@@ -79,6 +81,7 @@ class FakeRunner:
         self.asked.append(text)
         self.models.append(model)
         self.systems.append(kwargs.get("system"))
+        self.session_ids.append(kwargs.get("session_id"))
         if self.says is None:
             raise RuntimeError("no model today")
         return self.says
@@ -2167,6 +2170,80 @@ async def test_inspect_answers_from_a_phone(tmp_path: Path, wired) -> None:
 
     assert api.sent[-1]["reply_markup"]["inline_keyboard"]
     assert runner.asked == []
+
+
+async def test_an_inspection_run_by_hand_is_kept_under_its_tokens_id(tmp_path: Path, wired) -> None:
+    """What it was given and what it said, in the database beside the tokens,
+    under the id the turn ran under."""
+    import sqlite3
+
+    channel, _, runner, repo = wired
+    channel._database = tmp_path / "halyard.db"
+    inspections_in(channel, repo, tmp_path, proof="# proof: find the evidence")
+
+    await channel._run_inspection("proof delivery", CHAT, None)
+
+    with sqlite3.connect(channel._database) as db:
+        [row] = db.execute(
+            "SELECT id, project, work, inspection, handoff, runtime, model, note, input, "
+            "answer, outcome, step FROM inspection_runs"
+        ).fetchall()
+    (
+        ident,
+        project,
+        work,
+        inspection,
+        handoff,
+        runtime,
+        model,
+        note,
+        asked,
+        answer,
+        outcome,
+        step,
+    ) = row
+    assert ident == runner.session_ids[0]
+    assert (project, work, inspection, handoff) == (
+        "alpha-engine",
+        "alpha-engine#281",
+        "proof",
+        None,
+    )
+    assert (runtime, model, note) == ("claude-code", "sonnet", "delivery")
+    assert asked == runner.asked[0]
+    assert "All 42 tests passed." in asked
+    assert (answer, outcome, step) == ("loader stub and seed tweak", "answered", None)
+
+
+async def test_an_inspection_a_workflow_step_ran_is_kept_against_that_step(
+    tmp_path: Path, wired
+) -> None:
+    """So it joins `workflow_steps`: the run, the step, its phase and round."""
+    import sqlite3
+
+    channel, _, runner, repo = wired
+    channel._database = tmp_path / "halyard.db"
+    flow_in(channel, repo, tmp_path, runner, **TWO_STEPS)
+    (repo / "NOTES" / "proof.md").write_text("# proof")
+    found = channel._repositories["alpha-engine"]
+    channel._repositories["alpha-engine"] = replace(
+        found,
+        inspections={"proof": Path("NOTES/proof.md")},
+        handoffs={
+            **found.handoffs,
+            "review": replace(found.handoffs["review"], inspections=("proof",)),
+        },
+    )
+
+    await started(channel)
+
+    with sqlite3.connect(channel._database) as db:
+        [row] = db.execute(
+            "SELECT inspection, handoff, workflow_run, step, phase, round FROM inspection_runs"
+        ).fetchall()
+    inspection, handoff, workflow_run, step, phase, number = row
+    assert (inspection, handoff, step, phase, number) == ("proof", "review", "review", None, 1)
+    assert workflow_run.startswith("alpha-engine#281 ")
 
 
 async def test_the_names_inspections_had_before_still_work(tmp_path: Path, wired) -> None:

@@ -304,11 +304,17 @@ class _Asked:
 @dataclass(frozen=True)
 class StepRounds:
     """A workflow step's rounds: the ones it has had, how many it may, and how
-    to count the one on its way once the seat takes it."""
+    to count the one on its way once the seat takes it — and which step of which
+    run it is, for the inspections it runs to be kept against."""
 
     before: tuple[flowing.Round, ...]
     allowed: int
     count: Callable[[str], Awaitable[int]]
+    #: The run, as `workflow_steps` knows it, the step's name, and its phase
+    #: when it is one of a flow's phase steps.
+    run: str = ""
+    step: str = ""
+    phase: int | None = None
 
 
 @dataclass(frozen=True)
@@ -444,8 +450,11 @@ class _Inspecting:
         cwd: Path | None = None,
         name: str | None = None,
         edits: bool = True,
+        session_id: str | None = None,
     ) -> str | None:
-        session = str(uuid.uuid4())
+        # The inspection's own id when it chose one, so its record and its
+        # tokens are found by the same key.
+        session = session_id or str(uuid.uuid4())
         running = _Inspection(
             name or "inspection",
             self._destination,
@@ -472,6 +481,52 @@ class _Inspecting:
             raise inspecting.StoppedError(f"stopped by {running.stopped_by}") from None
         finally:
             self._channel._inspecting.pop(session, None)
+
+    @property
+    def runtime(self) -> str:
+        """Which runtime the turns run on — `claude-code`."""
+        return str(getattr(self._runner, "id", "") or "")
+
+
+class _Keeping:
+    """The channel's side of `inspections.Keeper`: a finished inspection run into
+    the database, with the project, the work and — for a workflow's step — the
+    step it ran for. Nothing to do without a database, and nothing that fails."""
+
+    def __init__(
+        self,
+        channel: TelegramChannel,
+        *,
+        project: str,
+        work: str | None,
+        runtime: str,
+        counted: StepRounds | None = None,
+    ) -> None:
+        self._channel = channel
+        self._project = project
+        self._work = work
+        self._runtime = runtime
+        self._counted = counted
+
+    async def keep(self, kept: inspecting.Kept) -> None:
+        database = self._channel._database
+        if database is None:
+            return
+        step = self._counted
+        await asyncio.to_thread(
+            partial(
+                inspecting.record.keep,
+                database,
+                kept,
+                project=self._project,
+                work=self._work,
+                runtime=self._runtime or None,
+                workflow_run=step.run or None if step else None,
+                step=step.step or None if step else None,
+                phase=step.phase if step else None,
+                round=len(step.before) + 1 if step else None,
+            )
+        )
 
 
 class _Labelling:
@@ -2544,6 +2599,12 @@ class TelegramChannel:
             timeout=INSPECTION_TIMEOUT_SECONDS,
             findings=found.label_findings,
             labeller=_Labelling(self, found),
+            keeper=_Keeping(
+                self,
+                project=found.name,
+                work=await self._work_item(found),
+                runtime=asker.runtime,
+            ),
             about=(
                 f"reply {arrived}, {len(said.text)} chars, "
                 f"from {said.agent_id or '?'} {said.session_id or '?'}"
@@ -3153,6 +3214,22 @@ class TelegramChannel:
                     labels=labels,
                 )
             )
+            inspector = (
+                self._inspector(chat_id, self._destination_of(seat))
+                if handoff.inspections
+                else None
+            )
+            keeper = (
+                _Keeping(
+                    self,
+                    project=found.name,
+                    work=await self._work_item(found),
+                    runtime=inspector.runtime,
+                    counted=counted,
+                )
+                if inspector is not None
+                else None
+            )
             handed = await handing.hand_off(
                 handoff,
                 project=found.path,
@@ -3164,11 +3241,7 @@ class TelegramChannel:
                 recipient_label=seat.label,
                 recipient=_seat_name(seat),
                 project_inspections=found.inspections,
-                asker=(
-                    self._inspector(chat_id, self._destination_of(seat))
-                    if handoff.inspections
-                    else None
-                ),
+                asker=inspector,
                 model=INSPECTION_MODEL,
                 timeout=INSPECTION_TIMEOUT_SECONDS,
                 delivery=_SeatDelivery(
@@ -3181,6 +3254,7 @@ class TelegramChannel:
                 round_number=number,
                 expected=expected,
                 previous=previous,
+                keeper=keeper,
             )
         finally:
             # Released whatever happened, as `/command` does: a project left
@@ -3460,7 +3534,14 @@ class TelegramChannel:
             ),
             buttons=cards.workflow_keyboard(run.workflow),
             command_lines=lines.lines,
-            counted=StepRounds(before=run.rounds.get(key, ()), allowed=step.rounds, count=count),
+            counted=StepRounds(
+                before=run.rounds.get(key, ()),
+                allowed=step.rounds,
+                count=count,
+                run=flowing.journal.run_id(run, work),
+                step=step.name,
+                phase=run.phase if "@" in key else None,
+            ),
         )
 
     @staticmethod
