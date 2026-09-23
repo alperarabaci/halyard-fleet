@@ -1,28 +1,49 @@
 """Where a workflow has got to, kept so a restart does not lose it.
 
 A run is one flow going through its steps for one piece of work: which
-workflow, which step, which seat it is waiting for, and since when. The machine
-restarts often — a merge, a `make restart` — and a flow that forgot itself
-there would leave a seat holding a reply nobody was waiting for.
+workflow, which step, which phase, which seat it is waiting for, and since
+when. The machine restarts often — a merge, a `make restart` — and a flow that
+forgot itself there would leave a seat holding a reply nobody was waiting for.
 
-Kept the way the round counter is (`halyard.handoffs.rounds`): a small file
-beside the database, written whole each time, and never raising on the path
-that is delivering something. One run per piece of work, because a project has
-one working tree and its branch says which work that is.
+**A run counts its own rounds.** Each step's rounds are kept in the run, by the
+step's name — and inside a flow's phases by the step and the phase, so the
+second phase's `discover` starts from its first round. A handoff pressed by
+hand is not part of any run, and counts nothing: the rounds that stop a loop
+are the loop's own. A run that is stopped and started again starts counting
+again, because starting one is somebody deciding to.
+
+**A round is a message that arrived.** It is counted when the seat's session
+takes it, so a step that reached nobody is not a round, and sending it again
+is the same round rather than the next.
+
+Kept the way `last_said` is: a small file beside the database, written whole
+each time, and never raising on the path that is delivering something. One run
+per piece of work, because a project has one working tree and its branch says
+which work that is.
 """
 
 from __future__ import annotations
 
 import json
 import logging
-from dataclasses import dataclass, replace
+from collections.abc import Mapping
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
-#: How many pieces of work to remember, as in `rounds`.
+#: How many pieces of work to remember.
 WORKS = 200
+
+
+@dataclass(frozen=True)
+class Round:
+    """One time a step reached the seat it was for."""
+
+    at: datetime
+    #: The seat's label. The answer to this round is what that seat says next.
+    to: str
 
 
 @dataclass(frozen=True)
@@ -51,26 +72,70 @@ class Run:
     #: What the step before decided, for a step that acts on it — one whose
     #: `decided_by:` names that step. Empty for every other step.
     carried: str = ""
+    #: Which phase the run is in. One until a flow's phases go round; the
+    #: steps before them are in the first, and the steps after them in the last.
+    phase: int = 1
+    #: Where this phase started, as a place in the flow — `back` from there
+    #: goes to the end of the phase before. -1 until a phase has started.
+    entered: int = -1
+    #: Every round each step has had in this run, oldest first, by what it is
+    #: counted as — see `counted_as`.
+    rounds: Mapping[str, tuple[Round, ...]] = field(default_factory=dict)
+    #: For a run stopped at the end of a phase, with the next one made ready:
+    #: the place leaving the phases would take it instead. -1 for any other
+    #: stop, and gone as soon as the run moves — a button left on an old card
+    #: then finds nothing to leave.
+    leaving: int = -1
 
-    def held(self, why: str) -> Run:
+    def held(self, why: str, *, leaving: int = -1) -> Run:
         """The same run, stopped for this reason.
 
         The seat it last dealt with is kept: what it carries on with, if
         somebody sends the step it stopped before, is that seat's reply.
         """
-        return replace(self, waiting=False, stopped=why)
+        return replace(self, waiting=False, stopped=why, leaving=leaving)
 
     def waiting_on(self, label: str) -> Run:
         """The same run, its step delivered and that seat's reply awaited."""
-        return replace(self, waiting=True, waiting_for=label, stopped="", back=False)
+        return replace(self, waiting=True, waiting_for=label, stopped="", back=False, leaving=-1)
 
-    def at(self, step: int, *, back: bool = False, carried: str = "") -> Run:
+    def at(
+        self,
+        step: int,
+        *,
+        back: bool = False,
+        carried: str = "",
+        phase: int | None = None,
+        entered: int | None = None,
+    ) -> Run:
         """The same run, moved to a step that has not been delivered yet.
 
         The seat it last heard from stays: that reply is what the step carries,
         whether it goes now or after a stop somebody sends it on from.
         """
-        return replace(self, step=step, back=back, carried=carried, waiting=False, stopped="")
+        return replace(
+            self,
+            step=step,
+            back=back,
+            carried=carried,
+            waiting=False,
+            stopped="",
+            phase=self.phase if phase is None else phase,
+            entered=self.entered if entered is None else entered,
+            leaving=-1,
+        )
+
+    def taken(self) -> dict[str, int]:
+        """How many rounds each step has had in this run, by what it is counted as."""
+        return {key: len(rounds) for key, rounds in self.rounds.items()}
+
+
+def counted_as(name: str, place: int, *, phase: int, stretch: tuple[int, int] | None) -> str:
+    """What a step's rounds are counted under: its name, and inside a flow's
+    phases its phase as well — `discover@2`."""
+    if stretch is not None and stretch[0] <= place <= stretch[1]:
+        return f"{name}@{phase}"
+    return name
 
 
 def _load(where: Path) -> dict:
@@ -82,6 +147,24 @@ def _load(where: Path) -> dict:
         logger.warning("Could not read %s: %s", where, unreadable)
         return {}
     return loaded if isinstance(loaded, dict) else {}
+
+
+def _rounds_from(value: object) -> dict[str, tuple[Round, ...]]:
+    found: dict[str, tuple[Round, ...]] = {}
+    for key, entries in value.items() if isinstance(value, dict) else ():
+        kept: list[Round] = []
+        for entry in entries if isinstance(entries, list) else []:
+            if not isinstance(entry, dict):
+                continue
+            try:
+                at = datetime.fromisoformat(str(entry.get("at")))
+            except (TypeError, ValueError):
+                continue
+            kept.append(
+                Round(at=at if at.tzinfo else at.replace(tzinfo=UTC), to=str(entry.get("to") or ""))
+            )
+        found[str(key)] = tuple(kept)
+    return found
 
 
 def current(where: Path, work: str) -> Run | None:
@@ -97,6 +180,9 @@ def current(where: Path, work: str) -> Run | None:
     if not workflow:
         return None
     thread = entry.get("thread")
+    phase = entry.get("phase")
+    entered = entry.get("entered")
+    leaving = entry.get("leaving")
     return Run(
         workflow=workflow,
         step=int(entry.get("step") or 0),
@@ -109,11 +195,15 @@ def current(where: Path, work: str) -> Run | None:
         stopped=str(entry.get("stopped") or ""),
         by=str(entry.get("by") or ""),
         carried=str(entry.get("carried") or ""),
+        phase=phase if isinstance(phase, int) and phase >= 1 else 1,
+        entered=entered if isinstance(entered, int) else -1,
+        rounds=_rounds_from(entry.get("rounds")),
+        leaving=leaving if isinstance(leaving, int) else -1,
     )
 
 
 def save(where: Path, work: str, run: Run) -> None:
-    """Write where the run has got to. Best-effort, as `rounds.record` is."""
+    """Write where the run has got to. Best-effort, as `last_said` is."""
     noted = _load(where)
     noted[work] = {
         "workflow": run.workflow,
@@ -127,6 +217,13 @@ def save(where: Path, work: str, run: Run) -> None:
         "stopped": run.stopped,
         "by": run.by,
         "carried": run.carried,
+        "phase": run.phase,
+        "entered": run.entered,
+        "leaving": run.leaving,
+        "rounds": {
+            key: [{"at": entry.at.isoformat(), "to": entry.to} for entry in entries]
+            for key, entries in run.rounds.items()
+        },
     }
     if len(noted) > WORKS:
         noted = dict(
@@ -135,6 +232,22 @@ def save(where: Path, work: str, run: Run) -> None:
             ]
         )
     _write(where, noted)
+
+
+def record(where: Path, work: str, key: str, *, to: str, now: datetime | None = None) -> int:
+    """Note that a step reached its seat, and say which round it was.
+
+    Written into the run as it is now, rather than the one the step was sent
+    from: the seat can take the message after the run has been saved again.
+    Nothing is counted for a run that is gone — somebody stopped it while its
+    step was on its way, and there is nothing left to count against.
+    """
+    run = current(where, work)
+    if run is None:
+        return 0
+    entries = (*run.rounds.get(key, ()), Round(at=now or datetime.now(UTC), to=to))
+    save(where, work, replace(run, rounds={**run.rounds, key: entries}))
+    return len(entries)
 
 
 def clear(where: Path, work: str) -> None:

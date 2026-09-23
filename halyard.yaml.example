@@ -168,8 +168,10 @@ projects:
     #   reviewed: {to: navigator}        # the reply alone, with no prompt of its own
     #   review:
     #     prompt: NOTES/halyard/handoffs/review.md
-    #     followup_prompt: NOTES/halyard/handoffs/review-followup.md   # rounds after the first
+    #     followup_prompt: NOTES/halyard/handoffs/review-followup.md   # a workflow step's round 2 on
     #     to: reviewer
+    #   driver_discover: {prompt: NOTES/halyard/handoffs/forward.md, to: driver}
+    #   driver_develop: {prompt: NOTES/halyard/handoffs/forward.md, to: driver}
     #   discover_completed:
     #     prompt: NOTES/halyard/handoffs/discovery.md
     #     checks: [proof, destructive]
@@ -181,15 +183,22 @@ projects:
     #     to: navigator
     # Workflows take those handoffs in an order, each step to a seat, and go on by
     # the last line of each reply: forward, back or wait. A step goes once unless
-    # `rounds:` says more. See docs/workflows.md.
+    # `rounds:` says more. A list inside a workflow is its phases: the steps a plan
+    # in parts goes through once per part, whose last step says `next` for another
+    # phase — or `next develop` to start it further on — and `forward` to leave
+    # them. See docs/workflows.md.
     # workflows:
-    #   decisions: {forward: forward, back: back, wait: wait}   # the defaults; rename any
+    #   decisions: {forward: forward, back: back, wait: wait, next: next}   # the defaults
+    #   phases: 3                        # how many phases go before it stops and asks
     #   steps:
     #     review: {seat: reviewer, rounds: 2}
     #     reviewed: {seat: navigator, decided_by: review, rounds: 2}
-    #     discovered: {handoff: discover_completed, seat: navigator}
+    #     discover: {handoff: driver_discover, seat: driver, rounds: 2}
+    #     discovered: {handoff: discover_completed, seat: navigator, rounds: 2}
+    #     develop: {handoff: driver_develop, seat: driver}
+    #     verified: {handoff: reviewed, seat: navigator}
     #     close: {seat: navigator}
-    #   level3: [review, reviewed, discovered, close]
+    #   level3: [review, reviewed, [discover, discovered, develop, verified], close]
     # Groups of task labels. The first one the task carries from each group
     # goes on the envelope checks and handoffs are given, as `level: level::3`.
     # Nothing is required or refused: a task with none of them adds nothing.

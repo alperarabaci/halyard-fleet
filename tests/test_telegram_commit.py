@@ -856,9 +856,10 @@ async def reviewed(channel) -> None:
     await settled(channel)
 
 
-async def test_a_handoff_counts_its_rounds_for_the_work_item(tmp_path: Path, wired) -> None:
-    """The branch is 281-…, so both presses are rounds of alpha-engine#281's
-    review: the first with the review text, the second with the followup."""
+async def test_a_handoff_pressed_by_hand_counts_no_rounds(tmp_path: Path, wired) -> None:
+    """Rounds are a workflow's. Pressed twice by hand, a handoff sends its own
+    prompt twice and says no round: a `1/2` where there is no second step would
+    be a workflow's word where there is no workflow."""
     channel, api, runner, repo = wired
     review = {
         "prompt": Path("NOTES/review.md"),
@@ -872,50 +873,10 @@ async def test_a_handoff_counts_its_rounds_for_the_work_item(tmp_path: Path, wir
     await reviewed(channel)
 
     first, second = (text for _, text in runner.sent)
-    assert "- Round: 1/2" in first and "try to break it" in first
-    assert "- Round: 2/2" in second and "Only the earlier BLOCKERs." in second
-    assert "try to break it" not in second
-    assert any("(round 2/2)" in sent["text"] for sent in api.sent)
-
-
-async def test_the_second_round_carries_the_reviewers_answer_to_the_first(
-    tmp_path: Path, wired
-) -> None:
-    from datetime import UTC, datetime
-
-    from halyard.channels.telegram.adapter import SAID_FILE
-    from halyard.core import last_said
-
-    channel, _, runner, repo = wired
-    handoffs_in(channel, repo, tmp_path, runner, review=TO_THE_REVIEWER)
-
-    await reviewed(channel)
-    last_said.remember(
-        channel._kept("-100888", SAID_FILE),
-        chat_id="-100888",
-        text="BLOCKER: the loader skips a row.",
-        now=datetime.now(UTC) + timedelta(minutes=2),
-    )
-    await reviewed(channel)
-
-    second = runner.sent[-1][1]
-    assert "xrev (reviewer)'s answer to round 1:" in second
-    assert "BLOCKER: the loader skips a row." in second
-
-
-async def test_a_round_that_reached_nobody_is_not_counted(tmp_path: Path, wired) -> None:
-    """Pressing again after a message went nowhere is the same round, not the
-    next — otherwise a followup goes to a seat that never saw the first."""
-    channel, _, runner, repo = wired
-    handoffs_in(channel, repo, tmp_path, runner, review=TO_THE_REVIEWER)
-    runner.accepting = False
-
-    await reviewed(channel)
-    runner.accepting = True
-    await reviewed(channel)
-
-    assert len(runner.sent) == 2
-    assert all("- Round: 1/2" in text for _, text in runner.sent)
+    assert "try to break it" in first and "try to break it" in second
+    assert "Only the earlier BLOCKERs." not in second
+    assert not any("Round:" in text for _, text in runner.sent)
+    assert not any("(round" in sent["text"] for sent in api.sent)
 
 
 # --- /workflow: the handoffs taken in the order the project wrote them down ---
@@ -930,8 +891,11 @@ def flow_in(
     flows: dict,
     steps: dict,
     decisions: dict | None = None,
+    stretches: dict | None = None,
+    phases: int = 3,
 ) -> None:
-    """Two handoffs, the steps a flow takes them in, and any words of its own."""
+    """Two handoffs, the steps a flow takes them in, and any words and phases
+    of its own."""
     from halyard.core.config_file import Decisions, Step, Workflows
 
     handoffs_in(
@@ -949,6 +913,8 @@ def flow_in(
             steps={name: Step(name=name, **spec) for name, spec in steps.items()},
             decisions=Decisions(**(decisions or {})),
             flows={name: tuple(order) for name, order in flows.items()},
+            stretches=stretches or {},
+            phases=phases,
         ),
     )
 
@@ -1271,6 +1237,217 @@ async def test_a_review_that_says_wait_stops_before_the_navigator(tmp_path: Path
     assert "The scope needs a decision." in text, "it carries the reviewer's reply"
     assert "Already decided" not in text
     assert "- Decide on your last line: forward" in text
+
+
+async def test_a_step_sent_back_carries_its_seat_s_answer_to_the_round_before(
+    tmp_path: Path, wired
+) -> None:
+    """The lesson of alpha-engine#361: a reviewer asked again is shown what it
+    said, rather than finding something new every time."""
+    channel, _, runner, repo = wired
+    flow_in(channel, repo, tmp_path, runner, **TWO_STEPS)
+    await started(channel)
+    await answered(channel, "xrev", "BLOCKER: the loader skips a row.\nDECISION: forward")
+
+    await answered(channel, "nav", "Look at it again.\nDECISION: back")
+
+    session, text = runner.sent[-1]
+    assert session == "id-rev"
+    assert "- Round: 2/2" in text
+    assert "answer to round 1:" in text
+    assert "BLOCKER: the loader skips a row." in text
+
+
+async def test_a_step_that_reached_nobody_counts_no_round(tmp_path: Path, wired) -> None:
+    """Sending it again is the same round, not the next — otherwise a followup
+    goes to a seat that never saw the first."""
+    from halyard import workflows as flowing
+    from halyard.channels.telegram.adapter import WORKFLOW_FILE
+
+    channel, _, runner, repo = wired
+    flow_in(channel, repo, tmp_path, runner, **TWO_STEPS)
+    runner.accepting = False
+
+    await started(channel)
+
+    work = await channel._work_item(channel._repositories["alpha-engine"])
+    run = flowing.current(channel._kept_for("alpha-engine", WORKFLOW_FILE), work)
+    assert run is not None
+    assert run.taken() == {}
+
+
+async def test_a_stopped_run_is_steered_from_a_picked_step_with_its_rounds_kept(
+    tmp_path: Path, wired
+) -> None:
+    """Picking the step keeps the work in the run: a loop it stopped in is not
+    reset by a tap."""
+    channel, api, runner, repo = wired
+    flow_in(channel, repo, tmp_path, runner, **capped())
+    await started(channel)
+    await answered(channel, "xrev", "DECISION: forward")
+    await answered(channel, "nav", "DECISION: back")
+    keys = [key["text"] for row in api.sent[-1]["reply_markup"]["inline_keyboard"] for key in row]
+    assert "🧭 Pick a step" in keys
+
+    await channel._handle_callback(pressed_handoff("flowpick", "level3"))
+    await settled(channel)
+    offered = api.sent[-1]["reply_markup"]["inline_keyboard"][0]
+    assert [key["text"] for key in offered] == ["1 · review", "2 · to_nav"]
+    await channel._handle_callback(pressed_handoff("flowat", "level3>0"))
+    await settled(channel)
+
+    session, text = runner.sent[-1]
+    assert session == "id-rev"
+    assert "- Round: 2/1" in text, "the round it was stopped before, not a fresh first"
+
+
+#: The same two seats as one phase: the reviewer, then the navigator deciding
+#: whether another part of the plan comes next.
+PHASED = {
+    "flows": {"level3": ["review", "to_nav"]},
+    "steps": {
+        "review": {"handoff": "review", "seat": "xrev", "rounds": 2},
+        "to_nav": {"handoff": "to_nav", "seat": "nav"},
+    },
+    "stretches": {"level3": (0, 1)},
+}
+
+
+async def test_next_starts_the_next_phase_and_says_so(tmp_path: Path, wired) -> None:
+    channel, api, runner, repo = wired
+    flow_in(channel, repo, tmp_path, runner, **PHASED)
+    await started(channel)
+    await answered(channel, "xrev", "DECISION: forward")
+
+    await answered(channel, "nav", "Part one is in.\nDECISION: next")
+
+    session, text = runner.sent[-1]
+    assert session == "id-rev"
+    assert "- Phase: 2" in text
+    assert "- Round: 1/2" in text, "the second phase's review is its first round"
+    assert "Part one is in." in text
+    assert any("phase 2 starts at <b>review</b>" in sent["text"] for sent in api.sent)
+
+
+async def test_next_naming_a_step_further_on_is_marked_in_the_chat(tmp_path: Path, wired) -> None:
+    """Leaving the usual path is something whoever reads the chat should see."""
+    channel, api, runner, repo = wired
+    flow_in(channel, repo, tmp_path, runner, **PHASED)
+    await started(channel)
+    await answered(channel, "xrev", "DECISION: forward")
+
+    await answered(channel, "nav", "Only a proposal this time.\nDECISION: next to_nav")
+
+    assert runner.sent[-1][0] == "id-nav"
+    assert "- Phase: 2" in runner.sent[-1][1]
+    marked = [sent["text"] for sent in api.sent if sent["text"].startswith("↪️")]
+    assert marked and "skipping review" in marked[0]
+
+
+async def test_a_phase_that_ends_undecided_offers_the_next_one_or_the_way_out(
+    tmp_path: Path, wired
+) -> None:
+    channel, api, runner, repo = wired
+    flow_in(channel, repo, tmp_path, runner, **PHASED)
+    await started(channel)
+    await answered(channel, "xrev", "DECISION: forward")
+
+    await answered(channel, "nav", "Part one is in.")
+
+    assert len(runner.sent) == 2, "nothing went while nobody decided"
+    stopped = api.sent[-1]
+    assert "phase 1 ended with no decision" in stopped["text"]
+    keys = [key["text"] for row in stopped["reply_markup"]["inline_keyboard"] for key in row]
+    assert keys == [
+        "↻ Phase 2 at review",
+        "⏭ On to the end",
+        "🧭 Pick a step",
+        "⏹ Stop the workflow",
+    ]
+
+    await channel._handle_callback(pressed_handoff("flowgo", "level3"))
+    await settled(channel)
+
+    assert runner.sent[-1][0] == "id-rev"
+    assert "- Phase: 2" in runner.sent[-1][1]
+
+
+async def test_leaving_the_phases_from_the_card_goes_on_past_them(tmp_path: Path, wired) -> None:
+    channel, api, runner, repo = wired
+    flow_in(channel, repo, tmp_path, runner, **PHASED)
+    await started(channel)
+    await answered(channel, "xrev", "DECISION: forward")
+    await answered(channel, "nav", "Part one is in.")
+
+    await channel._handle_callback(pressed_handoff("flowon", "level3"))
+    await settled(channel)
+
+    assert len(runner.sent) == 2
+    assert any("through its last step" in sent["text"] for sent in api.sent)
+
+
+async def test_leaving_from_an_old_card_moves_nothing_once_the_run_went_on(
+    tmp_path: Path, wired
+) -> None:
+    """Telegram keeps every button pressable. The way out of a phase belongs to
+    the stop that offered it, not to whatever the run is doing by then."""
+    channel, api, runner, repo = wired
+    flow_in(channel, repo, tmp_path, runner, **PHASED)
+    await started(channel)
+    await answered(channel, "xrev", "DECISION: forward")
+    await answered(channel, "nav", "Part one is in.")
+    await channel._handle_callback(pressed_handoff("flowgo", "level3"))
+    await settled(channel)
+    await answered(channel, "xrev", "The scope needs a decision.\nDECISION: wait")
+    sent = len(runner.sent)
+
+    await channel._handle_callback(pressed_handoff("flowon", "level3"))
+    await settled(channel)
+
+    assert len(runner.sent) == sent
+    assert not any("through its last step" in message["text"] for message in api.sent)
+    assert "to_nav · phase 2 — it was asked to wait" in api.sent[-1]["text"]
+
+
+async def test_the_phases_stop_past_their_count_and_can_be_sent_anyway(
+    tmp_path: Path, wired
+) -> None:
+    channel, api, runner, repo = wired
+    flow_in(channel, repo, tmp_path, runner, **PHASED, phases=1)
+    await started(channel)
+    await answered(channel, "xrev", "DECISION: forward")
+
+    await answered(channel, "nav", "DECISION: next")
+
+    assert len(runner.sent) == 2
+    keys = [key["text"] for key in api.sent[-1]["reply_markup"]["inline_keyboard"][0]]
+    assert keys == ["↻ Phase 2 at review anyway", "⏭ On to the end"]
+
+
+async def test_a_step_of_the_phases_can_be_started_in_the_phase_it_names(
+    tmp_path: Path, wired
+) -> None:
+    """Work that went through its first phase by hand joins the run where it is."""
+    channel, _, runner, repo = wired
+    flow_in(channel, repo, tmp_path, runner, **PHASED)
+
+    await channel._run_workflow("level3 to_nav phase 2", CHAT, None, f"tg:{APPROVER}")
+    await settled(channel)
+
+    session, text = runner.sent[-1]
+    assert session == "id-nav"
+    assert "- Phase: 2" in text
+
+
+async def test_a_step_outside_the_phases_has_no_phase_to_start_in(tmp_path: Path, wired) -> None:
+    channel, api, runner, repo = wired
+    flow_in(channel, repo, tmp_path, runner, **{**PHASED, "stretches": {"level3": (1, 1)}})
+
+    await channel._run_workflow("level3 review phase 2", CHAT, None, f"tg:{APPROVER}")
+    await settled(channel)
+
+    assert runner.sent == []
+    assert "no phase to start in" in api.sent[-1]["text"]
 
 
 async def test_a_handoff_runs_its_checks_before_it_goes(tmp_path: Path, wired) -> None:

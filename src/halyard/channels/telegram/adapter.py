@@ -210,12 +210,11 @@ LABELS_TIMEOUT_SECONDS = 10.0
 #: suites are for `/command`, which reports when it is done.
 HANDOFF_COMMAND_TIMEOUT_SECONDS = 600.0
 
-#: What each chat last heard, each chat's last answer per check, and how many
-#: times each handoff has gone for a piece of work. Kept per project — see
+#: What each chat last heard, each chat's last answer per check, and where each
+#: piece of work's workflow has got to, with its rounds. Kept per project — see
 #: `_kept`.
 SAID_FILE = "last-said.json"
 RESULTS_FILE = "check-results.json"
-ROUNDS_FILE = "handoff-rounds.json"
 WORKFLOW_FILE = "workflow-runs.json"
 
 
@@ -302,6 +301,16 @@ class _Asked:
 
 
 @dataclass(frozen=True)
+class StepRounds:
+    """A workflow step's rounds: the ones it has had, how many it may, and how
+    to count the one on its way once the seat takes it."""
+
+    before: tuple[flowing.Round, ...]
+    allowed: int
+    count: Callable[[str], Awaitable[int]]
+
+
+@dataclass(frozen=True)
 class _SessionTarget:
     """A resolved session together with the runtime that owns it.
 
@@ -314,6 +323,19 @@ class _SessionTarget:
     project: str
     cwd: str | None
     runner: AgentRunner
+
+
+def _phase_named(typed: str) -> tuple[int | None, str]:
+    """`phase 2` at the start of what followed a step's name, and the rest.
+
+    Only a whole number of at least one reads as a phase; anything else is the
+    note it always was.
+    """
+    word, _, rest = typed.strip().partition(" ")
+    number, _, after = rest.strip().partition(" ")
+    if word.casefold() == "phase" and number.isdigit() and int(number) >= 1:
+        return int(number), after.strip()
+    return None, typed
 
 
 def parse_destination(value: str | None) -> tuple[str, int | None] | None:
@@ -2828,7 +2850,7 @@ class TelegramChannel:
         elif kind == cards.PICKED_FOR_COMMAND:
             await self._run_command(name, chat_id, thread_id)
         elif kind == cards.PICKED_FOR_WORKFLOW:
-            await self._resume_workflow(True, chat_id, thread_id)
+            await self._resume_workflow("go", chat_id, thread_id)
 
     async def _task_labels(self, found: Project) -> dict[str, str]:
         """The task's labels from this project's own groups, for the envelope.
@@ -2908,7 +2930,7 @@ class TelegramChannel:
         named = [seat for seat in mine if seat.label.casefold() == to.casefold()]
         return named or [seat for seat in mine if seat.role and seat.role.value == to.casefold()]
 
-    def _answer_since(self, last: rounds.Round, number: int) -> handing.Previous:
+    def _answer_since(self, last: flowing.Round, number: int) -> handing.Previous:
         """What the seat the last round went to has said since it got there.
 
         Read from what that seat's chat last heard, and only if it came after
@@ -3045,12 +3067,13 @@ class TelegramChannel:
         actor: str,
         sender: str,
         extra: Sequence[str] = (),
-        expected: int = rounds.EXPECTED,
         lead: str = "",
         buttons: dict | None = None,
         command_lines: Mapping[str, str] | None = None,
+        counted: StepRounds | None = None,
     ) -> None:
-        """Make one handoff: count the round, say so, run it, deliver it.
+        """Make one handoff: say so, run it, deliver it — and count the round
+        when it is a workflow's step.
 
         What `/handoff` and a workflow's step have in common — everything above
         this chose *which* handoff goes where, and this is the making of it.
@@ -3058,6 +3081,8 @@ class TelegramChannel:
         of the line in the chat and `buttons` under it, which is how a step says
         which flow it belongs to and offers to stop it. `command_lines` are its
         commands as they run, with any task label in them — see `_command_lines`.
+        `counted` is the step's rounds so far and how to count this one; a
+        handoff pressed by hand has none, and says no round.
         """
         # One at a time per project, as for `/command`: two `make` runs in one
         # directory fight over the same outputs, and the second one's failure
@@ -3072,26 +3097,21 @@ class TelegramChannel:
             )
             return
 
-        # Which time this goes for the work the branch is on, this one included.
-        # Counted when it reaches the seat rather than here: a press that went
-        # nowhere is the same round when it is pressed again.
-        tally = self._kept_for(found.name, ROUNDS_FILE)
-        work = await self._work_item(found)
-        done = await asyncio.to_thread(rounds.taken, tally, work, name) if tally and work else None
+        # Which round of its step this is, this one included — a workflow's
+        # question only. Counted when it reaches the seat rather than here: a
+        # step that went nowhere is the same round when it is sent again.
+        done = counted.before if counted is not None else None
         number = len(done) + 1 if done is not None else None
+        expected = counted.allowed if counted is not None else None
         previous = self._answer_since(done[-1], number) if done and number else None
 
         async def reached() -> None:
             """The round counts: the seat's session took the message."""
-            if tally is None or work is None:
+            if counted is None:
                 return
-            counted = await asyncio.to_thread(rounds.record, tally, work, name, to=seat.label)
+            which = await counted.count(seat.label)
             logger.info(
-                "Round %s of %s for %s reached %s",
-                rounds.shown(counted, expected),
-                name,
-                work,
-                seat.label,
+                "Round %s of %s reached %s", rounds.shown(which, expected), name, seat.label
             )
 
         steps = [
@@ -3099,7 +3119,7 @@ class TelegramChannel:
             *([f"checking {', '.join(handoff.checks)}"] if handoff.checks else []),
         ]
         first = f", {' then '.join(steps)} first" if steps else ""
-        which = f" (round {rounds.shown(number, expected)})" if number else ""
+        which = f" (round {rounds.shown(number, expected)})" if number and number > 1 else ""
         await self._say(
             f"{lead}\U0001f91d <b>{html.escape(name)}</b>{which} → "
             f"<b>{html.escape(_seat_name(seat))}</b>{html.escape(first)}…",
@@ -3177,9 +3197,15 @@ class TelegramChannel:
         The shape `/handoff` has: a button per workflow, then a button per step
         of the one pressed, and it starts at the step pressed — the work is
         often past the first one already. `/workflow level3 review` starts
-        there outright, with whatever follows as a note. With a run already
-        going it says where that is instead — one working tree, one branch,
-        one flow through it at a time.
+        there outright, with whatever follows as a note, and `/workflow level3
+        applied phase 2` starts a step of the phases in the phase it names.
+        With a run already going it says where that is instead — one working
+        tree, one branch, one flow through it at a time.
+
+        A run that stopped is not left behind by this: naming a step of the
+        same workflow sends the stopped run on from there, its rounds and its
+        phase kept, which is how somebody steers a run without taking the work
+        out of it. Stopping it with the button is what starts afresh.
         """
         found = self._repository_for(chat_id)
         if found is None:
@@ -3243,7 +3269,9 @@ class TelegramChannel:
             return
 
         flow = flows[name]
+        stretch = found.workflows.stretches.get(name)
         at, _, note = rest.strip().partition(" ")
+        phase, note = _phase_named(note)
         if start is None and at:
             places = (i for i, step in enumerate(flow) if step.casefold() == at.casefold())
             start = next(places, None)
@@ -3261,12 +3289,28 @@ class TelegramChannel:
                 reply_markup=cards.workflow_steps(name, flow),
             )
             return
+        inside = stretch is not None and stretch[0] <= start <= stretch[1]
+        if phase is not None and not inside:
+            await self._say(
+                f"<b>{html.escape(flow[start])}</b> is not one of <b>{html.escape(name)}</b>'s "
+                "phase steps, so it has no phase to start in.",
+                chat_id,
+                thread_id,
+            )
+            return
 
-        kept_said = self._kept(chat_id, SAID_FILE)
-        await self._take_step(
-            found,
-            work,
-            flowing.Run(
+        continuing = run is not None and run.workflow == name
+        if continuing:
+            # Steered, not restarted: the rounds it has had and the phase it is
+            # in stay, so a loop it was stopped in cannot be reset by a tap.
+            assert run is not None
+            going = run.at(
+                start,
+                phase=phase,
+                entered=start if phase is not None or (inside and run.entered < 0) else None,
+            )
+        else:
+            going = flowing.Run(
                 workflow=name,
                 step=start,
                 since=self._clock(),
@@ -3274,7 +3318,14 @@ class TelegramChannel:
                 thread=thread_id,
                 waiting=False,
                 by=actor,
-            ),
+                phase=phase or 1,
+                entered=start if inside else -1,
+            )
+        kept_said = self._kept(chat_id, SAID_FILE)
+        await self._take_step(
+            found,
+            work,
+            going,
             last_said.last(kept_said, chat_id) if kept_said else None,
             _seat_name(for_chat(self._seats, chat_id)) or "this chat",
             note=note.strip(),
@@ -3286,7 +3337,7 @@ class TelegramChannel:
         step = flow[run.step] if run.step < len(flow) else "the end"
         where = (
             f"<b>{html.escape(run.workflow)}</b> {min(run.step + 1, len(flow))}/{len(flow)} · "
-            f"{html.escape(step)}"
+            f"{html.escape(step)}{self._phase_of(found, run)}"
         )
         if run.waiting:
             return f"▶️ {where} — waiting for <b>{html.escape(run.waiting_for)}</b>."
@@ -3339,16 +3390,17 @@ class TelegramChannel:
                 workflow=run.workflow,
                 lead=(
                     f"⏸ <b>{html.escape(run.workflow)}</b> {run.step + 1}/{len(flow)} · "
-                    f"{html.escape(step.name)} — "
+                    f"{html.escape(step.name)}{self._phase_of(found, run)} — "
                 ),
             )
             return
 
-        tally = self._kept_for(found.name, ROUNDS_FILE)
-        taken = dict(await asyncio.to_thread(rounds.counts, tally, work)) if tally else {}
+        stretch = found.workflows.stretches.get(run.workflow)
+        key = flowing.counted_as(step.name, run.step, phase=run.phase, stretch=stretch)
         # This step's own round is counted when it arrives, and what the
         # envelope says about the steps after it is said as of then.
-        taken[step.handoff] = taken.get(step.handoff, 0) + 1
+        taken = run.taken()
+        taken[key] = taken.get(key, 0) + 1
         when = f" at {_local(said.at).strftime('%H:%M')}" if said else ""
         extra = flowing.lines_for(
             run,
@@ -3358,17 +3410,24 @@ class TelegramChannel:
             seats=self._step_seats(found, flow),
             words=found.workflows.decisions,
             sent_back_by=f"{sender}{when}" if run.back else "",
+            stretch=stretch,
+            most=found.workflows.phases,
         )
         await asyncio.to_thread(flowing.save, kept, work, run.waiting_on(seat.label))
         logger.info(
-            "Workflow %s step %d/%d for %s: %s → %s",
+            "Workflow %s step %d/%d (phase %d) for %s: %s → %s",
             run.workflow,
             run.step + 1,
             len(flow),
+            run.phase,
             work,
             step.name,
             seat.label,
         )
+
+        async def count(label: str) -> int:
+            return await asyncio.to_thread(flowing.record, kept, work, key, to=label)
+
         await self._hand_off_once(
             found,
             step.handoff,
@@ -3381,11 +3440,22 @@ class TelegramChannel:
             actor=run.by or "workflow",
             sender=sender,
             extra=extra,
-            expected=step.rounds,
-            lead=f"<b>{html.escape(run.workflow)}</b> {run.step + 1}/{len(flow)} · ",
+            lead=(
+                f"<b>{html.escape(run.workflow)}</b> {run.step + 1}/{len(flow)}"
+                f"{self._phase_of(found, run)} · "
+            ),
             buttons=cards.workflow_keyboard(run.workflow),
             command_lines=lines.lines,
+            counted=StepRounds(before=run.rounds.get(key, ()), allowed=step.rounds, count=count),
         )
+
+    @staticmethod
+    def _phase_of(found: Project, run: flowing.Run) -> str:
+        """` · phase 2` for a run on a step of its flow's phases; nothing otherwise."""
+        stretch = found.workflows.stretches.get(run.workflow)
+        if stretch is None or not stretch[0] <= run.step <= stretch[1]:
+            return ""
+        return f" · phase {run.phase}"
 
     def _step_seats(self, found: Project, flow: Sequence[str]) -> dict[str, str]:
         """The seat each step of a flow goes to, by label, for the envelope to
@@ -3403,9 +3473,22 @@ class TelegramChannel:
         return named
 
     async def _stopped(
-        self, found: Project, work: str, run: flowing.Run, *, go: bool = False
+        self,
+        found: Project,
+        work: str,
+        run: flowing.Run,
+        *,
+        go: bool = False,
+        go_text: str = "",
+        on: str = "",
     ) -> None:
-        """Keep a run that is not going on, and say so where it was started."""
+        """Keep a run that is not going on, and say so where it was started.
+
+        The card keeps the work in the run: send what is ready, leave the
+        phases (`on` names where to), pick the step to go on from, or stop it.
+        Taking it by hand would take it out of the run, and nothing asked for
+        that.
+        """
         kept = self._kept_for(found.name, WORKFLOW_FILE)
         if kept is not None:
             await asyncio.to_thread(flowing.save, kept, work, run)
@@ -3414,7 +3497,9 @@ class TelegramChannel:
             self._where_the_run_is(found, run),
             run.chat,
             run.thread,
-            reply_markup=cards.workflow_keyboard(run.workflow, go=go),
+            reply_markup=cards.workflow_keyboard(
+                run.workflow, go=go, go_text=go_text, on=on, pick=True
+            ),
         )
 
     async def _advance_workflow(self, answered: Seat, text: str) -> None:
@@ -3438,21 +3523,28 @@ class TelegramChannel:
             return
 
         flow = found.workflows.flows.get(run.workflow) or ()
-        tally = self._kept_for(found.name, ROUNDS_FILE)
-        taken = await asyncio.to_thread(rounds.counts, tally, work) if tally else {}
-        decision = flowing.read(text, found.workflows.decisions)
+        stretch = found.workflows.stretches.get(run.workflow)
+        decision, named = flowing.decided(text, found.workflows.decisions)
         moving = flowing.after(
-            decision, run=run, flow=flow, steps=found.workflows.steps, taken=taken
+            decision,
+            run=run,
+            flow=flow,
+            steps=found.workflows.steps,
+            taken=run.taken(),
+            stretch=stretch,
+            most=found.workflows.phases,
+            named=named,
         )
         logger.info(
-            "Workflow %s for %s: %s decided %s, acting on %s",
+            "Workflow %s for %s: %s decided %s%s, acting on %s",
             run.workflow,
             work,
             answered.label,
             decision or "nothing",
+            f" {named}" if named else "",
             moving.decided or "nothing",
         )
-        if decision is None:
+        if decision is None and moving.leaving is None:
             # Said rather than done quietly: a flow that moves on a reply
             # nobody wrote a decision into is a step somebody should see taken.
             here = found.workflows.steps.get(flow[run.step]) if run.step < len(flow) else None
@@ -3485,26 +3577,78 @@ class TelegramChannel:
                 # decision carried: the wait was the decision, and it is spent.
                 target = run.step + 1
             parked = (
-                run.at(target, back=moving.back, carried=str(moving.carried or ""))
+                run.at(
+                    target,
+                    back=moving.back,
+                    carried=str(moving.carried or ""),
+                    phase=moving.phase,
+                    entered=moving.entered,
+                )
                 if target is not None
                 else run
             )
-            await self._stopped(found, work, parked.held(moving.stop), go=target is not None)
+            go_text = ""
+            if target is not None and moving.phase is not None and moving.phase > run.phase:
+                past = " anyway" if moving.phase > found.workflows.phases else ""
+                go_text = f"↻ Phase {moving.phase} at {flow[target]}{past}"
+            on = ""
+            if moving.leaving is not None:
+                on = flow[moving.leaving] if moving.leaving < len(flow) else "the end"
+            await self._stopped(
+                found,
+                work,
+                parked.held(
+                    moving.stop, leaving=moving.leaving if moving.leaving is not None else -1
+                ),
+                go=target is not None,
+                go_text=go_text,
+                on=on,
+            )
             return
         if moving.step is None:
             return
+        if moving.phase is not None and moving.phase > run.phase:
+            await self._say(
+                self._phase_line(run.workflow, moving, flow, answered.label),
+                run.chat,
+                run.thread,
+            )
         where = parse_destination(answered.chat) or (self._chat_id, None)
         said_kept = self._kept_for(found.name, SAID_FILE)
         await self._take_step(
             found,
             work,
-            run.at(moving.step, back=moving.back, carried=str(moving.carried or "")),
+            run.at(
+                moving.step,
+                back=moving.back,
+                carried=str(moving.carried or ""),
+                phase=moving.phase,
+                entered=moving.entered,
+            ),
             last_said.last(said_kept, where[0]) if said_kept else None,
             _seat_name(answered),
         )
 
-    async def _resume_workflow(self, go: bool, chat_id: str, thread_id: int | None) -> None:
-        """The buttons on a run: send the step it stopped before, or stop it."""
+    @staticmethod
+    def _phase_line(workflow: str, moving: flowing.Next, flow: Sequence[str], by: str) -> str:
+        """The chat's line for a phase starting: plain when it starts where
+        phases start, and marked when a `next` named a step further on — the
+        run leaving its usual path is something whoever reads this should see.
+        """
+        assert moving.step is not None and moving.phase is not None
+        where = f"<b>{html.escape(flow[moving.step])}</b>"
+        if not moving.skipped:
+            return f"↻ <b>{html.escape(workflow)}</b> phase {moving.phase} starts at {where}."
+        return (
+            f"↪️ <b>{html.escape(workflow)}</b> phase {moving.phase} starts at {where}, "
+            f"skipping {html.escape(', '.join(moving.skipped))} — "
+            f"<b>{html.escape(by)}</b> named where to start."
+        )
+
+    async def _resume_workflow(self, action: str, chat_id: str, thread_id: int | None) -> None:
+        """The buttons on a run: send the step it stopped before (`go`), leave
+        its phases instead (`on`), offer its steps to go on from (`pick`), or
+        stop it (`stop`)."""
         found = self._repository_for(chat_id)
         if found is None:
             await self._say(self._no_repository(chat_id), chat_id, thread_id)
@@ -3515,7 +3659,7 @@ class TelegramChannel:
         if run is None or kept is None or work is None:
             await self._say("No workflow is going here.", chat_id, thread_id)
             return
-        if not go:
+        if action == "stop":
             await asyncio.to_thread(flowing.clear, kept, work)
             await self._say(
                 f"⏹ <b>{html.escape(run.workflow)}</b> stopped at step {run.step + 1}. "
@@ -3527,6 +3671,35 @@ class TelegramChannel:
         if run.waiting:
             await self._say(self._where_the_run_is(found, run), chat_id, thread_id)
             return
+        flow = found.workflows.flows.get(run.workflow) or ()
+        if action == "pick":
+            await self._say(
+                f"Send <b>{html.escape(run.workflow)}</b> on from which step"
+                f"{self._phase_of(found, run).replace(' · ', ', in ')}? Its rounds so far "
+                "are kept.",
+                chat_id,
+                thread_id,
+                reply_markup=cards.workflow_steps(run.workflow, flow),
+            )
+            return
+        if action == "on":
+            # Only from a stop at the end of a phase, which is the one that
+            # says where leaving goes. The run is parked at the next phase, so
+            # the phase it leaves in is the one before that. A button left on
+            # an older card finds nothing to leave: the run has moved since.
+            stretch = found.workflows.stretches.get(run.workflow)
+            if stretch is None or run.leaving < 0:
+                await self._say(self._where_the_run_is(found, run), chat_id, thread_id)
+                return
+            if run.leaving >= len(flow):
+                await asyncio.to_thread(flowing.clear, kept, work)
+                await self._say(
+                    f"✅ <b>{html.escape(run.workflow)}</b> is through its last step.",
+                    chat_id,
+                    thread_id,
+                )
+                return
+            run = run.at(run.leaving, phase=max(run.phase - 1, 1), entered=stretch[0])
         source = find(self._seats, run.waiting_for) if run.waiting_for else None
         where = (parse_destination(source.chat) if source and source.chat else None) or (
             run.chat,
@@ -4119,10 +4292,10 @@ class TelegramChannel:
                     "/pick",
                 )
                 return
-            if what in ("flowgo", "flowstop"):
+            if what in ("flowgo", "flowstop", "flowon", "flowpick"):
                 self._detach(
                     self._resume_workflow(
-                        what == "flowgo", here or "", message.get("message_thread_id")
+                        what.removeprefix("flow"), here or "", message.get("message_thread_id")
                     ),
                     "/workflow",
                 )

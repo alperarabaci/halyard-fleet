@@ -135,7 +135,7 @@ def with_followup(tmp_path: Path) -> Handoff:
 async def test_the_first_round_sends_the_prompt_and_says_which_round(tmp_path: Path) -> None:
     a_project(tmp_path)
 
-    _, delivery = await hand(tmp_path, with_followup(tmp_path), round_number=1)
+    _, delivery = await hand(tmp_path, with_followup(tmp_path), round_number=1, expected=2)
 
     [(_, text)] = delivery.sent
     assert "Try to break the prompt below." in text
@@ -150,7 +150,7 @@ async def test_every_round_after_the_first_sends_the_followup_in_its_place(
     everything afresh — which is how alpha-engine#361 went round three times."""
     a_project(tmp_path)
 
-    _, delivery = await hand(tmp_path, with_followup(tmp_path), round_number=3)
+    _, delivery = await hand(tmp_path, with_followup(tmp_path), round_number=3, expected=2)
 
     [(_, text)] = delivery.sent
     assert "Only the earlier BLOCKERs." in text
@@ -163,7 +163,7 @@ async def test_a_handoff_without_a_followup_sends_its_prompt_every_round(tmp_pat
     a_project(tmp_path)
     discovery = Handoff(name="discovery", prompt=Path("NOTES/discovery.md"))
 
-    _, delivery = await hand(tmp_path, discovery, round_number=2)
+    _, delivery = await hand(tmp_path, discovery, round_number=2, expected=2)
 
     [(_, text)] = delivery.sent
     assert "The message below is the driver's report." in text
