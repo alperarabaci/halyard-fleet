@@ -30,23 +30,32 @@ an answer that says one of them puts `halyard:<inspection>` on the task. The
 inspection decides, from the project's settings — whoever runs it has no say —
 so one in a handoff labels exactly as one run by hand. Halyard only adds.
 
-**Two ports, and no chat.** An inspection reaches a model through `Asker` and
-the task through `Labeller`, and knows nothing of Telegram, of any runtime or
-of any tracker. `halyard.handoffs` runs inspections; nothing here hands anything
-on. `tests/test_layering.py` keeps it that way.
+**Every run is kept.** What the model was given, word for word, and what it
+said, through `Keeper` into the table `record` writes — the one thing Halyard
+keeps the text of, so an inspection can be compared and run again later.
+
+**Three ports, and no chat.** An inspection reaches a model through `Asker`, the
+task through `Labeller` and its record through `Keeper`, and knows nothing of
+Telegram, of any runtime or of any tracker. `halyard.handoffs` runs
+inspections; nothing here hands anything on. `tests/test_layering.py` keeps it
+that way.
 """
 
-from halyard.inspections.spec import Answer, Asker, Labeller, StoppedError
+from halyard.inspections import record
+from halyard.inspections.spec import Answer, Asker, Keeper, Kept, Labeller, StoppedError
 from halyard.inspections.turn import finding, handed_on, prompt, run, unfenced
 
 __all__ = [
     "Answer",
     "Asker",
+    "Keeper",
+    "Kept",
     "Labeller",
     "StoppedError",
     "finding",
     "handed_on",
     "prompt",
+    "record",
     "run",
     "unfenced",
 ]

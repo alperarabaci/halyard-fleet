@@ -5,11 +5,13 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+import uuid
 from collections.abc import Sequence
+from datetime import UTC, datetime
 from pathlib import Path
 
 from halyard import frame
-from halyard.inspections.spec import Answer, Asker, Labeller, StoppedError
+from halyard.inspections.spec import Answer, Asker, Keeper, Kept, Labeller, StoppedError
 
 logger = logging.getLogger(__name__)
 
@@ -133,6 +135,7 @@ async def run(
     handoff: str = "",
     findings: Sequence[str] = (),
     labeller: Labeller | None = None,
+    keeper: Keeper | None = None,
 ) -> Answer:
     """Run one inspection over a reply: its own text, what Halyard can see, the reply.
 
@@ -153,6 +156,11 @@ async def run(
     Logged as a frame rather than the files — enough to say afterwards what a
     finding was about and which revision of the inspection found it — and then the
     answer as it came.
+
+    Kept whole through `keeper` as well, whichever way the turn ended: what the
+    model was given, word for word, and what it said — under the id the turn ran
+    under, which is the one its tokens are recorded by. An inspection whose file
+    could not be read never reached a model, and is not kept.
     """
     instructions = frame.read(path, project)
     version = await asyncio.to_thread(frame.version, path, project)
@@ -170,19 +178,49 @@ async def run(
         note,
         model,
     )
+    asked = prompt(instructions, context=context, note=note, text=reply)
+    session = str(uuid.uuid4())
+    at = datetime.now(UTC)
+
+    async def kept(answer: str | None, why: str, took: float, phrase: str | None = None) -> None:
+        if keeper is None:
+            return
+        record = Kept(
+            session=session,
+            at=at,
+            name=name,
+            path=path,
+            version=version,
+            handoff=handoff,
+            model=model,
+            asked=asked,
+            context=tuple(context),
+            note=note,
+            answer=answer,
+            why=why,
+            finding=phrase,
+            took=took,
+        )
+        try:
+            await keeper.keep(record)
+        except Exception:
+            logger.warning("Inspection %s could not be kept", name, exc_info=True)
+
     started = time.monotonic()
     try:
         said = await asker.ask(
-            prompt(instructions, context=context, note=note, text=reply),
+            asked,
             model=model,
             timeout=timeout,
             cwd=project,
             name=f"{name} · handoff {handoff}" if handoff else name,
             edits=False,
+            session_id=session,
         )
     except StoppedError as stopped:
         took = time.monotonic() - started
         logger.info("Inspection %s %s after %.1fs", name, stopped, took)
+        await kept(None, str(stopped), took)
         return Answer(name, path, version, why=str(stopped), took=took)
     except Exception:
         logger.warning("Inspection %s failed", name, exc_info=True)
@@ -190,10 +228,13 @@ async def run(
     took = time.monotonic() - started
     if not said:
         logger.info("Inspection %s got no answer in %.1fs", name, took)
+        await kept(None, "the model did not answer", took)
         return Answer(name, path, version, why="the model did not answer", took=took)
     logger.info("Inspection %s answered in %.1fs:\n%s", name, took, said)
-    if labeller is not None and (phrase := finding(said, findings)):
+    phrase = finding(said, findings)
+    if labeller is not None and phrase:
         await _label(name, phrase, labeller)
+    await kept(said, "", took, phrase)
     return Answer(name, path, version, text=unfenced(said), took=took)
 
 

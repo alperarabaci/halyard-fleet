@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Protocol, runtime_checkable
 
@@ -19,6 +20,8 @@ class Asker(Protocol):
     to a person — a command it asks to run is a card, and the card has to say
     whose. `edits=False` is a turn with no tool that edits a file: it may still
     read, and run commands, which the project's gate puts in front of somebody.
+    `session_id` is the id the turn runs under, chosen by the inspection, so
+    that the record kept of it and the tokens it used can be found together.
     """
 
     async def ask(
@@ -30,6 +33,7 @@ class Asker(Protocol):
         cwd: Path | None = None,
         name: str | None = None,
         edits: bool = True,
+        session_id: str | None = None,
     ) -> str | None: ...
 
 
@@ -42,6 +46,49 @@ class Labeller(Protocol):
     """
 
     async def label(self, label: str) -> None: ...
+
+
+@dataclass(frozen=True)
+class Kept:
+    """One inspection run, whole: what the model was given, what it said, and
+    how it went — kept so it can be read, compared and run again later.
+
+    Unlike anything else Halyard records, this keeps the text: the input holds
+    the reply that was inspected, and an inspection cannot be compared or
+    repeated without it.
+    """
+
+    #: The id the turn ran under — the same one its tokens are recorded by.
+    session: str
+    at: datetime
+    name: str
+    path: Path
+    version: str
+    #: The handoff it ran for, or empty when it was run by hand.
+    handoff: str
+    model: str
+    #: Everything the model was given, exactly as it was sent.
+    asked: str
+    #: The envelope lines inside it, one fact to a line — where the files
+    #: stood among them.
+    context: tuple[str, ...]
+    note: str
+    #: What the model said, or None when it said nothing usable.
+    answer: str | None
+    #: Why there is no answer, when there is none.
+    why: str
+    #: The project's own finding phrase the answer said, if it said one.
+    finding: str | None
+    took: float
+
+
+@runtime_checkable
+class Keeper(Protocol):
+    """Where a finished inspection run is kept. The channel answers it — it
+    knows the database, the project and the work — and keeping never fails
+    the inspection it describes."""
+
+    async def keep(self, kept: Kept) -> None: ...
 
 
 class StoppedError(Exception):
