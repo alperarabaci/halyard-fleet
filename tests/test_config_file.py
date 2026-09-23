@@ -755,6 +755,66 @@ def test_a_decision_word_cannot_hold_a_colon(tmp_path) -> None:
         with_workflows(tmp_path, '  decisions: {forward: "go: on"}')
 
 
+def test_a_list_inside_a_workflow_is_its_phases(tmp_path) -> None:
+    """The steps before it go once, the ones after it once, and the ones in it
+    once per phase — so the flow is still the steps in order, and the list is
+    where they repeat."""
+    [project] = with_workflows(
+        tmp_path,
+        "  steps:",
+        "    review: {}",
+        "    discover: {handoff: driver_discover}",
+        "    discovered: {handoff: review}",
+        "  level3: [review, [discover, discovered], review]",
+    )
+
+    assert project.workflows.flows["level3"] == ("review", "discover", "discovered", "review")
+    assert project.workflows.stretches == {"level3": (1, 2)}
+    assert project.workflows.phases == 3, "three phases unless the project says otherwise"
+
+
+def test_how_many_phases_is_the_project_s_to_say(tmp_path) -> None:
+    [project] = with_workflows(
+        tmp_path, "  phases: 4", "  steps:", "    review: {}", "  l3: [[review]]"
+    )
+
+    assert project.workflows.phases == 4
+    assert project.workflows.stretches == {"l3": (0, 0)}
+    assert set(project.workflows.flows) == {"l3"}, "`phases` is not a workflow"
+
+
+def test_a_workflow_has_one_list_of_phases_at_most(tmp_path) -> None:
+    """A second would be a second phase count, and a card could not say which."""
+    with pytest.raises(ValueError, match="two lists of phases"):
+        with_workflows(tmp_path, "  steps:", "    review: {}", "  l3: [[review], [review]]")
+
+
+def test_phases_cannot_be_empty_or_nested(tmp_path) -> None:
+    for flow in ("[review, []]", "[[review, [review]]]"):
+        with pytest.raises(ValueError, match="phases must be a list of step names"):
+            with_workflows(tmp_path, "  steps:", "    review: {}", f"  l3: {flow}")
+
+
+def test_a_phase_step_nobody_defined_is_refused_like_any_other(tmp_path) -> None:
+    with pytest.raises(ValueError, match="does not define under"):
+        with_workflows(tmp_path, "  steps:", "    review: {}", "  l3: [review, [gone]]")
+
+
+def test_the_phase_count_has_to_be_a_whole_number_of_at_least_one(tmp_path) -> None:
+    with pytest.raises(ValueError, match="phases:` must be a whole number"):
+        with_workflows(tmp_path, "  phases: 0", "  steps:", "    review: {}", "  l3: [review]")
+
+
+def test_next_is_a_decision_word_a_project_can_rename_too(tmp_path) -> None:
+    from halyard.core.config_file import Decisions
+
+    [project] = with_workflows(
+        tmp_path, "  decisions: {next: sonraki}", "  steps:", "    review: {}", "  l3: [review]"
+    )
+
+    assert project.workflows.decisions == Decisions(next="sonraki")
+
+
 def test_a_project_with_no_workflows_has_none(tmp_path) -> None:
     from halyard.core.config_file import Decisions
 

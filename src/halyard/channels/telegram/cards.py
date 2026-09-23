@@ -115,6 +115,8 @@ _CHOOSABLE = frozenset(
         "flow",
         "flowat",
         "flowgo",
+        "flowon",
+        "flowpick",
         "flowstop",
         "pick",
     }
@@ -604,17 +606,29 @@ def label_picks(
     return {"inline_keyboard": [*rows, *workflow_keyboard(workflow)["inline_keyboard"]]}
 
 
-def workflow_keyboard(workflow: str, *, go: bool = False) -> dict:
-    """What can be done with a run: send the step it stopped before, or stop it.
+def workflow_keyboard(
+    workflow: str, *, go: bool = False, go_text: str = "", on: str = "", pick: bool = False
+) -> dict:
+    """What can be done with a run: send the step it stopped before, leave its
+    phases for the step `on` names, pick a step to go on from, or stop it.
 
-    No cancel row. Leaving this card alone *is* leaving the run alone, and a
-    third button that did neither is the one somebody presses by mistake.
+    Every one of them keeps the work in the run but the last: a stop is where
+    somebody steers, and steering by hand would leave the run behind. No cancel
+    row. Leaving this card alone *is* leaving the run alone, and a button that
+    did neither is the one somebody presses by mistake.
     """
-    row = []
+
+    def button(text: str, what: str) -> dict:
+        return {"text": text, "callback_data": choice_data(what, workflow)}
+
+    moving = []
     if go:
-        row.append({"text": "▶️ Send it anyway", "callback_data": choice_data("flowgo", workflow)})
-    row.append({"text": "⏹ Stop the workflow", "callback_data": choice_data("flowstop", workflow)})
-    return {"inline_keyboard": [row]}
+        moving.append(button(go_text or "▶️ Send it anyway", "flowgo"))
+    if on:
+        moving.append(button(f"⏭ On to {on}", "flowon"))
+    steering = [*([button("🧭 Pick a step", "flowpick")] if pick else [])]
+    steering.append(button("⏹ Stop the workflow", "flowstop"))
+    return {"inline_keyboard": [row for row in (moving, steering) if row]}
 
 
 def result_choices(check: str, labels: tuple[str, ...]) -> dict | None:

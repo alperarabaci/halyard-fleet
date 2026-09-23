@@ -147,9 +147,8 @@ class Step:
     #: A seat's label or a role. Unset leaves it to the handoff's `to:`, which
     #: is enough until one role is held by two seats.
     seat: str | None = None
-    #: How many rounds this step may have for one piece of work — counting
-    #: every time its handoff has gone, pressed by hand as well, since the seat
-    #: read it either way.
+    #: How many rounds this step may have in one run — and, inside a flow's
+    #: phases, in each phase: the second phase's `discover` starts from one.
     rounds: int = _DEFAULT_ROUNDS
     #: Another step, whose decision this one acts on when its own reply decides
     #: nothing — `reviewed` after `review`, so a reviewer's back reaches the
@@ -162,13 +161,20 @@ class Decisions:
     """The words a reply's last line decides in.
 
     Each is its own name unless a project says otherwise — `forward`, `back`,
-    `wait` — so a project whose prompts ask for those writes nothing, and one
-    whose prompts ask for other words names them: `decisions: {forward: go}`.
+    `wait`, `next` — so a project whose prompts ask for those writes nothing,
+    and one whose prompts ask for other words names them: `decisions: {forward:
+    go}`. `next` only means something at the end of a flow's phases.
     """
 
     forward: str = "forward"
     back: str = "back"
     wait: str = "wait"
+    next: str = "next"
+
+
+#: How many phases a flow may go through before a run stops and asks. Past it
+#: the next phase is the operator's to send, as a round past `rounds:` is.
+_DEFAULT_PHASES = 3
 
 
 @dataclass(frozen=True)
@@ -178,10 +184,16 @@ class Workflows:
 
     steps: dict[str, Step] = field(default_factory=dict)
     decisions: Decisions = field(default_factory=Decisions)
-    #: Each flow by name, as the step names it takes in order. `steps` and
-    #: `decisions` are not flows, which is why a workflow cannot be called
-    #: either of them.
+    #: Each flow by name, as the step names it takes in order. `steps`,
+    #: `decisions` and `phases` are not flows, which is why a workflow cannot
+    #: be called any of them.
     flows: dict[str, tuple[str, ...]] = field(default_factory=dict)
+    #: The stretch of a flow that goes round once per phase — written as a list
+    #: inside the flow — as the places of its first and last steps. Only flows
+    #: that have one are here.
+    stretches: dict[str, tuple[int, int]] = field(default_factory=dict)
+    #: How many phases any stretch may go through before a run stops and asks.
+    phases: int = _DEFAULT_PHASES
 
 
 @dataclass(frozen=True)
@@ -387,11 +399,11 @@ def _handoffs_from(
     return found
 
 
-#: What a step may say, the words a decision can be given, and the two names
-#: under `workflows:` that are not flows.
+#: What a step may say, the words a decision can be given, and the names under
+#: `workflows:` that are not flows.
 _STEP_FIELDS = {"handoff", "seat", "rounds", "decided_by"}
-_DECISION_FIELDS = ("forward", "back", "wait")
-_NOT_A_FLOW = ("steps", "decisions")
+_DECISION_FIELDS = ("forward", "back", "wait", "next")
+_NOT_A_FLOW = ("steps", "decisions", "phases")
 
 
 def _workflows_from(
@@ -417,6 +429,7 @@ def _workflows_from(
         )
     steps = _steps_from(project, value.get("steps"), handoffs=handoffs, seats=seats)
     flows: dict[str, tuple[str, ...]] = {}
+    stretches: dict[str, tuple[int, int]] = {}
     for raw, listed in value.items():
         name = str(raw).strip()
         if name in _NOT_A_FLOW:
@@ -425,20 +438,61 @@ def _workflows_from(
         if not isinstance(listed, list) or not listed:
             raise ValueError(
                 f"{where} must be a list of step names, in the order it takes them. "
-                f"({' and '.join(_NOT_A_FLOW)} are the two names here that are not workflows.)"
+                f"({', '.join(_NOT_A_FLOW)} are the names here that are not workflows.)"
             )
-        wanted = [str(step).strip() for step in listed]
+        wanted, stretch = _flow_from(where, listed)
         if missing := [step for step in wanted if step not in steps]:
             raise ValueError(
                 f"{where} names steps this project does not define under "
                 f"`workflows: steps:`: {', '.join(missing)}"
             )
         flows[name] = tuple(wanted)
+        if stretch is not None:
+            stretches[name] = stretch
     return Workflows(
         steps=steps,
         decisions=_decisions_from(project, value.get("decisions")),
         flows=flows,
+        stretches=stretches,
+        phases=_phases_from(project, value.get("phases")),
     )
+
+
+def _flow_from(where: str, listed: list) -> tuple[list[str], tuple[int, int] | None]:
+    """A flow's step names in order, and where its phases are, if it has any.
+
+    One list inside the flow is the stretch that goes round once per phase —
+    `[to_nav, review, [discover, develop, verified], close]` — so the steps
+    before it happen once, and so do the ones after it. One stretch at most:
+    a second would be a second phase count, and nobody reading a card could
+    tell which one it meant.
+    """
+    wanted: list[str] = []
+    stretch: tuple[int, int] | None = None
+    for entry in listed:
+        if not isinstance(entry, list):
+            wanted.append(str(entry).strip())
+            continue
+        if stretch is not None:
+            raise ValueError(f"{where} has two lists of phases in it; a workflow has one.")
+        if not entry or any(isinstance(inner, (list, dict)) for inner in entry):
+            raise ValueError(
+                f"{where}: its phases must be a list of step names, and not an empty one."
+            )
+        stretch = (len(wanted), len(wanted) + len(entry) - 1)
+        wanted.extend(str(inner).strip() for inner in entry)
+    return wanted, stretch
+
+
+def _phases_from(project: str, value: Any) -> int:
+    """`workflows: phases:` — how many phases a run may go through unasked."""
+    if value is None:
+        return _DEFAULT_PHASES
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        raise ValueError(
+            f"Project {project!r}: `workflows: phases:` must be a whole number of at least 1."
+        )
+    return value
 
 
 def _decisions_from(project: str, value: Any) -> Decisions:

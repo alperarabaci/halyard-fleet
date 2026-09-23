@@ -115,7 +115,7 @@ from the group, in the group's order: `area:api` and `area:web` run
 it ran.
 
 A task carrying none of the group's labels is asked for one before anything runs:
-a button per label, and the one pressed goes on the task, so a second round — or
+a button per label, and the one pressed goes on the task, so the next time — or
 the other machine — is not asked again. A branch that names no task has nothing
 to put it on, and the label pressed is kept for that work until Halyard restarts.
 The same happens wherever the command runs: `/command`, a handoff, a workflow's
@@ -151,15 +151,12 @@ handoff names commands themselves, so naming a list there is refused when the
 file is read, and so is a handoff or `validate:` naming a command that asks for
 a typed value: neither has anybody to ask.
 
-## A handoff counts its rounds
+## Rounds are a workflow's
 
-A reply sent back comes round again, and every time a handoff goes for the same
-work item is a round. The envelope says which — `Round: 2/2` — and so does the
-line in the chat it was sent from. The work item is the one the branch names; a
-branch without a number counts under its own name. A prompt edited between
-rounds is the same work going round again, so the count carries on.
-
-A handoff can name a second text for every round after the first:
+A reply sent back comes round again. When it does inside a
+[workflow](workflows.md), that is the step's next round: the envelope says which
+— `Round: 2/2` — and a handoff can name a second text for every round after the
+first:
 
 ```yaml
       review:
@@ -173,11 +170,8 @@ seat is handed its own answer to the round before, ahead of the reply — so a
 reviewer asked again sees what it found last time rather than being set to find
 everything afresh. A handoff without one sends its `prompt:` every round.
 
-Two rounds is what the count expects. A third still goes when somebody presses
-for it, as `3/2`: every round is a person pressing a button, and an envelope
-saying it is past the usual is worth more than a refusal.
-
-A round counts when the seat's session takes the message. One that reached
-nobody is not a round, so pressing again is the same round rather than the
-next. The count is kept on the machine, beside Halyard's database; a work item
-that moves to another machine starts again there.
+A handoff pressed by hand counts no rounds and says none. It is not part of a
+run, so there is no loop for a count to stop, and a `1/2` on it would be a
+workflow's word where there is no workflow: pressed twice, it sends its own
+`prompt:` twice. The rounds a workflow counts are its run's own, per step — see
+[Rounds stop a loop](workflows.md#rounds-stop-a-loop).
