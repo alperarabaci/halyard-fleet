@@ -2026,6 +2026,7 @@ class TelegramChannel:
                         model=MESSAGE_MODEL,
                         purpose="commit message",
                         project=self._project_name_for(chat_id),
+                        system=commits.SYSTEM,
                     ),
                     timeout=MESSAGE_TIMEOUT_SECONDS,
                 )

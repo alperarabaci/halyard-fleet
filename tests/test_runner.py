@@ -385,11 +385,30 @@ async def test_a_check_turn_stands_in_the_project_under_the_id_it_was_given(
     assert arguments[-1] == "check this"
 
 
+async def test_a_turn_that_needs_only_its_text_carries_nothing_else(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A commit message: its own short system prompt, no tools, no MCP server,
+    and no session left behind — Claude Code's prompt and tools were most of
+    what it cost."""
+    calls = spying_on_the_turn(monkeypatch)
+
+    await runner().ask("write a subject line", model="sonnet", system="You write messages.")
+
+    [(arguments, _)] = calls
+    assert "--tools=" in arguments, "with its `=`: a bare empty value would swallow the text"
+    assert "--strict-mcp-config" in arguments
+    assert arguments[arguments.index("--system-prompt") + 1] == "You write messages."
+    assert "--no-session-persistence" in arguments
+    assert arguments[-1] == "write a subject line"
+
+
 async def test_an_ordinary_one_shot_turn_is_left_as_it_was(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A commit message or a compaction record: nowhere in particular to stand,
-    every tool it always had, and no id chosen for it."""
+    """A compaction record: nowhere in particular to stand, every tool it always
+    had, and no id chosen for it — its instructions are the project's, and may
+    ask it to read something."""
     calls = spying_on_the_turn(monkeypatch)
 
     await runner().ask("write a subject line", model="sonnet")
