@@ -43,8 +43,11 @@ def say(message):
 
 
 def keep():
-    with open(where, "w") as file:
+    # Whole or not at all: the bridge ends this process the moment a turn is
+    # over, and a file it was half way through writing would read as nothing.
+    with open(where + ".tmp", "w") as file:
         json.dump(record, file)
+    os.replace(where + ".tmp", where)
 
 
 say({"id": 1, "method": "session/requestRuntimePreferences", "params": {}})
