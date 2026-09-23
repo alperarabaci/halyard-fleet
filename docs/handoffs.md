@@ -125,12 +125,41 @@ FROM inspection_runs r JOIN workflow_steps s
  AND (s.phase IS r.phase);
 ```
 
-`experimental` and `repeat_of` are for runs somebody makes on purpose to compare
-models, so they never mix with the ones the work made.
+`experimental` and `repeat_of` are for runs made on purpose to compare models —
+see the next section — so they never mix with the ones the work made.
 
 Keeping never holds anything up: the row is written off to one side once the
 answer is in, so a database busy with the audit log cannot keep an answer from
 reaching anybody, and a row that cannot be written costs the row alone.
+
+## A kept inspection can be run again
+
+To see what another model makes of the same job, a kept run can be given to it
+again — word for word what the first model was given — from the command line.
+An experiment, apart from the work: nothing is posted, nothing is labelled, and
+the new row is marked `experimental`, with `repeat_of` pointing at the run it
+repeats.
+
+```sh
+uv run halyard inspect recent                          # the last runs, with their ids
+uv run halyard inspect repeat 5f0c9a2e --model haiku   # the same input, another model
+uv run halyard inspect repeat 5f0c9a2e --model opus --times 3
+uv run halyard inspect compare 5f0c9a2e                # the runs side by side
+```
+
+An id can be cut to any start of it that no other id has. A repeat runs on
+Claude Code in the project's directory, with the tools an inspection has, one
+run after another: a command its model asks to run comes to Telegram as a card
+from its session — whose start it prints — and with Halyard stopped it is
+refused. Its tokens are recorded as `inspect <name> · repeat`, apart from the
+work's.
+
+The files are where they are when it runs; nothing is checked out. The model
+reads the envelope the first run was given, and the row keeps where the files
+stand now, so `compare` can say whether a repeat saw the same code: `same` is
+`yes` when `HEAD` and the content id both match the original's. `compare` also
+writes the input, the table and every answer to files — beside the database,
+under `projects/<project>/inspections/<id>/` — for whoever judges the runs.
 
 ## A handoff can run the project's commands first
 
