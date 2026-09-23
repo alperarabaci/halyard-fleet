@@ -559,6 +559,9 @@ class TelegramChannel:
         #: Where the last thing said in each chat is kept, so `/forward`
         #: survives a restart. None disables it: nothing else depends on it.
         said_path: Path | None = None,
+        #: The database the audit log and turn usage share, where a finished
+        #: workflow run is kept for reading later. None keeps none.
+        database: Path | None = None,
         #: Each runtime's own availability-check context, by runtime name — see
         #: `RuntimeSpec.check_context`. Asked only when a seat's session cannot
         #: be found, to say *why*; each check is handed its own and nobody else's.
@@ -572,6 +575,7 @@ class TelegramChannel:
         self._audit = audit
         self._chat_id = chat_id
         self._said_path = said_path
+        self._database = database
         # Two seats and a default. A role with nowhere of its own falls back to
         # the main chat, so an existing single-chat setup keeps working
         # untouched by any of this.
@@ -3502,6 +3506,44 @@ class TelegramChannel:
             ),
         )
 
+    async def _finished(self, found: Project, work: str, run: flowing.Run, outcome: str) -> None:
+        """The end of a run: what it did is kept for reading later, and one
+        that went all the way says so in the chat it was started from.
+
+        `outcome` is `done` or `stopped`. A stopped run is kept as well — how
+        far work gets before somebody takes it over is as much a fact about
+        it — but the chat is told that by the stop itself.
+        """
+        finished = self._clock()
+        if self._database is not None:
+            await asyncio.to_thread(
+                flowing.journal.record,
+                self._database,
+                run,
+                project=found.name,
+                work=work,
+                outcome=outcome,
+                finished=finished,
+            )
+        kept = self._kept_for(found.name, WORKFLOW_FILE)
+        if kept is not None:
+            await asyncio.to_thread(flowing.clear, kept, work)
+        logger.info("Workflow %s for %s %s", run.workflow, work, outcome)
+        if outcome != "done":
+            return
+        flow = found.workflows.flows.get(run.workflow) or ()
+        stretch = found.workflows.stretches.get(run.workflow)
+        start, end = _local(run.since), _local(finished)
+        shape = "%H:%M" if start.date() == end.date() else "%b %d %H:%M"
+        await self._say(
+            f"📋 <b>{html.escape(run.workflow)}</b> is done — {html.escape(work)}\n"
+            f"{start.strftime(shape)} → {end.strftime(shape)} · "
+            f"{flowing.journal.lasted(run.since, finished)}\n"
+            f"{html.escape(flowing.journal.steps_line(run, flow=flow, stretch=stretch))}",
+            run.chat,
+            run.thread,
+        )
+
     async def _advance_workflow(self, answered: Seat, text: str) -> None:
         """Take the next step, now that the seat a run was waiting for replied.
 
@@ -3561,12 +3603,7 @@ class TelegramChannel:
                 run.thread,
             )
         if moving.done:
-            await asyncio.to_thread(flowing.clear, kept, work)
-            await self._say(
-                f"✅ <b>{html.escape(run.workflow)}</b> is through its last step.",
-                run.chat,
-                run.thread,
-            )
+            await self._finished(found, work, run, "done")
             return
         if moving.stop:
             target = moving.step
@@ -3660,7 +3697,7 @@ class TelegramChannel:
             await self._say("No workflow is going here.", chat_id, thread_id)
             return
         if action == "stop":
-            await asyncio.to_thread(flowing.clear, kept, work)
+            await self._finished(found, work, run, "stopped")
             await self._say(
                 f"⏹ <b>{html.escape(run.workflow)}</b> stopped at step {run.step + 1}. "
                 "Its handoffs can still be pressed by hand.",
@@ -3692,12 +3729,7 @@ class TelegramChannel:
                 await self._say(self._where_the_run_is(found, run), chat_id, thread_id)
                 return
             if run.leaving >= len(flow):
-                await asyncio.to_thread(flowing.clear, kept, work)
-                await self._say(
-                    f"✅ <b>{html.escape(run.workflow)}</b> is through its last step.",
-                    chat_id,
-                    thread_id,
-                )
+                await self._finished(found, work, run, "done")
                 return
             run = run.at(run.leaving, phase=max(run.phase - 1, 1), entered=stretch[0])
         source = find(self._seats, run.waiting_for) if run.waiting_for else None

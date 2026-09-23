@@ -23,12 +23,17 @@ allowed it to, when the phases would, when a phase ends undecided, when a seat
 says to wait, and when a message reached nobody — and each of those is said in
 the chat it was started from, with the run kept so it can go on afterwards.
 
+**What a run did outlives it.** When it ends — finished or stopped — its steps
+are kept in the database beside the tokens, and a finished one says in the
+chat when it started, when it ended and which steps it took — see `journal`.
+
 **Nothing here knows a chat or a runtime.** A step is delivered by whatever
 drives it — the Telegram channel today — through `halyard.handoffs`, which is
 the one place that knows how a reply reaches a seat. `tests/test_layering.py`
 keeps it that way.
 """
 
+from halyard.workflows import journal
 from halyard.workflows.decisions import Decision, decided, read, word_for
 from halyard.workflows.envelope import lines_for
 from halyard.workflows.flow import PHASES, Next, after
@@ -45,6 +50,7 @@ __all__ = [
     "counted_as",
     "current",
     "decided",
+    "journal",
     "lines_for",
     "read",
     "record",
