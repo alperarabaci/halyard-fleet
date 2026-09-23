@@ -1097,8 +1097,56 @@ async def test_the_last_step_finishes_the_run(tmp_path: Path, wired) -> None:
 
     await answered(channel, "nav", "Done.\nDECISION: forward")
 
-    assert any("through its last step" in sent["text"] for sent in api.sent)
+    assert any("<b>level3</b> is done" in sent["text"] for sent in api.sent)
     assert len(runner.sent) == 2
+
+
+async def test_a_finished_run_reports_what_it_did_and_is_kept(tmp_path: Path, wired) -> None:
+    """When it started and finished, how long, and the steps it took with their
+    rounds — in the chat, and in the database beside the tokens."""
+    import sqlite3
+
+    channel, api, runner, repo = wired
+    channel._database = tmp_path / "halyard.db"
+    both_twice = {
+        "review": {"handoff": "review", "seat": "xrev", "rounds": 2},
+        "to_nav": {"handoff": "to_nav", "seat": "nav", "rounds": 2},
+    }
+    flow_in(channel, repo, tmp_path, runner, flows=TWO_STEPS["flows"], steps=both_twice)
+    await started(channel)
+    await answered(channel, "xrev", "DECISION: forward")
+    await answered(channel, "nav", "Look again.\nDECISION: back")
+    await answered(channel, "xrev", "DECISION: forward")
+
+    await answered(channel, "nav", "Done.\nDECISION: forward")
+
+    [report] = [sent["text"] for sent in api.sent if "is done" in sent["text"]]
+    heading, when, steps = report.split("\n")
+    assert heading == "📋 <b>level3</b> is done — alpha-engine#281"
+    assert " → " in when and "min" in when
+    assert steps == "review x2 · to_nav x2"
+    with sqlite3.connect(channel._database) as db:
+        assert db.execute("SELECT workflow, outcome, deliveries FROM workflow_runs").fetchall() == [
+            ("level3", "done", 4)
+        ]
+
+
+async def test_a_stopped_run_is_kept_without_a_report(tmp_path: Path, wired) -> None:
+    import sqlite3
+
+    channel, api, runner, repo = wired
+    channel._database = tmp_path / "halyard.db"
+    flow_in(channel, repo, tmp_path, runner, **TWO_STEPS)
+    await started(channel)
+
+    await channel._handle_callback(pressed_handoff("flowstop", "level3"))
+    await settled(channel)
+
+    assert not any("is done" in sent["text"] for sent in api.sent)
+    with sqlite3.connect(channel._database) as db:
+        assert db.execute("SELECT outcome, deliveries FROM workflow_runs").fetchall() == [
+            ("stopped", 1)
+        ]
 
 
 def capped() -> dict:
@@ -1213,7 +1261,7 @@ async def test_the_navigator_s_own_decision_overrules_the_review(tmp_path: Path,
     await answered(channel, "nav", "That row is out of scope.\nDECISION: forward")
 
     assert len(runner.sent) == 2
-    assert any("through its last step" in sent["text"] for sent in api.sent)
+    assert any("<b>level3</b> is done" in sent["text"] for sent in api.sent)
 
 
 async def test_a_review_that_says_wait_stops_before_the_navigator(tmp_path: Path, wired) -> None:
@@ -1404,7 +1452,7 @@ async def test_leaving_the_phases_from_the_card_goes_on_past_them(tmp_path: Path
     await settled(channel)
 
     assert len(runner.sent) == 2
-    assert any("through its last step" in sent["text"] for sent in api.sent)
+    assert any("<b>level3</b> is done" in sent["text"] for sent in api.sent)
 
 
 async def test_leaving_from_an_old_card_moves_nothing_once_the_run_went_on(
@@ -1426,7 +1474,7 @@ async def test_leaving_from_an_old_card_moves_nothing_once_the_run_went_on(
     await settled(channel)
 
     assert len(runner.sent) == sent
-    assert not any("through its last step" in message["text"] for message in api.sent)
+    assert not any("is done" in message["text"] for message in api.sent)
     assert "to_nav · phase 2 — it was asked to wait" in api.sent[-1]["text"]
 
 

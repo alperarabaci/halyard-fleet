@@ -206,6 +206,32 @@ run:
   `/workflow level3 develop` does the same for a stopped run;
 - **⏹ Stop the workflow** clears it. Starting it again after that starts afresh.
 
+## When a run ends
+
+A run that goes all the way says so in the chat it was started from, in three lines —
+when it started and finished, how long that was, and the steps it took with their rounds:
+
+```
+📋 level3phased is done — alpha-engine#386
+14:02 → 17:40 · 3 h 38 min
+to_nav · review x2 · reviewed x2 · phase 1: discover, develop, developed · phase 2: develop, developed · close
+```
+
+The same run is kept in Halyard's database, beside the tokens the turns Halyard starts
+use: one row per run in `workflow_runs` (`project`, `work`, `workflow`, `started_at`,
+`finished_at`, `outcome`, `phases`, `deliveries`) and one per step delivered in
+`workflow_steps` (`at`, `step`, `phase`, `round`, `seat`). A run stopped with **⏹** is
+kept too, as `stopped`, without the report. The two join on the project and the time:
+
+```sql
+SELECT s.step, s.phase, s.round, s.seat, SUM(u.output_tokens)
+FROM workflow_steps s JOIN workflow_runs r USING (run_id)
+JOIN turn_usage u ON u.project = r.project AND u.recorded_at BETWEEN s.at AND r.finished_at
+GROUP BY s.run_id, s.step, s.phase, s.round;
+```
+
+What a seat said is not kept, as the audit log does not keep it.
+
 A run is kept per project beside Halyard's database, so a restart picks it up where it
 was, and there is one run per piece of work: a project has one working tree, and its
 branch says which work that is. A message that reached nobody leaves the run waiting
