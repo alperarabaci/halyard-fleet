@@ -15,6 +15,7 @@ from halyard.workflows import (
     Round,
     Run,
     after,
+    answered,
     clear,
     current,
     decided,
@@ -659,6 +660,25 @@ def test_nothing_is_counted_for_a_run_that_is_gone(tmp_path: Path) -> None:
 
     assert record(kept, "alpha-engine#386", "discover@1", to="xdrv") == 0
     assert current(kept, "alpha-engine#386") is None
+
+
+def test_an_answer_marks_the_round_it_answers(tmp_path: Path) -> None:
+    """What the run did on it, and whose word that was, across a restart."""
+    kept = tmp_path / "workflow-runs.json"
+    first, second = Round(at=AT, to="xreview"), Round(at=AT + timedelta(hours=1), to="xreview")
+    run = a_run(1, rounds={"review": (first, second)})
+
+    save(kept, "alpha-engine#386", answered(run, "review", decision="back", decided_by="review"))
+
+    rounds = current(kept, "alpha-engine#386").rounds["review"]
+    assert rounds[0] == first, "an earlier round keeps what it had"
+    assert (rounds[1].decision, rounds[1].decided_by) == ("back", "review")
+
+
+def test_a_step_that_reached_nobody_has_no_answer_to_mark() -> None:
+    run = a_run(1)
+
+    assert answered(run, "review", decision="forward", decided_by="review") == run
 
 
 def test_a_run_written_before_phases_reads_as_the_first_phase(tmp_path: Path) -> None:

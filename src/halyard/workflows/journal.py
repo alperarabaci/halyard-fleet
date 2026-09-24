@@ -2,8 +2,9 @@
 
 A run's file is where it has got to, and it is gone the moment the run ends.
 What it did — which steps, in which phase, how many rounds each, which agent,
-when — is worth more after the end than during it: that is when somebody asks
-how a piece of work actually went, and across many runs how work goes at all.
+when, and what each answer decided on whose word — is worth more after the end
+than during it: that is when somebody asks how a piece of work actually went,
+and across many runs how work goes at all. `halyard runs` reads it back.
 
 **Written where the tokens are.** `halyard.core.usage` keeps what the turns
 Halyard starts used — the checks a step runs, among them — in the database the
@@ -30,8 +31,10 @@ import contextlib
 import logging
 import sqlite3
 from collections.abc import Sequence
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
+from typing import NamedTuple
 
 from halyard.workflows.runs import Run
 
@@ -56,18 +59,26 @@ CREATE TABLE IF NOT EXISTS workflow_steps (
     step   TEXT NOT NULL,
     phase  INTEGER,
     round  INTEGER NOT NULL,
-    agent  TEXT NOT NULL
+    agent  TEXT NOT NULL,
+    decision   TEXT,
+    decided_by TEXT
 );
 
 CREATE INDEX IF NOT EXISTS workflow_steps_run_idx ON workflow_steps (run_id);
 CREATE INDEX IF NOT EXISTS workflow_steps_at_idx ON workflow_steps (at);
 """
 
+#: Columns added since the table was first written, added to one kept before.
+_ADDED = ("decision", "decided_by")
+
 
 def _upgraded(db: sqlite3.Connection) -> None:
-    """The tables as this version writes them. `workflow_steps.seat` is
-    `agent` now, its rows kept: a seat was what an agent was called until
-    2026-09-24. The column keeps its place, so rows go in as they did."""
+    """The tables as this version writes them, their rows kept.
+
+    `workflow_steps.seat` is `agent` now: a seat was what an agent was called
+    until 2026-09-24. `decision` and `decided_by` came on 2026-09-25, and the
+    steps kept before then have neither.
+    """
     db.executescript(_SCHEMA)
     have = {row[1] for row in db.execute("PRAGMA table_info(workflow_steps)")}
     if "seat" in have and "agent" not in have:
@@ -76,6 +87,14 @@ def _upgraded(db: sqlite3.Connection) -> None:
         except sqlite3.OperationalError as error:
             # Somebody else got here first.
             if "no such column" not in str(error) and "duplicate column" not in str(error):
+                raise
+    for column in _ADDED:
+        if column in have:
+            continue
+        try:
+            db.execute(f"ALTER TABLE workflow_steps ADD COLUMN {column} TEXT")
+        except sqlite3.OperationalError as error:
+            if "duplicate column" not in str(error):
                 raise
 
 
@@ -90,15 +109,35 @@ def _step_and_phase(key: str) -> tuple[str, int | None]:
     return (name, int(phase)) if phase.isdigit() else (key, None)
 
 
-def deliveries(run: Run) -> list[tuple[datetime, str, int | None, int, str]]:
-    """Every step the run delivered, oldest first: when, which step, which
-    phase, which round of it, to which agent."""
+class Delivery(NamedTuple):
+    """One step reaching its agent, and what the run did on the answer."""
+
+    at: datetime
+    step: str
+    phase: int | None
+    round: int
+    agent: str
+    #: Empty for an answer that decided nothing, one that never came, and a
+    #: step kept before decisions were.
+    decision: str = ""
+    decided_by: str = ""
+
+
+def deliveries(run: Run) -> list[Delivery]:
+    """Every step the run delivered, oldest first."""
     found = [
-        (entry.at, *_step_and_phase(key), place + 1, entry.to)
+        Delivery(
+            entry.at,
+            *_step_and_phase(key),
+            place + 1,
+            entry.to,
+            entry.decision,
+            entry.decided_by,
+        )
         for key, entries in run.rounds.items()
         for place, entry in enumerate(entries)
     ]
-    return sorted(found, key=lambda delivered: delivered[0])
+    return sorted(found, key=lambda delivered: delivered.at)
 
 
 def record(
@@ -107,7 +146,7 @@ def record(
     """Keep what this run did. Never raises: a record that cannot be kept costs
     the record, never the run."""
     steps = deliveries(run)
-    phases = max((phase for _, _, phase, _, _ in steps if phase is not None), default=0)
+    phases = max((step.phase for step in steps if step.phase is not None), default=0)
     ident = run_id(run, work)
     try:
         with contextlib.closing(sqlite3.connect(path)) as db:
@@ -128,10 +167,21 @@ def record(
             )
             db.execute("DELETE FROM workflow_steps WHERE run_id = ?", (ident,))
             db.executemany(
-                "INSERT INTO workflow_steps VALUES (?, ?, ?, ?, ?, ?)",
+                "INSERT INTO workflow_steps "
+                "(run_id, at, step, phase, round, agent, decision, decided_by) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                 [
-                    (ident, at.isoformat(), step, phase, number, seat)
-                    for at, step, phase, number, seat in steps
+                    (
+                        ident,
+                        step.at.isoformat(),
+                        step.step,
+                        step.phase,
+                        step.round,
+                        step.agent,
+                        step.decision or None,
+                        step.decided_by or None,
+                    )
+                    for step in steps
                 ],
             )
             db.commit()
@@ -139,6 +189,95 @@ def record(
         logger.warning(
             "Could not keep what workflow %s did in %s", run.workflow, path, exc_info=True
         )
+
+
+@dataclass(frozen=True)
+class Kept:
+    """A run as the database keeps it."""
+
+    run_id: str
+    project: str
+    work: str
+    workflow: str
+    started: datetime
+    finished: datetime
+    outcome: str
+    phases: int
+    deliveries: int
+
+
+def _read(path: Path, sql: str, params: tuple = ()) -> list[tuple]:
+    """Rows, or none: a database that is not there yet, or cannot be read,
+    has kept nothing anybody can be shown."""
+    if not path.is_file():
+        return []
+    try:
+        with contextlib.closing(sqlite3.connect(path)) as db:
+            _upgraded(db)
+            return db.execute(sql, params).fetchall()
+    except sqlite3.Error:
+        logger.warning("Could not read the workflow runs kept in %s", path, exc_info=True)
+        return []
+
+
+_RUNS = (
+    "SELECT run_id, project, work, workflow, started_at, finished_at, outcome, phases, "
+    "deliveries FROM workflow_runs "
+)
+
+
+def _kept(row: tuple) -> Kept:
+    ident, project, work, workflow, started, finished, outcome, phases, delivered = row
+    return Kept(
+        ident,
+        project,
+        work,
+        workflow,
+        datetime.fromisoformat(started),
+        datetime.fromisoformat(finished),
+        outcome,
+        phases,
+        delivered,
+    )
+
+
+def recent(path: Path, limit: int = 10) -> list[Kept]:
+    """The runs kept, the latest to start first."""
+    return [_kept(row) for row in _read(path, _RUNS + "ORDER BY started_at DESC LIMIT ?", (limit,))]
+
+
+def of_work(path: Path, work: str) -> list[Kept]:
+    """Every run one piece of work had, oldest first. Named in full or by its
+    number: `alpha-engine#386`, `#386` and `386` are the same work."""
+    wanted = work.strip()
+    number = wanted.lstrip("#")
+    return [
+        kept
+        for kept in map(_kept, _read(path, _RUNS + "ORDER BY started_at"))
+        if kept.work == wanted or (number and kept.work.rpartition("#")[2] == number)
+    ]
+
+
+def steps_of(path: Path, ident: str) -> list[Delivery]:
+    """What a kept run delivered, in the order it happened."""
+    rows = _read(
+        path,
+        "SELECT at, step, phase, round, agent, decision, decided_by FROM workflow_steps "
+        "WHERE run_id = ? ORDER BY at",
+        (ident,),
+    )
+    return [
+        Delivery(
+            datetime.fromisoformat(at),
+            step,
+            phase,
+            number,
+            agent,
+            decision or "",
+            decided_by or "",
+        )
+        for at, step, phase, number, agent, decision, decided_by in rows
+    ]
 
 
 def steps_line(run: Run, *, flow: Sequence[str], stretch: tuple[int, int] | None) -> str:

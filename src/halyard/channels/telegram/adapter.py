@@ -3752,10 +3752,23 @@ class TelegramChannel:
             f" {named}" if named else "",
             moving.decided or "nothing",
         )
+        here = found.workflows.steps.get(flow[run.step]) if run.step < len(flow) else None
+        if here is not None:
+            # Kept on the round this answers, so a run read back later says how
+            # it moved and on whose word, not only where it went.
+            whose = ""
+            if moving.decided is not None:
+                whose = here.name if decision is not None else here.decided_by
+            run = flowing.answered(
+                run,
+                flowing.counted_as(here.name, run.step, phase=run.phase, stretch=stretch),
+                decision=str(moving.decided or ""),
+                decided_by=whose,
+            )
+            await asyncio.to_thread(flowing.save, kept, work, run)
         if decision is None and moving.leaving is None:
             # Said rather than done quietly: a flow that moves on a reply
             # nobody wrote a decision into is a step somebody should see taken.
-            here = found.workflows.steps.get(flow[run.step]) if run.step < len(flow) else None
             if moving.decided is not None and here is not None and here.decided_by:
                 word = flowing.word_for(moving.decided, found.workflows.decisions)
                 outcome = (
