@@ -485,7 +485,7 @@ def create_app(settings: Settings, *, channel=None) -> FastAPI:
         )
         # Said once, because nothing else is until a label is written, and "is it
         # on in the process that is running" had no answer from outside it.
-        logger.info("Labelling tasks in %s as seats work on them", ", ".join(sorted(labelled)))
+        logger.info("Labelling tasks in %s as agents work on them", ", ".join(sorted(labelled)))
     elif labelled:
         logger.warning(
             "label_work is on for %s, but there is no forge token to write labels with",

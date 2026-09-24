@@ -6,12 +6,12 @@
 #
 # `halyard init` writes this file for you and can wire a project afterwards.
 # Editing it by hand is the same thing more slowly. For the smallest file that
-# works — one project, one seat, one chat — start from
+# works — one project, one agent, one chat — start from
 # `halyard.simple.yaml.example`; this one describes everything.
 #
 # A real environment variable still wins over anything below — that is how a
 # container passes a token in without writing it to disk. There is no second
-# file: `.env` used to hold the settings while this held the seats, which meant
+# file: `.env` used to hold the settings while this held the agents, which meant
 # two files describing one machine and no rule for which of them won.
 
 settings:
@@ -42,12 +42,12 @@ settings:
   # Note: ANTHROPIC_API_KEY, if it is set anywhere in the environment, outranks
   # the token and bills the API instead of your plan. `halyard doctor` says so.
 
-  # What a ZCode seat's turns pay with, and which model they run. ZCode's engine
+  # What a ZCode agent's turns pay with, and which model they run. ZCode's engine
   # keeps no credential when something else drives it: it asks Halyard for the
   # model call's header, and this is the answer. A coding-plan key from Z.AI's
   # console is the long-lived kind; the application's own login is short-lived,
   # and refreshing it from here would log the desk out. Without these two a
-  # ZCode seat still approves and replies, but takes its messages at the desk.
+  # ZCode agent still approves and replies, but takes its messages at the desk.
   #
   # ZCODE_TOKEN: "replace-me"
   # ZCODE_MODEL: account:zai-individual-coding-plan/GLM-5.3-Flash
@@ -146,7 +146,7 @@ prompts:
     NOTES/development-prompts, in whichever place fits, and reply with the
     path and nothing else.
 
-# Seats, arranged by the project they work in.
+# Agents, arranged by the project they work in.
 #
 # Once a project has a `path`, wiring takes its name rather than a directory:
 #     halyard wire alpha-engine
@@ -156,8 +156,8 @@ projects:
   alpha-engine:
     # Where `halyard wire` puts the gate.
     path: ~/code/alpha-engine
-    # Put each seat's label on the task its branch is for — `navigator:claude`,
-    # `reviewer:codex` — the first time that seat works on it. Needs a forge
+    # Put each agent's label on the task its branch is for — `navigator:claude`,
+    # `reviewer:codex` — the first time that agent works on it. Needs a forge
     # token that may label issues; off unless set. See docs/setup.md.
     # label_work: true
     # What `/command` offers, by name. `validate:` and a transition's `commands:`
@@ -172,8 +172,8 @@ projects:
     # Inspections `/inspect` offers over a chat's last reply, and transitions
     # `/transition` offers — each the project's own file, read relative to `path`. A
     # transition carries the last reply, puts its prompt in front, runs its commands
-    # and then the inspections it names under `inspect:`, and goes to the seat or
-    # role in `to:` (every seat is offered if unset). All of it is described in
+    # and then the inspections it names under `inspect:`, and goes to the agent or
+    # role in `to:` (every agent is offered if unset). All of it is described in
     # docs/transitions.md. Written `checks:` before 2026-09-23 and `handoffs:`
     # before 2026-09-24, which still work.
     # inspections:
@@ -199,7 +199,7 @@ projects:
     #     commands: [test-fast]          # from `commands:`, run before the inspections
     #     inspect: [proof, destructive]
     #     to: navigator
-    # Workflows take those transitions in an order, each step to a seat, and go on by
+    # Workflows take those transitions in an order, each step to an agent, and go on by
     # the last line of each reply: forward, back or wait. A step goes once unless
     # `rounds:` says more. A list inside a workflow is its phases: the steps a plan
     # in parts goes through once per part, whose last step says `next` for another
@@ -209,13 +209,13 @@ projects:
     #   decisions: {forward: forward, back: back, wait: wait, next: next}   # the defaults
     #   phases: 3                        # how many phases go before it stops and asks
     #   steps:
-    #     review: {seat: reviewer, rounds: 2}
-    #     reviewed: {seat: navigator, decided_by: review, rounds: 2}
-    #     discover: {transition: driver_discover, seat: driver, rounds: 2}
-    #     discovered: {transition: discover_completed, seat: navigator, rounds: 2}
-    #     develop: {transition: driver_develop, seat: driver}
-    #     verified: {transition: reviewed, seat: navigator}
-    #     close: {seat: navigator}
+    #     review: {agent: reviewer, rounds: 2}
+    #     reviewed: {agent: navigator, decided_by: review, rounds: 2}
+    #     discover: {transition: driver_discover, agent: driver, rounds: 2}
+    #     discovered: {transition: discover_completed, agent: navigator, rounds: 2}
+    #     develop: {transition: driver_develop, agent: driver}
+    #     verified: {transition: reviewed, agent: navigator}
+    #     close: {agent: navigator}
     #   level3: [review, reviewed, [discover, discovered, develop, verified], close]
     # Groups of task labels. The first one the task carries from each group
     # goes on the envelope inspections and transitions are given, as `level: level::3`.
@@ -230,12 +230,14 @@ projects:
     # label_findings:
     #   - "status: candidate"
     #   - "status: evidence missing"
-    seats:
+    # Written `seats:` before 2026-09-24, and a step's `agent:` was `seat:`;
+    # both still work.
+    agents:
       # A label is what you type on a phone. It has to be unique across every
-      # project, because it is also how `doctor` names a seat.
+      # project, because it is also how `doctor` names an agent.
       nav:
         runtime: claude-code
-        # What survives a compaction, for the seats where it matters. A
+        # What survives a compaction, for the agents where it matters. A
         # navigator holding a plan across a day needs this; a driver running
         # one command does not, and is left alone by leaving these out.
         #
@@ -278,12 +280,12 @@ projects:
         # A forum topic inside a group is "-1001:12".
         chat: "-1001234567890"
         # Optional. It colours the card and matches a hook that declares one.
-        # Two seats may share a role; that is the point of having four.
+        # Two agents may share a role; that is the point of having four.
         role: navigator
-        # Optional. The label this seat puts on a task when `label_work` is on —
+        # Optional. The label this agent puts on a task when `label_work` is on —
         # role and runtime unless set, `navigator:claude`, or `claude` alone for a
-        # seat with no role. Set it to match labels your tracker already uses.
-        # Leave the model out: that changes under a seat, and this never does.
+        # agent with no role. Set it to match labels your tracker already uses.
+        # Leave the model out: that changes under an agent, and this never does.
         # task_label: navigator:agent
 
       drv:
@@ -304,19 +306,19 @@ projects:
         chat: "-1004234567890"
         role: driver
 
-      # A reviewer is a seat like the others. Hand it work with `/forward`
-      # from the seat that wrote it; its cards go to its own chat.
+      # A reviewer is an agent like the others. Hand it work with `/forward`
+      # from the agent that wrote it; its cards go to its own chat.
       xrev:
         runtime: codex
         session: alpha-engine-xreviewer
         chat: "-1005234567890"
         role: reviewer
 
-  # A second project is a second block. A seat with no `chat` is reachable by
+  # A second project is a second block. An agent with no `chat` is reachable by
   # name and has nowhere of its own to speak, which is enough to hand it work.
   # hermes:
   #   path: ~/code/hermes
-  #   seats:
+  #   agents:
   #     hnav:
   #       runtime: codex
   #       session: hermes-navigator

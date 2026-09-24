@@ -46,7 +46,7 @@ Message [@BotFather](https://t.me/BotFather), send `/newbot`, and keep the token
 gives you. Then message [@userinfobot](https://t.me/userinfobot) to get your own user
 id — only ids you list can approve anything.
 
-Create a group for each seat you want to keep separate, and add the bot to each. One
+Create a group for each agent you want to keep separate, and add the bot to each. One
 bot covers every group.
 
 ### 2. Install
@@ -67,15 +67,15 @@ uv run halyard init      # asks what you have, writes halyard.yaml, wires it, ch
 uv run halyard           # keep this running
 ```
 
-`init` asks how many seats you have of each runtime, offers the session names it can
+`init` asks how many agents you have of each runtime, offers the session names it can
 already see, and reads the bot token without echoing it. It backs up any file it
 replaces and keeps settings it does not manage.
 
 Writing the file by hand instead, start from `halyard.simple.yaml.example` — one
-project, one seat, one chat — and take anything more from `halyard.yaml.example`,
+project, one agent, one chat — and take anything more from `halyard.yaml.example`,
 which describes all of it.
 
-One file describes a machine: the settings and the seats of every project it
+One file describes a machine: the settings and the agents of every project it
 gates. `halyard.yaml` is gitignored, and a real environment variable still
 overrides it — so a container can pass a token in without writing it to disk.
 
@@ -96,8 +96,8 @@ reading configuration.
 | *(type anything)* | send it into that group's session |
 | `/options` | every model and effort level the runtime accepts |
 | `/model`, `/effort` | what answers, and how hard it thinks |
-| `/to` | *(typed; not on the menu)* hand a message to another seat by name |
-| `/inspect` | pick one of this project's own inspections and run it over the chat's last reply; the answer has a button per seat to hand it on |
+| `/to` | *(typed; not on the menu)* hand a message to another agent by name |
+| `/inspect` | pick one of this project's own inspections and run it over the chat's last reply; the answer has a button per agent to hand it on |
 | `/transition` | take the chat's last reply to its next stage, the way this project defines it — its own prompt in front, its commands and inspections run first |
 | `/md` | *(configurable)* have the agent write its answer to a file and pass the path |
 | `/commit` | commit this branch's work, with a message to approve — and push |
@@ -105,7 +105,7 @@ reading configuration.
 | `/command` | run one of the project's own commands, and hear how it went |
 | `/label` | put a label on the task this branch is for |
 | `/open` | start an agent that is not running — `claude`, `codex`, `gemini` |
-| `/status` | what each seat is, what is running, and how full its limits are |
+| `/status` | what each agent is, what is running, and how full its limits are |
 | `/doctor` | the same check as `halyard doctor`, read from a phone |
 | `/pause`, `/resume` | step out of the way, and come back |
 
@@ -166,8 +166,8 @@ projects:
 ```
 
 **Inspections and transitions** have [a page of their own](docs/transitions.md): a
-project's own inspections, run over a seat's reply, and a reply handed from one
-seat to the next with the project's prompt in front and its commands and
+project's own inspections, run over an agent's reply, and a reply handed from one
+agent to the next with the project's prompt in front and its commands and
 inspections run first. Nothing above needs either.
 
 **`confirmation:` buys a round that a guard cannot.** A test proves what it
@@ -208,10 +208,10 @@ already rejected and why, the corrections it made to its own earlier mistakes.
 What comes back is a confident agent working from a slightly older version of
 events.
 
-Two files per seat close that, and neither needs you to be watching:
+Two files per agent close that, and neither needs you to be watching:
 
 ```yaml
-seats:
+agents:
   nav:
     runtime: claude-code
     before_compaction: compaction_hook/precompact.md
@@ -221,7 +221,7 @@ seats:
 `before_compaction` is instructions for a record Halyard writes *about* the
 session as it is compacted — a separate one-shot turn reads the transcript, so
 the live session is never resumed or forked. `after_compaction` is what the
-session is handed once the summary is done. Both are optional and per seat: a
+session is handed once the summary is done. Both are optional and per agent: a
 navigator holding a plan needs them, a driver running one command does not.
 
 Measured before it was built: a hook cannot steer the summary itself — output
@@ -259,11 +259,11 @@ systemd unit.
 - **Two things can outrun the gate.** A hook that exceeds its timeout, and a wrapper
   that cannot start at all, both let the command through. `doctor` checks for the
   second.
-- **A ZCode seat stops at a captcha.** Messages reach a ZCode session and its gate
+- **A ZCode agent stops at a captcha.** Messages reach a ZCode session and its gate
   answers from your phone, but its provider asks for a captcha from time to time,
   and the token a solved one produces can only be got in ZCode's own window.
   Halyard says so and ends the turn rather than waiting on it; you solve it at the
-  desk and send again. If you would rather not meet that at all, drive the seat
+  desk and send again. If you would rather not meet that at all, drive the agent
   with another runtime — opencode runs the same models and is gated the same way.
 - **One bot token per machine.** Telegram's `getUpdates` has a single consumer.
 - **`/commit` reads the whole working tree, not the staging area.** Agents write
@@ -294,7 +294,7 @@ systemd unit.
 - **Only Codex says how full its limits are.** It writes its accounting into its
   own transcript on every turn, so `/status` can read it back. Claude Code
   publishes nothing to read — measured on 2.1.246: no usage command on the CLI,
-  and per-turn token counts with no limit anywhere among them — so its seats show
+  and per-turn token counts with no limit anywhere among them — so its agents show
   no standing rather than a guess.
 - **Nothing reports when the control plane's own token expires.** `claude auth
   status` answers with eight fields and not one of them is a date, and the token
@@ -328,10 +328,10 @@ behalf, uncontrolled agent-to-agent messaging, or multi-user RBAC.
 |---|---|
 | [Before you wire it in](docs/before-you-wire-it.md) | What changes, and what surprised us |
 | [When it does not work](docs/when-it-does-not-work.md) | Every way setup has gone wrong so far, and the fix |
-| [Setup](docs/setup.md) | Installing it, seats in YAML, gating a project by hand |
+| [Setup](docs/setup.md) | Installing it, agents in YAML, gating a project by hand |
 | [Inspections and transitions](docs/transitions.md) | A project's own inspections, and taking the work from one stage to the next |
 | [Workflows](docs/workflows.md) | A project's transitions taken in order, each reply's last line deciding what comes next |
-| [Telegram](docs/telegram.md) | The bot, seats, models and effort |
+| [Telegram](docs/telegram.md) | The bot, agents, models and effort |
 | [Architecture](docs/architecture.md) | How the layers fit, and the security posture |
 | [Hook behaviour](docs/hook-payload-notes.md) | What the runtimes' hooks actually do — measured |
 | [Session I/O](docs/session-io-notes.md) | Writing into a live session, and what forks it |

@@ -329,14 +329,14 @@ def check_available(**_context) -> list[tuple[str, str]]:
         return lines + models_said
 
     # A failure, not a warning, and the reason is what happens next. Everything
-    # after this asks opencode something — which session a seat means, whether
+    # after this asks opencode something — which session an agent means, whether
     # it is where it says it is — and with nobody answering, every one of those
     # comes back empty. Reported as a warning once, and the line underneath it
     # read "no session named alpha-engine-opencode-driver", which sent somebody
     # looking for a session that was there the whole time behind a server that
     # was not running.
     lines.append(("fail", f"nothing is answering on port {port} ({said})"))
-    lines.append(("", "so nothing here can be asked which session a seat means"))
+    lines.append(("", "so nothing here can be asked which session an agent means"))
     lines.append(("", f"start it with `opencode --port {port}`, or leave a headless one"))
     lines.append(("", f"running with `opencode serve --port {port}` and attach to that"))
     lines.append(("", f"from a terminal with `opencode attach http://127.0.0.1:{port}`"))

@@ -267,4 +267,4 @@ async def _refuse(asked: Permission) -> Answer:
     allows by default would be the gate failing open.
     """
     logger.warning("No gate is wired to ZCode; refusing %s", asked.tool)
-    return Answer(decision="deny", reason="Halyard has no gate wired to this seat")
+    return Answer(decision="deny", reason="Halyard has no gate wired to this agent")

@@ -354,4 +354,4 @@ async def test_a_session_that_is_no_seat_is_said_once_and_not_labelled(
         await settled(labeller)
 
     assert forge.asked == 0
-    assert sum("matches no seat" in record.getMessage() for record in caplog.records) == 1
+    assert sum("matches no agent" in record.getMessage() for record in caplog.records) == 1

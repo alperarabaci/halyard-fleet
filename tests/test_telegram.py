@@ -1881,7 +1881,7 @@ async def test_an_unknown_seat_answers_with_the_list(tmp_path: Path) -> None:
     await channel._handle_message(typed_in("/to nope hello", DRV_CHAT))
 
     said = api.sent[-1]["text"]
-    assert "No seat called" in said
+    assert "No agent called" in said
     assert "xnav" in said and "drv" in said
 
 

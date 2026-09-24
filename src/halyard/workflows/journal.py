@@ -1,7 +1,7 @@
 """What a finished run did, kept to be read later, and said in a line or two.
 
 A run's file is where it has got to, and it is gone the moment the run ends.
-What it did — which steps, in which phase, how many rounds each, which seat,
+What it did — which steps, in which phase, how many rounds each, which agent,
 when — is worth more after the end than during it: that is when somebody asks
 how a piece of work actually went, and across many runs how work goes at all.
 
@@ -10,14 +10,14 @@ Halyard starts used — the checks a step runs, among them — in the database t
 audit log lives in. The runs go into two tables beside it, so the two join on
 the project and the time a step was delivered:
 
-    SELECT s.step, s.phase, s.round, s.seat, SUM(u.output_tokens)
+    SELECT s.step, s.phase, s.round, s.agent, SUM(u.output_tokens)
     FROM workflow_steps s JOIN workflow_runs r USING (run_id)
     JOIN turn_usage u ON u.project = r.project
      AND u.recorded_at BETWEEN s.at AND r.finished_at
     GROUP BY s.run_id, s.step, s.phase, s.round;
 
-What a seat said is not kept, as the audit log does not keep it: the steps are
-the record, and the conversation stays where it happened.
+What an agent said is not kept, as the audit log does not keep it: the steps
+are the record, and the conversation stays where it happened.
 
 **Kept whether a run finished or was stopped.** A run somebody stopped part-way
 is as much a fact about how work goes as one that ran to the end; `outcome`
@@ -56,12 +56,27 @@ CREATE TABLE IF NOT EXISTS workflow_steps (
     step   TEXT NOT NULL,
     phase  INTEGER,
     round  INTEGER NOT NULL,
-    seat   TEXT NOT NULL
+    agent  TEXT NOT NULL
 );
 
 CREATE INDEX IF NOT EXISTS workflow_steps_run_idx ON workflow_steps (run_id);
 CREATE INDEX IF NOT EXISTS workflow_steps_at_idx ON workflow_steps (at);
 """
+
+
+def _upgraded(db: sqlite3.Connection) -> None:
+    """The tables as this version writes them. `workflow_steps.seat` is
+    `agent` now, its rows kept: a seat was what an agent was called until
+    2026-09-24. The column keeps its place, so rows go in as they did."""
+    db.executescript(_SCHEMA)
+    have = {row[1] for row in db.execute("PRAGMA table_info(workflow_steps)")}
+    if "seat" in have and "agent" not in have:
+        try:
+            db.execute("ALTER TABLE workflow_steps RENAME COLUMN seat TO agent")
+        except sqlite3.OperationalError as error:
+            # Somebody else got here first.
+            if "no such column" not in str(error) and "duplicate column" not in str(error):
+                raise
 
 
 def run_id(run: Run, work: str) -> str:
@@ -77,7 +92,7 @@ def _step_and_phase(key: str) -> tuple[str, int | None]:
 
 def deliveries(run: Run) -> list[tuple[datetime, str, int | None, int, str]]:
     """Every step the run delivered, oldest first: when, which step, which
-    phase, which round of it, to which seat."""
+    phase, which round of it, to which agent."""
     found = [
         (entry.at, *_step_and_phase(key), place + 1, entry.to)
         for key, entries in run.rounds.items()
@@ -96,7 +111,7 @@ def record(
     ident = run_id(run, work)
     try:
         with contextlib.closing(sqlite3.connect(path)) as db:
-            db.executescript(_SCHEMA)
+            _upgraded(db)
             db.execute(
                 "INSERT OR REPLACE INTO workflow_runs VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
@@ -157,7 +172,7 @@ def steps_line(run: Run, *, flow: Sequence[str], stretch: tuple[int, int] | None
         for name in once(flow[last + 1 :])
         if taken.get(name) and name not in flow[:first]
     ]
-    return " · ".join(parts) or "no step reached its seat"
+    return " · ".join(parts) or "no step reached its agent"
 
 
 def lasted(since: datetime, until: datetime) -> str:

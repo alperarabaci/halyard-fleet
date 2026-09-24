@@ -280,7 +280,7 @@ class TranscriptWatcher:
                     session_name=seat.session,
                 )
             except Exception:
-                logger.debug("Could not adopt the session for seat %s", seat.label, exc_info=True)
+                logger.debug("Could not adopt the session for agent %s", seat.label, exc_info=True)
 
     async def run(self, seats=None) -> None:
         """Poll forever. Cancelled on shutdown, like the channel's own loop."""

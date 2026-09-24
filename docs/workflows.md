@@ -2,7 +2,7 @@
 
 A transition hands one reply on and stops there: somebody reads what came back and presses
 the next one. A **workflow** presses it. It is a project's transitions taken in the order
-the project wrote them down, each step going to one seat, and each reply's own last line
+the project wrote them down, each step going to one agent, and each reply's own last line
 saying whether the work goes on, comes back a step, or waits for a person.
 
 Everything here sits under the project in `halyard.yaml`, beside the `transitions:` its
@@ -24,30 +24,30 @@ projects:
       close: {prompt: NOTES/transitions/close.md, to: navigator}
     workflows:
       steps:
-        to_nav:       {seat: nav}
-        review:       {seat: xreview, rounds: 2}
-        reviewed:     {seat: nav, decided_by: review, rounds: 2}
-        discover:     {transition: driver_discover, seat: xdrv, rounds: 2}
-        discover_glm: {transition: driver_discover, seat: zdrv, rounds: 2}
-        discovered:   {transition: discover_completed, seat: nav, rounds: 2}
-        develop:      {transition: driver_develop, seat: xdrv}
-        develop_glm:  {transition: driver_develop, seat: zdrv}
-        verified:     {transition: to_nav, seat: nav}
-        close:        {seat: nav}
+        to_nav:       {agent: nav}
+        review:       {agent: xreview, rounds: 2}
+        reviewed:     {agent: nav, decided_by: review, rounds: 2}
+        discover:     {transition: driver_discover, agent: xdrv, rounds: 2}
+        discover_glm: {transition: driver_discover, agent: zdrv, rounds: 2}
+        discovered:   {transition: discover_completed, agent: nav, rounds: 2}
+        develop:      {transition: driver_develop, agent: xdrv}
+        develop_glm:  {transition: driver_develop, agent: zdrv}
+        verified:     {transition: to_nav, agent: nav}
+        close:        {agent: nav}
       level3:    [to_nav, review, reviewed, [discover, discovered, develop, verified], close]
       level2glm: [to_nav, discover_glm, discovered, develop_glm, close]
 ```
 
 ## Steps are named once
 
-Every workflow uses the same `steps:`. A step is a transition going to a seat: `transition:` is
-the step's own name when it says none, and `seat:` can be left out when the transition's
-`to:` already names one seat. One transition going to two different drivers is two steps —
+Every workflow uses the same `steps:`. A step is a transition going to an agent: `transition:` is
+the step's own name when it says none, and `agent:` can be left out when the transition's
+`to:` already names one agent. One transition going to two different drivers is two steps —
 `discover` and `discover_glm` above — which is where the two are told apart. A workflow
 is then a list of step names, in order; `steps`, `decisions` and `phases` are the names
 under `workflows:` that are not workflows.
 
-A flow naming a step, a step naming a transition, or a step naming a seat that the project
+A flow naming a step, a step naming a transition, or a step naming an agent that the project
 does not define is refused when the file is read, rather than part-way through a flow.
 
 ## Starting one
@@ -63,7 +63,7 @@ phase 2`.
 
 ## The last line decides
 
-When the seat a step went to replies, Halyard reads the last line of that reply:
+When the agent a step went to replies, Halyard reads the last line of that reply:
 
 - `forward` takes the next step, carrying the reply to it;
 - `back` sends the work to the step before — the one that produced what was just judged
@@ -108,7 +108,7 @@ The last step of the phases decides between two ways on:
 - `forward` leaves the phases for whatever comes after them — `close` above.
 
 Only there. A `next` at any other step stops the run rather than guess which phase the
-seat meant, and so does a phase that ends with **no decision at all**: carrying on would
+agent meant, and so does a phase that ends with **no decision at all**: carrying on would
 leave the phases with nobody having said the work was done. The stop offers the next
 phase and the way out of them as buttons, so the work stays in the run whichever it is.
 
@@ -142,7 +142,7 @@ from there, the navigator decides for itself.
 
 A transition pressed by hand carries nothing of a workflow. A step's envelope carries the
 workflow's own lines as well — where it is, and where each word on its last line would
-take the work, with the seat, the round and the phase it would be:
+take the work, with the agent, the round and the phase it would be:
 
 ```
 - Workflow: level3 · step 5 of 8 · discovered
@@ -170,7 +170,7 @@ The review is told where its decision goes, and the navigator what was decided:
 
 A step the work came back to also says who sent it, as `Sent back by: nav (navigator) at
 18:21`. Coming back is that step's next round, so its transition's `followup_prompt:` is
-what goes in front of it, with the seat's own answer to the round before.
+what goes in front of it, with the agent's own answer to the round before.
 
 ## Rounds stop a loop
 
@@ -179,7 +179,7 @@ round again, so both say it: `discovered` sending the work back runs `discover` 
 time, and then `discovered` a second time, which is why both have `rounds: 2` above.
 `develop` and `close` say nothing, so a `back` at `close` stops and asks.
 
-**Rounds are the run's own.** Each step counts the times it reached its seat in this
+**Rounds are the run's own.** Each step counts the times it reached its agent in this
 run — per phase, inside the phases — and the envelope's `Round: n/…` counts against the
 same number. A transition pressed by hand is not part of a run and counts nothing: it sends
 its own prompt every time, and says no round. Two steps naming one transition do not share
@@ -195,8 +195,8 @@ going says where it is — `level3 5/8 · develop · phase 2 — waiting for xdr
 offers the same button.
 
 A run stops, and says why, when a step would go past its rounds, when the phases would
-go past theirs, when a phase ends with no decision, when a seat decides to wait, and when
-a step's seat could be more than one seat. The card it stops with keeps the work in the
+go past theirs, when a phase ends with no decision, when an agent decides to wait, and when
+a step's agent could be more than one agent. The card it stops with keeps the work in the
 run:
 
 - **▶️ Send it anyway** — or **↻ Phase 2 at discover** — sends what is ready;
@@ -220,17 +220,17 @@ to_nav · review x2 · reviewed x2 · phase 1: discover, develop, developed · p
 The same run is kept in Halyard's database, beside the tokens the turns Halyard starts
 use: one row per run in `workflow_runs` (`project`, `work`, `workflow`, `started_at`,
 `finished_at`, `outcome`, `phases`, `deliveries`) and one per step delivered in
-`workflow_steps` (`at`, `step`, `phase`, `round`, `seat`). A run stopped with **⏹** is
+`workflow_steps` (`at`, `step`, `phase`, `round`, `agent`). A run stopped with **⏹** is
 kept too, as `stopped`, without the report. The two join on the project and the time:
 
 ```sql
-SELECT s.step, s.phase, s.round, s.seat, SUM(u.output_tokens)
+SELECT s.step, s.phase, s.round, s.agent, SUM(u.output_tokens)
 FROM workflow_steps s JOIN workflow_runs r USING (run_id)
 JOIN turn_usage u ON u.project = r.project AND u.recorded_at BETWEEN s.at AND r.finished_at
 GROUP BY s.run_id, s.step, s.phase, s.round;
 ```
 
-What a seat said is not kept, as the audit log does not keep it.
+What an agent said is not kept, as the audit log does not keep it.
 
 A run is kept per project beside Halyard's database, so a restart picks it up where it
 was, and there is one run per piece of work: a project has one working tree, and its
