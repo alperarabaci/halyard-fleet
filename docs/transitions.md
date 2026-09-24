@@ -95,6 +95,10 @@ Without an effort, the runtime picks one, and not the same for every model: in
 the catalog Claude Code 2.1.280 ships, Sonnet 5 thinks at `high` unless told and
 Opus 5.5 at `medium`.
 
+Every inspection runs on the default runtime, Claude Code, whichever agent's
+chat it is asked from: the model and the effort are that runtime's words. Another
+runtime is for trying one on purpose — see below.
+
 An inspection that needs a stronger model says so where it is described,
 written as a mapping instead of a file alone. What it leaves out is the
 machine's:
@@ -194,6 +198,7 @@ uv run halyard inspect repeat 5f0c9a2e --model opus    # the same input, another
 uv run halyard inspect repeat 5f0c9a2e --effort max    # the same model, thinking harder
 uv run halyard inspect repeat 5f0c9a2e --times 3       # the same again, three times
 uv run halyard inspect repeat 5f0c9a2e --runtime opencode --model zai-coding-plan/glm-5.3 --effort high
+uv run halyard inspect repeat 5f0c9a2e --runtime codex --model gpt-5.6-luna --effort medium
 uv run halyard inspect compare 5f0c9a2e                # the runs side by side
 ```
 
@@ -220,6 +225,12 @@ a file or fetch a page, asking about commands as the project's rules say, and
 deleted when the turn ends. Its effort is opencode's *variant* — `low`, `high`
 or `max` for GLM 5.3. Not `opencode run`: run without a terminal, it refuses
 every question itself before Halyard hears of it.
+
+**On Codex** — GPT — a repeat is `codex exec`, run in the project's directory so
+the project's hooks are its gate: a sandbox that only reads and asks for
+nothing more, and no thread kept on disk. Its effort is the model's reasoning
+effort, from the levels that model takes. Not every model in the CLI's catalog
+is open to every account: measured, `gpt-5.4-mini` is refused to a ChatGPT one.
 
 The files are where they are when it runs; nothing is checked out. The model
 reads the envelope the first run was given, and the row keeps where the files

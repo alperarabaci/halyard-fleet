@@ -29,7 +29,7 @@ USAGE = """usage: halyard inspect <recent [n] | repeat <id> [options] | compare 
   repeat <id>        give one the same input again, and keep the answer beside
     --model <m>        the original as an experiment: on this model,
     --effort <e>       thinking this hard (`default`: the runtime's own),
-    --runtime <r>      on this runtime — `opencode`, say — with --model,
+    --runtime <r>      on this runtime — `opencode`, `codex` — with --model,
     --times <n>        n runs, one after another
   compare <id>       a run and its repeats side by side; the input and every
                      answer are written out as files, for whoever judges them
@@ -43,7 +43,8 @@ HALYARD_KEEP_INSPECTIONS is on.
 A repeat takes a turn of its own in the project's directory, as an inspection
 does: a command its model asks to run comes to Telegram as the repeat's card,
 and with Halyard stopped it is refused. On opencode it runs in the opencode
-already open at the desk, in a session of its own that is deleted afterwards.
+already open at the desk, in a session of its own that is deleted afterwards;
+on Codex it is `codex exec`, reading only, with nothing kept.
 """
 
 
