@@ -50,6 +50,7 @@ CREATE TABLE IF NOT EXISTS inspection_runs (
     round        INTEGER,
     runtime      TEXT,
     model        TEXT NOT NULL,
+    effort       TEXT,
     head         TEXT,
     content      TEXT,
     context      TEXT NOT NULL,
@@ -67,6 +68,28 @@ CREATE TABLE IF NOT EXISTS inspection_runs (
 CREATE INDEX IF NOT EXISTS inspection_runs_at_idx ON inspection_runs (at);
 CREATE INDEX IF NOT EXISTS inspection_runs_work_idx ON inspection_runs (work);
 """
+
+#: Columns added after the table was first made, and what they hold. A table
+#: made before one of them gets it added, empty for the rows it already has.
+_ADDED = {"effort": "TEXT"}
+
+
+def upgrade(db: sqlite3.Connection) -> None:
+    """The table as this version reads and writes it, made or brought up to
+    date. `effort` came a day after the table did: the runs kept before it
+    ran at whatever effort the runtime chose, and say nothing."""
+    db.executescript(_SCHEMA)
+    have = {row[1] for row in db.execute("PRAGMA table_info(inspection_runs)")}
+    for column, kind in _ADDED.items():
+        if column in have:
+            continue
+        try:
+            db.execute(f"ALTER TABLE inspection_runs ADD COLUMN {column} {kind}")
+        except sqlite3.OperationalError as error:
+            # The service and `halyard inspect` can both get here first.
+            if "duplicate column" not in str(error):
+                raise
+    db.commit()
 
 
 def _said(context: tuple[str, ...], label: str) -> str | None:
@@ -95,40 +118,43 @@ def keep(
 ) -> None:
     """Write one inspection run. Never raises: a record that cannot be kept
     costs the record, never the inspection."""
+    row = {
+        "id": kept.session,
+        "at": kept.at.isoformat(),
+        "project": project,
+        "work": work,
+        "inspection": kept.name,
+        "file": str(kept.path),
+        "file_version": kept.version,
+        "handoff": kept.handoff or None,
+        "workflow_run": workflow_run,
+        "step": step,
+        "phase": phase,
+        "round": round,
+        "runtime": runtime,
+        "model": kept.model,
+        "effort": kept.effort,
+        "head": _said(kept.context, "HEAD"),
+        "content": _said(kept.context, "Content"),
+        "context": "\n".join(kept.context),
+        "note": kept.note,
+        "input": kept.asked,
+        "answer": kept.answer,
+        "outcome": "answered" if kept.answer is not None else "unmeasured",
+        "why": kept.why,
+        "finding": kept.finding,
+        "took": kept.took,
+        "experimental": int(experimental),
+        "repeat_of": repeat_of,
+    }
     try:
         with contextlib.closing(sqlite3.connect(path)) as db:
-            db.executescript(_SCHEMA)
+            upgrade(db)
+            # By name: a table brought up to date has its newer columns last.
             db.execute(
-                "INSERT OR REPLACE INTO inspection_runs VALUES "
-                "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (
-                    kept.session,
-                    kept.at.isoformat(),
-                    project,
-                    work,
-                    kept.name,
-                    str(kept.path),
-                    kept.version,
-                    kept.handoff or None,
-                    workflow_run,
-                    step,
-                    phase,
-                    round,
-                    runtime,
-                    kept.model,
-                    _said(kept.context, "HEAD"),
-                    _said(kept.context, "Content"),
-                    "\n".join(kept.context),
-                    kept.note,
-                    kept.asked,
-                    kept.answer,
-                    "answered" if kept.answer is not None else "unmeasured",
-                    kept.why,
-                    kept.finding,
-                    kept.took,
-                    int(experimental),
-                    repeat_of,
-                ),
+                f"INSERT OR REPLACE INTO inspection_runs ({', '.join(row)}) "
+                f"VALUES ({', '.join('?' for _ in row)})",
+                tuple(row.values()),
             )
             db.commit()
     except sqlite3.Error:

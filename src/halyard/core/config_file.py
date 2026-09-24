@@ -200,6 +200,19 @@ class Workflows:
 
 
 @dataclass(frozen=True)
+class ModelChoice:
+    """A model, and how hard it thinks — `opus`, `high`. Either may be left
+    unsaid, for something broader to fill in: see `over`."""
+
+    model: str | None = None
+    effort: str | None = None
+
+    def over(self, broader: ModelChoice) -> ModelChoice:
+        """This, with what it leaves unsaid taken from `broader`."""
+        return ModelChoice(self.model or broader.model, self.effort or broader.effort)
+
+
+@dataclass(frozen=True)
 class Project:
     """A codebase, its location, and the seats working in it."""
 
@@ -260,6 +273,11 @@ class Project:
     #: to the project and put in front of a model on its own. Empty unless
     #: configured. See `halyard.inspections`.
     inspections: dict[str, Path] = field(default_factory=dict)
+    #: The inspections that name a model or an effort of their own, by name —
+    #: written as a mapping under `inspections:` rather than a file alone. The
+    #: others, and whatever these leave unsaid, run on the machine's
+    #: `HALYARD_INSPECTION_MODEL` and `HALYARD_INSPECTION_EFFORT`.
+    inspection_models: dict[str, ModelChoice] = field(default_factory=dict)
     #: How a reply is handed from one seat to another here, by name — see
     #: `Handoff`. Empty unless configured.
     handoffs: dict[str, Handoff] = field(default_factory=dict)
@@ -305,25 +323,59 @@ def _spelled(project: str, body: dict, new: str, old: str, where: str) -> tuple[
     return body.get(new), None
 
 
-def _inspections_from(project: str, value: Any) -> dict[str, Path]:
-    """`inspections:` as a mapping of name to the file that says what to look for.
+#: What an inspection written as a mapping may say.
+_INSPECTION_FIELDS = ("file", "model", "effort")
 
-    Strict about the shape: an inspection written as a mapping would otherwise
-    become a path spelled with its own braces, and fail only when somebody ran it.
+
+def _inspections_from(project: str, value: Any) -> tuple[dict[str, Path], dict[str, ModelChoice]]:
+    """`inspections:` as a mapping of name to the file that says what to look
+    for — or, for one that runs on a model of its own, to a mapping:
+
+        proof: NOTES/inspections/proof.md
+        bounded-context:
+          file: NOTES/inspections/bounded-context.md
+          model: opus
+          effort: high
+
+    Strict about the shape: a mapping without `file:`, or with a key nobody
+    reads, would otherwise fail only when somebody ran the inspection.
     """
     if value is None:
-        return {}
+        return {}, {}
     if not isinstance(value, dict):
         raise ValueError(f"Project {project!r}: `inspections:` must be a mapping of name to file.")
-    found: dict[str, Path] = {}
+    files: dict[str, Path] = {}
+    models: dict[str, ModelChoice] = {}
     for name, where in value.items():
+        chosen = ModelChoice()
+        if isinstance(where, dict):
+            unknown = sorted(str(key) for key in where if key not in _INSPECTION_FIELDS)
+            if unknown:
+                raise ValueError(
+                    f"Project {project!r}: inspection {name!r} has {', '.join(unknown)} — "
+                    f"it takes {', '.join(_INSPECTION_FIELDS)}."
+                )
+            said = {key: where.get(key) for key in ("model", "effort")}
+            for key, text in said.items():
+                if text is not None and (not isinstance(text, str) or not text.strip()):
+                    raise ValueError(
+                        f"Project {project!r}: inspection {name!r}'s `{key}:` must be a name, "
+                        f"like `{'opus' if key == 'model' else 'high'}`."
+                    )
+            chosen = ModelChoice(
+                said["model"].strip() if said["model"] else None,
+                said["effort"].strip().lower() if said["effort"] else None,
+            )
+            where = where.get("file")
         if not str(name).strip() or not isinstance(where, str) or not where.strip():
             raise ValueError(
                 f"Project {project!r}: inspection {name!r} needs a file, "
                 "like `proof: NOTES/inspections/proof.md`."
             )
-        found[str(name).strip()] = Path(where.strip()).expanduser()
-    return found
+        files[str(name).strip()] = Path(where.strip()).expanduser()
+        if chosen != ModelChoice():
+            models[str(name).strip()] = chosen
+    return files, models
 
 
 #: A handoff's name rides in a button, where Telegram allows 64 bytes of
@@ -945,7 +997,7 @@ def projects_from_yaml(text: str) -> list[Project]:
         written, spelled = _spelled(project, body, "inspections", "checks", "the project")
         if spelled is not None:
             older.append(spelled)
-        inspections = _inspections_from(project, written)
+        inspections, inspection_models = _inspections_from(project, written)
         commands, command_lists = _commands_from(project, body.get("commands"))
         _not_a_list(project, body, command_lists)
         handoffs = _handoffs_from(
@@ -975,6 +1027,7 @@ def projects_from_yaml(text: str) -> list[Project]:
                 label_work=_as_flag(project, "label_work", body.get("label_work")),
                 confirmation=_confirmation_from(project, body.get("confirmation")),
                 inspections=inspections,
+                inspection_models=inspection_models,
                 handoffs=handoffs,
                 workflows=_workflows_from(
                     project, body.get("workflows"), handoffs=handoffs, seats=seats

@@ -22,6 +22,8 @@ class Asker(Protocol):
     read, and run commands, which the project's gate puts in front of somebody.
     `session_id` is the id the turn runs under, chosen by the inspection, so
     that the record kept of it and the tokens it used can be found together.
+    `effort` is how hard the model thinks, in the runtime's own words; None
+    leaves it to the runtime.
     """
 
     async def ask(
@@ -34,6 +36,7 @@ class Asker(Protocol):
         name: str | None = None,
         edits: bool = True,
         session_id: str | None = None,
+        effort: str | None = None,
     ) -> str | None: ...
 
 
@@ -80,6 +83,9 @@ class Kept:
     #: The project's own finding phrase the answer said, if it said one.
     finding: str | None
     took: float
+    #: How hard the model was asked to think, or None when that was left to the
+    #: runtime — whose default is not the same for every model.
+    effort: str | None = None
 
 
 @runtime_checkable

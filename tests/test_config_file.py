@@ -396,11 +396,59 @@ def test_the_old_name_and_the_new_one_together_are_refused(tmp_path) -> None:
         )
 
 
-def test_an_inspection_written_as_anything_but_a_file_is_refused(tmp_path) -> None:
+def test_an_inspection_written_as_a_mapping_still_needs_its_file(tmp_path) -> None:
     """Otherwise it becomes a path spelled with its own braces, and fails only
     when somebody runs it."""
     with pytest.raises(ValueError, match="needs a file"):
+        a_project(tmp_path, lines=["inspections:", "  proof: {model: opus}"])
+
+
+def test_an_inspection_says_nothing_it_does_not_read(tmp_path) -> None:
+    """`prompt:` is a handoff's. Written here, it would be passed over without a
+    word, and the inspection would run on nothing."""
+    with pytest.raises(ValueError, match="has prompt — it takes file, model, effort"):
         a_project(tmp_path, lines=["inspections:", "  proof: {prompt: NOTES/proof.md}"])
+
+
+def test_an_inspection_can_run_on_a_model_of_its_own(tmp_path) -> None:
+    """One that needs a stronger model says so where it is described; the rest
+    run on the machine's."""
+    from halyard.core.config_file import ModelChoice
+
+    [project] = a_project(
+        tmp_path,
+        lines=[
+            "inspections:",
+            "  proof: NOTES/inspections/proof.md",
+            "  bounded-context:",
+            "    file: NOTES/inspections/bounded-context.md",
+            "    model: opus",
+            "    effort: High",
+        ],
+    )
+
+    assert project.inspections == {
+        "proof": Path("NOTES/inspections/proof.md"),
+        "bounded-context": Path("NOTES/inspections/bounded-context.md"),
+    }
+    assert project.inspection_models == {"bounded-context": ModelChoice("opus", "high")}
+
+
+def test_what_an_inspection_leaves_unsaid_is_the_machine_s(tmp_path) -> None:
+    from halyard.core.config_file import ModelChoice
+
+    [project] = a_project(
+        tmp_path, lines=["inspections:", "  proof: {file: NOTES/proof.md, effort: max}"]
+    )
+
+    [(name, chosen)] = project.inspection_models.items()
+    assert name == "proof"
+    assert chosen.over(ModelChoice("sonnet", "high")) == ModelChoice("sonnet", "max")
+
+
+def test_an_effort_that_is_not_a_name_is_refused(tmp_path) -> None:
+    with pytest.raises(ValueError, match="`effort:` must be a name"):
+        a_project(tmp_path, lines=["inspections:", "  proof: {file: NOTES/p.md, effort: 3}"])
 
 
 def test_an_inspection_file_that_is_not_there_is_named_too(tmp_path) -> None:

@@ -69,6 +69,8 @@ class FakeRunner:
         self.models: list[str | None] = []
         #: The system prompt each turn asked for in place of Claude Code's own.
         self.systems: list[str | None] = []
+        #: How hard each one-shot turn was asked to think.
+        self.efforts: list[str | None] = []
         #: The id each one-shot turn ran under — what its tokens are recorded by.
         self.session_ids: list[str | None] = []
         self.sent: list[tuple[str, str]] = []
@@ -80,6 +82,7 @@ class FakeRunner:
     async def ask(self, text: str, *, model: str | None = None, **kwargs) -> str | None:
         self.asked.append(text)
         self.models.append(model)
+        self.efforts.append(kwargs.get("effort"))
         self.systems.append(kwargs.get("system"))
         self.session_ids.append(kwargs.get("session_id"))
         if self.says is None:
@@ -2103,6 +2106,50 @@ async def test_pressing_a_check_runs_that_one_over_the_last_reply(tmp_path: Path
     assert "alpha-engine#281" in asked
     assert runner.models == [INSPECTION_MODEL]
     assert api.sent[-1]["text"].startswith("<b>proof</b>")
+
+
+async def test_an_inspection_runs_on_its_own_model_and_the_rest_on_the_machine_s(
+    tmp_path: Path, wired
+) -> None:
+    """`HALYARD_INSPECTION_EFFORT: max` for every inspection, and one that says
+    `model: opus` where it is described — the effort it leaves unsaid is the
+    machine's still."""
+    from halyard.core.config_file import ModelChoice
+
+    channel, _, runner, repo = wired
+    inspections_in(channel, repo, tmp_path, proof="# proof", bounded="# bounded context")
+    found = channel._repositories["alpha-engine"]
+    channel._repositories["alpha-engine"] = replace(
+        found, inspection_models={"bounded": ModelChoice(model="opus")}
+    )
+    channel._inspection_model = ModelChoice("sonnet", "max")
+
+    await channel._handle_callback(pressed_inspection("proof"))
+    await settled(channel)
+    await channel._handle_callback(pressed_inspection("bounded"))
+    await settled(channel)
+
+    assert list(zip(runner.models, runner.efforts, strict=True)) == [
+        ("sonnet", "max"),
+        ("opus", "max"),
+    ]
+
+
+def test_what_the_machine_leaves_unsaid_is_the_channel_s_own_model() -> None:
+    """Only an effort set, as `HALYARD_INSPECTION_EFFORT: max` alone would."""
+    from halyard.channels.telegram.adapter import INSPECTION_MODEL
+    from halyard.core.config_file import ModelChoice
+
+    channel = TelegramChannel(
+        api=FakeApi(),
+        store=ApprovalStore(ttl=timedelta(minutes=5)),
+        audit=AuditLog([]),
+        chat_id=CHAT,
+        authorized_user_ids=frozenset({APPROVER}),
+        inspection_model=ModelChoice(effort="max"),
+    )
+
+    assert channel._inspection_model == ModelChoice(INSPECTION_MODEL, "max")
 
 
 async def test_a_check_named_after_the_command_runs_with_the_note(tmp_path: Path, wired) -> None:

@@ -204,6 +204,15 @@ class Settings(BaseSettings):
     #: the input holds the reply that was inspected. Turned on, it never holds
     #: anything up — the row is written off to one side, after the answer.
     keep_inspections: bool = Field(default=False, validation_alias="HALYARD_KEEP_INSPECTIONS")
+    #: The model every inspection runs on — unless its own entry under a
+    #: project's `inspections:` names another. Unset, the channel's own choice.
+    inspection_model: str | None = Field(default=None, validation_alias="HALYARD_INSPECTION_MODEL")
+    #: How hard it thinks — `max`. Unset, the runtime's default for the model,
+    #: which is not the same for every model: in the catalog Claude Code 2.1.280
+    #: ships, `high` for Sonnet 5 and `medium` for Opus 5.5.
+    inspection_effort: str | None = Field(
+        default=None, validation_alias="HALYARD_INSPECTION_EFFORT"
+    )
 
     log_level: str = Field(default="INFO", validation_alias="HALYARD_LOG_LEVEL")
     #: A ceiling on one week, so an always-on service cannot fill a disk before

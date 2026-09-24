@@ -17,6 +17,8 @@ class Asking:
         self.how: list[dict] = []
         #: The id each turn was asked to run under.
         self.sessions: list[str | None] = []
+        #: How hard each turn was asked to think.
+        self.efforts: list[str | None] = []
 
     async def ask(
         self,
@@ -28,10 +30,12 @@ class Asking:
         name: str | None = None,
         edits: bool = True,
         session_id: str | None = None,
+        effort: str | None = None,
     ) -> str | None:
         self.asked.append((text, model))
         self.how.append({"cwd": cwd, "name": name, "edits": edits})
         self.sessions.append(session_id)
+        self.efforts.append(effort)
         if self.says is None:
             raise RuntimeError("no model today")
         return self.says
@@ -266,7 +270,9 @@ class Keeping:
         self.kept.append(kept)
 
 
-async def kept_run(tmp_path: Path, asker, keeper: Keeping, *, says_finding: bool = False):
+async def kept_run(
+    tmp_path: Path, asker, keeper: Keeping, *, says_finding: bool = False, effort=None
+):
     (tmp_path / "proof.md").write_text("# proof\n")
     return await inspections.run(
         "proof",
@@ -277,11 +283,23 @@ async def kept_run(tmp_path: Path, asker, keeper: Keeping, *, says_finding: bool
         reply="42 passed",
         asker=asker,
         model="sonnet",
+        effort=effort,
         timeout=5,
         handoff="close",
         findings=("status: candidate",) if says_finding else (),
         keeper=keeper,
     )
+
+
+async def test_the_effort_asked_for_is_the_one_kept(tmp_path: Path) -> None:
+    """How hard a model thought is half of what a run is compared by."""
+    asker, keeper = Asking(), Keeping()
+
+    await kept_run(tmp_path, asker, keeper, effort="max")
+
+    assert asker.efforts == ["max"]
+    [kept] = keeper.kept
+    assert (kept.model, kept.effort) == ("sonnet", "max")
 
 
 async def test_every_run_is_kept_whole_under_the_id_it_ran_under(tmp_path: Path) -> None:

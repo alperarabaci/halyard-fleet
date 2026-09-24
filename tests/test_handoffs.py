@@ -6,7 +6,7 @@ from pathlib import Path
 
 from halyard import handoffs
 from halyard.commands import Command, Result
-from halyard.core.config_file import Handoff
+from halyard.core.config_file import Handoff, ModelChoice
 
 
 class Asking:
@@ -17,6 +17,8 @@ class Asking:
         self.asked: list[str] = []
         #: What each turn went by, as a card for one of its commands would say.
         self.names: list[str | None] = []
+        #: The model and effort each turn was asked for, by what it went by.
+        self.models: dict[str | None, tuple[str | None, str | None]] = {}
 
     async def ask(
         self,
@@ -28,9 +30,11 @@ class Asking:
         name: str | None = None,
         edits: bool = True,
         session_id: str | None = None,
+        effort: str | None = None,
     ) -> str | None:
         self.asked.append(text)
         self.names.append(name)
+        self.models[name] = (model, effort)
         return self.says
 
 
@@ -253,6 +257,26 @@ async def test_each_check_a_handoff_runs_goes_by_the_handoffs_name_too(tmp_path:
     await hand(tmp_path, Handoff(name="discovery", inspections=("proof", "claims")), asker=asker)
 
     assert sorted(asker.names) == ["claims · handoff discovery", "proof · handoff discovery"]
+
+
+async def test_an_inspection_that_names_its_own_model_runs_on_it(tmp_path: Path) -> None:
+    """One inspection on a stronger model, the rest on the machine's — and what
+    it leaves unsaid, the machine's too."""
+    a_project(tmp_path)
+    asker = Asking()
+
+    await hand(
+        tmp_path,
+        Handoff(name="close", inspections=("proof", "claims")),
+        asker=asker,
+        effort="max",
+        models={"claims": ModelChoice(model="opus")},
+    )
+
+    assert asker.models == {
+        "proof · handoff close": ("sonnet", "max"),
+        "claims · handoff close": ("opus", "max"),
+    }
 
 
 async def test_the_seat_reads_an_envelope_one_fact_to_a_line(tmp_path: Path) -> None:

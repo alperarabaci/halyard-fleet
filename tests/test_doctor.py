@@ -485,3 +485,28 @@ def test_a_name_from_before_a_rename_is_a_warning_that_says_what_to_rename() -> 
         "the old name still works",
     ]
     assert doctor._older_spellings(projects_from_yaml("projects:\n  a:\n    path: /x\n")) == []
+
+
+def test_an_effort_the_runtime_does_not_take_is_named_where_it_was_written() -> None:
+    """Such an inspection still runs, at the model's own effort, and says so in
+    a log nobody reads. The doctor is where somebody looks."""
+    from types import SimpleNamespace
+
+    from halyard.core.config_file import projects_from_yaml
+
+    [project] = projects_from_yaml(
+        "projects:\n  alpha-engine:\n    inspections:\n"
+        "      proof: NOTES/proof.md\n"
+        "      bounded-context: {file: NOTES/bc.md, model: opus, effort: hihg}\n"
+    )
+
+    lines = doctor._inspection_efforts(
+        SimpleNamespace(inspection_effort="Max", claude_models=None, claude_binary=None,
+                        claude_default_model=None, claude_oauth_token=None,
+                        db_path=Path("halyard.db")),
+        [project],
+    )  # fmt: skip
+
+    [warning] = lines
+    assert "alpha-engine's inspection bounded-context asks for effort 'hihg'" in warning
+    assert "max" in warning

@@ -20,26 +20,29 @@ from halyard import frame
 from halyard.core.config_file import Project, projects
 from halyard.inspections import repeat as repeating
 
-USAGE = """usage: halyard inspect <recent [n] | repeat <id> --model <m> [--times n] | compare <id>>
+USAGE = """usage: halyard inspect <recent [n] | repeat <id> [options] | compare <id>>
 
-  recent [n]               the last n inspections the work made (10), with their ids
-  repeat <id> --model <m>  give one the same input again, with another model, and keep
-         [--times n]       the answer beside the original as an experiment; n runs
-  compare <id>             a run and its repeats side by side; the input and every
-                           answer are written out as files, for whoever judges them
+  recent [n]         the last n inspections the work made (10), with their ids
+  repeat <id>        give one the same input again, and keep the answer beside
+    --model <m>        the original as an experiment: on this model,
+    --effort <e>       thinking this hard (`default`: the runtime's own),
+    --times <n>        n runs, one after another
+  compare <id>       a run and its repeats side by side; the input and every
+                     answer are written out as files, for whoever judges them
 
-An id can be cut to any start of it no other id has. Runs are kept only while
-HALYARD_KEEP_INSPECTIONS is on. A repeat takes a turn of its own on the default
-runtime, in the project's directory, as an inspection does: a command its model
-asks to run comes to Telegram as a card from its session, and with Halyard
-stopped it is refused.
+A repeat changes only what it is told to: a model or an effort left out is the
+original's. An id can be cut to any start of it no other id has. Runs are kept
+only while HALYARD_KEEP_INSPECTIONS is on. A repeat takes a turn of its own on
+the default runtime, in the project's directory, as an inspection does: a
+command its model asks to run comes to Telegram as a card from its session, and
+with Halyard stopped it is refused.
 """
 
 
 def main(args: Sequence[str]) -> int:
     """`halyard inspect …` — see `USAGE`."""
     try:
-        words, named = _options(args, known=("model", "times"))
+        words, named = _options(args, known=("model", "effort", "times"))
     except ValueError as wrong:
         print(f"halyard inspect: {wrong}\n\n{USAGE}", file=sys.stderr)
         return 2
@@ -121,7 +124,7 @@ def _line(run: repeating.Row, repeated: int = 0) -> str:
         f"{run.at.astimezone():%m-%d %H:%M}",
         run.work or run.project,
         f"{run.inspection}{ran_for}",
-        run.model,
+        f"{run.model}@{run.effort}" if run.effort else run.model,
         f"{run.took:.0f}s",
         run.outcome if run.answer is not None else f"unmeasured: {run.why}",
     ]
@@ -182,6 +185,7 @@ class _Asking:
         name: str | None = None,
         edits: bool = True,
         session_id: str | None = None,
+        effort: str | None = None,
     ) -> str | None:
         return await self._runner.ask(
             text,
@@ -192,6 +196,7 @@ class _Asking:
             session_id=session_id,
             purpose=f"inspect {name} · repeat" if name else "inspect · repeat",
             project=self._project,
+            effort=effort,
         )
 
     @property
@@ -214,10 +219,12 @@ def _one_shot(settings):
 def _repeat_command(
     original: repeating.Row, named: dict[str, str], settings, database: Path
 ) -> int:
-    model = named.get("model", "").strip()
-    if not model:
-        print("halyard inspect repeat: with which model? --model haiku, for one", file=sys.stderr)
-        return 2
+    # What it is not told is the original's, so that one thing changes at a
+    # time: another model at the same effort, or the same model thinking harder.
+    model = named.get("model", "").strip() or original.model
+    effort = named.get("effort", "").strip().lower() or original.effort
+    if effort == "default":
+        effort = None
     times = named.get("times", "1")
     if not (times.isdigit() and int(times) > 0):
         print(
@@ -257,6 +264,7 @@ def _repeat_command(
             original,
             asker=_Asking(runner, found.name),
             model=model,
+            effort=effort,
             times=int(times),
             found=found,
             database=database,
@@ -269,6 +277,7 @@ async def _repeat(
     *,
     asker: _Asking,
     model: str,
+    effort: str | None,
     times: int,
     found: Project,
     database: Path,
@@ -281,14 +290,16 @@ async def _repeat(
         session = str(uuid.uuid4())
         # Shortened as its cards show it, so a card can be told for this run's.
         print(
-            f"{original.inspection} · repeat {turn} of {times} with {model} on {asker.runtime} "
-            f"in {found.path} · session {session[:4]}…{session[-4:]}",
+            f"{original.inspection} · repeat {turn} of {times} with "
+            f"{model}@{effort or 'default'} on {asker.runtime} in {found.path} "
+            f"· session {session[:4]}…{session[-4:]}",
             flush=True,
         )
         kept = await repeating.repeat(
             original,
             asker=asker,
             model=model,
+            effort=effort,
             runtime=asker.runtime,
             project=found.path,
             context=context,
