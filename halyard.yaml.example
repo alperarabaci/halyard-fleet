@@ -106,6 +106,11 @@ settings:
 #   NOTES           the same thing, written shorter
 #   NOTES/*.md      Markdown directly in NOTES, and no deeper
 #
+# The gate's own files ask whatever the pattern says: `.git/`, and where the
+# runtimes read their hooks from — `.claude/`, `.codex/`, `.opencode/` with
+# `opencode.json`, `.zcode/`, `.agents/` — in any case, at any depth. So even
+# `**` cannot let an agent switch the gate off without a card.
+#
 # writes:
 #   - NOTES/**
 

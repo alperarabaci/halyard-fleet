@@ -93,6 +93,7 @@ RUNTIME = RuntimeSpec(
         extra=(("PreInvocation", None, "inject.py", 15),),
         grouped=("PreToolUse", "PostToolUse"),
         disableable=True,
+        guarded=(".agents",),
     ),
     runner=_runner,
     find_session=late("halyard.agents.antigravity", "find_session"),

@@ -577,6 +577,27 @@ async def test_a_write_outside_the_configured_paths_still_asks(tmp_path: Path) -
     assert AuditAction.APPROVAL_REQUESTED in {r.action for r in await sink.read_all()}
 
 
+async def test_the_widest_pattern_still_asks_before_the_gates_own_files(tmp_path: Path) -> None:
+    """`**` covers the directory the gate's hooks are read from, and granting
+    that would let an agent take the gate off without a card."""
+    project = tmp_path / "repo"
+    (project / ".claude").mkdir(parents=True)
+    service, sink = build_with_writes(tmp_path, ("**",))
+    await sink.open()
+
+    outcome = await service.request(
+        session_id="s1",
+        agent_id="claude-code",
+        tool="Write",
+        command="Write .claude/settings.local.json",
+        project_dir=str(project),
+        file_path=str(project / ".claude" / "settings.local.json"),
+    )
+
+    assert not outcome.allowed
+    assert AuditAction.APPROVAL_REQUESTED in {r.action for r in await sink.read_all()}
+
+
 async def test_a_bash_command_is_never_granted_by_a_path(tmp_path: Path) -> None:
     """Its whole argument is a command, not a destination. A `writes:` entry
     must not become a way to run things without asking."""

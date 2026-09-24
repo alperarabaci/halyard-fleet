@@ -467,6 +467,10 @@ RUNTIME = RuntimeSpec(
         settings=str(wiring.PLUGINS / wiring.PLUGIN),
         matcher="|".join(sorted(wiring.ASK)),
         dialect="plugin",
+        # Every plugin is code opencode loads, and the project's config holds
+        # the `permission` block without which it never asks anything — in
+        # either of the two files it reads.
+        guarded=(wiring.PLUGINS.parts[0], wiring.CONFIG, "opencode.jsonc"),
     ),
     runner=_runner,
     find_session=find_session,
