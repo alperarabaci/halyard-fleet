@@ -1,9 +1,9 @@
 """Where the work stands, as Halyard can see it for itself.
 
-A check and a handoff both hand somebody something to judge, and both have to
+A check and a transition both hand somebody something to judge, and both have to
 say what it is about: which task, which branch, which revision of the tree, and
 which revision of the project's own file that did the asking. The project's
-handoff prompts refuse to guess — a field that is missing is reported as
+transition prompts refuse to guess — a field that is missing is reported as
 unmeasured — so Halyard supplies what it can read without asking anybody: the
 task from the branch name, the rule `/label` uses; the machine; HEAD; the tree
 id of the files; what is changed on top of HEAD; and the commit that last

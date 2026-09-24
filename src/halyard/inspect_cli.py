@@ -118,7 +118,7 @@ def _settings():
 
 def _line(run: repeating.Row, repeated: int = 0) -> str:
     """One run on one line: enough to pick it out, and what came of it."""
-    ran_for = f" · {run.step}" if run.step else f" · {run.handoff}" if run.handoff else ""
+    ran_for = f" · {run.step}" if run.step else f" · {run.transition}" if run.transition else ""
     parts = [
         run.id[:8],
         f"{run.at.astimezone():%m-%d %H:%M}",

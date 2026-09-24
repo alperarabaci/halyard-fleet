@@ -241,7 +241,7 @@ def _without_a_path(where: dict[str, Path | None], seats) -> list[str]:
     machine this printed "Everything checks out" for.
     """
     return [
-        f"{WARN}{name} has no `path:`, so /commit, /command, /inspect, /handoff "
+        f"{WARN}{name} has no `path:`, so /commit, /command, /inspect, /transition "
         "and /label have nowhere to run for it"
         for name, path in where.items()
         if path is None and any(seat.project == name for seat in seats)

@@ -74,7 +74,7 @@ settings:
   # Keep every inspection run in the database — what the model was given, word
   # for word, and what it said — to compare models on the same input later.
   # Off unless set, because it is the one place Halyard keeps text: the input
-  # holds the reply that was inspected. See docs/handoffs.md.
+  # holds the reply that was inspected. See docs/transitions.md.
   # HALYARD_KEEP_INSPECTIONS: true
 
   # The model every inspection runs on, and how hard it thinks: low, medium,
@@ -160,7 +160,7 @@ projects:
     # `reviewer:codex` — the first time that seat works on it. Needs a forge
     # token that may label issues; off unless set. See docs/setup.md.
     # label_work: true
-    # What `/command` offers, by name. `validate:` and a handoff's `commands:`
+    # What `/command` offers, by name. `validate:` and a transition's `commands:`
     # name entries from here rather than a command line of their own.
     # commands:
     #   test-fast: make test-fast
@@ -169,36 +169,37 @@ projects:
     #   pull-branch: make pull-branch TASK={input.task}   # typed when /command runs it
     #   next-task: [cleanup, pull-branch]              # a list: one after another, stops at a failure
     # validate: test-fast             # run first by /review_and_commit
-    # Inspections `/inspect` offers over a chat's last reply, and handoffs
-    # `/handoff` offers — each the project's own file, read relative to `path`. A
-    # handoff carries the last reply, puts its prompt in front, runs its commands
+    # Inspections `/inspect` offers over a chat's last reply, and transitions
+    # `/transition` offers — each the project's own file, read relative to `path`. A
+    # transition carries the last reply, puts its prompt in front, runs its commands
     # and then the inspections it names under `inspect:`, and goes to the seat or
     # role in `to:` (every seat is offered if unset). All of it is described in
-    # docs/handoffs.md. Written `checks:` before 2026-09-23, which still works.
+    # docs/transitions.md. Written `checks:` before 2026-09-23 and `handoffs:`
+    # before 2026-09-24, which still work.
     # inspections:
     #   proof: NOTES/halyard/inspections/proof.md
     #   destructive: NOTES/halyard/inspections/destructive.md
     #   bounded-context:                 # one that runs on a model of its own
     #     file: NOTES/halyard/inspections/bounded-context.md
     #     model: opus                    # effort: too; what it leaves out is the machine's
-    # handoffs:
+    # transitions:
     #   reviewed: {to: navigator}        # the reply alone, with no prompt of its own
     #   review:
-    #     prompt: NOTES/halyard/handoffs/review.md
-    #     followup_prompt: NOTES/halyard/handoffs/review-followup.md   # a workflow step's round 2 on
+    #     prompt: NOTES/halyard/transitions/review.md
+    #     followup_prompt: NOTES/halyard/transitions/review-followup.md   # a workflow step's round 2 on
     #     to: reviewer
-    #   driver_discover: {prompt: NOTES/halyard/handoffs/forward.md, to: driver}
-    #   driver_develop: {prompt: NOTES/halyard/handoffs/forward.md, to: driver}
+    #   driver_discover: {prompt: NOTES/halyard/transitions/forward.md, to: driver}
+    #   driver_develop: {prompt: NOTES/halyard/transitions/forward.md, to: driver}
     #   discover_completed:
-    #     prompt: NOTES/halyard/handoffs/discovery.md
+    #     prompt: NOTES/halyard/transitions/discovery.md
     #     inspect: [proof, destructive]
     #     to: navigator
     #   close:
-    #     prompt: NOTES/halyard/handoffs/close.md
+    #     prompt: NOTES/halyard/transitions/close.md
     #     commands: [test-fast]          # from `commands:`, run before the inspections
     #     inspect: [proof, destructive]
     #     to: navigator
-    # Workflows take those handoffs in an order, each step to a seat, and go on by
+    # Workflows take those transitions in an order, each step to a seat, and go on by
     # the last line of each reply: forward, back or wait. A step goes once unless
     # `rounds:` says more. A list inside a workflow is its phases: the steps a plan
     # in parts goes through once per part, whose last step says `next` for another
@@ -210,14 +211,14 @@ projects:
     #   steps:
     #     review: {seat: reviewer, rounds: 2}
     #     reviewed: {seat: navigator, decided_by: review, rounds: 2}
-    #     discover: {handoff: driver_discover, seat: driver, rounds: 2}
-    #     discovered: {handoff: discover_completed, seat: navigator, rounds: 2}
-    #     develop: {handoff: driver_develop, seat: driver}
-    #     verified: {handoff: reviewed, seat: navigator}
+    #     discover: {transition: driver_discover, seat: driver, rounds: 2}
+    #     discovered: {transition: discover_completed, seat: navigator, rounds: 2}
+    #     develop: {transition: driver_develop, seat: driver}
+    #     verified: {transition: reviewed, seat: navigator}
     #     close: {seat: navigator}
     #   level3: [review, reviewed, [discover, discovered, develop, verified], close]
     # Groups of task labels. The first one the task carries from each group
-    # goes on the envelope inspections and handoffs are given, as `level: level::3`.
+    # goes on the envelope inspections and transitions are given, as `level: level::3`.
     # Nothing is required or refused: a task with none of them adds nothing.
     # label_groups:
     #   level: [level::1, level::2, level::3]

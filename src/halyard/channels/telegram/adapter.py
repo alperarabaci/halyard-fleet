@@ -29,9 +29,9 @@ from functools import partial
 from pathlib import Path
 
 from halyard import commits, frame
-from halyard import handoffs as handing
 from halyard import inspections as inspecting
 from halyard import tasks as task_tracker
+from halyard import transitions as transitioning
 from halyard import workflows as flowing
 from halyard.agents.base import AgentRunner
 from halyard.applications import catalogue, desktop
@@ -61,7 +61,7 @@ from halyard.core.audit import (
     unauthorized_callback,
     user_message,
 )
-from halyard.core.config_file import Handoff, ModelChoice, Project
+from halyard.core.config_file import ModelChoice, Project, Transition
 from halyard.core.events import Role
 from halyard.core.gate import Gate
 from halyard.core.questions import (
@@ -79,8 +79,8 @@ from halyard.core.said_by_a_process import the_useful_end
 from halyard.core.seats import Seat, find, for_chat, for_project, for_session
 from halyard.core.seats import _default_runtime as default_runtime
 from halyard.core.transcripts import watching_for
-from halyard.handoffs import rounds
 from halyard.tasks.branches import current as current_branch
+from halyard.transitions import rounds
 
 logger = logging.getLogger(__name__)
 
@@ -113,8 +113,8 @@ COMMANDS: tuple[tuple[str, str], ...] = (
     ("chat", "Send a message into this seat's session"),
     ("forward", "Hand this chat's last reply to another seat"),
     ("inspect", "Run one of this project's inspections over this chat's last reply"),
-    ("handoff", "Hand this chat's last reply on, the way this project defines it"),
-    ("workflow", "Take this project's handoffs in the order it wrote them down"),
+    ("transition", "Take this chat's last reply to its next stage, as this project defines it"),
+    ("workflow", "Take this project's transitions in the order it wrote them down"),
     ("commit", "Commit this branch's work, with a message to approve"),
     ("review_and_commit", "The same, with this project's checks and its review round"),
     ("open", "Open an agent on the machine — claude, codex, gemini"),
@@ -130,7 +130,7 @@ COMMANDS: tuple[tuple[str, str], ...] = (
     ("help", "This list"),
 )
 
-#: Answered when typed, and kept off the menu. `/to` is what a handoff already
+#: Answered when typed, and kept off the menu. `/to` is what a transition already
 #: does from the menu, and one fewer button on a phone is worth more than a
 #: second way to the same place; whoever types it still gets it.
 UNLISTED: tuple[str, ...] = ("to",)
@@ -168,7 +168,7 @@ _ASKED = re.compile(r"^Send what to (\S+)\?")
 #:
 #: Long enough to type a paragraph, short enough that a tap abandoned before
 #: lunch is not still holding the next thing said after it.
-HANDOFF_SECONDS = 300
+WAIT_FOR_TEXT_SECONDS = 300
 
 #: How the prompt names the commit it is waiting for a message for.
 #:
@@ -202,15 +202,15 @@ INSPECTION_TIMEOUT_SECONDS = 600.0
 #: record of where the files stood, never the reply.
 TREE_TIMEOUT_SECONDS = 5.0
 
-#: How long an inspection or a handoff waits for its task's labels. A tracker
+#: How long an inspection or a transition waits for its task's labels. A tracker
 #: that has not answered by then leaves them off the envelope; nothing else
 #: waits on it.
 LABELS_TIMEOUT_SECONDS = 10.0
 
-#: How long one of a handoff's commands may run. The bound `validate:` has:
-#: somebody is holding a phone waiting for the handoff to go, and the long
+#: How long one of a transition's commands may run. The bound `validate:` has:
+#: somebody is holding a phone waiting for the transition to go, and the long
 #: suites are for `/command`, which reports when it is done.
-HANDOFF_COMMAND_TIMEOUT_SECONDS = 600.0
+TRANSITION_COMMAND_TIMEOUT_SECONDS = 600.0
 
 #: What each chat last heard, each chat's last answer per inspection, and where each
 #: piece of work's workflow has got to, with its rounds. Kept per project — see
@@ -362,11 +362,11 @@ def parse_destination(value: str | None) -> tuple[str, int | None] | None:
 
 
 class _SeatDelivery:
-    """The channel's side of `handoffs.Delivery`: the path `/to` takes.
+    """The channel's side of `transitions.Delivery`: the path `/to` takes.
 
-    So a handoff lands where a person would have sent it by hand, and both chats
+    So a transition lands where a person would have sent it by hand, and both chats
     say so, the way they do for `/to`. `accepted` runs once the seat's session
-    takes the message, which is when a handoff's round counts.
+    takes the message, which is when a transition's round counts.
     """
 
     def __init__(
@@ -540,7 +540,7 @@ class _Keeping:
 class _Labelling:
     """The channel's side of `inspections.Labeller`: a label onto this project's task.
 
-    Written off to one side, so an inspection's answer and a handoff never wait on an
+    Written off to one side, so an inspection's answer and a transition never wait on an
     issue tracker, and quietly — the log says what happened, nobody is asked.
     """
 
@@ -553,8 +553,8 @@ class _Labelling:
 
 
 class _Running:
-    """The channel's side of `handoffs.Runner`: a project command, run where the
-    project is, with how it is getting on said in the chat the handoff came from.
+    """The channel's side of `transitions.Runner`: a project command, run where the
+    project is, with how it is getting on said in the chat the transition came from.
 
     The command says for itself that it started and how it ended, in the log —
     see `commands.running`. What this adds is what only the channel can: the
@@ -589,7 +589,7 @@ class _Running:
                 commands_running.run,
                 command.line,
                 self._path,
-                timeout=HANDOFF_COMMAND_TIMEOUT_SECONDS,
+                timeout=TRANSITION_COMMAND_TIMEOUT_SECONDS,
                 on_progress=progress,
             )
         )
@@ -684,7 +684,7 @@ class TelegramChannel:
         # Who pressed a seat button and has not yet said what to send. Keyed by
         # the person as well as the chat: in a group, somebody else typing must
         # not be swept into a hand-off they did not ask for.
-        self._handoffs: dict[tuple[str, int | None, str], tuple[str, datetime]] = {}
+        self._recipients: dict[tuple[str, int | None, str], tuple[str, datetime]] = {}
         self._authorized = authorized_user_ids
         self._clock = clock
         #: For reaching an issue tracker. Absent means `/label` says so and
@@ -1150,7 +1150,9 @@ class TelegramChannel:
                 await self._rewrite_commit(waiting, text, here or "", thread, user_id)
                 return
 
-            answering = _seat_being_asked_for(replied) or self._take_handoff(here, thread, user_id)
+            answering = _seat_being_asked_for(replied) or self._take_recipient(
+                here, thread, user_id
+            )
             # The line that was missing while this was being guessed at: where
             # the message went, and what it arrived attached to.
             logger.info(
@@ -1167,7 +1169,7 @@ class TelegramChannel:
 
         # Any command means the sentence never came. Dropping the hand-off here
         # keeps it from attaching itself to something typed much later.
-        self._take_handoff(here, thread, user_id)
+        self._take_recipient(here, thread, user_id)
 
         command, _, argument = text.partition(" ")
         command = command.lstrip("/").split("@")[0].lower()
@@ -1211,13 +1213,15 @@ class TelegramChannel:
             self._detach(self._run_inspection(argument, here or "", thread), "/inspect")
             return
         if command == "workflow":
-            # Detached like `/handoff`, and for longer: this one takes a step
+            # Detached like `/transition`, and for longer: this one takes a step
             # that may run commands and inspections, and then waits for a seat.
             self._detach(self._run_workflow(argument, here or "", thread, actor), "/workflow")
             return
-        if command == "handoff":
-            # Detached for the same reason: a handoff may run inspections first.
-            self._detach(self._run_handoff(argument, here or "", thread, actor), "/handoff")
+        # `/handoff` is what `/transition` was called until 2026-09-24; still
+        # answered, and kept off the menu.
+        if command in ("transition", "handoff"):
+            # Detached for the same reason: a transition may run inspections first.
+            self._detach(self._run_transition(argument, here or "", thread, actor), "/transition")
             return
         if command in ("commit", "review_and_commit"):
             # Detached: this reads a repository, may run the project's whole
@@ -1392,7 +1396,7 @@ class TelegramChannel:
         )
         if destination != chat_id:
             # In pieces Telegram will take, the way a relayed reply is sent.
-            # Whole, a handoff — the project's prompt and a report — ran past
+            # Whole, a transition — the project's prompt and a report — ran past
             # 4096 characters, Telegram refused it, and the refusal went to the
             # log: the session got the message and its chat showed nothing.
             chunks = cards.split_for_telegram(text)
@@ -1431,22 +1435,24 @@ class TelegramChannel:
             if (failed := done.exception()) is not None:
                 logger.error("%s failed", what, exc_info=failed)
 
-    def _remember_handoff(self, seat: str, chat_id: str, thread_id: int | None, user: str) -> None:
+    def _remember_recipient(
+        self, seat: str, chat_id: str, thread_id: int | None, user: str
+    ) -> None:
         """Note that this person picked a seat and owes us a sentence."""
-        self._handoffs[(chat_id, thread_id, user)] = (seat, self._clock())
+        self._recipients[(chat_id, thread_id, user)] = (seat, self._clock())
 
-    def _take_handoff(self, chat_id: str | None, thread_id: int | None, user: str) -> str | None:
+    def _take_recipient(self, chat_id: str | None, thread_id: int | None, user: str) -> str | None:
         """The seat this person picked, if they picked one recently enough.
 
         Taken rather than read: a hand-off covers the next thing said and
         nothing after it. Leaving it in place would mean a tap made once
         quietly redirecting a conversation.
         """
-        found = self._handoffs.pop((chat_id or "", thread_id, user), None)
+        found = self._recipients.pop((chat_id or "", thread_id, user), None)
         if found is None:
             return None
         seat, when = found
-        if self._clock() - when > timedelta(seconds=HANDOFF_SECONDS):
+        if self._clock() - when > timedelta(seconds=WAIT_FOR_TEXT_SECONDS):
             return None
         return seat
 
@@ -1484,7 +1490,7 @@ class TelegramChannel:
         # text or the author of the message being replied to — and this question
         # names nobody and replies to nothing, so it opened the reply box for no
         # one at all.
-        self._remember_handoff(seat.label, chat_id, thread_id, user)
+        self._remember_recipient(seat.label, chat_id, thread_id, user)
         await self._say(
             ASK_FOR_TEXT.format(seat=html.escape(seat.label))
             + "\n\n<i>Reply to this, or just say it — either reaches "
@@ -1863,7 +1869,7 @@ class TelegramChannel:
         if held is None:
             return False
         asked, when = held
-        if self._clock() - when > timedelta(seconds=HANDOFF_SECONDS):
+        if self._clock() - when > timedelta(seconds=WAIT_FOR_TEXT_SECONDS):
             return False
         found = self._repositories.get(asked.project)
         named = self._commands_named(found, asked.command) if found else None
@@ -2949,8 +2955,8 @@ class TelegramChannel:
                     f"\U0001f3f7 <b>{html.escape(label)}</b> is on {task}.", chat_id, thread_id
                 )
 
-        if kind == cards.PICKED_FOR_HANDOFF:
-            await self._run_handoff(name, chat_id, thread_id, actor)
+        if kind == cards.PICKED_FOR_TRANSITION:
+            await self._run_transition(name, chat_id, thread_id, actor)
         elif kind == cards.PICKED_FOR_COMMAND:
             await self._run_command(name, chat_id, thread_id)
         elif kind == cards.PICKED_FOR_WORKFLOW:
@@ -3022,7 +3028,7 @@ class TelegramChannel:
         return files
 
     def _seats_for(self, project: str, to: str | None) -> list[Seat]:
-        """Where a handoff can go: the seat `to:` names, the seats holding the
+        """Where a transition can go: the seat `to:` names, the seats holding the
         role it names, or every seat of the project.
 
         A role held by two seats — a navigator on each runtime — offers both
@@ -3034,7 +3040,7 @@ class TelegramChannel:
         named = [seat for seat in mine if seat.label.casefold() == to.casefold()]
         return named or [seat for seat in mine if seat.role and seat.role.value == to.casefold()]
 
-    def _answer_since(self, last: flowing.Round, number: int) -> handing.Previous:
+    def _answer_since(self, last: flowing.Round, number: int) -> transitioning.Previous:
         """What the seat the last round went to has said since it got there.
 
         Read from what that seat's chat last heard, and only if it came after
@@ -3048,8 +3054,8 @@ class TelegramChannel:
         kept = self._kept(chat, SAID_FILE)
         said = last_said.last(kept, chat) if kept is not None else None
         if said is None or said.at <= last.at:
-            return handing.Previous(number=number - 1, seat=named, sent=sent)
-        return handing.Previous(
+            return transitioning.Previous(number=number - 1, seat=named, sent=sent)
+        return transitioning.Previous(
             number=number - 1,
             seat=named,
             sent=sent,
@@ -3057,7 +3063,7 @@ class TelegramChannel:
             at=_local(said.at).strftime("%H:%M"),
         )
 
-    async def _run_handoff(
+    async def _run_transition(
         self,
         typed: str,
         chat_id: str,
@@ -3065,9 +3071,9 @@ class TelegramChannel:
         actor: str,
         to: str | None = None,
     ) -> None:
-        """`/handoff` — offer this project's handoffs, or make the named one.
+        """`/transition` — offer this project's transitions, or make the named one.
 
-        The shape `/inspect` has: a button per handoff, and the one pressed goes.
+        The shape `/inspect` has: a button per transition, and the one pressed goes.
         It carries the last reply in this chat, the project's own text for the
         seat receiving it, and the answers of whichever inspections it names —
         run first, so they arrive together. Whatever follows the name goes in as
@@ -3077,9 +3083,9 @@ class TelegramChannel:
         if found is None:
             await self._say(self._no_repository(chat_id), chat_id, thread_id)
             return
-        if not found.handoffs:
+        if not found.transitions:
             await self._say(
-                f"<b>{html.escape(found.name)}</b> has no <code>handoffs:</code> in "
+                f"<b>{html.escape(found.name)}</b> has no <code>transitions:</code> in "
                 "<code>halyard.yaml</code>.",
                 chat_id,
                 thread_id,
@@ -3092,23 +3098,23 @@ class TelegramChannel:
                 "Hand the last reply here on how?",
                 chat_id,
                 thread_id,
-                reply_markup=cards.handoff_choices(tuple(found.handoffs)),
+                reply_markup=cards.transition_choices(tuple(found.transitions)),
             )
             return
-        name = next((key for key in found.handoffs if key.casefold() == wanted.casefold()), None)
+        name = next((key for key in found.transitions if key.casefold() == wanted.casefold()), None)
         if name is None:
             await self._say(
-                f"<b>{html.escape(found.name)}</b> has no handoff called "
+                f"<b>{html.escape(found.name)}</b> has no transition called "
                 f"<b>{html.escape(wanted)}</b>.",
                 chat_id,
                 thread_id,
             )
-            await self._run_handoff("", chat_id, thread_id, actor)
+            await self._run_transition("", chat_id, thread_id, actor)
             return
-        handoff = found.handoffs[name]
+        transition = found.transitions[name]
 
         said = None
-        if handoff.include_last_message:
+        if transition.include_last_message:
             kept = self._kept(chat_id, SAID_FILE)
             said = last_said.last(kept, chat_id) if kept else None
             if said is None:
@@ -3119,34 +3125,34 @@ class TelegramChannel:
                 )
                 return
 
-        seats = self._seats_for(found.name, to or handoff.to)
+        seats = self._seats_for(found.name, to or transition.to)
         if len(seats) != 1:
             await self._say(
                 f"Hand <b>{html.escape(name)}</b> to which seat?",
                 chat_id,
                 thread_id,
-                reply_markup=cards.handoff_seat_choices(
+                reply_markup=cards.transition_seat_choices(
                     name, tuple(seat.label for seat in seats or self._seats)
                 ),
             )
             return
         [seat] = seats
 
-        lines = await self._command_lines(found, handoff.commands)
+        lines = await self._command_lines(found, transition.commands)
         if lines.missing:
             await self._ask_for_label(
                 found,
                 lines,
-                kind=cards.PICKED_FOR_HANDOFF,
+                kind=cards.PICKED_FOR_TRANSITION,
                 name=name,
                 chat_id=chat_id,
                 thread_id=thread_id,
             )
             return
-        await self._hand_off_once(
+        await self._take_transition(
             found,
             name,
-            handoff,
+            transition,
             seat,
             said,
             note=note.strip(),
@@ -3157,11 +3163,11 @@ class TelegramChannel:
             command_lines=lines.lines,
         )
 
-    async def _hand_off_once(
+    async def _take_transition(
         self,
         found: Project,
         name: str,
-        handoff: Handoff,
+        transition: Transition,
         seat: Seat,
         said: last_said.Said | None,
         *,
@@ -3176,22 +3182,22 @@ class TelegramChannel:
         command_lines: Mapping[str, str] | None = None,
         counted: StepRounds | None = None,
     ) -> None:
-        """Make one handoff: say so, run it, deliver it — and count the round
+        """Make one transition: say so, run it, deliver it — and count the round
         when it is a workflow's step.
 
-        What `/handoff` and a workflow's step have in common — everything above
-        this chose *which* handoff goes where, and this is the making of it.
+        What `/transition` and a workflow's step have in common — everything above
+        this chose *which* transition goes where, and this is the making of it.
         `extra` are facts the caller adds to the envelope, `lead` goes in front
         of the line in the chat and `buttons` under it, which is how a step says
         which flow it belongs to and offers to stop it. `command_lines` are its
         commands as they run, with any task label in them — see `_command_lines`.
         `counted` is the step's rounds so far and how to count this one; a
-        handoff pressed by hand has none, and says no round.
+        transition pressed by hand has none, and says no round.
         """
         # One at a time per project, as for `/command`: two `make` runs in one
         # directory fight over the same outputs, and the second one's failure
-        # is a mystery. Nothing is handed on; the handoff can be pressed again.
-        if handoff.commands and (busy := self._working.get(found.name)):
+        # is a mystery. Nothing is handed on; the transition can be pressed again.
+        if transition.commands and (busy := self._working.get(found.name)):
             await self._say(
                 f"⏳ <b>{html.escape(busy)}</b> is still running in "
                 f"<b>{html.escape(found.name)}</b>, so <b>{html.escape(name)}</b> did "
@@ -3219,8 +3225,12 @@ class TelegramChannel:
             )
 
         steps = [
-            *([f"running {', '.join(handoff.commands)}"] if handoff.commands else []),
-            *([f"inspecting {', '.join(handoff.inspections)}"] if handoff.inspections else []),
+            *([f"running {', '.join(transition.commands)}"] if transition.commands else []),
+            *(
+                [f"inspecting {', '.join(transition.inspections)}"]
+                if transition.inspections
+                else []
+            ),
         ]
         first = f", {' then '.join(steps)} first" if steps else ""
         which = f" (round {rounds.shown(number, expected)})" if number and number > 1 else ""
@@ -3231,8 +3241,8 @@ class TelegramChannel:
             thread_id,
             reply_markup=buttons,
         )
-        if handoff.commands:
-            self._working[found.name] = f"handoff {name}"
+        if transition.commands:
+            self._working[found.name] = f"transition {name}"
         try:
             labels = await self._task_labels(found)
             known = await asyncio.to_thread(
@@ -3247,7 +3257,7 @@ class TelegramChannel:
             )
             inspector = (
                 self._inspector(chat_id, self._destination_of(seat))
-                if handoff.inspections
+                if transition.inspections
                 else None
             )
             keeper = (
@@ -3255,8 +3265,8 @@ class TelegramChannel:
                 if inspector is not None
                 else None
             )
-            handed = await handing.hand_off(
-                handoff,
+            handed = await transitioning.take(
+                transition,
                 project=found.path,
                 context=[*known, *extra],
                 note=note,
@@ -3286,7 +3296,7 @@ class TelegramChannel:
         finally:
             # Released whatever happened, as `/command` does: a project left
             # marked busy would refuse every command after it.
-            if handoff.commands:
+            if transition.commands:
                 self._working.pop(found.name, None)
         outcomes = [
             *(f"<b>{html.escape(c.name)}</b>: {_ended(r)}" for c, r in handed.ran),
@@ -3307,9 +3317,9 @@ class TelegramChannel:
         *,
         start: int | None = None,
     ) -> None:
-        """`/workflow` — take this project's handoffs in the order it wrote down.
+        """`/workflow` — take this project's transitions in the order it wrote down.
 
-        The shape `/handoff` has: a button per workflow, then a button per step
+        The shape `/transition` has: a button per workflow, then a button per step
         of the one pressed, and it starts at the step pressed — the work is
         often past the first one already. `/workflow level3 review` starts
         there outright, with whatever follows as a note, and `/workflow level3
@@ -3358,7 +3368,7 @@ class TelegramChannel:
                 )
                 return
             await self._say(
-                "Take this project's handoffs how?",
+                "Take this project's transitions how?",
                 chat_id,
                 thread_id,
                 reply_markup=cards.workflow_choices(tuple(flows)),
@@ -3468,7 +3478,7 @@ class TelegramChannel:
         *,
         note: str = "",
     ) -> None:
-        """Make the handoff the run is on, and wait for that seat's reply.
+        """Make the transition the run is on, and wait for that seat's reply.
 
         The run is written down before the step goes, so a control plane that
         restarts in the middle comes back knowing what it was waiting for.
@@ -3476,11 +3486,11 @@ class TelegramChannel:
         kept = self._kept_for(found.name, WORKFLOW_FILE)
         flow = found.workflows.flows.get(run.workflow) or ()
         step = found.workflows.steps.get(flow[run.step]) if run.step < len(flow) else None
-        handoff = found.handoffs.get(step.handoff) if step else None
-        if kept is None or step is None or handoff is None:
+        transition = found.transitions.get(step.transition) if step else None
+        if kept is None or step is None or transition is None:
             await self._stopped(found, work, run.held("its step is not one this project defines"))
             return
-        seats = self._seats_for(found.name, step.seat or handoff.to)
+        seats = self._seats_for(found.name, step.seat or transition.to)
         if len(seats) != 1:
             # A role two seats hold, and a step that did not say which. Said
             # rather than guessed: the wrong driver is a turn of somebody's work.
@@ -3488,7 +3498,7 @@ class TelegramChannel:
             return
         [seat] = seats
 
-        lines = await self._command_lines(found, handoff.commands)
+        lines = await self._command_lines(found, transition.commands)
         if lines.missing:
             # A label is somebody's to pick, so the run waits here for it; the
             # tap puts it on the task and sends this step on.
@@ -3543,10 +3553,10 @@ class TelegramChannel:
         async def count(label: str) -> int:
             return await asyncio.to_thread(flowing.record, kept, work, key, to=label)
 
-        await self._hand_off_once(
+        await self._take_transition(
             found,
-            step.handoff,
-            handoff,
+            step.transition,
+            transition,
             seat,
             said,
             note=note,
@@ -3587,11 +3597,11 @@ class TelegramChannel:
         named: dict[str, str] = {}
         for name in flow:
             step = found.workflows.steps.get(name)
-            handoff = found.handoffs.get(step.handoff) if step else None
-            if step is None or handoff is None:
+            transition = found.transitions.get(step.transition) if step else None
+            if step is None or transition is None:
                 continue
-            seats = self._seats_for(found.name, step.seat or handoff.to)
-            named[name] = seats[0].label if len(seats) == 1 else (step.seat or handoff.to or "")
+            seats = self._seats_for(found.name, step.seat or transition.to)
+            named[name] = seats[0].label if len(seats) == 1 else (step.seat or transition.to or "")
         return named
 
     async def _stopped(
@@ -3824,7 +3834,7 @@ class TelegramChannel:
             await self._finished(found, work, run, "stopped")
             await self._say(
                 f"⏹ <b>{html.escape(run.workflow)}</b> stopped at step {run.step + 1}. "
-                "Its handoffs can still be pressed by hand.",
+                "Its transitions can still be pressed by hand.",
                 chat_id,
                 thread_id,
             )
@@ -4133,7 +4143,7 @@ class TelegramChannel:
                 )
             )
         if delivered and accepted is not None:
-            # Whatever was waiting for it to land — a handoff's round, counted
+            # Whatever was waiting for it to land — a transition's round, counted
             # only now, so a message that reached nobody is not one. Failing
             # here costs that and nothing else: the message is in.
             try:
@@ -4441,7 +4451,7 @@ class TelegramChannel:
                 return
             if what == "pick":
                 # Detached: it writes to the task's tracker, then runs whatever
-                # needed the label — a handoff, a command, a workflow's step.
+                # needed the label — a transition, a command, a workflow's step.
                 self._detach(
                     self._label_picked(
                         value, here or "", message.get("message_thread_id"), f"tg:{user_id}"
@@ -4457,17 +4467,19 @@ class TelegramChannel:
                     "/workflow",
                 )
                 return
+            # A transition's buttons, under the kinds they had when transitions
+            # were handoffs: the wire format, never shown, and in every chat.
             if what in ("handoff", "handto"):
                 name, _, label = value.partition(">")
                 self._detach(
-                    self._run_handoff(
+                    self._run_transition(
                         name,
                         here or "",
                         message.get("message_thread_id"),
                         f"tg:{user_id}",
                         to=label or None,
                     ),
-                    "/handoff",
+                    "/transition",
                 )
                 return
             if what == "open":

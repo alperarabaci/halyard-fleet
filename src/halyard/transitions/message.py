@@ -6,8 +6,8 @@ from collections.abc import Sequence
 
 from halyard import frame
 from halyard.commands import Command, Result
-from halyard.handoffs.spec import Previous
 from halyard.inspections import Answer
+from halyard.transitions.spec import Previous
 
 
 def compose(
@@ -25,10 +25,10 @@ def compose(
     ran: Sequence[tuple[Command, Result]] = (),
     previous: Previous | None = None,
 ) -> str:
-    """Everything a seat needs to act on a handoff, in the order it reads it.
+    """Everything a seat needs to act on a transition, in the order it reads it.
 
-    Who it is for and from, first, so a session can tell a handoff from an
-    instruction typed at it. Then the project's own text for this handoff, which
+    Who it is for and from, first, so a session can tell a transition from an
+    instruction typed at it. Then the project's own text for this transition, which
     speaks of "the message below". Then the envelope: what Halyard can see for
     itself — the task, the machine, the tree, which round this is and which
     revision of the prompt — one fact to a line, because the project's prompts
@@ -37,7 +37,7 @@ def compose(
     seat said back to the round before. Then the reply itself, last, where the
     prompt said it would be.
     """
-    parts = [f"To {recipient}, from Halyard — handoff: {name}."]
+    parts = [f"To {recipient}, from Halyard — transition: {name}."]
     if prompt:
         parts += ["", prompt]
     facts = list(context)

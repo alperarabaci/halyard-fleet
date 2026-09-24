@@ -1,38 +1,38 @@
 # Workflows
 
-A handoff hands one reply on and stops there: somebody reads what came back and presses
-the next one. A **workflow** presses it. It is a project's handoffs taken in the order
+A transition hands one reply on and stops there: somebody reads what came back and presses
+the next one. A **workflow** presses it. It is a project's transitions taken in the order
 the project wrote them down, each step going to one seat, and each reply's own last line
 saying whether the work goes on, comes back a step, or waits for a person.
 
-Everything here sits under the project in `halyard.yaml`, beside the `handoffs:` its
-steps name — see [Inspections and handoffs](handoffs.md).
+Everything here sits under the project in `halyard.yaml`, beside the `transitions:` its
+steps name — see [Inspections and transitions](transitions.md).
 
 ```yaml
 projects:
   alpha-engine:
-    handoffs:
+    transitions:
       to_nav: {to: navigator}
       review:
-        prompt: NOTES/handoffs/review.md
-        followup_prompt: NOTES/handoffs/review-followup.md
+        prompt: NOTES/transitions/review.md
+        followup_prompt: NOTES/transitions/review-followup.md
         to: reviewer
       reviewed: {to: navigator}
-      driver_discover: {prompt: NOTES/handoffs/forward.md, to: driver}
-      discover_completed: {prompt: NOTES/handoffs/discovery.md, to: navigator}
-      driver_develop: {prompt: NOTES/handoffs/forward.md, to: driver}
-      close: {prompt: NOTES/handoffs/close.md, to: navigator}
+      driver_discover: {prompt: NOTES/transitions/forward.md, to: driver}
+      discover_completed: {prompt: NOTES/transitions/discovery.md, to: navigator}
+      driver_develop: {prompt: NOTES/transitions/forward.md, to: driver}
+      close: {prompt: NOTES/transitions/close.md, to: navigator}
     workflows:
       steps:
         to_nav:       {seat: nav}
         review:       {seat: xreview, rounds: 2}
         reviewed:     {seat: nav, decided_by: review, rounds: 2}
-        discover:     {handoff: driver_discover, seat: xdrv, rounds: 2}
-        discover_glm: {handoff: driver_discover, seat: zdrv, rounds: 2}
-        discovered:   {handoff: discover_completed, seat: nav, rounds: 2}
-        develop:      {handoff: driver_develop, seat: xdrv}
-        develop_glm:  {handoff: driver_develop, seat: zdrv}
-        verified:     {handoff: to_nav, seat: nav}
+        discover:     {transition: driver_discover, seat: xdrv, rounds: 2}
+        discover_glm: {transition: driver_discover, seat: zdrv, rounds: 2}
+        discovered:   {transition: discover_completed, seat: nav, rounds: 2}
+        develop:      {transition: driver_develop, seat: xdrv}
+        develop_glm:  {transition: driver_develop, seat: zdrv}
+        verified:     {transition: to_nav, seat: nav}
         close:        {seat: nav}
       level3:    [to_nav, review, reviewed, [discover, discovered, develop, verified], close]
       level2glm: [to_nav, discover_glm, discovered, develop_glm, close]
@@ -40,21 +40,21 @@ projects:
 
 ## Steps are named once
 
-Every workflow uses the same `steps:`. A step is a handoff going to a seat: `handoff:` is
-the step's own name when it says none, and `seat:` can be left out when the handoff's
-`to:` already names one seat. One handoff going to two different drivers is two steps —
+Every workflow uses the same `steps:`. A step is a transition going to a seat: `transition:` is
+the step's own name when it says none, and `seat:` can be left out when the transition's
+`to:` already names one seat. One transition going to two different drivers is two steps —
 `discover` and `discover_glm` above — which is where the two are told apart. A workflow
 is then a list of step names, in order; `steps`, `decisions` and `phases` are the names
 under `workflows:` that are not workflows.
 
-A flow naming a step, a step naming a handoff, or a step naming a seat that the project
+A flow naming a step, a step naming a transition, or a step naming a seat that the project
 does not define is refused when the file is read, rather than part-way through a flow.
 
 ## Starting one
 
 `/workflow` offers each workflow as a button, then each step of the one pressed: the
 work is often past the first step already. The step pressed goes first, carrying the
-chat's last reply, the way `/handoff` does. Typed, `/workflow level3 review` starts at
+chat's last reply, the way `/transition` does. Typed, `/workflow level3 review` starts at
 `review` straight away, and anything after the step's name goes in as a note.
 
 A step of the phases can start in a phase other than the first — work that went
@@ -140,7 +140,7 @@ from there, the navigator decides for itself.
 
 ## What each step is told
 
-A handoff pressed by hand carries nothing of a workflow. A step's envelope carries the
+A transition pressed by hand carries nothing of a workflow. A step's envelope carries the
 workflow's own lines as well — where it is, and where each word on its last line would
 take the work, with the seat, the round and the phase it would be:
 
@@ -169,7 +169,7 @@ The review is told where its decision goes, and the navigator what was decided:
 ```
 
 A step the work came back to also says who sent it, as `Sent back by: nav (navigator) at
-18:21`. Coming back is that step's next round, so its handoff's `followup_prompt:` is
+18:21`. Coming back is that step's next round, so its transition's `followup_prompt:` is
 what goes in front of it, with the seat's own answer to the round before.
 
 ## Rounds stop a loop
@@ -181,8 +181,8 @@ time, and then `discovered` a second time, which is why both have `rounds: 2` ab
 
 **Rounds are the run's own.** Each step counts the times it reached its seat in this
 run — per phase, inside the phases — and the envelope's `Round: n/…` counts against the
-same number. A handoff pressed by hand is not part of a run and counts nothing: it sends
-its own prompt every time, and says no round. Two steps naming one handoff do not share
+same number. A transition pressed by hand is not part of a run and counts nothing: it sends
+its own prompt every time, and says no round. Two steps naming one transition do not share
 a count either.
 
 A step that would go past its rounds does not go: the run stops, and the chat offers to

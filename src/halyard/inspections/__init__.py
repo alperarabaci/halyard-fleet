@@ -5,7 +5,7 @@ change that quietly deletes or hides something, a gate reported green that
 nobody ran: a rule matching words cannot tell any of these from the honest
 version, and a model reading the text can. So a project writes each inspection
 as a file — what to look for, and how to answer — and each one runs, on its
-own, as a model turn over a reply. `/inspect` runs one by hand; a handoff's
+own, as a model turn over a reply. `/inspect` runs one by hand; a transition's
 `inspect:` runs the ones it names before it goes.
 
 The files belong to the project, for the reason `confirmation:` files do: what
@@ -28,7 +28,7 @@ the answers before the name changed and after it can be compared.
 its inspections' answers say when they found something, in its own words, and
 an answer that says one of them puts `halyard:<inspection>` on the task. The
 inspection decides, from the project's settings — whoever runs it has no say —
-so one in a handoff labels exactly as one run by hand. Halyard only adds.
+so one in a transition labels exactly as one run by hand. Halyard only adds.
 
 **Every run is kept.** What the model was given, word for word, and what it
 said, through `Keeper` into the table `record` writes — the one thing Halyard
@@ -36,7 +36,7 @@ keeps the text of, so an inspection can be compared and run again later.
 
 **Three ports, and no chat.** An inspection reaches a model through `Asker`, the
 task through `Labeller` and its record through `Keeper`, and knows nothing of
-Telegram, of any runtime or of any tracker. `halyard.handoffs` runs
+Telegram, of any runtime or of any tracker. `halyard.transitions` runs
 inspections; nothing here hands anything on. `tests/test_layering.py` keeps it
 that way.
 """

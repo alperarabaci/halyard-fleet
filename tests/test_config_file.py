@@ -374,16 +374,16 @@ def test_the_name_inspections_had_before_is_still_read_and_said(tmp_path) -> Non
         lines=[
             "checks:",
             "  proof: NOTES/checks/proof.md",
-            "handoffs:",
+            "transitions:",
             "  discovery: {checks: [proof]}",
         ],
     )
 
     assert project.inspections == {"proof": Path("NOTES/checks/proof.md")}
-    assert project.handoffs["discovery"].inspections == ("proof",)
+    assert project.transitions["discovery"].inspections == ("proof",)
     assert project.older == (
         "the project: `checks:` is now `inspections:`",
-        "handoff 'discovery': `checks:` is now `inspect:`",
+        "transition 'discovery': `checks:` is now `inspect:`",
     )
 
 
@@ -396,6 +396,37 @@ def test_the_old_name_and_the_new_one_together_are_refused(tmp_path) -> None:
         )
 
 
+def test_the_names_transitions_had_before_are_still_read_and_said(tmp_path) -> None:
+    """`handoffs:` until 2026-09-24, and a step's `handoff:`. A configuration
+    written then keeps working, and `doctor` says what to rename."""
+    [project] = a_project(
+        tmp_path,
+        lines=[
+            "handoffs:",
+            "  review: {to: navigator}",
+            "workflows:",
+            "  steps:",
+            "    reviewing: {handoff: review}",
+            "  level1: [reviewing]",
+        ],
+    )
+
+    assert list(project.transitions) == ["review"]
+    assert project.workflows.steps["reviewing"].transition == "review"
+    assert project.older == (
+        "the project: `handoffs:` is now `transitions:`",
+        "step 'reviewing': `handoff:` is now `transition:`",
+    )
+
+
+def test_both_names_for_transitions_at_once_are_refused(tmp_path) -> None:
+    with pytest.raises(ValueError, match="both `transitions:` and `handoffs:`"):
+        a_project(
+            tmp_path,
+            lines=["handoffs:", "  a: {to: navigator}", "transitions:", "  b: {to: navigator}"],
+        )
+
+
 def test_an_inspection_written_as_a_mapping_still_needs_its_file(tmp_path) -> None:
     """Otherwise it becomes a path spelled with its own braces, and fails only
     when somebody runs it."""
@@ -404,7 +435,7 @@ def test_an_inspection_written_as_a_mapping_still_needs_its_file(tmp_path) -> No
 
 
 def test_an_inspection_says_nothing_it_does_not_read(tmp_path) -> None:
-    """`prompt:` is a handoff's. Written here, it would be passed over without a
+    """`prompt:` is a transition's. Written here, it would be passed over without a
     word, and the inspection would run on nothing."""
     with pytest.raises(ValueError, match="has prompt — it takes file, model, effort"):
         a_project(tmp_path, lines=["inspections:", "  proof: {prompt: NOTES/proof.md}"])
@@ -542,7 +573,7 @@ def test_an_empty_list_is_refused(tmp_path) -> None:
         a_project(tmp_path, lines=["commands:", "  nothing: []"])
 
 
-def test_a_handoff_naming_a_list_is_told_to_name_its_commands(tmp_path) -> None:
+def test_a_transition_naming_a_list_is_told_to_name_its_commands(tmp_path) -> None:
     with pytest.raises(ValueError, match="which is a list of commands"):
         a_project(
             tmp_path,
@@ -550,21 +581,21 @@ def test_a_handoff_naming_a_list_is_told_to_name_its_commands(tmp_path) -> None:
                 "commands:",
                 "  a: make a",
                 "  both: [a]",
-                "handoffs:",
+                "transitions:",
                 "  close: {commands: [both]}",
             ],
         )
 
 
-def test_a_handoff_cannot_run_a_command_that_asks_for_a_typed_value(tmp_path) -> None:
-    """A handoff has nobody to ask."""
+def test_a_transition_cannot_run_a_command_that_asks_for_a_typed_value(tmp_path) -> None:
+    """A transition has nobody to ask."""
     with pytest.raises(ValueError, match="nobody to ask"):
         a_project(
             tmp_path,
             lines=[
                 "commands:",
                 "  pull: make pull TASK={input.task}",
-                "handoffs:",
+                "transitions:",
                 "  close: {commands: [pull]}",
             ],
         )
@@ -601,58 +632,58 @@ def test_a_finding_phrase_left_unquoted_is_refused_with_why(tmp_path) -> None:
         a_project(tmp_path, lines=["label_findings:", "  - status: candidate"])
 
 
-def test_handoffs_are_read_with_what_they_carry(tmp_path) -> None:
+def test_transitions_are_read_with_what_they_carry(tmp_path) -> None:
     [project] = a_project(
         tmp_path,
         lines=[
             "inspections:",
             "  proof: NOTES/inspections/proof.md",
-            "handoffs:",
-            "  review: {prompt: NOTES/handoffs/review.md, to: reviewer}",
+            "transitions:",
+            "  review: {prompt: NOTES/transitions/review.md, to: reviewer}",
             "  discover_completed: {inspect: [proof], to: navigator}",
         ],
     )
 
-    review = project.handoffs["review"]
-    assert review.prompt == Path("NOTES/handoffs/review.md")
+    review = project.transitions["review"]
+    assert review.prompt == Path("NOTES/transitions/review.md")
     assert review.include_last_message is True
     assert review.to == "reviewer"
-    assert project.handoffs["discover_completed"].inspections == ("proof",)
+    assert project.transitions["discover_completed"].inspections == ("proof",)
 
 
-def test_a_handoff_can_run_the_projects_commands_first(tmp_path) -> None:
+def test_a_transition_can_run_the_projects_commands_first(tmp_path) -> None:
     [project] = a_project(
         tmp_path,
         lines=[
             "commands:",
             "  test-fast: make test-fast",
             "  lint: make lint",
-            "handoffs:",
+            "transitions:",
             "  close: {commands: [lint, test-fast], to: navigator}",
         ],
     )
 
-    assert project.handoffs["close"].commands == ("lint", "test-fast")
+    assert project.transitions["close"].commands == ("lint", "test-fast")
 
 
-def test_a_handoff_naming_a_command_nobody_defined_is_refused(tmp_path) -> None:
+def test_a_transition_naming_a_command_nobody_defined_is_refused(tmp_path) -> None:
     """The same as a check: otherwise it fails only when somebody presses it."""
     with pytest.raises(ValueError, match="does not define: test-all"):
-        a_project(tmp_path, lines=["handoffs:", "  close: {commands: [test-all]}"])
+        a_project(tmp_path, lines=["transitions:", "  close: {commands: [test-all]}"])
 
 
-def test_a_handoff_of_commands_alone_is_something_to_hand_on(tmp_path) -> None:
+def test_a_transition_of_commands_alone_is_something_to_hand_on(tmp_path) -> None:
     [project] = a_project(
         tmp_path,
         lines=[
             "commands:",
             "  test-fast: make test-fast",
-            "handoffs:",
+            "transitions:",
             "  tests: {commands: [test-fast], include_last_message: false}",
         ],
     )
 
-    assert project.handoffs["tests"].include_last_message is False
+    assert project.transitions["tests"].include_last_message is False
 
 
 def test_validate_names_one_of_the_projects_commands(tmp_path) -> None:
@@ -672,51 +703,51 @@ def test_validate_written_as_a_command_line_is_refused(tmp_path) -> None:
         a_project(tmp_path, lines=written)
 
 
-def test_a_handoff_naming_an_inspection_nobody_defined_is_refused(tmp_path) -> None:
+def test_a_transition_naming_an_inspection_nobody_defined_is_refused(tmp_path) -> None:
     """Otherwise it fails only when somebody presses it, from a phone."""
     with pytest.raises(ValueError, match="does not define: claims"):
-        a_project(tmp_path, lines=["handoffs:", "  discovery: {inspect: [claims]}"])
+        a_project(tmp_path, lines=["transitions:", "  discovery: {inspect: [claims]}"])
 
 
-def test_a_handoff_to_a_seat_that_is_not_there_is_refused(tmp_path) -> None:
+def test_a_transition_to_a_seat_that_is_not_there_is_refused(tmp_path) -> None:
     with pytest.raises(ValueError, match="must be a role"):
-        a_project(tmp_path, lines=["handoffs:", "  review: {to: somebody}"])
+        a_project(tmp_path, lines=["transitions:", "  review: {to: somebody}"])
 
 
-def test_a_handoff_prompt_that_is_not_there_is_named(tmp_path) -> None:
+def test_a_transition_prompt_that_is_not_there_is_named(tmp_path) -> None:
     from halyard.core.config_file import missing_files
 
-    found = a_project(tmp_path, lines=["handoffs:", "  review: {prompt: NOTES/GONE.md}"])
+    found = a_project(tmp_path, lines=["transitions:", "  review: {prompt: NOTES/GONE.md}"])
 
     [said] = missing_files(found)
-    assert "handoffs.review.prompt" in said
+    assert "transitions.review.prompt" in said
 
 
-def test_a_handoff_can_name_its_text_for_the_rounds_after_the_first(tmp_path) -> None:
+def test_a_transition_can_name_its_text_for_the_rounds_after_the_first(tmp_path) -> None:
     [project] = a_project(
         tmp_path,
         lines=[
-            "handoffs:",
+            "transitions:",
             "  review:",
-            "    prompt: NOTES/handoffs/review.md",
-            "    followup_prompt: NOTES/handoffs/review-followup.md",
+            "    prompt: NOTES/transitions/review.md",
+            "    followup_prompt: NOTES/transitions/review-followup.md",
             "    to: reviewer",
         ],
     )
 
-    review = project.handoffs["review"]
-    assert review.prompt == Path("NOTES/handoffs/review.md")
-    assert review.followup_prompt == Path("NOTES/handoffs/review-followup.md")
+    review = project.transitions["review"]
+    assert review.prompt == Path("NOTES/transitions/review.md")
+    assert review.followup_prompt == Path("NOTES/transitions/review-followup.md")
 
 
 def with_workflows(tmp_path, *lines: str):
-    """A project with two handoffs and whatever `workflows:` says here."""
+    """A project with two transitions and whatever `workflows:` says here."""
     return a_project(
         tmp_path,
         lines=[
-            "handoffs:",
-            "  review: {prompt: NOTES/handoffs/review.md, to: reviewer}",
-            "  driver_discover: {prompt: NOTES/handoffs/forward.md}",
+            "transitions:",
+            "  review: {prompt: NOTES/transitions/review.md, to: reviewer}",
+            "  driver_discover: {prompt: NOTES/transitions/forward.md}",
             "workflows:",
             *lines,
         ],
@@ -728,23 +759,23 @@ def test_a_workflow_is_the_steps_it_takes_in_order(tmp_path) -> None:
         tmp_path,
         "  steps:",
         "    review: {seat: reviewer, rounds: 2}",
-        "    discover: {handoff: driver_discover, seat: reviewer}",
+        "    discover: {transition: driver_discover, seat: reviewer}",
         "  level3: [review, discover, review]",
     )
 
     flows = project.workflows
     assert flows.flows["level3"] == ("review", "discover", "review")
-    assert (flows.steps["review"].handoff, flows.steps["review"].rounds) == ("review", 2)
-    assert flows.steps["discover"].handoff == "driver_discover"
+    assert (flows.steps["review"].transition, flows.steps["review"].rounds) == ("review", 2)
+    assert flows.steps["discover"].transition == "driver_discover"
     assert flows.steps["discover"].decided_by is None
 
 
 def test_a_step_says_nothing_but_its_name_and_is_still_a_step(tmp_path) -> None:
-    """The handoff is the step's own name, and `to:` says where it goes."""
+    """The transition is the step's own name, and `to:` says where it goes."""
     [project] = with_workflows(tmp_path, "  steps:", "    review: {}", "  short: [review]")
 
     step = project.workflows.steps["review"]
-    assert (step.handoff, step.seat) == ("review", None)
+    assert (step.transition, step.seat) == ("review", None)
     assert step.rounds == 1, "a step goes once unless it says otherwise"
 
 
@@ -754,8 +785,8 @@ def test_a_workflow_naming_a_step_nobody_defined_is_refused(tmp_path) -> None:
         with_workflows(tmp_path, "  steps:", "    review: {}", "  level3: [review, gone]")
 
 
-def test_a_step_naming_a_handoff_nobody_defined_is_refused(tmp_path) -> None:
-    with pytest.raises(ValueError, match="names the handoff 'close'"):
+def test_a_step_naming_a_transition_nobody_defined_is_refused(tmp_path) -> None:
+    with pytest.raises(ValueError, match="names the transition 'close'"):
         with_workflows(tmp_path, "  steps:", "    close: {}", "  level3: [close]")
 
 
@@ -781,7 +812,7 @@ def test_a_step_can_act_on_the_decision_of_a_step_named_after_it(tmp_path) -> No
     [project] = with_workflows(
         tmp_path,
         "  steps:",
-        "    reviewed: {handoff: review, decided_by: review}",
+        "    reviewed: {transition: review, decided_by: review}",
         "    review: {}",
         "  level3: [review, reviewed]",
     )
@@ -794,7 +825,7 @@ def test_decided_by_naming_no_step_is_refused(tmp_path) -> None:
         with_workflows(
             tmp_path,
             "  steps:",
-            "    reviewed: {handoff: review, decided_by: gone}",
+            "    reviewed: {transition: review, decided_by: gone}",
             "  level3: [reviewed]",
         )
 
@@ -846,8 +877,8 @@ def test_a_list_inside_a_workflow_is_its_phases(tmp_path) -> None:
         tmp_path,
         "  steps:",
         "    review: {}",
-        "    discover: {handoff: driver_discover}",
-        "    discovered: {handoff: review}",
+        "    discover: {transition: driver_discover}",
+        "    discovered: {transition: review}",
         "  level3: [review, [discover, discovered], review]",
     )
 
@@ -911,10 +942,12 @@ def test_a_project_with_no_workflows_has_none(tmp_path) -> None:
 def test_a_followup_prompt_that_is_not_there_is_named(tmp_path) -> None:
     from halyard.core.config_file import missing_files
 
-    found = a_project(tmp_path, lines=["handoffs:", "  review: {followup_prompt: NOTES/GONE.md}"])
+    found = a_project(
+        tmp_path, lines=["transitions:", "  review: {followup_prompt: NOTES/GONE.md}"]
+    )
 
     [said] = missing_files(found)
-    assert "handoffs.review.followup_prompt" in said
+    assert "transitions.review.followup_prompt" in said
 
 
 def test_a_seat_prompt_file_is_checked_too(tmp_path) -> None:

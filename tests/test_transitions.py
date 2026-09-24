@@ -1,12 +1,12 @@
-"""Tests for `halyard.handoffs` — a reply handed on, its checks run first."""
+"""Tests for `halyard.transitions` — a reply handed on, its checks run first."""
 
 from __future__ import annotations
 
 from pathlib import Path
 
-from halyard import handoffs
+from halyard import transitions
 from halyard.commands import Command, Result
-from halyard.core.config_file import Handoff, ModelChoice
+from halyard.core.config_file import ModelChoice, Transition
 
 
 class Asking:
@@ -70,10 +70,10 @@ class Running:
         )
 
 
-async def hand(tmp_path: Path, handoff: Handoff, *, asker: Asking | None = None, **more):
+async def hand(tmp_path: Path, transition: Transition, *, asker: Asking | None = None, **more):
     delivery = Delivered()
-    handed = await handoffs.hand_off(
-        handoff,
+    handed = await transitions.take(
+        transition,
         project=tmp_path,
         context=["Work item: alpha-engine#355"],
         note="",
@@ -99,7 +99,7 @@ async def test_the_navigator_gets_the_prompt_the_checks_and_the_report_in_that_o
     the checks' answers arrive with it rather than after it."""
     a_project(tmp_path)
     asker = Asking()
-    discovery = Handoff(
+    discovery = Transition(
         name="discovery",
         prompt=Path("NOTES/discovery.md"),
         inspections=("proof", "claims"),
@@ -110,7 +110,7 @@ async def test_the_navigator_gets_the_prompt_the_checks_and_the_report_in_that_o
 
     [(label, text)] = delivery.sent
     assert label == "nav"
-    assert text.startswith("To nav (navigator), from Halyard — handoff: discovery.")
+    assert text.startswith("To nav (navigator), from Halyard — transition: discovery.")
     order = [
         text.index("The message below"),
         text.index("Inspection proof"),
@@ -122,14 +122,14 @@ async def test_the_navigator_gets_the_prompt_the_checks_and_the_report_in_that_o
     assert "Work item: alpha-engine#355" in text
     assert len(asker.asked) == 2
     assert [answer.name for answer in handed.answers] == ["proof", "claims"]
-    assert isinstance(delivery, handoffs.Delivery)
+    assert isinstance(delivery, transitions.Delivery)
 
 
-def with_followup(tmp_path: Path) -> Handoff:
+def with_followup(tmp_path: Path) -> Transition:
     """A review with a text of its own for every round after the first."""
     (tmp_path / "NOTES" / "review.md").write_text("Try to break the prompt below.")
     (tmp_path / "NOTES" / "review-followup.md").write_text("Only the earlier BLOCKERs.")
-    return Handoff(
+    return Transition(
         name="review",
         prompt=Path("NOTES/review.md"),
         followup_prompt=Path("NOTES/review-followup.md"),
@@ -164,9 +164,9 @@ async def test_every_round_after_the_first_sends_the_followup_in_its_place(
     assert "- Prompt: NOTES/review-followup.md @ " in text
 
 
-async def test_a_handoff_without_a_followup_sends_its_prompt_every_round(tmp_path: Path) -> None:
+async def test_a_transition_without_a_followup_sends_its_prompt_every_round(tmp_path: Path) -> None:
     a_project(tmp_path)
-    discovery = Handoff(name="discovery", prompt=Path("NOTES/discovery.md"))
+    discovery = Transition(name="discovery", prompt=Path("NOTES/discovery.md"))
 
     _, delivery = await hand(tmp_path, discovery, round_number=2, expected=2)
 
@@ -177,7 +177,7 @@ async def test_a_handoff_without_a_followup_sends_its_prompt_every_round(tmp_pat
 
 async def test_the_answer_to_the_round_before_comes_ahead_of_the_reply(tmp_path: Path) -> None:
     a_project(tmp_path)
-    answered = handoffs.Previous(
+    answered = transitions.Previous(
         number=1,
         seat="xrev (reviewer)",
         sent="17:07",
@@ -199,7 +199,7 @@ async def test_the_answer_to_the_round_before_comes_ahead_of_the_reply(tmp_path:
 
 async def test_a_seat_that_has_said_nothing_since_is_said_to_have_not(tmp_path: Path) -> None:
     a_project(tmp_path)
-    silent = handoffs.Previous(number=1, seat="xrev (reviewer)", sent="17:07")
+    silent = transitions.Previous(number=1, seat="xrev (reviewer)", sent="17:07")
 
     _, delivery = await hand(tmp_path, with_followup(tmp_path), round_number=2, previous=silent)
 
@@ -208,7 +208,7 @@ async def test_a_seat_that_has_said_nothing_since_is_said_to_have_not(tmp_path: 
     assert "answer to round 1:" not in text
 
 
-async def test_a_handoff_nobody_counts_says_nothing_of_rounds(tmp_path: Path) -> None:
+async def test_a_transition_nobody_counts_says_nothing_of_rounds(tmp_path: Path) -> None:
     a_project(tmp_path)
 
     _, delivery = await hand(tmp_path, with_followup(tmp_path))
@@ -222,17 +222,17 @@ async def test_a_check_that_could_not_run_still_goes_marked_unmeasured(tmp_path:
     """An unmeasured line is not a clean one, and the reader has to see it."""
     a_project(tmp_path)
 
-    handed, delivery = await hand(tmp_path, Handoff(name="discovery", inspections=("proof",)))
+    handed, delivery = await hand(tmp_path, Transition(name="discovery", inspections=("proof",)))
 
     [(_, text)] = delivery.sent
     assert "unmeasured — no runtime here can take a one-shot turn" in text
     assert not handed.answers[0].measured
 
 
-async def test_a_handoff_can_be_the_reply_alone(tmp_path: Path) -> None:
+async def test_a_transition_can_be_the_reply_alone(tmp_path: Path) -> None:
     """The review going back to the navigator needs nothing in front of it but
     who it is from."""
-    handed, delivery = await hand(tmp_path, Handoff(name="back"))
+    handed, delivery = await hand(tmp_path, Transition(name="back"))
 
     [(_, text)] = delivery.sent
     assert "Prompt:" not in text
@@ -242,21 +242,23 @@ async def test_a_handoff_can_be_the_reply_alone(tmp_path: Path) -> None:
 
 
 async def test_a_prompt_that_cannot_be_read_is_said_rather_than_dropped(tmp_path: Path) -> None:
-    _, delivery = await hand(tmp_path, Handoff(name="review", prompt=Path("NOTES/gone.md")))
+    _, delivery = await hand(tmp_path, Transition(name="review", prompt=Path("NOTES/gone.md")))
 
     [(_, text)] = delivery.sent
     assert "NOTES/gone.md @ uncommitted — could not be read" in text
 
 
-async def test_each_check_a_handoff_runs_goes_by_the_handoffs_name_too(tmp_path: Path) -> None:
+async def test_each_check_a_transition_runs_goes_by_the_transitions_name_too(
+    tmp_path: Path,
+) -> None:
     """A command one of them asks to run reaches a person saying which check
-    and which handoff it came from."""
+    and which transition it came from."""
     a_project(tmp_path)
     asker = Asking()
 
-    await hand(tmp_path, Handoff(name="discovery", inspections=("proof", "claims")), asker=asker)
+    await hand(tmp_path, Transition(name="discovery", inspections=("proof", "claims")), asker=asker)
 
-    assert sorted(asker.names) == ["claims · handoff discovery", "proof · handoff discovery"]
+    assert sorted(asker.names) == ["claims · transition discovery", "proof · transition discovery"]
 
 
 async def test_an_inspection_that_names_its_own_model_runs_on_it(tmp_path: Path) -> None:
@@ -267,15 +269,15 @@ async def test_an_inspection_that_names_its_own_model_runs_on_it(tmp_path: Path)
 
     await hand(
         tmp_path,
-        Handoff(name="close", inspections=("proof", "claims")),
+        Transition(name="close", inspections=("proof", "claims")),
         asker=asker,
         effort="max",
         models={"claims": ModelChoice(model="opus")},
     )
 
     assert asker.models == {
-        "proof · handoff close": ("sonnet", "max"),
-        "claims · handoff close": ("opus", "max"),
+        "proof · transition close": ("sonnet", "max"),
+        "claims · transition close": ("opus", "max"),
     }
 
 
@@ -284,15 +286,17 @@ async def test_the_seat_reads_an_envelope_one_fact_to_a_line(tmp_path: Path) -> 
     list, not a line of facts run together for a model to pick apart."""
     a_project(tmp_path)
 
-    _, delivery = await hand(tmp_path, Handoff(name="discovery", prompt=Path("NOTES/discovery.md")))
+    _, delivery = await hand(
+        tmp_path, Transition(name="discovery", prompt=Path("NOTES/discovery.md"))
+    )
 
     [(_, text)] = delivery.sent
     assert "Envelope:\n- Work item: alpha-engine#355\n- Prompt: NOTES/discovery.md @ " in text
     assert "\n- From: drv (driver), reply from 00:21" in text
 
 
-async def test_a_check_in_a_handoff_labels_the_task_as_it_would_by_hand(tmp_path: Path) -> None:
-    """No exception for handoffs: the check decides, wherever it runs."""
+async def test_a_check_in_a_transition_labels_the_task_as_it_would_by_hand(tmp_path: Path) -> None:
+    """No exception for transitions: the check decides, wherever it runs."""
     a_project(tmp_path)
     put: list[str] = []
 
@@ -300,8 +304,8 @@ async def test_a_check_in_a_handoff_labels_the_task_as_it_would_by_hand(tmp_path
         async def label(self, label: str) -> None:
             put.append(label)
 
-    await handoffs.hand_off(
-        Handoff(name="discovery", inspections=("proof",)),
+    await transitions.take(
+        Transition(name="discovery", inspections=("proof",)),
         project=tmp_path,
         context=[],
         note="",
@@ -333,7 +337,7 @@ async def test_commands_run_first_and_the_checks_read_what_they_did(tmp_path: Pa
 
     handed, delivery = await hand(
         tmp_path,
-        Handoff(name="close", commands=("test-fast",), inspections=("claims",)),
+        Transition(name="close", commands=("test-fast",), inspections=("claims",)),
         asker=asker,
         project_commands=COMMANDS,
         runner=runner,
@@ -355,7 +359,7 @@ async def test_commands_run_one_after_another_in_the_order_written(tmp_path: Pat
 
     await hand(
         tmp_path,
-        Handoff(name="close", commands=("lint", "test-fast")),
+        Transition(name="close", commands=("lint", "test-fast")),
         project_commands=COMMANDS,
         runner=runner,
     )
@@ -363,7 +367,7 @@ async def test_commands_run_one_after_another_in_the_order_written(tmp_path: Pat
     assert runner.ran == ["lint", "test-fast"]
 
 
-async def test_a_command_that_fails_is_reported_and_the_handoff_still_goes(
+async def test_a_command_that_fails_is_reported_and_the_transition_still_goes(
     tmp_path: Path,
 ) -> None:
     """Whoever receives it has to see that it failed."""
@@ -372,7 +376,7 @@ async def test_a_command_that_fails_is_reported_and_the_handoff_still_goes(
 
     _, delivery = await hand(
         tmp_path,
-        Handoff(name="close", commands=("test-fast",)),
+        Transition(name="close", commands=("test-fast",)),
         project_commands=COMMANDS,
         runner=Running(**{"test-fast": broke}),
     )

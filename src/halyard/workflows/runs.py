@@ -7,7 +7,7 @@ forgot itself there would leave a seat holding a reply nobody was waiting for.
 
 **A run counts its own rounds.** Each step's rounds are kept in the run, by the
 step's name — and inside a flow's phases by the step and the phase, so the
-second phase's `discover` starts from its first round. A handoff pressed by
+second phase's `discover` starts from its first round. A transition pressed by
 hand is not part of any run, and counts nothing: the rounds that stop a loop
 are the loop's own. A run that is stopped and started again starts counting
 again, because starting one is somebody deciding to.

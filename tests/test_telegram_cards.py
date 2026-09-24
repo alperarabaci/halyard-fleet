@@ -40,8 +40,8 @@ def test_every_choice_card_can_be_cancelled() -> None:
         cards.label_choices(("andon",)),
         cards.inspection_choices(("proof",)),
         cards.result_choices("proof", ("nav", "drv")),
-        cards.handoff_choices(("review", "discovery")),
-        cards.handoff_seat_choices("review", ("nav", "xrev")),
+        cards.transition_choices(("review", "discovery")),
+        cards.transition_seat_choices("review", ("nav", "xrev")),
     ]
 
     for keyboard in built:
@@ -65,7 +65,7 @@ def test_a_command_an_inspection_asks_for_says_whose_it_is() -> None:
     """An inspection's turn is nobody's seat. Without this the card would say
     AGENT over a session nobody has seen, and what is being allowed is an
     inspection looking, not a seat working — before it is answered and after."""
-    inspection = "claims · handoff discover_completed"
+    inspection = "claims · transition discover_completed"
 
     asked = cards.render(a_command(), now=NOW, inspection=inspection)
     settled = cards.render_resolved(
@@ -73,8 +73,8 @@ def test_a_command_an_inspection_asks_for_says_whose_it_is() -> None:
     )
 
     assert asked.startswith("<b>[INSPECTION — PERMISSION REQUEST]</b>")
-    assert "Inspection: <b>claims · handoff discover_completed</b>" in asked
-    assert "Inspection: <b>claims · handoff discover_completed</b>" in settled
+    assert "Inspection: <b>claims · transition discover_completed</b>" in asked
+    assert "Inspection: <b>claims · transition discover_completed</b>" in settled
 
 
 def test_a_seats_command_is_carded_as_it_always_was() -> None:

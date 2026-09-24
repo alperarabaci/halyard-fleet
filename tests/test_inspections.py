@@ -74,7 +74,7 @@ async def checked(
 
 
 async def ran(
-    tmp_path: Path, asker: Asking, check: str = "proof.md", *, handoff: str = ""
+    tmp_path: Path, asker: Asking, check: str = "proof.md", *, transition: str = ""
 ) -> inspections.Answer:
     return await inspections.run(
         "proof",
@@ -86,7 +86,7 @@ async def ran(
         asker=asker,
         model="sonnet",
         timeout=5,
-        handoff=handoff,
+        transition=transition,
     )
 
 
@@ -167,14 +167,14 @@ async def test_the_turn_stands_in_the_project_and_cannot_change_it(tmp_path: Pat
     assert asker.how == [{"cwd": tmp_path, "name": "proof", "edits": False}]
 
 
-async def test_a_check_run_for_a_handoff_goes_by_both_names(tmp_path: Path) -> None:
-    """Whatever it asks a person for says which check and which handoff."""
+async def test_a_check_run_for_a_transition_goes_by_both_names(tmp_path: Path) -> None:
+    """Whatever it asks a person for says which check and which transition."""
     (tmp_path / "proof.md").write_text("# proof\n")
     asker = Asking()
 
-    await ran(tmp_path, asker, handoff="discover_completed")
+    await ran(tmp_path, asker, transition="discover_completed")
 
-    assert asker.how[0]["name"] == "proof · handoff discover_completed"
+    assert asker.how[0]["name"] == "proof · transition discover_completed"
 
 
 async def test_a_model_that_does_not_answer_is_said_not_skipped(tmp_path: Path) -> None:
@@ -225,7 +225,7 @@ def test_a_finding_is_the_projects_own_words_whatever_their_case() -> None:
 
 async def test_a_check_that_finds_something_labels_the_task(tmp_path: Path) -> None:
     """Decided by the check, from the project's own words — so a check run by
-    hand and one run by a handoff label alike."""
+    hand and one run by a transition label alike."""
     labeller = Labelling()
 
     await checked(tmp_path, "proof · status: candidate", labeller)
@@ -285,7 +285,7 @@ async def kept_run(
         model="sonnet",
         effort=effort,
         timeout=5,
-        handoff="close",
+        transition="close",
         findings=("status: candidate",) if says_finding else (),
         keeper=keeper,
     )
@@ -313,7 +313,7 @@ async def test_every_run_is_kept_whole_under_the_id_it_ran_under(tmp_path: Path)
     [(text, _)] = asker.asked
     assert kept.asked == text
     assert kept.session == asker.sessions[0]
-    assert (kept.name, kept.handoff, kept.model) == ("proof", "close", "sonnet")
+    assert (kept.name, kept.transition, kept.model) == ("proof", "close", "sonnet")
     assert kept.answer == "proof · status: candidate"
     assert kept.finding == "status: candidate"
     assert kept.context[1] == "HEAD: 2cdcab9c"
@@ -382,7 +382,7 @@ def test_a_kept_run_joins_the_tokens_it_used(tmp_path: Path) -> None:
         name="proof",
         path=Path("NOTES/proof.md"),
         version="3e8c847",
-        handoff="close",
+        transition="close",
         model="sonnet",
         asked="# proof\n\nText to check:\n\n42 passed",
         context=("Work item: alpha-engine#386", "HEAD: 2cdcab9c", "Content: 5df40c87 (write-tree)"),

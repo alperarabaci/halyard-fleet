@@ -467,8 +467,9 @@ def test_a_project_whose_seats_have_no_path_is_a_warning() -> None:
 
 
 def test_a_name_from_before_a_rename_is_a_warning_that_says_what_to_rename() -> None:
-    """`checks:` became `inspections:` on 2026-09-23. It still works, so doctor
-    only says what to rename — never a problem that fails the check."""
+    """`checks:` became `inspections:` on 2026-09-23, and `handoffs:` became
+    `transitions:` the day after. They still work, so doctor only says what to
+    rename — never a problem that fails the check."""
     from halyard.core.config_file import projects_from_yaml
 
     [project] = projects_from_yaml(
@@ -481,7 +482,9 @@ def test_a_name_from_before_a_rename_is_a_warning_that_says_what_to_rename() -> 
     assert lines == [
         f"{doctor.WARN}alpha-engine — the project: `checks:` is now `inspections:`; "
         "the old name still works",
-        f"{doctor.WARN}alpha-engine — handoff 'close': `checks:` is now `inspect:`; "
+        f"{doctor.WARN}alpha-engine — the project: `handoffs:` is now `transitions:`; "
+        "the old name still works",
+        f"{doctor.WARN}alpha-engine — transition 'close': `checks:` is now `inspect:`; "
         "the old name still works",
     ]
     assert doctor._older_spellings(projects_from_yaml("projects:\n  a:\n    path: /x\n")) == []

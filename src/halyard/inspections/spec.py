@@ -67,8 +67,8 @@ class Kept:
     name: str
     path: Path
     version: str
-    #: The handoff it ran for, or empty when it was run by hand.
-    handoff: str
+    #: The transition it ran for, or empty when it was run by hand.
+    transition: str
     model: str
     #: Everything the model was given, exactly as it was sent.
     asked: str

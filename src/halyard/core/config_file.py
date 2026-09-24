@@ -63,6 +63,8 @@ _PROJECT_FIELDS = {
     "inspections",
     # The name `inspections:` had until 2026-09-23, still read.
     "checks",
+    "transitions",
+    # The name `transitions:` had until 2026-09-24, still read.
     "handoffs",
     "workflows",
 }
@@ -98,28 +100,30 @@ class Confirmation:
 
 
 @dataclass(frozen=True)
-class Handoff:
-    """One way a reply goes from one seat to another, as a project defines it.
+class Transition:
+    """How the work enters its next stage, as a project defines it: a seat's
+    reply, carried to the seat that works on it next. A handoff until
+    2026-09-24 — `handoffs:` and `/handoff` still work.
 
-    A button on `/handoff`'s card. It carries the chat's last reply, puts the
+    A button on `/transition`'s card. It carries the chat's last reply, puts the
     project's own text in front of it, runs whichever of the project's inspections
     it names over the reply first, and delivers the lot to a seat — the one `to:`
     names, or whichever is pressed. Everything it reads belongs to the project;
-    Halyard adds only what it can see for itself. See `halyard.handoffs`.
+    Halyard adds only what it can see for itself. See `halyard.transitions`.
     """
 
     name: str
     #: The project's own text for whoever receives it — `review.md`. Read
-    #: relative to the project. Optional: a handoff can be the reply alone.
+    #: relative to the project. Optional: a transition can be the reply alone.
     prompt: Path | None = None
     #: The project's text for every round after the first — each time this
-    #: handoff goes again for the same work item — `review-followup.md`. Unset
-    #: sends `prompt` every round. See `halyard.handoffs.rounds`.
+    #: transition goes again for the same work item — `review-followup.md`. Unset
+    #: sends `prompt` every round. See `halyard.transitions.rounds`.
     followup_prompt: Path | None = None
     #: Whether the chat's last reply goes with it. Almost always.
     include_last_message: bool = True
     #: Inspections from this project's `inspections:`, run over the reply before
-    #: it goes — written `inspect:` on the handoff.
+    #: it goes — written `inspect:` on the transition.
     inspections: tuple[str, ...] = ()
     #: Commands from this project's `commands:`, run one after another before
     #: the inspections. What each did goes into the envelope the inspections
@@ -137,17 +141,18 @@ _DEFAULT_ROUNDS = 1
 
 @dataclass(frozen=True)
 class Step:
-    """One step of a workflow: a handoff, the seat it goes to, how often it may go.
+    """One step of a workflow — a stage of the work: the transition into it, the
+    seat it goes to, how often it may go.
 
     Named once, under `workflows: steps:`, because every flow uses the same
-    ones — and one handoff going to two different drivers is two steps, which
+    ones — and one transition going to two different drivers is two steps, which
     is where a Codex driver and a ZCode one are told apart.
     """
 
     name: str
-    #: One of the project's `handoffs:`. The step's own name when it says none.
-    handoff: str
-    #: A seat's label or a role. Unset leaves it to the handoff's `to:`, which
+    #: One of the project's `transitions:`. The step's own name when it says none.
+    transition: str
+    #: A seat's label or a role. Unset leaves it to the transition's `to:`, which
     #: is enough until one role is held by two seats.
     seat: str | None = None
     #: How many rounds this step may have in one run — and, inside a flow's
@@ -250,7 +255,7 @@ class Project:
     labels: tuple[str, ...] = ()
     #: Groups of task labels, by name — `level: [level::1, level::2, level::3]`.
     #: The first label a task carries from each goes on the envelope that
-    #: inspections and handoffs are given, as `level: level::3`. Empty unless
+    #: inspections and transitions are given, as `level: level::3`. Empty unless
     #: configured. A task with none of a group's labels, or a tracker that
     #: cannot be read, adds nothing: this reports what is there, it does not ask
     #: for anything.
@@ -279,12 +284,12 @@ class Project:
     #: `HALYARD_INSPECTION_MODEL` and `HALYARD_INSPECTION_EFFORT`.
     inspection_models: dict[str, ModelChoice] = field(default_factory=dict)
     #: How a reply is handed from one seat to another here, by name — see
-    #: `Handoff`. Empty unless configured.
-    handoffs: dict[str, Handoff] = field(default_factory=dict)
+    #: `Transition`. Empty unless configured.
+    transitions: dict[str, Transition] = field(default_factory=dict)
     #: The spellings this project's configuration still uses from before they
     #: were renamed, as a sentence each, for `doctor` to mention. They work.
     older: tuple[str, ...] = ()
-    #: The flows this project takes its handoffs in, and the steps they share
+    #: The flows this project takes its transitions in, and the steps they share
     #: — see `Workflows`. Empty unless configured.
     workflows: Workflows = field(default_factory=Workflows)
 
@@ -378,10 +383,10 @@ def _inspections_from(project: str, value: Any) -> tuple[dict[str, Path], dict[s
     return files, models
 
 
-#: A handoff's name rides in a button, where Telegram allows 64 bytes of
-#: callback data, and is typed after `/handoff`.
-_HANDOFF_NAME = re.compile(r"^[a-z0-9_-]{1,32}$")
-_HANDOFF_FIELDS = {
+#: A transition's name rides in a button, where Telegram allows 64 bytes of
+#: callback data, and is typed after `/transition`.
+_TRANSITION_NAME = re.compile(r"^[a-z0-9_-]{1,32}$")
+_TRANSITION_FIELDS = {
     "prompt",
     "followup_prompt",
     "include_last_message",
@@ -393,7 +398,7 @@ _HANDOFF_FIELDS = {
 }
 
 
-def _handoffs_from(
+def _transitions_from(
     project: str,
     value: Any,
     *,
@@ -401,24 +406,26 @@ def _handoffs_from(
     seats: list[Seat],
     commands: dict[str, str] | None = None,
     older: list[str] | None = None,
-) -> dict[str, Handoff]:
-    """`handoffs:` as a mapping of name to how that handoff is made.
+) -> dict[str, Transition]:
+    """`transitions:` as a mapping of name to how that transition is made.
 
-    Checked against the rest of the project here, because a handoff naming a
+    Checked against the rest of the project here, because a transition naming a
     check, a command or a seat nobody defined would otherwise fail only when
     somebody pressed it — from a phone, in the middle of a piece of work.
     """
     if value is None:
         return {}
     if not isinstance(value, dict):
-        raise ValueError(f"Project {project!r}: `handoffs:` must be a mapping of name to handoff.")
+        raise ValueError(
+            f"Project {project!r}: `transitions:` must be a mapping of name to transition."
+        )
     roles = {role.value for role in Role}
     labels = {seat.label for seat in seats}
-    found: dict[str, Handoff] = {}
+    found: dict[str, Transition] = {}
     for raw, spec in value.items():
         name = str(raw).strip()
-        where = f"Project {project!r}: handoff {name!r}"
-        if not _HANDOFF_NAME.match(name):
+        where = f"Project {project!r}: transition {name!r}"
+        if not _TRANSITION_NAME.match(name):
             raise ValueError(
                 f"{where} needs a name of lowercase letters, digits, `-` or `_`, "
                 "up to 32 characters."
@@ -426,10 +433,10 @@ def _handoffs_from(
         spec = spec or {}
         if not isinstance(spec, dict):
             raise ValueError(f"{where} must be a mapping.")
-        unknown = set(spec) - _HANDOFF_FIELDS
+        unknown = set(spec) - _TRANSITION_FIELDS
         if unknown:
             raise ValueError(f"{where} has unknown field(s) {', '.join(sorted(unknown))}")
-        named, spelled = _spelled(project, spec, "inspect", "checks", f"handoff {name!r}")
+        named, spelled = _spelled(project, spec, "inspect", "checks", f"transition {name!r}")
         if spelled is not None and older is not None:
             older.append(spelled)
         named = named or []
@@ -468,7 +475,7 @@ def _handoffs_from(
                 f"{where}: `to:` must be a role ({', '.join(sorted(roles))}) "
                 "or one of this project's seats."
             )
-        found[name] = Handoff(
+        found[name] = Transition(
             name=name,
             prompt=Path(prompt).expanduser() if prompt else None,
             followup_prompt=Path(followup).expanduser() if followup else None,
@@ -482,7 +489,14 @@ def _handoffs_from(
 
 #: What a step may say, the words a decision can be given, and the names under
 #: `workflows:` that are not flows.
-_STEP_FIELDS = {"handoff", "seat", "rounds", "decided_by"}
+_STEP_FIELDS = {
+    "transition",
+    # The name `transition:` had until 2026-09-24, still read.
+    "handoff",
+    "seat",
+    "rounds",
+    "decided_by",
+}
 _DECISION_FIELDS = ("forward", "back", "wait", "next")
 _NOT_A_FLOW = ("steps", "decisions", "phases")
 
@@ -491,14 +505,15 @@ def _workflows_from(
     project: str,
     value: Any,
     *,
-    handoffs: dict[str, Handoff],
+    transitions: dict[str, Transition],
     seats: list[Seat],
+    older: list[str] | None = None,
 ) -> Workflows:
     """`workflows:` — the steps every flow shares, the words that decide, and
     the flows themselves, each a list of step names in the order it takes them.
 
-    Checked against the rest of the project here, the way a handoff is: a flow
-    naming a step, a step naming a handoff, or a step naming a seat that nobody
+    Checked against the rest of the project here, the way a transition is: a flow
+    naming a step, a step naming a transition, or a step naming a seat that nobody
     defined would otherwise fail when somebody started it from a phone.
     """
     if value is None:
@@ -508,7 +523,9 @@ def _workflows_from(
             f"Project {project!r}: `workflows:` must be a mapping — `steps:`, `decisions:`, "
             "and a list of step names for each workflow."
         )
-    steps = _steps_from(project, value.get("steps"), handoffs=handoffs, seats=seats)
+    steps = _steps_from(
+        project, value.get("steps"), transitions=transitions, seats=seats, older=older
+    )
     flows: dict[str, tuple[str, ...]] = {}
     stretches: dict[str, tuple[int, int]] = {}
     for raw, listed in value.items():
@@ -603,8 +620,9 @@ def _steps_from(
     project: str,
     value: Any,
     *,
-    handoffs: dict[str, Handoff],
+    transitions: dict[str, Transition],
     seats: list[Seat],
+    older: list[str] | None = None,
 ) -> dict[str, Step]:
     """`workflows: steps:` as a mapping of name to what that step does."""
     if value is None:
@@ -619,7 +637,7 @@ def _steps_from(
     for raw, spec in value.items():
         name = str(raw).strip()
         where = f"Project {project!r}: step {name!r}"
-        if not _HANDOFF_NAME.match(name):
+        if not _TRANSITION_NAME.match(name):
             raise ValueError(
                 f"{where} needs a name of lowercase letters, digits, `-` or `_`, "
                 "up to 32 characters."
@@ -630,10 +648,13 @@ def _steps_from(
         unknown = set(spec) - _STEP_FIELDS
         if unknown:
             raise ValueError(f"{where} has unknown field(s) {', '.join(sorted(unknown))}")
-        handoff = _as_text(spec.get("handoff")) or name
-        if handoff not in handoffs:
+        named, spelled = _spelled(project, spec, "transition", "handoff", f"step {name!r}")
+        if spelled is not None and older is not None:
+            older.append(spelled)
+        transition = _as_text(named) or name
+        if transition not in transitions:
             raise ValueError(
-                f"{where} names the handoff {handoff!r}, which this project does not define."
+                f"{where} names the transition {transition!r}, which this project does not define."
             )
         seat = _as_text(spec.get("seat"))
         if seat and seat.lower() not in roles and seat not in labels:
@@ -646,7 +667,7 @@ def _steps_from(
             raise ValueError(f"{where}: `rounds:` must be a whole number of at least 1.")
         found[name] = Step(
             name=name,
-            handoff=handoff,
+            transition=transition,
             seat=seat.lower() if seat and seat.lower() in roles else seat,
             rounds=rounds,
             decided_by=_as_text(spec.get("decided_by")),
@@ -697,22 +718,24 @@ def _commands_from(project: str, value: Any) -> tuple[dict[str, str], dict[str, 
     return lines, lists
 
 
-def _not_a_list(project: str, body: dict, command_lists: dict[str, tuple[str, ...]]) -> None:
-    """A handoff or `validate:` names commands themselves, never a list of them.
+def _not_a_list(
+    project: str, transitions: Any, validate: Any, command_lists: dict[str, tuple[str, ...]]
+) -> None:
+    """A transition or `validate:` names commands themselves, never a list of them.
 
     Said before either is read, which would otherwise call a list's name a
     command this project does not define — true, and no help.
     """
-    handoffs = body.get("handoffs")
-    for handoff, spec in (handoffs if isinstance(handoffs, dict) else {}).items():
+    for transition, spec in (transitions if isinstance(transitions, dict) else {}).items():
         ran = spec.get("commands") if isinstance(spec, dict) else None
         for name in ran if isinstance(ran, list) else []:
             if str(name).strip() in command_lists:
                 raise ValueError(
-                    f"Project {project!r}: handoff {str(handoff)!r} names {str(name).strip()!r}, "
-                    "which is a list of commands — name the commands in it instead."
+                    f"Project {project!r}: transition {str(transition)!r} names "
+                    f"{str(name).strip()!r}, which is a list of commands — name the commands "
+                    "in it instead."
                 )
-    if (validate := _as_text(body.get("validate"))) in command_lists:
+    if (validate := _as_text(validate)) in command_lists:
         raise ValueError(
             f"Project {project!r}: `validate:` names {validate!r}, which is a list of "
             "commands — `validate:` names one command."
@@ -725,13 +748,13 @@ def _placeholders_checked(
     label_groups: dict[str, tuple[str, ...]],
     *,
     validate: str | None,
-    handoffs: dict[str, Handoff],
+    transitions: dict[str, Transition],
 ) -> None:
     """What a command line fills in is something that can be filled in.
 
     `{label_groups.<group>}` names a group this project has, with labels in
     it. `{input.<name>}` is typed by somebody, so only `/command` can run it: a
-    handoff has nobody to ask, and neither does a commit's `validate:`, which
+    transition has nobody to ask, and neither does a commit's `validate:`, which
     takes no label either. Refused here rather than when the command runs,
     where the line would reach the shell with its braces still in it. See
     `halyard.commands.labels` and `halyard.commands.inputs`.
@@ -753,13 +776,13 @@ def _placeholders_checked(
                 "task's label or something typed — and a commit has nowhere to ask for one. "
                 "Give `validate:` a command of its own."
             )
-    for handoff in handoffs.values():
-        for name in handoff.commands:
+    for transition in transitions.values():
+        for name in transition.commands:
             if typed := names_in(commands.get(name, "")):
                 raise ValueError(
-                    f"Project {project!r}: handoff {handoff.name!r} runs {name!r}, which takes "
-                    f"{{input.{typed[0]}}} — typed by somebody, and a handoff has nobody to "
-                    "ask. Run it with /command."
+                    f"Project {project!r}: transition {transition.name!r} runs {name!r}, "
+                    f"which takes {{input.{typed[0]}}} — typed by somebody, and a transition "
+                    "has nobody to ask. Run it with /command."
                 )
 
 
@@ -768,7 +791,7 @@ def _validate_from(project: str, value: Any, commands: dict[str, str]) -> str | 
 
     Not a command line of its own: what Halyard runs for a project is what
     `commands:` lists, and a line written anywhere else is one nobody reading
-    that list can see. Checked here, as a handoff's commands are, rather than
+    that list can see. Checked here, as a transition's commands are, rather than
     when somebody presses the button.
     """
     name = _as_text(value)
@@ -999,10 +1022,13 @@ def projects_from_yaml(text: str) -> list[Project]:
             older.append(spelled)
         inspections, inspection_models = _inspections_from(project, written)
         commands, command_lists = _commands_from(project, body.get("commands"))
-        _not_a_list(project, body, command_lists)
-        handoffs = _handoffs_from(
+        moves, spelled = _spelled(project, body, "transitions", "handoffs", "the project")
+        if spelled is not None:
+            older.append(spelled)
+        _not_a_list(project, moves, body.get("validate"), command_lists)
+        transitions = _transitions_from(
             project,
-            body.get("handoffs"),
+            moves,
             inspections=inspections,
             seats=seats,
             commands=commands,
@@ -1010,7 +1036,9 @@ def projects_from_yaml(text: str) -> list[Project]:
         )
         label_groups = _label_groups_from(project, body.get("label_groups"))
         validate = _validate_from(project, body.get("validate"), commands)
-        _placeholders_checked(project, commands, label_groups, validate=validate, handoffs=handoffs)
+        _placeholders_checked(
+            project, commands, label_groups, validate=validate, transitions=transitions
+        )
         projects.append(
             Project(
                 name=project,
@@ -1028,10 +1056,15 @@ def projects_from_yaml(text: str) -> list[Project]:
                 confirmation=_confirmation_from(project, body.get("confirmation")),
                 inspections=inspections,
                 inspection_models=inspection_models,
-                handoffs=handoffs,
+                transitions=transitions,
                 workflows=_workflows_from(
-                    project, body.get("workflows"), handoffs=handoffs, seats=seats
+                    project,
+                    body.get("workflows"),
+                    transitions=transitions,
+                    seats=seats,
+                    older=older,
                 ),
+                # After `workflows=`, which adds to it: arguments go in order.
                 older=tuple(older),
             )
         )
@@ -1167,11 +1200,11 @@ def missing_files(projects: list[Project]) -> list[str]:
                 wanted.append(("confirmation.review", project.confirmation.review))
         for name, path in project.inspections.items():
             wanted.append((f"inspections.{name}", path))
-        for name, handoff in project.handoffs.items():
-            if handoff.prompt:
-                wanted.append((f"handoffs.{name}.prompt", handoff.prompt))
-            if handoff.followup_prompt:
-                wanted.append((f"handoffs.{name}.followup_prompt", handoff.followup_prompt))
+        for name, transition in project.transitions.items():
+            if transition.prompt:
+                wanted.append((f"transitions.{name}.prompt", transition.prompt))
+            if transition.followup_prompt:
+                wanted.append((f"transitions.{name}.followup_prompt", transition.followup_prompt))
         for seat in project.seats:
             for key in ("before_compaction", "after_compaction"):
                 if written := getattr(seat, key, None):
