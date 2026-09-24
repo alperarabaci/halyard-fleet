@@ -29,12 +29,17 @@ import logging
 import os
 import re
 import shutil
-import signal
 import subprocess
 from collections.abc import Callable
 from pathlib import Path
 
-from halyard.agents.turns import WEDGED_AFTER_SECONDS, LateFailure, Turns, say_started
+from halyard.agents.turns import (
+    WEDGED_AFTER_SECONDS,
+    LateFailure,
+    Turns,
+    end_group,
+    say_started,
+)
 from halyard.core import usage
 
 logger = logging.getLogger(__name__)
@@ -256,19 +261,8 @@ def turns_used(
     ]
 
 
-def _end(process) -> None:
-    """End a one-shot turn and everything it started.
-
-    A check's turn runs commands — a test suite, say — as processes of its own,
-    and killing the CLI alone would leave them running for a check nobody is
-    waiting on. So the turn starts as a group of its own, and the group is what
-    is ended.
-    """
-    try:
-        os.killpg(process.pid, signal.SIGKILL)
-    except OSError:
-        with contextlib.suppress(ProcessLookupError):
-            process.kill()
+#: Ends a one-shot turn and everything it started — see `agents.turns`.
+_end = end_group
 
 
 class ClaudeCodeRunner:

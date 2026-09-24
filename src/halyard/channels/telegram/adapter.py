@@ -2124,6 +2124,12 @@ class TelegramChannel:
         usable message on its own, and `Rewrite` is one tap away.
         """
         runner = self._message_runner(chat_id)
+        # Written on the default runtime only, as it was while no other could
+        # take a turn of its own: `MESSAGE_MODEL` is that runtime's word, and a
+        # runtime that read it as something else would write the message on a
+        # model nobody chose. Another agent's chat keeps the reference alone.
+        if runner is not self._runner:
+            runner = None
         said = None
         if runner is not None and hasattr(runner, "ask"):
             try:
@@ -2722,15 +2728,19 @@ class TelegramChannel:
         await self._forward_to_seat(f"{label} {greeting}\n\n{kept.text}", actor, chat_id, thread_id)
 
     def _one_shot_runner(self, chat_id: str):
-        """A runtime that can take a turn apart from any session, or None.
+        """The runtime an inspection takes its turn on, or None — the channel's
+        side of `inspections.Asker`.
 
-        This chat's own if it can, and the default one otherwise, so a report
-        from any seat can be inspected — the channel's side of `inspections.Asker`.
+        The default runtime, whatever this chat's own is, so a report from any
+        agent can be inspected. It was "this chat's own if it can", which meant
+        the default while no other runtime could take a turn of its own. Now
+        opencode and Codex can, and the inspection's model and effort are the
+        default runtime's words: opencode takes `sonnet` for no model at all and
+        answers on its own default, and Codex refuses it. Another runtime is
+        chosen on purpose — `halyard inspect repeat --runtime` — never by the
+        chat an inspection happens to be asked from.
         """
-        runner = self._message_runner(chat_id)
-        if not hasattr(runner, "ask"):
-            runner = self._runner
-        return runner if hasattr(runner, "ask") else None
+        return self._runner if hasattr(self._runner, "ask") else None
 
     def _inspector(self, chat_id: str, destination: tuple[str, int | None]) -> _Inspecting | None:
         """This chat's one-shot runtime, for an inspection whose answer goes to

@@ -16,8 +16,9 @@ def _present() -> bool:
 
 
 def _runner(settings=None) -> CodexRunner:
-    """Takes nothing from settings; the argument is the shared shape."""
-    return CodexRunner()
+    """Takes only where a turn of Halyard's own records what it used; the rest
+    of this runtime's settings are read where they are needed."""
+    return CodexRunner(usage_path=getattr(settings, "db_path", None))
 
 
 def _check_available(**_) -> list[tuple[str, str]]:

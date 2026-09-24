@@ -55,7 +55,10 @@ caller may hand in `when_done`, called only when an accepted turn ends badly.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
+import os
+import signal
 from collections import defaultdict
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 
@@ -289,3 +292,18 @@ async def say_started(started: Callable[[str], object] | None, session_id: str |
             await told
     except Exception:
         logger.warning("Could not say which session %s is", session_id, exc_info=True)
+
+
+def end_group(process) -> None:
+    """End a one-shot turn and everything it started.
+
+    A turn runs commands — a test suite, say — as processes of its own, and
+    killing the CLI alone would leave them running for a turn nobody is waiting
+    on. So a one-shot turn starts as a group of its own, and the group is what
+    is ended.
+    """
+    try:
+        os.killpg(process.pid, signal.SIGKILL)
+    except OSError:
+        with contextlib.suppress(ProcessLookupError):
+            process.kill()

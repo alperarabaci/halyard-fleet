@@ -315,6 +315,15 @@ class Recorder:
 
         if not seat.before_compaction:
             return False
+        from halyard.agents import registry
+
+        runner = self._runners.get(seat.runtime)
+        if runner is None or not hasattr(runner, "ask") or seat.runtime != registry.DEFAULT:
+            # Written by the default runtime, for its own seats: the record's
+            # model is that runtime's word. opencode and Codex can take a turn
+            # of their own now, and a seat on either is left alone as it was —
+            # handed `sonnet`, one reads it as no model and the other refuses it.
+            return False
         # Found by id under the runtimes' own directories, never taken from the
         # request: a path in a payload posted over HTTP is a path an attacker
         # chooses. See `find_transcript`.
@@ -322,12 +331,6 @@ class Recorder:
         # its transcript. Nothing here knows either.
         transcript = find_transcript(session_id, watching_for(seat.runtime), self._roots)
         if transcript is None:
-            return False
-        runner = self._runners.get(seat.runtime)
-        if runner is None or not hasattr(runner, "ask"):
-            # Only Claude Code can run a one-shot turn today. A seat on another
-            # runtime is left alone rather than reached for with a method it
-            # does not have.
             return False
         instructions = read(seat.before_compaction, in_project(seat, self._projects) or self._root)
         if instructions is None:

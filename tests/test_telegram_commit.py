@@ -263,6 +263,22 @@ async def test_the_model_is_asked_with_the_house_style_and_the_cheap_model(wired
     assert "alpha-engine#279 p2" in runner.asked[0]
 
 
+async def test_another_agent_s_chat_keeps_the_reference_alone(wired) -> None:
+    """As it was while only the default runtime could take a turn of its own:
+    `sonnet` is that runtime's word, and opencode would have read it as no
+    model and written the message on its own default."""
+    channel, _, runner, repo = wired
+    other = FakeRunner()
+    channel._runners["opencode"] = other
+    channel._seats = [replace(seat, runtime="opencode") for seat in channel._seats]
+    wrote(repo, "loader.py", "x = 1\n")
+
+    await deliver(channel, typed("/commit"))
+
+    assert other.asked == []
+    assert runner.asked == []
+
+
 async def test_the_message_is_written_with_nothing_but_the_diff(wired) -> None:
     """Claude Code's own prompt and tools were five sixths of what a message
     cost, and the diff in front of it is all it needs."""
@@ -2122,6 +2138,25 @@ async def test_a_workflow_step_waits_for_the_label_and_the_pick_sends_it(
     [(session, text)] = runner.sent
     assert session == "id-rev"
     assert "- Workflow: level3 · step 1 of 1 · close" in text
+
+
+async def test_an_inspection_runs_on_the_default_runtime_whichever_chat_asks(
+    tmp_path: Path, wired
+) -> None:
+    """Asked from an opencode agent's chat, it still runs where its model and
+    effort mean what they say. Choosing by the chat meant the default only while
+    nothing else could take a turn of its own."""
+    channel, _, runner, repo = wired
+    other = FakeRunner()
+    channel._runners["opencode"] = other
+    channel._seats = [replace(seat, runtime="opencode") for seat in channel._seats]
+    inspections_in(channel, repo, tmp_path, proof="# proof")
+
+    await channel._handle_callback(pressed_inspection("proof"))
+    await settled(channel)
+
+    assert other.asked == []
+    assert len(runner.asked) == 1
 
 
 async def test_an_inspection_s_session_is_marked_as_halyard_s_own(tmp_path: Path, wired) -> None:

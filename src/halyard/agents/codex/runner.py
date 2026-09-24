@@ -21,15 +21,24 @@ chat command should not pay that every time somebody types `/options`.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import os
 import shutil
 import subprocess
+from collections.abc import Callable
 from pathlib import Path
 
 from halyard.agents.codex.sessions import find_session
-from halyard.agents.turns import WEDGED_AFTER_SECONDS, LateFailure, Turns
+from halyard.agents.turns import (
+    WEDGED_AFTER_SECONDS,
+    LateFailure,
+    Turns,
+    end_group,
+    say_started,
+)
+from halyard.core import usage
 
 logger = logging.getLogger(__name__)
 
@@ -54,6 +63,18 @@ FALLBACK_MODELS: dict[str, tuple[str, ...]] = {
 #: cheapest model, Codex's default is its current frontier one — so there is no
 #: quiet downgrade to correct here, and nothing is forced.
 DEFAULT_MODEL: str | None = None
+
+#: What a one-shot turn that edits nothing runs under: a sandbox that reads and
+#: never writes, and nothing that asks to be let out of it — a command it
+#: refuses fails rather than becoming a question. Every command meets the
+#: project's gate first, because `PreToolUse` fires before the sandbox is asked.
+READING_ONLY = ("-s", "read-only", "-c", 'approval_policy="never"')
+
+#: How long one line of `codex exec --json` may be. A command's whole output is
+#: on the line that reports it, and a diff is easily more than the 64 KiB a
+#: stream reader allows by default — the size of line that stopped the ZCode
+#: bridge reading.
+LINE_LIMIT = 32 * 1024 * 1024
 
 _FALLBACK_BINARIES = (
     Path("/opt/homebrew/bin/codex"),
@@ -144,7 +165,11 @@ class CodexRunner:
         binary: str | None = None,
         wedged_after_seconds: float = DEFAULT_WEDGED_AFTER_SECONDS,
         default_model: str | None = DEFAULT_MODEL,
+        usage_path: Path | None = None,
     ) -> None:
+        #: Where what a turn of Halyard's own used is recorded, as the other
+        #: runners record theirs. None records nothing.
+        self._usage_path = usage_path
         # The path is *not* resolved here. A control plane runs for days, and
         # what it can reach changes underneath it: a CLI installed after
         # startup stayed invisible until a restart, and Claude Code's binary
@@ -358,3 +383,174 @@ class CodexRunner:
         if model := self._models.get(session_id) or self._default_model:
             arguments += ["--model", model]
         return [*arguments, "--message", text]
+
+    # --- a turn of Halyard's own ----------------------------------------------
+
+    async def ask(
+        self,
+        text: str,
+        *,
+        timeout: float = 180.0,
+        model: str | None = None,
+        cwd: Path | None = None,
+        edits: bool = True,
+        session_id: str | None = None,
+        purpose: str | None = None,
+        project: str | None = None,
+        system: str | None = None,
+        effort: str | None = None,
+        started: Callable[[str], object] | None = None,
+    ) -> str | None:
+        """One turn in a thread of its own — `codex exec` — and nothing kept.
+
+        Run where the project is, because Codex reads a project's hooks, the
+        gate among them, from the directory the CLI runs in. Measured: the
+        `PreToolUse` hook reached Halyard for a command a one-shot turn ran in
+        alpha-engine. `--ephemeral` keeps the thread off disk, so it is listed
+        nowhere afterwards, and when `edits` is False the sandbox only reads.
+
+        The model and its effort go as `send` passes them. `system`, which
+        `codex exec` has no place for, goes in front of the text. Stdin is
+        closed: with anything else there, the CLI reads it as more of the prompt.
+
+        The answer comes as JSON lines. The first names the thread — told to
+        `started` at once, before the model has asked to run anything — and the
+        last says what the turn used, recorded under `session_id`, the caller's
+        own id for the turn. Codex counts cached input inside `input_tokens`
+        and reasoning inside `output_tokens`; the row keeps them the way the
+        other runtimes' rows do.
+
+        Returns the last thing the model said, or None on any failure.
+        """
+        binary = self._binary
+        if not binary or not (text or "").strip():
+            return None
+        arguments = [binary, "exec", "--json", "--ephemeral"]
+        arguments += (
+            list(READING_ONLY)
+            if not edits
+            else ["-s", "workspace-write", "-c", 'approval_policy="never"']
+        )
+        chosen = model or self._default_model
+        if chosen:
+            arguments += ["-m", chosen]
+        if effort:
+            arguments += ["-c", f'model_reasoning_effort="{effort}"']
+        if cwd is not None:
+            arguments += ["-C", str(cwd)]
+        arguments.append(f"{system}\n\n{text}" if system else text)
+        try:
+            process = await asyncio.create_subprocess_exec(
+                *arguments,
+                stdin=asyncio.subprocess.DEVNULL,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                cwd=cwd,
+                env=os.environ.copy(),
+                start_new_session=True,
+                limit=LINE_LIMIT,
+            )
+        except OSError:
+            logger.warning("Could not start the codex CLI for a one-shot turn", exc_info=True)
+            return None
+        # Drained alongside, or a CLI with plenty to say on stderr — an MCP
+        # server that cannot sign in says it every turn — fills the pipe and
+        # stops writing to stdout.
+        said_aside = asyncio.ensure_future(process.stderr.read()) if process.stderr else None
+        try:
+            said, used, thread = await asyncio.wait_for(
+                self._read(process, started), timeout=timeout
+            )
+            await process.wait()
+        except TimeoutError:
+            end_group(process)
+            await process.wait()
+            logger.warning("A codex one-shot turn ran past %.0fs; giving up on it", timeout)
+            return None
+        except asyncio.CancelledError:
+            # Stopped by somebody. What the turn started is a group of its own
+            # and would carry on for a turn nobody is waiting on.
+            end_group(process)
+            with contextlib.suppress(asyncio.CancelledError):
+                await process.wait()
+            raise
+        finally:
+            if said_aside is not None:
+                aside = b""
+                with contextlib.suppress(Exception):
+                    aside = await asyncio.wait_for(said_aside, timeout=5)
+                if process.returncode not in (0, None) and aside:
+                    logger.warning(
+                        "A codex one-shot turn failed (exit %s): %s",
+                        process.returncode,
+                        aside.decode("utf-8", "replace").strip()[-300:],
+                    )
+        if used:
+            self._record(
+                used,
+                session_id=session_id or thread or "",
+                model=chosen,
+                purpose=purpose,
+                project=project,
+            )
+        return said
+
+    async def _read(self, process, started) -> tuple[str | None, dict | None, str | None]:
+        """The turn's events as they come: the thread it runs as, the last
+        thing the model said, and what it used — or no answer when it failed."""
+        said: str | None = None
+        used: dict | None = None
+        thread: str | None = None
+        failed: str | None = None
+        assert process.stdout is not None
+        async for line in process.stdout:
+            try:
+                event = json.loads(line)
+            except ValueError:
+                continue
+            kind = event.get("type")
+            item = event.get("item") or {}
+            if kind == "thread.started" and not thread:
+                thread = event.get("thread_id")
+                await say_started(started, thread)
+            elif kind == "item.completed" and item.get("type") == "agent_message":
+                said = item.get("text") or said
+            elif kind == "turn.completed":
+                used = event.get("usage") or {}
+            elif kind == "turn.failed":
+                failed = str((event.get("error") or {}).get("message") or "it failed")
+        if failed:
+            logger.warning("A codex one-shot turn failed: %s", failed[:300])
+            return None, used, thread
+        return (said.strip() or None) if said else None, used, thread
+
+    def _record(
+        self,
+        used: dict,
+        *,
+        session_id: str,
+        model: str | None,
+        purpose: str | None,
+        project: str | None,
+    ) -> None:
+        """What the turn used, as the other runtimes' rows say it. Never raises."""
+        if self._usage_path is None:
+            return
+        cached = int(used.get("cached_input_tokens") or 0)
+        usage.record(
+            self._usage_path,
+            [
+                usage.Turn(
+                    self.id,
+                    session_id,
+                    model,
+                    purpose,
+                    project,
+                    max(int(used.get("input_tokens") or 0) - cached, 0),
+                    int(used.get("output_tokens") or 0),
+                    int(used.get("cache_write_input_tokens") or 0),
+                    cached,
+                    None,
+                )
+            ],
+        )
