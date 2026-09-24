@@ -112,6 +112,8 @@ _CHOOSABLE = frozenset(
         "check",
         "cancel",
         "result",
+        # A transition's buttons, under the kinds they had when transitions
+        # were handoffs: nobody sees them, and every chat already holds some.
         "handoff",
         "handto",
         "flow",
@@ -580,9 +582,9 @@ def workflow_steps(workflow: str, flow: tuple[str, ...]) -> dict | None:
     return _keyboard([buttons[i : i + 3] for i in range(0, len(buttons), 3)])
 
 
-#: What a label picked for a command goes on to do: the handoff, the command, or
+#: What a label picked for a command goes on to do: the transition, the command, or
 #: the workflow step that needed it, pressed again.
-PICKED_FOR_HANDOFF = "h"
+PICKED_FOR_TRANSITION = "h"
 PICKED_FOR_COMMAND = "c"
 PICKED_FOR_WORKFLOW = "w"
 
@@ -656,10 +658,10 @@ def result_choices(inspection: str, labels: tuple[str, ...]) -> dict | None:
     return _keyboard([buttons[i : i + 3] for i in range(0, len(buttons), 3)])
 
 
-def handoff_choices(names: tuple[str, ...]) -> dict | None:
-    """A button per handoff a project defines, the way `/inspect` offers inspections.
+def transition_choices(names: tuple[str, ...]) -> dict | None:
+    """A button per transition a project defines, the way `/inspect` offers inspections.
 
-    Two to a row: a handoff's name says where work goes next —
+    Two to a row: a transition's name says where work goes next —
     `discover_completed` — and three of those wrap on a phone.
     """
     buttons = []
@@ -673,16 +675,16 @@ def handoff_choices(names: tuple[str, ...]) -> dict | None:
     return _keyboard([buttons[i : i + 2] for i in range(0, len(buttons), 2)])
 
 
-def handoff_seat_choices(handoff: str, labels: tuple[str, ...]) -> dict | None:
-    """Buttons for where a handoff goes, when its `to:` does not settle it.
+def transition_seat_choices(transition: str, labels: tuple[str, ...]) -> dict | None:
+    """Buttons for where a transition goes, when its `to:` does not settle it.
 
-    The handoff travels in the button with the seat, so nothing has to be
+    The transition travels in the button with the seat, so nothing has to be
     remembered between the tap and the send.
     """
     buttons = []
     for label in labels:
         try:
-            data = choice_data("handto", f"{handoff}>{label}")
+            data = choice_data("handto", f"{transition}>{label}")
         except ValueError:
             continue
         buttons.append({"text": f"→ {label}", "callback_data": data})

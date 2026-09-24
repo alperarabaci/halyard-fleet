@@ -1,6 +1,6 @@
 """What a workflow adds to the envelope of each step it takes.
 
-A handoff pressed by hand carries nothing of a workflow, because there is none.
+A transition pressed by hand carries nothing of a workflow, because there is none.
 These lines are the workflow's own, put on the envelope by the step it takes:
 where the seat is in the flow, and where each word on its last line would take
 the work — which step, which seat, which round, which phase — worked out by the

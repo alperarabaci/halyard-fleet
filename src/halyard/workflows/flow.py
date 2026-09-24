@@ -5,7 +5,7 @@ carried out by whoever drives it. A flow that went round three times when it
 should have gone round twice is the failure this exists to make testable.
 
 **Forward is the default.** A decision Halyard could not read carries the work
-to the next step rather than stopping — most handoffs ask for no decision at
+to the next step rather than stopping — most transitions ask for no decision at
 all — and whoever drives this says so in the chat. The one exception is the end
 of a phase, below.
 

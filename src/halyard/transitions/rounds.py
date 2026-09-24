@@ -5,11 +5,11 @@ review went three times on 15 September, each time with the whole review text
 in front as though it were the first — and the reviewer, told nothing of what it
 had found before, found something new each time until somebody cut it off. So a
 workflow's step counts its rounds: the envelope says `Round: 2/2`, and a
-handoff with a `followup_prompt:` sends that from the second round on, with the
+transition with a `followup_prompt:` sends that from the second round on, with the
 answer the seat gave to the round before.
 
 **Rounds are a workflow's.** They are counted by the run, per step — and per
-phase inside a flow's phases — in `halyard.workflows.runs`. A handoff pressed by
+phase inside a flow's phases — in `halyard.workflows.runs`. A transition pressed by
 hand counts none and says none: it sends its own prompt every time, and a `1/2`
 on something that has no second step would be a workflow's word where there is
 no workflow.

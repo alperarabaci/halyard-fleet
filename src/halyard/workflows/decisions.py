@@ -17,7 +17,7 @@ because not every phase needs every step: one that is only a proposal has
 nothing to discover. The name is read, not trusted: the flow checks it is one
 of its phase's steps, and a run that is told to skip says so in the chat.
 
-**A reply that decides nothing carries on.** Not every handoff asks for a
+**A reply that decides nothing carries on.** Not every transition asks for a
 decision, and a flow that stopped whenever a seat answered in prose would stop
 constantly. The chat is told which it was, so a step taken on no decision is
 taken in the open.

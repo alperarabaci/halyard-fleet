@@ -38,7 +38,7 @@ from halyard.inspections.turn import finding
 TIMEOUT_SECONDS = 600.0
 
 _COLUMNS = (
-    "id, at, project, work, inspection, file, file_version, handoff, workflow_run, step, "
+    "id, at, project, work, inspection, file, file_version, transition, workflow_run, step, "
     "phase, round, runtime, model, head, content, context, note, input, answer, outcome, "
     "why, finding, took, experimental, repeat_of, effort"
 )
@@ -55,7 +55,7 @@ class Row:
     inspection: str
     file: str
     file_version: str
-    handoff: str | None
+    transition: str | None
     workflow_run: str | None
     step: str | None
     phase: int | None
@@ -169,7 +169,7 @@ async def repeat(
 
     The row it keeps: the original's inspection, file revision, input, note,
     project and work; this run's model, effort, runtime, answer, timing and
-    state. It ran for no handoff and no workflow step, whatever the original
+    state. It ran for no transition and no workflow step, whatever the original
     did — those are the original's, one `repeat_of` away. None when it could
     not be kept.
     """
@@ -205,7 +205,7 @@ async def repeat(
             # The instructions are inside the input: the revision the original
             # ran with, whatever the file says now.
             version=original.file_version,
-            handoff="",
+            transition="",
             model=model,
             asked=original.input,
             context=tuple(context),
@@ -299,8 +299,8 @@ def compared(path: Path, runs: Sequence[Row]) -> list[str]:
     ran_for = (
         f" · step {first.step}"
         if first.step
-        else f" · handoff {first.handoff}"
-        if first.handoff
+        else f" · transition {first.transition}"
+        if first.transition
         else ""
     )
     return [

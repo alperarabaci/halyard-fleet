@@ -1801,7 +1801,7 @@ async def test_the_help_text_lists_exactly_those(tmp_path: Path) -> None:
 
 
 def test_to_answers_when_typed_but_is_off_the_menu() -> None:
-    """A handoff does from the menu what `/to` did, and one fewer button on a
+    """A transition does from the menu what `/to` did, and one fewer button on a
     phone is worth more than a second way to the same place. Typed, `/to` still
     answers — so a prompt still cannot take its name."""
     listed = {name for name, _ in adapter.COMMANDS}
@@ -2515,8 +2515,8 @@ async def test_a_long_message_shows_in_the_seats_chat_in_pieces_telegram_takes(
     tmp_path: Path,
 ) -> None:
     """Telegram refuses a message over 4096 characters, and the refusal was
-    swallowed: a long handoff reached the session and never showed in the
-    seat's own chat, which read as the handoff having gone nowhere."""
+    swallowed: a long transition reached the session and never showed in the
+    seat's own chat, which read as the transition having gone nowhere."""
     channel, api = await with_two_seats(tmp_path)
     long_text = "the review prompt, then the report " + "x" * 9000
 

@@ -10,7 +10,7 @@ from halyard.commands import Result, run, summary
 
 def test_a_command_says_it_started_before_anything_else(tmp_path: Path, caplog) -> None:
     """So a run that never reports back has still left a line saying it began,
-    whoever asked for it — `/command`, a commit's check or a handoff."""
+    whoever asked for it — `/command`, a commit's check or a transition."""
     caplog.set_level(logging.INFO)
 
     result = run("echo hi", tmp_path)

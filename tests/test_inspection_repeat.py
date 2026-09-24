@@ -42,7 +42,7 @@ def kept(
             name="proof",
             path=Path("NOTES/proof.md"),
             version="3e8c847",
-            handoff="close",
+            transition="close",
             model=model,
             asked=INPUT,
             context=(
@@ -128,7 +128,7 @@ async def test_a_repeat_gives_another_model_the_same_input_word_for_word(tmp_pat
     assert (again.head, again.content) == ("2cdcab9c", "5df40c87aff3")
 
 
-async def test_a_repeat_ran_for_no_handoff_and_no_step(tmp_path: Path) -> None:
+async def test_a_repeat_ran_for_no_transition_and_no_step(tmp_path: Path) -> None:
     """Those are the original's, one `repeat_of` away. A repeat counted as a
     workflow step's would count that step twice."""
     database = tmp_path / "halyard.db"
@@ -137,7 +137,7 @@ async def test_a_repeat_ran_for_no_handoff_and_no_step(tmp_path: Path) -> None:
     again = await repeated(database, tmp_path, Asking())
 
     assert again is not None
-    assert (again.handoff, again.workflow_run, again.step, again.phase, again.round) == (
+    assert (again.transition, again.workflow_run, again.step, again.phase, again.round) == (
         None,
         None,
         None,
@@ -440,29 +440,34 @@ def test_the_comparison_says_how_hard_each_run_thought(tmp_path: Path) -> None:
     assert (original.split()[3], again.split()[4]) == ("default", "max")
 
 
-def test_runs_kept_before_effort_are_read_and_kept_beside(tmp_path: Path) -> None:
-    """The table is a day older than its `effort`: a machine that kept runs
-    before then has them read, and new ones written, without a step of its own."""
+def test_runs_kept_in_the_first_table_are_read_and_kept_beside(tmp_path: Path) -> None:
+    """The table as it was made on 2026-09-23 — a `handoff` column, no `effort`:
+    a machine that kept runs then has them read, their transition kept, and new
+    ones written, without a step of its own."""
     import contextlib
     import sqlite3
 
     database = tmp_path / "halyard.db"
-    before = inspections.record._SCHEMA.replace("    effort       TEXT,\n", "")
-    assert "effort" not in before, "the table as it was, or this proves nothing"
+    before = inspections.record._SCHEMA.replace("    effort       TEXT,\n", "").replace(
+        "    transition   TEXT,\n", "    handoff      TEXT,\n"
+    )
+    assert "effort" not in before and "transition" not in before, (
+        "the table as it was, or this proves nothing"
+    )
     with contextlib.closing(sqlite3.connect(database)) as db:
         db.executescript(before)
         db.execute(
             "INSERT INTO inspection_runs (id, at, project, inspection, file, file_version, "
-            "model, context, note, input, outcome, why, took) VALUES ('old-run', "
+            "handoff, model, context, note, input, outcome, why, took) VALUES ('old-run', "
             "'2026-09-23T18:00:00+00:00', 'alpha-engine', 'proof', 'NOTES/proof.md', "
-            "'3e8c847', 'sonnet', '', '', 'the input', 'answered', '', 41.5)"
+            "'3e8c847', 'close', 'sonnet', '', '', 'the input', 'answered', '', 41.5)"
         )
         db.commit()
 
     [old] = repeating.recent(database)
     kept(database, "new-run", later=1, effort="max")
 
-    assert (old.id, old.effort) == ("old-run", None)
+    assert (old.id, old.transition, old.effort) == ("old-run", "close", None)
     assert {run.id: run.effort for run in repeating.recent(database)} == {
         "old-run": None,
         "new-run": "max",

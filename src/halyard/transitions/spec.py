@@ -1,4 +1,4 @@
-"""What a handoff needs from outside, and what it gives back."""
+"""What a transition needs from outside, and what it gives back."""
 
 from __future__ import annotations
 
@@ -11,10 +11,10 @@ from halyard.inspections import Answer
 
 @runtime_checkable
 class Delivery(Protocol):
-    """Where a handoff ends: a seat's session, by the seat's label.
+    """Where a transition ends: a seat's session, by the seat's label.
 
-    The port a handoff reaches a session through. The Telegram channel answers
-    it with the path `/to` takes, so a handoff lands exactly where a person
+    The port a transition reaches a session through. The Telegram channel answers
+    it with the path `/to` takes, so a transition lands exactly where a person
     would have sent it by hand, and says so in both chats.
     """
 
@@ -23,10 +23,10 @@ class Delivery(Protocol):
 
 @runtime_checkable
 class Runner(Protocol):
-    """How a handoff runs one of its project's commands.
+    """How a transition runs one of its project's commands.
 
     The channel answers it: it knows where the project is, who is waiting to
-    see it move, and what else is running there. A handoff knows only which
+    see it move, and what else is running there. A transition knows only which
     commands it names, and what came back.
     """
 
@@ -35,7 +35,7 @@ class Runner(Protocol):
 
 @dataclass(frozen=True)
 class Handed:
-    """What a handoff did: the message it delivered, the commands it ran and
+    """What a transition did: the message it delivered, the commands it ran and
     the inspections that went with it."""
 
     text: str

@@ -11,7 +11,7 @@ Phase 1 keeps this in memory. Sessions are scoped to a running Claude Code
 process and do not outlive a control plane restart, so persisting them would
 mostly mean reloading rows describing sessions that no longer exist. Phase 5
 (state persistence) is where durable session identity is actually needed, and it
-will want a schema shaped by handoff, not by this.
+will want a schema shaped by transition, not by this.
 """
 
 from __future__ import annotations

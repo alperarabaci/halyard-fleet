@@ -1,9 +1,9 @@
-"""Tests for `halyard.handoffs.rounds` — which work a round belongs to, and how
+"""Tests for `halyard.transitions.rounds` — which work a round belongs to, and how
 one is shown. The rounds themselves are a workflow's: see `test_workflows.py`."""
 
 from __future__ import annotations
 
-from halyard.handoffs import rounds
+from halyard.transitions import rounds
 
 
 def test_a_numbered_branch_counts_against_its_work_item() -> None:

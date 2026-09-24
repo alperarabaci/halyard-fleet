@@ -28,19 +28,21 @@ AT = datetime(2026, 9, 16, 18, 21, tzinfo=UTC)
 
 FLOW = ("to_nav", "review", "discover", "discovered")
 STEPS = {
-    "to_nav": Step(name="to_nav", handoff="to_nav", seat="nav"),
-    "review": Step(name="review", handoff="review", seat="xreview", rounds=2),
-    "discover": Step(name="discover", handoff="driver_discover", seat="xdrv", rounds=2),
-    "discovered": Step(name="discovered", handoff="discover_completed", seat="nav", rounds=2),
+    "to_nav": Step(name="to_nav", transition="to_nav", seat="nav"),
+    "review": Step(name="review", transition="review", seat="xreview", rounds=2),
+    "discover": Step(name="discover", transition="driver_discover", seat="xdrv", rounds=2),
+    "discovered": Step(name="discovered", transition="discover_completed", seat="nav", rounds=2),
 }
 
 #: The review of level 3: the reviewer's decision is the navigator's to act on.
 REVIEWED = ("review", "reviewed", "discover", "discovered")
 REVIEWED_STEPS = {
-    "review": Step(name="review", handoff="review", seat="xreview", rounds=2),
-    "reviewed": Step(name="reviewed", handoff="to_nav", seat="nav", rounds=2, decided_by="review"),
-    "discover": Step(name="discover", handoff="driver_discover", seat="xdrv", rounds=2),
-    "discovered": Step(name="discovered", handoff="discover_completed", seat="nav", rounds=2),
+    "review": Step(name="review", transition="review", seat="xreview", rounds=2),
+    "reviewed": Step(
+        name="reviewed", transition="to_nav", seat="nav", rounds=2, decided_by="review"
+    ),
+    "discover": Step(name="discover", transition="driver_discover", seat="xdrv", rounds=2),
+    "discovered": Step(name="discovered", transition="discover_completed", seat="nav", rounds=2),
 }
 
 #: A project whose prompts ask for words of their own, and one left as it was.
@@ -184,8 +186,8 @@ def test_a_step_goes_once_unless_it_says_otherwise() -> None:
     assert "round 2 of 1" in moving.stop
 
 
-def test_rounds_are_counted_by_the_step_not_by_its_handoff() -> None:
-    """Two steps sharing a handoff do not share a count, and the handoff's own
+def test_rounds_are_counted_by_the_step_not_by_its_transition() -> None:
+    """Two steps sharing a transition do not share a count, and the transition's own
     presses count nothing: the rounds that stop a loop are the loop's own."""
     counted = next_after(Decision.BACK, step=3, discover=2)
     handed = next_after(Decision.BACK, step=3, driver_discover=2)
@@ -267,11 +269,11 @@ def test_only_the_step_that_names_it_acts_on_a_carried_decision() -> None:
 #: per part, then close.
 PHASED = ("to_nav", "discover", "develop", "verified", "close")
 PHASED_STEPS = {
-    "to_nav": Step(name="to_nav", handoff="to_nav", seat="nav"),
-    "discover": Step(name="discover", handoff="driver_discover", seat="xdrv", rounds=2),
-    "develop": Step(name="develop", handoff="driver_develop", seat="xdrv"),
-    "verified": Step(name="verified", handoff="to_nav", seat="nav", rounds=2),
-    "close": Step(name="close", handoff="close", seat="nav"),
+    "to_nav": Step(name="to_nav", transition="to_nav", seat="nav"),
+    "discover": Step(name="discover", transition="driver_discover", seat="xdrv", rounds=2),
+    "develop": Step(name="develop", transition="driver_develop", seat="xdrv"),
+    "verified": Step(name="verified", transition="to_nav", seat="nav", rounds=2),
+    "close": Step(name="close", transition="close", seat="nav"),
 }
 STRETCH = (1, 3)
 

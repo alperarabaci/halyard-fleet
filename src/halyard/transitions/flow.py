@@ -1,4 +1,4 @@
-"""Making a handoff: its commands, then its inspections, then the message, then the seat."""
+"""Taking a transition: its commands, then its inspections, then the message, then the seat."""
 
 from __future__ import annotations
 
@@ -9,16 +9,16 @@ from pathlib import Path
 
 from halyard import frame, inspections
 from halyard.commands import Command, Result, summary
-from halyard.core.config_file import Handoff, ModelChoice
-from halyard.handoffs import rounds
-from halyard.handoffs.message import compose
-from halyard.handoffs.spec import Delivery, Handed, Previous, Runner
+from halyard.core.config_file import ModelChoice, Transition
+from halyard.transitions import rounds
+from halyard.transitions.message import compose
+from halyard.transitions.spec import Delivery, Handed, Previous, Runner
 
 logger = logging.getLogger(__name__)
 
 
-async def hand_off(
-    handoff: Handoff,
+async def take(
+    transition: Transition,
     *,
     project: Path,
     context: list[str],
@@ -44,13 +44,13 @@ async def hand_off(
     previous: Previous | None = None,
     keeper: inspections.Keeper | None = None,
 ) -> Handed:
-    """Run a handoff's commands, then its inspections, write the message, deliver it.
+    """Run a transition's commands, then its inspections, write the message, deliver it.
 
-    The one place the parts of a handoff meet, in this order, each handed what
+    The one place the parts of a transition meet, in this order, each handed what
     came before it. The commands run first, one after another, where the
     project is; what each did becomes a line of the envelope, so the inspections read
     Halyard's own run rather than setting out to make one. A command that fails
-    is reported and the handoff goes on — whoever receives it has to see that it
+    is reported and the transition goes on — whoever receives it has to see that it
     failed.
 
     The inspections run side by side, each a turn of its own, and all before
@@ -59,11 +59,11 @@ async def hand_off(
     being left out — the project's prompts say an unmeasured line is not a
     clean one, and the reader has to see it to know that. An inspection that finds
     something labels the task as it would run by hand: the project's `findings`
-    decide, not the handoff.
+    decide, not the transition.
 
     `round_number` is which round of a workflow's step this is, this one
-    included, and None for a handoff pressed by hand, which counts nothing —
-    see `halyard.handoffs.rounds`. From the second round on, a handoff with a
+    included, and None for a transition pressed by hand, which counts nothing —
+    see `halyard.transitions.rounds`. From the second round on, a transition with a
     `followup_prompt:` sends that in place of its `prompt:`, and `previous`
     carries what the seat said back to the round before. `expected` is how many
     rounds the step allows. `keeper` keeps each inspection it runs — see
@@ -73,7 +73,7 @@ async def hand_off(
     project's own, by inspection — names another for it.
     """
     ran: list[tuple[Command, Result]] = []
-    for name in handoff.commands:
+    for name in transition.commands:
         command = Command(name=name, line=(project_commands or {}).get(name, ""))
         if runner is None:
             result = Result(ok=False, output="nothing here can run a command", seconds=0.0)
@@ -81,7 +81,9 @@ async def hand_off(
             try:
                 result = await runner.run(command)
             except Exception:
-                logger.warning("Handoff %s could not run %s", handoff.name, name, exc_info=True)
+                logger.warning(
+                    "Transition %s could not run %s", transition.name, name, exc_info=True
+                )
                 result = Result(ok=False, output="it could not be run", seconds=0.0)
         ran.append((command, result))
     envelope = [
@@ -91,17 +93,17 @@ async def hand_off(
     ]
 
     answers: tuple[inspections.Answer, ...] = ()
-    if handoff.inspections and (asker is None or reply is None):
+    if transition.inspections and (asker is None or reply is None):
         why = "no runtime here can take a one-shot turn" if asker is None else "there was no reply"
         answers = tuple(
             inspections.Answer(name, project_inspections[name], "not run", why=why)
-            for name in handoff.inspections
+            for name in transition.inspections
         )
-    elif handoff.inspections:
+    elif transition.inspections:
         broader = ModelChoice(model, effort)
         chosen = {
             name: (models or {}).get(name, ModelChoice()).over(broader)
-            for name in handoff.inspections
+            for name in transition.inspections
         }
         answers = tuple(
             await asyncio.gather(
@@ -117,20 +119,20 @@ async def hand_off(
                         model=chosen[name].model or model,
                         effort=chosen[name].effort,
                         timeout=timeout,
-                        about=f"handoff {handoff.name}, {sender}'s reply from {arrived}",
-                        handoff=handoff.name,
+                        about=f"transition {transition.name}, {sender}'s reply from {arrived}",
+                        transition=transition.name,
                         findings=findings,
                         labeller=labeller,
                         keeper=keeper,
                     )
-                    for name in handoff.inspections
+                    for name in transition.inspections
                 )
             )
         )
 
-    written = handoff.prompt
-    if round_number is not None and round_number > 1 and handoff.followup_prompt:
-        written = handoff.followup_prompt
+    written = transition.prompt
+    if round_number is not None and round_number > 1 and transition.followup_prompt:
+        written = transition.followup_prompt
     prompt, prompt_ref = "", ""
     if written:
         prompt = frame.read(written, project)
@@ -138,7 +140,7 @@ async def hand_off(
         prompt_ref = f"{written} @ {revision}" + ("" if prompt else " — could not be read")
 
     text = compose(
-        handoff.name,
+        transition.name,
         recipient=recipient,
         sender=sender,
         arrived=arrived,
@@ -153,8 +155,8 @@ async def hand_off(
     )
     await delivery.to_seat(recipient_label, text)
     logger.info(
-        "Handoff %s: %s → %s, %d chars, inspections: %s · %s",
-        handoff.name,
+        "Transition %s: %s → %s, %d chars, inspections: %s · %s",
+        transition.name,
         sender,
         recipient,
         len(text),

@@ -10,7 +10,7 @@ where the value comes from — here, from whoever runs the command. `/command
 next-task` asks for `task` before anything runs, so a list does not stop half
 way to wait for an answer; `/command next-task 369` gives it outright.
 
-Only `/command` runs these. A handoff or a commit's `validate:` has nobody to
+Only `/command` runs these. A transition or a commit's `validate:` has nobody to
 ask, and naming such a command there is refused when the file is read.
 
 What was typed goes into the line quoted for the shell, so it arrives as one

@@ -133,7 +133,7 @@ async def run(
     timeout: float,
     effort: str | None = None,
     about: str = "",
-    handoff: str = "",
+    transition: str = "",
     findings: Sequence[str] = (),
     labeller: Labeller | None = None,
     keeper: Keeper | None = None,
@@ -142,7 +142,7 @@ async def run(
 
     The turn stands in the project, because a report is compared against the
     code it is about: it may read, and run what the inspection's text sends it
-    to, and edits nothing. It goes by the inspection's name — and the handoff's,
+    to, and edits nothing. It goes by the inspection's name — and the transition's,
     when it runs for one — so that a command it wants run reaches a person as
     that inspection's rather than a stranger's.
 
@@ -193,7 +193,7 @@ async def run(
             name=name,
             path=path,
             version=version,
-            handoff=handoff,
+            transition=transition,
             model=model,
             asked=asked,
             context=tuple(context),
@@ -216,7 +216,7 @@ async def run(
             model=model,
             timeout=timeout,
             cwd=project,
-            name=f"{name} · handoff {handoff}" if handoff else name,
+            name=f"{name} · transition {transition}" if transition else name,
             edits=False,
             session_id=session,
             effort=effort,

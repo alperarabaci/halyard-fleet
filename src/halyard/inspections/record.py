@@ -43,7 +43,7 @@ CREATE TABLE IF NOT EXISTS inspection_runs (
     inspection   TEXT NOT NULL,
     file         TEXT NOT NULL,
     file_version TEXT NOT NULL,
-    handoff      TEXT,
+    transition   TEXT,
     workflow_run TEXT,
     step         TEXT,
     phase        INTEGER,
@@ -73,20 +73,34 @@ CREATE INDEX IF NOT EXISTS inspection_runs_work_idx ON inspection_runs (work);
 #: made before one of them gets it added, empty for the rows it already has.
 _ADDED = {"effort": "TEXT"}
 
+#: Columns renamed since, by the name they had: a transition was a handoff
+#: until 2026-09-24.
+_RENAMED = {"handoff": "transition"}
+
 
 def upgrade(db: sqlite3.Connection) -> None:
     """The table as this version reads and writes it, made or brought up to
     date. `effort` came a day after the table did: the runs kept before it
-    ran at whatever effort the runtime chose, and say nothing."""
+    ran at whatever effort the runtime chose, and say nothing. `handoff` is
+    `transition` now, its rows kept."""
     db.executescript(_SCHEMA)
     have = {row[1] for row in db.execute("PRAGMA table_info(inspection_runs)")}
+    # The service and `halyard inspect` can both get to each of these first,
+    # and the second finds it done.
+    for old, new in _RENAMED.items():
+        if old in have and new not in have:
+            try:
+                db.execute(f"ALTER TABLE inspection_runs RENAME COLUMN {old} TO {new}")
+            except sqlite3.OperationalError as error:
+                if "no such column" not in str(error) and "duplicate column" not in str(error):
+                    raise
+            have = (have - {old}) | {new}
     for column, kind in _ADDED.items():
         if column in have:
             continue
         try:
             db.execute(f"ALTER TABLE inspection_runs ADD COLUMN {column} {kind}")
         except sqlite3.OperationalError as error:
-            # The service and `halyard inspect` can both get here first.
             if "duplicate column" not in str(error):
                 raise
     db.commit()
@@ -126,7 +140,7 @@ def keep(
         "inspection": kept.name,
         "file": str(kept.path),
         "file_version": kept.version,
-        "handoff": kept.handoff or None,
+        "transition": kept.transition or None,
         "workflow_run": workflow_run,
         "step": step,
         "phase": phase,
