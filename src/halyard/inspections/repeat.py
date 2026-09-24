@@ -40,7 +40,7 @@ TIMEOUT_SECONDS = 600.0
 _COLUMNS = (
     "id, at, project, work, inspection, file, file_version, handoff, workflow_run, step, "
     "phase, round, runtime, model, head, content, context, note, input, answer, outcome, "
-    "why, finding, took, experimental, repeat_of"
+    "why, finding, took, experimental, repeat_of, effort"
 )
 
 
@@ -74,15 +74,20 @@ class Row:
     took: float
     experimental: bool
     repeat_of: str | None
+    #: None when the runtime was left to choose — every run kept before
+    #: effort was, among them.
+    effort: str | None
 
 
 def _read(path: Path, query: str, params: Sequence[object] = ()) -> list[tuple]:
     """Rows from the database, or none — no file, no table yet, or a file that
-    cannot be read all mean nothing was kept here."""
+    cannot be read all mean nothing was kept here. A table from before a
+    column was added is brought up to date first, so it can be read at all."""
     if not path.is_file():
         return []
     try:
         with contextlib.closing(sqlite3.connect(path)) as db:
+            record.upgrade(db)
             return db.execute(query, tuple(params)).fetchall()
     except sqlite3.Error:
         return []
@@ -90,7 +95,7 @@ def _read(path: Path, query: str, params: Sequence[object] = ()) -> list[tuple]:
 
 def _rows(path: Path, where: str, params: Sequence[object] = ()) -> list[Row]:
     return [
-        Row(row[0], datetime.fromisoformat(row[1]), *row[2:24], bool(row[24]), row[25])
+        Row(row[0], datetime.fromisoformat(row[1]), *row[2:24], bool(row[24]), *row[25:27])
         for row in _read(path, f"SELECT {_COLUMNS} FROM inspection_runs {where}", params)
     ]
 
@@ -149,6 +154,7 @@ async def repeat(
     context: Sequence[str],
     findings: Sequence[str],
     database: Path,
+    effort: str | None = None,
     session: str | None = None,
     timeout: float = TIMEOUT_SECONDS,
 ) -> Row | None:
@@ -156,14 +162,16 @@ async def repeat(
 
     `context` is where the files stand as it runs, one fact to a line, as
     `halyard.frame.context` gives it; the model reads the original's envelope,
-    inside the input. `session` is the id the turn runs under — chosen by the
-    caller when it wants to say it first, because a command the turn asks to
-    run is a card that shows it.
+    inside the input. `effort` is how hard it thinks; None leaves that to the
+    runtime. `session` is the id the turn runs under — chosen by the caller
+    when it wants to say it first, because a command the turn asks to run is a
+    card that shows it.
 
     The row it keeps: the original's inspection, file revision, input, note,
-    project and work; this run's model, runtime, answer, timing and state. It
-    ran for no handoff and no workflow step, whatever the original did — those
-    are the original's, one `repeat_of` away. None when it could not be kept.
+    project and work; this run's model, effort, runtime, answer, timing and
+    state. It ran for no handoff and no workflow step, whatever the original
+    did — those are the original's, one `repeat_of` away. None when it could
+    not be kept.
     """
     session = session or str(uuid.uuid4())
     at = datetime.now(UTC)
@@ -178,6 +186,7 @@ async def repeat(
             name=original.inspection,
             edits=False,
             session_id=session,
+            effort=effort,
         )
     except StoppedError as stopped:
         said, why = None, str(stopped)
@@ -205,6 +214,7 @@ async def repeat(
             why=why,
             finding=finding(said, findings) if said else None,
             took=took,
+            effort=effort,
         ),
         project=original.project,
         work=original.work,
@@ -232,18 +242,33 @@ def _used(path: Path, ids: Sequence[str]) -> dict[str, tuple[int, int, float]]:
 
 
 def compared(path: Path, runs: Sequence[Row]) -> list[str]:
-    """A run and its repeats as a table: model, time, outcome, finding, tokens.
+    """A run and its repeats as a table: model, effort, time, outcome, finding,
+    tokens.
 
-    `same` says whether a repeat saw the files where the original did: `yes`
-    when `HEAD` and the content id both match, `no` when either differs, `?`
-    when one of them was not recorded.
+    `effort` is `default` where the runtime was left to choose. `same` says
+    whether a repeat saw the files where the original did: `yes` when `HEAD`
+    and the content id both match, `no` when either differs, `?` when one of
+    them was not recorded.
     """
     if not runs:
         return []
     first = runs[0]
     used = _used(path, [run.id for run in runs])
     table = [
-        ("", "id", "model", "runtime", "took", "outcome", "finding", "read", "wrote", "$", "same")
+        (
+            "",
+            "id",
+            "model",
+            "effort",
+            "runtime",
+            "took",
+            "outcome",
+            "finding",
+            "read",
+            "wrote",
+            "$",
+            "same",
+        )
     ]
     for place, run in enumerate(runs):
         read, wrote, cost = used.get(run.id, (0, 0, 0.0))
@@ -258,6 +283,7 @@ def compared(path: Path, runs: Sequence[Row]) -> list[str]:
                 "original" if place == 0 else f"repeat {place}",
                 run.id[:8],
                 run.model,
+                run.effort or "default",
                 run.runtime or "?",
                 f"{run.took:.0f}s",
                 run.outcome,
@@ -297,5 +323,7 @@ def write(into: Path, runs: Sequence[Row], table: Sequence[str]) -> None:
         name = "original" if place == 0 else f"repeat-{place}"
         # A model can be named by its provider as well — `zai/glm-4.6`.
         model = re.sub(r"[^A-Za-z0-9._-]", "_", run.model)
+        if run.effort:
+            model += "-" + re.sub(r"[^A-Za-z0-9._-]", "_", run.effort)
         said = run.answer if run.answer is not None else f"(no answer: {run.why})"
         (into / f"{place:02d}-{name}-{model}-{run.id[:8]}.md").write_text(said, encoding="utf-8")

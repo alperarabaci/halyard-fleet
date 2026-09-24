@@ -61,7 +61,7 @@ from halyard.core.audit import (
     unauthorized_callback,
     user_message,
 )
-from halyard.core.config_file import Handoff, Project
+from halyard.core.config_file import Handoff, ModelChoice, Project
 from halyard.core.events import Role
 from halyard.core.gate import Gate
 from halyard.core.questions import (
@@ -187,8 +187,9 @@ MESSAGE_MODEL = "sonnet"
 #: than this has gone wrong, and the phone should hear that rather than hold.
 MESSAGE_TIMEOUT_SECONDS = 120.0
 
-#: The one-shot model each of a project's inspections runs on, named here for
-#: the reason `MESSAGE_MODEL` is. One turn per inspection.
+#: The one-shot model each of a project's inspections runs on when neither
+#: `HALYARD_INSPECTION_MODEL` nor the inspection's own entry names one — named
+#: here for the reason `MESSAGE_MODEL` is. One turn per inspection.
 INSPECTION_MODEL = "sonnet"
 
 #: How long one inspection may take. It reads a whole report and may run what the
@@ -451,6 +452,7 @@ class _Inspecting:
         name: str | None = None,
         edits: bool = True,
         session_id: str | None = None,
+        effort: str | None = None,
     ) -> str | None:
         # The inspection's own id when it chose one, so its record and its
         # tokens are found by the same key.
@@ -468,6 +470,7 @@ class _Inspecting:
                     session_id=session,
                     purpose=f"inspect {name}" if name else "inspect",
                     project=self._project,
+                    effort=effort,
                 )
             ),
         )
@@ -627,6 +630,10 @@ class TelegramChannel:
         #: Whether every inspection run is kept there too, text and all. Off
         #: unless asked for — see `Settings.keep_inspections`.
         keep_inspections: bool = False,
+        #: The model inspections run on, and how hard it thinks, unless a
+        #: project's own entry for an inspection says otherwise. What it leaves
+        #: unsaid is `INSPECTION_MODEL`, at the runtime's own effort.
+        inspection_model: ModelChoice | None = None,
         #: Each runtime's own availability-check context, by runtime name — see
         #: `RuntimeSpec.check_context`. Asked only when a seat's session cannot
         #: be found, to say *why*; each check is handed its own and nobody else's.
@@ -642,6 +649,9 @@ class TelegramChannel:
         self._said_path = said_path
         self._database = database
         self._keep_inspections = keep_inspections
+        self._inspection_model = (inspection_model or ModelChoice()).over(
+            ModelChoice(INSPECTION_MODEL)
+        )
         # Two seats and a default. A role with nowhere of its own falls back to
         # the main chat, so an existing single-chat setup keeps working
         # untouched by any of this.
@@ -2596,6 +2606,7 @@ class TelegramChannel:
                 labels=labels,
             )
         )
+        chosen = found.inspection_models.get(name, ModelChoice()).over(self._inspection_model)
         answer = await inspecting.run(
             name,
             path,
@@ -2604,7 +2615,8 @@ class TelegramChannel:
             note=note.strip(),
             reply=said.text,
             asker=asker,
-            model=INSPECTION_MODEL,
+            model=chosen.model or INSPECTION_MODEL,
+            effort=chosen.effort,
             timeout=INSPECTION_TIMEOUT_SECONDS,
             findings=found.label_findings,
             labeller=_Labelling(self, found),
@@ -3255,7 +3267,9 @@ class TelegramChannel:
                 recipient=_seat_name(seat),
                 project_inspections=found.inspections,
                 asker=inspector,
-                model=INSPECTION_MODEL,
+                model=self._inspection_model.model or INSPECTION_MODEL,
+                effort=self._inspection_model.effort,
+                models=found.inspection_models,
                 timeout=INSPECTION_TIMEOUT_SECONDS,
                 delivery=_SeatDelivery(
                     self, actor, chat_id, thread_id, accepted=reached if number else None

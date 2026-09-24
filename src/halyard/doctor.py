@@ -261,6 +261,38 @@ def _older_spellings(projects) -> list[str]:
     ]
 
 
+def _inspection_efforts(settings, projects) -> list[str]:
+    """Each effort asked for inspections that the runtime they run on would
+    not take.
+
+    A warning, and not a refusal to start: such an inspection still runs, at
+    the model's own effort, and says so in a log nobody is reading. This is
+    where somebody looks. Which efforts there are is the runtime's to say.
+    """
+    from halyard.agents import registry
+
+    spec = registry.get(registry.DEFAULT)
+    runner = spec.runner(settings) if spec is not None else None
+    offered = runner.options() if hasattr(runner, "options") else {}
+    allowed, enforced = offered.get("effort", ((), False))
+    if not enforced:
+        return []
+    asked = [
+        ("HALYARD_INSPECTION_EFFORT", settings.inspection_effort),
+        *(
+            (f"{project.name}'s inspection {name}", chosen.effort)
+            for project in projects
+            for name, chosen in project.inspection_models.items()
+        ),
+    ]
+    return [
+        f"{WARN}{where} asks for effort {effort!r}, which is not one of "
+        f"{', '.join(allowed)} — it runs at the model's own effort instead"
+        for where, effort in asked
+        if effort and effort.strip().lower() not in allowed
+    ]
+
+
 def _check_seat(
     seat,
     project_path: Path | None = None,
@@ -692,6 +724,8 @@ def run() -> int:
     if seats and not absent:
         print(f"{OK}every file the configuration names is where it says")
     for line in _older_spellings(described):
+        print(line)
+    for line in _inspection_efforts(settings, described) if settings_ok else []:
         print(line)
     if seats:
         print()

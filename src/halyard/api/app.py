@@ -39,7 +39,7 @@ from halyard.core.audit import (
     JsonlAuditSink,
     SqliteAuditSink,
 )
-from halyard.core.config_file import missing_files
+from halyard.core.config_file import ModelChoice, missing_files
 from halyard.core.events import RiskLevel, Role
 from halyard.core.gate import Gate
 from halyard.core.policy import Policy
@@ -354,6 +354,10 @@ def _build_channel(
         said_path=settings.db_path.parent / "last-said.json",
         database=settings.db_path,
         keep_inspections=settings.keep_inspections,
+        inspection_model=ModelChoice(
+            (settings.inspection_model or "").strip() or None,
+            (settings.inspection_effort or "").strip().lower() or None,
+        ),
     )
 
 

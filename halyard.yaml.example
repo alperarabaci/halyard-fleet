@@ -77,6 +77,13 @@ settings:
   # holds the reply that was inspected. See docs/handoffs.md.
   # HALYARD_KEEP_INSPECTIONS: true
 
+  # The model every inspection runs on, and how hard it thinks: low, medium,
+  # high, xhigh or max. Sonnet unless set, at the runtime's own effort for the
+  # model — which is not the same for every model. An inspection can name its
+  # own under the project's `inspections:`.
+  # HALYARD_INSPECTION_MODEL: sonnet
+  # HALYARD_INSPECTION_EFFORT: max
+
   # How much the log says. INFO unless set; DEBUG says more. A level that does
   # not exist refuses to start rather than quietly logging at INFO.
   # HALYARD_LOG_LEVEL: DEBUG
@@ -171,6 +178,9 @@ projects:
     # inspections:
     #   proof: NOTES/halyard/inspections/proof.md
     #   destructive: NOTES/halyard/inspections/destructive.md
+    #   bounded-context:                 # one that runs on a model of its own
+    #     file: NOTES/halyard/inspections/bounded-context.md
+    #     model: opus                    # effort: too; what it leaves out is the machine's
     # handoffs:
     #   reviewed: {to: navigator}        # the reply alone, with no prompt of its own
     #   review:

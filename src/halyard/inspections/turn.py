@@ -131,6 +131,7 @@ async def run(
     asker: Asker,
     model: str,
     timeout: float,
+    effort: str | None = None,
     about: str = "",
     handoff: str = "",
     findings: Sequence[str] = (),
@@ -168,7 +169,7 @@ async def run(
         logger.warning("Inspection %s did not run: could not read %s", name, path)
         return Answer(name, path, version, why=f"could not read {path}")
     logger.info(
-        "Inspection %s asked · %s · %s · file %s @ %s, %d chars · note %r · model %s",
+        "Inspection %s asked · %s · %s · file %s @ %s, %d chars · note %r · model %s%s",
         name,
         " · ".join(context),
         about or f"reply {len(reply)} chars",
@@ -177,6 +178,7 @@ async def run(
         len(instructions),
         note,
         model,
+        f" · effort {effort}" if effort else "",
     )
     asked = prompt(instructions, context=context, note=note, text=reply)
     session = str(uuid.uuid4())
@@ -200,6 +202,7 @@ async def run(
             why=why,
             finding=phrase,
             took=took,
+            effort=effort,
         )
         try:
             await keeper.keep(record)
@@ -216,6 +219,7 @@ async def run(
             name=f"{name} · handoff {handoff}" if handoff else name,
             edits=False,
             session_id=session,
+            effort=effort,
         )
     except StoppedError as stopped:
         took = time.monotonic() - started

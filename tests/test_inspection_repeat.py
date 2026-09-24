@@ -31,6 +31,7 @@ def kept(
     content: str | None = "5df40c87aff3",
     answer: str | None = "proof · no finding",
     repeat_of: str | None = None,
+    effort: str | None = None,
 ) -> None:
     """A run as the work keeps one — or, with `repeat_of`, as a repeat does."""
     inspections.record.keep(
@@ -54,6 +55,7 @@ def kept(
             why="" if answer else "the model did not answer",
             finding=None,
             took=41.5,
+            effort=effort,
         ),
         project="alpha-engine",
         work="alpha-engine#386",
@@ -248,8 +250,8 @@ def test_the_comparison_joins_what_each_run_used(tmp_path: Path) -> None:
     lines = repeating.compared(database, repeating.family(database, ORIGINAL))
 
     original, again = lines[3], lines[4]
-    assert original.split()[7:10] == ["185,012", "3,400", "0.23"]
-    assert again.split()[8:11] == ["20,010", "900", "0.02"]
+    assert original.split()[8:11] == ["185,012", "3,400", "0.23"]
+    assert again.split()[9:12] == ["20,010", "900", "0.02"]
 
 
 def test_the_runs_are_written_out_for_whoever_judges_them(tmp_path: Path) -> None:
@@ -373,7 +375,7 @@ def test_recent_with_nothing_kept_says_how_runs_are_kept(
         ([], "usage: halyard inspect"),
         (["compare"], "usage: halyard inspect"),
         (["recent", "a week"], "not a number of runs"),
-        (["repeat", "5f0c9"], "with which model"),
+        (["repeat", "5f0c9", "--effort"], "--effort needs a value"),
         (["repeat", "5f0c9", "--modle", "haiku"], "there is no --modle"),
         (["repeat", "5f0c9", "--model"], "--model needs a value"),
         (["repeat", "5f0c9", "--model", "haiku", "--times", "0"], "a number of runs"),
@@ -398,6 +400,73 @@ def test_a_repeat_needs_the_project_it_ran_in(
 
     assert "alpha-engine has no `path:`" in capsys.readouterr().err
     assert here.runner.asked == []
+
+
+@pytest.mark.parametrize(
+    ("told", "asked"),
+    [
+        ([], ("sonnet", "max")),
+        (["--model", "opus"], ("opus", "max")),
+        (["--effort", "High"], ("sonnet", "high")),
+        (["--effort", "default"], ("sonnet", None)),
+    ],
+)
+def test_a_repeat_changes_only_what_it_is_told(
+    here: SimpleNamespace, told: list[str], asked: tuple[str, str | None]
+) -> None:
+    """One thing at a time: another model at the same effort, or the same model
+    thinking harder — and `default` hands the effort back to the runtime."""
+    kept(here.database, effort="max")
+
+    assert inspect_cli.main(["repeat", "5f0c9", *told]) == 0
+
+    [turn] = here.runner.asked
+    assert (turn["model"], turn["effort"]) == asked
+    again = repeating.find(here.database, turn["session_id"])
+    assert again is not None
+    assert (again.model, again.effort) == asked
+
+
+def test_the_comparison_says_how_hard_each_run_thought(tmp_path: Path) -> None:
+    database = tmp_path / "halyard.db"
+    kept(database)
+    kept(database, "again-1", later=1, effort="max", repeat_of=ORIGINAL)
+
+    lines = repeating.compared(database, repeating.family(database, ORIGINAL))
+
+    header, original, again = lines[2], lines[3], lines[4]
+    assert header.split()[2] == "effort"
+    # `repeat 1` is two words where `original` is one.
+    assert (original.split()[3], again.split()[4]) == ("default", "max")
+
+
+def test_runs_kept_before_effort_are_read_and_kept_beside(tmp_path: Path) -> None:
+    """The table is a day older than its `effort`: a machine that kept runs
+    before then has them read, and new ones written, without a step of its own."""
+    import contextlib
+    import sqlite3
+
+    database = tmp_path / "halyard.db"
+    before = inspections.record._SCHEMA.replace("    effort       TEXT,\n", "")
+    assert "effort" not in before, "the table as it was, or this proves nothing"
+    with contextlib.closing(sqlite3.connect(database)) as db:
+        db.executescript(before)
+        db.execute(
+            "INSERT INTO inspection_runs (id, at, project, inspection, file, file_version, "
+            "model, context, note, input, outcome, why, took) VALUES ('old-run', "
+            "'2026-09-23T18:00:00+00:00', 'alpha-engine', 'proof', 'NOTES/proof.md', "
+            "'3e8c847', 'sonnet', '', '', 'the input', 'answered', '', 41.5)"
+        )
+        db.commit()
+
+    [old] = repeating.recent(database)
+    kept(database, "new-run", later=1, effort="max")
+
+    assert (old.id, old.effort) == ("old-run", None)
+    assert {run.id: run.effort for run in repeating.recent(database)} == {
+        "old-run": None,
+        "new-run": "max",
+    }
 
 
 def test_inspect_is_a_command_of_its_own(monkeypatch: pytest.MonkeyPatch, capsys) -> None:

@@ -9,7 +9,7 @@ from pathlib import Path
 
 from halyard import frame, inspections
 from halyard.commands import Command, Result, summary
-from halyard.core.config_file import Handoff
+from halyard.core.config_file import Handoff, ModelChoice
 from halyard.handoffs import rounds
 from halyard.handoffs.message import compose
 from halyard.handoffs.spec import Delivery, Handed, Previous, Runner
@@ -33,6 +33,8 @@ async def hand_off(
     model: str,
     timeout: float,
     delivery: Delivery,
+    effort: str | None = None,
+    models: Mapping[str, ModelChoice] | None = None,
     findings: Sequence[str] = (),
     labeller: inspections.Labeller | None = None,
     project_commands: Mapping[str, str] | None = None,
@@ -66,6 +68,9 @@ async def hand_off(
     carries what the seat said back to the round before. `expected` is how many
     rounds the step allows. `keeper` keeps each inspection it runs — see
     `halyard.inspections.record`.
+
+    Each inspection runs on `model` at `effort`, unless `models` — the
+    project's own, by inspection — names another for it.
     """
     ran: list[tuple[Command, Result]] = []
     for name in handoff.commands:
@@ -93,6 +98,11 @@ async def hand_off(
             for name in handoff.inspections
         )
     elif handoff.inspections:
+        broader = ModelChoice(model, effort)
+        chosen = {
+            name: (models or {}).get(name, ModelChoice()).over(broader)
+            for name in handoff.inspections
+        }
         answers = tuple(
             await asyncio.gather(
                 *(
@@ -104,7 +114,8 @@ async def hand_off(
                         note=note,
                         reply=reply,
                         asker=asker,
-                        model=model,
+                        model=chosen[name].model or model,
+                        effort=chosen[name].effort,
                         timeout=timeout,
                         about=f"handoff {handoff.name}, {sender}'s reply from {arrived}",
                         handoff=handoff.name,

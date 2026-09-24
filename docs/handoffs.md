@@ -63,6 +63,37 @@ refuses it and ends the inspection, along with anything it started. A command
 refused, an inspection stopped, or one that runs out of time leaves the
 inspection unmeasured rather than clean.
 
+## An inspection runs on the machine's model, or its own
+
+Every inspection runs on one model, and thinks as hard as one effort says —
+set for the machine, in the `settings:` of `halyard.yaml`:
+
+```yaml
+settings:
+  HALYARD_INSPECTION_MODEL: sonnet    # sonnet unless set
+  HALYARD_INSPECTION_EFFORT: max      # low, medium, high, xhigh or max
+```
+
+Without an effort, the runtime picks one, and not the same for every model: in
+the catalog Claude Code 2.1.280 ships, Sonnet 5 thinks at `high` unless told and
+Opus 5.5 at `medium`.
+
+An inspection that needs a stronger model says so where it is described,
+written as a mapping instead of a file alone. What it leaves out is the
+machine's:
+
+```yaml
+    inspections:
+      proof: NOTES/inspections/proof.md
+      bounded-context:
+        file: NOTES/inspections/bounded-context.md
+        model: opus                   # at the machine's effort, since it names none
+```
+
+It runs on that model wherever it runs — from `/inspect`, a handoff or a
+workflow's step. An effort the runtime does not take is left out, so the
+inspection still runs, at the model's own; `halyard doctor` names it.
+
 ## Every inspection and handoff carries an envelope
 
 What Halyard reads for itself: the machine, the branch, HEAD, the files' own
@@ -142,10 +173,16 @@ repeats.
 
 ```sh
 uv run halyard inspect recent                          # the last runs, with their ids
-uv run halyard inspect repeat 5f0c9a2e --model haiku   # the same input, another model
-uv run halyard inspect repeat 5f0c9a2e --model opus --times 3
+uv run halyard inspect repeat 5f0c9a2e --model opus    # the same input, another model
+uv run halyard inspect repeat 5f0c9a2e --effort max    # the same model, thinking harder
+uv run halyard inspect repeat 5f0c9a2e --times 3       # the same again, three times
 uv run halyard inspect compare 5f0c9a2e                # the runs side by side
 ```
+
+A repeat changes only what it is told to: a model or an effort left out is the
+original's, so one thing changes at a time — and `--effort default` hands the
+effort back to the runtime. Runs kept before efforts were recorded show
+`default`, which is what they ran at.
 
 An id can be cut to any start of it that no other id has. A repeat runs on
 Claude Code in the project's directory, with the tools an inspection has, one

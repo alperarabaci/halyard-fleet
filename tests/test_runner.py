@@ -418,6 +418,33 @@ async def test_an_ordinary_one_shot_turn_is_left_as_it_was(
     assert not any(argument.startswith("--tools") for argument in arguments)
     assert "--session-id" not in arguments
     assert "--no-session-persistence" not in arguments
+    assert "--effort" not in arguments, "left to the CLI, whose default is per model"
+
+
+async def test_a_one_shot_turn_thinks_as_hard_as_it_is_asked(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = spying_on_the_turn(monkeypatch)
+
+    await runner().ask("check this", model="sonnet", effort="max")
+
+    [(arguments, _)] = calls
+    assert arguments[arguments.index("--effort") + 1] == "max"
+    assert arguments[-1] == "check this"
+
+
+async def test_an_effort_the_cli_does_not_take_is_left_out_not_failed(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The CLI would refuse it, and an inspection that does not run is worse
+    than one at the model's own effort. The log says why."""
+    calls = spying_on_the_turn(monkeypatch)
+
+    await runner().ask("check this", model="sonnet", effort="mx")
+
+    [(arguments, _)] = calls
+    assert "--effort" not in arguments
+    assert "'mx' is not an effort" in caplog.text
 
 
 class StillRunning:

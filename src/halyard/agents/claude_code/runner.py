@@ -452,6 +452,7 @@ class ClaudeCodeRunner:
         purpose: str | None = None,
         project: str | None = None,
         system: str | None = None,
+        effort: str | None = None,
     ) -> str | None:
         """Run one prompt in a session of its own and return what came back.
 
@@ -468,6 +469,8 @@ class ClaudeCodeRunner:
         sessions somebody does come back to. `edits=False` leaves it
         `READING_TOOLS`. `session_id` is the id it runs under, chosen by the
         caller so that what the turn asks for can be recognised as it arrives.
+        `effort` is `--effort`; without it the CLI uses its default for the
+        model, which is not the same for every model.
 
         `system` is for a turn that needs nothing but the text it is given: it
         replaces Claude Code's own system prompt, and the turn runs with no
@@ -491,6 +494,13 @@ class ClaudeCodeRunner:
         arguments = [binary, "-p", "--output-format", "json"]
         if chosen := model or self._default_model:
             arguments += ["--model", chosen]
+        if effort in EFFORT_LEVELS:
+            arguments += ["--effort", effort]
+        elif effort:
+            # Left out rather than failing the turn: the CLI would refuse it,
+            # and an inspection that does not run is worse than one at the
+            # model's own effort. `halyard doctor` names it.
+            logger.warning("%r is not an effort the claude CLI takes; running without it", effort)
         if system is not None:
             # `--tools=` with its `=`: the flag takes several values, and a
             # bare `--tools ""` would take the next argument as a tool as well.
