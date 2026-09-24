@@ -11,6 +11,7 @@ from types import SimpleNamespace
 import pytest
 
 from halyard import inspect_cli, inspections
+from halyard.agents.turns import say_started
 from halyard.core import usage
 from halyard.core.config_file import Project
 from halyard.inspections import repeat as repeating
@@ -288,6 +289,8 @@ class Runner:
 
     async def ask(self, text: str, **how) -> str | None:
         self.asked.append({"text": text, **how})
+        # As the real ones do: the id the turn runs under, before it begins.
+        await say_started(how.get("started"), how.get("session_id"))
         return "proof · status: candidate"
 
 
@@ -302,9 +305,17 @@ def here(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
     )
     monkeypatch.setattr(inspect_cli, "_settings", lambda: SimpleNamespace(db_path=database))
     monkeypatch.setattr(inspect_cli, "projects", lambda: [project])
-    monkeypatch.setattr(inspect_cli, "_one_shot", lambda settings: runner)
+    monkeypatch.setattr(inspect_cli, "_one_shot", lambda settings, runtime: runner)
     monkeypatch.setattr(inspect_cli.frame, "context", lambda path, name: NOW)
-    return SimpleNamespace(database=database, runner=runner, project=project)
+    # Never the real service: a test that marked sessions in the Halyard running
+    # on this machine would be a test with a side effect somebody could see.
+    marked: list[tuple[str, str, str]] = []
+    monkeypatch.setattr(
+        inspect_cli,
+        "_mark_own",
+        lambda service, ident, label: marked.append((service, ident, label)),
+    )
+    return SimpleNamespace(database=database, runner=runner, project=project, marked=marked)
 
 
 def test_a_repeat_runs_in_the_project_and_is_kept_beside_the_original(
@@ -399,6 +410,45 @@ def test_a_repeat_needs_the_project_it_ran_in(
     assert inspect_cli.main(["repeat", "5f0c9", "--model", "haiku"]) == 2
 
     assert "alpha-engine has no `path:`" in capsys.readouterr().err
+    assert here.runner.asked == []
+
+
+def test_a_repeat_marks_its_session_as_halyard_s_own_before_it_begins(
+    here: SimpleNamespace,
+) -> None:
+    """With the running service, under the id the runtime runs it by — so its
+    reply stays out of the chat and it labels no task."""
+    assert inspect_cli.main(["repeat", "5f0c9"]) == 0
+
+    [turn] = here.runner.asked
+    assert here.marked == [("http://127.0.0.1:8787", turn["session_id"], "proof · repeat")]
+    assert turn["purpose"] == "inspect proof · repeat"
+
+
+def test_a_repeat_on_another_runtime_names_its_model_and_leaves_its_effort(
+    here: SimpleNamespace, capsys
+) -> None:
+    """`sonnet` means nothing to opencode, and neither does Claude's `max`."""
+    kept(here.database, effort="max")
+
+    assert inspect_cli.main(["repeat", "5f0c9", "--runtime", "opencode"]) == 2
+    assert "on opencode, with which model?" in capsys.readouterr().err
+    assert here.runner.asked == []
+
+    assert (
+        inspect_cli.main(
+            ["repeat", "5f0c9", "--runtime", "opencode", "--model", "zai-coding-plan/glm-5.3"]
+        )
+        == 0
+    )
+    [turn] = here.runner.asked
+    assert (turn["model"], turn["effort"]) == ("zai-coding-plan/glm-5.3", None)
+
+
+def test_a_runtime_there_is_not_is_refused(here: SimpleNamespace, capsys) -> None:
+    assert inspect_cli.main(["repeat", "5f0c9", "--runtime", "nowhere", "--model", "m"]) == 2
+
+    assert "there is no runtime 'nowhere'" in capsys.readouterr().err
     assert here.runner.asked == []
 
 

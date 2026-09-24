@@ -457,8 +457,19 @@ class _Inspecting:
         # The inspection's own id when it chose one, so its record and its
         # tokens are found by the same key.
         session = session_id or str(uuid.uuid4())
+        label = name or "inspection"
+        registry = self._channel._registry
+
+        def own(ident: str) -> None:
+            # Marked before the turn begins, so nothing it says is taken for
+            # an agent's — under the id the runtime runs it by, which is not
+            # always the one chosen here.
+            if registry is not None:
+                registry.mark_own(ident, label)
+
+        own(session)
         running = _Inspection(
-            name or "inspection",
+            label,
             self._destination,
             asyncio.ensure_future(
                 self._runner.ask(
@@ -471,6 +482,7 @@ class _Inspecting:
                     purpose=f"inspect {name}" if name else "inspect",
                     project=self._project,
                     effort=effort,
+                    started=own,
                 )
             ),
         )
@@ -826,6 +838,15 @@ class TelegramChannel:
                     return parse_destination(seat.chat) or (self._chat_id, None)
         return (role and self._routes.get(role)) or (self._chat_id, None)
 
+    def _inspection_named(self, session_id: str) -> str | None:
+        """Which inspection a session is running, when it is one: an inspection
+        this channel started, or a turn Halyard started for itself elsewhere
+        and marked as its own."""
+        running = self._inspecting.get(session_id)
+        if running is not None:
+            return running.name
+        return self._registry.own(session_id) if self._registry is not None else None
+
     async def send_approval_request(self, request: ApprovalRequest) -> str:
         """Put a card in the chat.
 
@@ -838,9 +859,10 @@ class TelegramChannel:
         # inspection's answer is going, says it is an inspection's, and can stop
         # the inspection; routed
         # like a seat's, it would land wherever an unknown session falls, over
-        # a session id nobody has seen.
+        # a session id nobody has seen. One started outside this channel —
+        # `halyard inspect repeat` — still says whose it is.
         running = self._inspecting.get(request.session_id)
-        inspection = running.name if running else None
+        inspection = self._inspection_named(request.session_id)
         text = cards.render(request, now=self._clock(), inspection=inspection)
         markup = cards.keyboard(
             request,
@@ -4630,13 +4652,15 @@ class TelegramChannel:
         by: str | None,
     ) -> None:
         """Rewrite the card to show the outcome and drop the buttons."""
-        running = self._inspecting.get(request.session_id)
         try:
             await self._api.edit_message_text(
                 chat_id,
                 message_id,
                 cards.render_resolved(
-                    request, decision=decision, by=by, inspection=running.name if running else None
+                    request,
+                    decision=decision,
+                    by=by,
+                    inspection=self._inspection_named(request.session_id),
                 ),
                 reply_markup=None,
             )

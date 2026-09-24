@@ -51,10 +51,11 @@ TIMEOUT = 10.0
 
 
 def _runner(settings=None):
-    """Takes nothing from settings; the argument is the shared shape."""
+    """Takes only where a turn of Halyard's own records what it used; the rest
+    of this runtime's settings are read where they are needed."""
     from halyard.agents.opencode.runner import OpencodeRunner
 
-    return OpencodeRunner()
+    return OpencodeRunner(usage_path=getattr(settings, "db_path", None))
 
 
 def _binary() -> str | None:

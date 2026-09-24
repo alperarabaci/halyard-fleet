@@ -198,3 +198,192 @@ async def test_it_does_not_wait_for_the_turn_to_finish(sent) -> None:
     where, _ = sent[0]
     assert where.endswith("/prompt_async") or "/prompt_async?" in where
     assert "/message" not in where
+
+
+# --- a turn of Halyard's own ----------------------------------------------------
+
+
+class Server:
+    """The opencode API as `ask` meets it: every call remembered, each answered
+    as a real server answered it when this was measured."""
+
+    def __init__(self, *, says: str = "1790280300", hangs: bool = False) -> None:
+        self.calls: list[tuple[str, str, dict | None]] = []
+        self.says = says
+        self.hangs = hangs
+
+    def __call__(self, method: str, where: str, body: dict | None, timeout: float):
+        self.calls.append((method, where, body))
+        path = where.split("?")[0].removeprefix("http://127.0.0.1:4096")
+        if method == "POST" and path == "/session":
+            return {"id": "ses_own1"}
+        if method == "POST" and path.endswith("/message"):
+            if self.hangs:
+                import time
+
+                time.sleep(1)
+            return {
+                "info": {"role": "assistant", "tokens": {"input": 96, "output": 8}},
+                "parts": [{"type": "step-start"}, {"type": "text", "text": self.says}],
+            }
+        if method == "GET" and path.endswith("/message"):
+            return [
+                {"info": {"role": "user"}},
+                {
+                    "info": {
+                        "role": "assistant",
+                        "providerID": "zai-coding-plan",
+                        "modelID": "glm-5.3",
+                        "cost": 0,
+                        "tokens": {
+                            "input": 52,
+                            "output": 13,
+                            "reasoning": 20,
+                            "cache": {"read": 34496, "write": 0},
+                        },
+                    }
+                },
+                {
+                    "info": {
+                        "role": "assistant",
+                        "providerID": "zai-coding-plan",
+                        "modelID": "glm-5.3",
+                        "cost": 0,
+                        "tokens": {
+                            "input": 96,
+                            "output": 8,
+                            "reasoning": 0,
+                            "cache": {"read": 34496, "write": 0},
+                        },
+                    }
+                },
+            ]
+        return {}
+
+
+@pytest.fixture
+def server(monkeypatch) -> Server:
+    answering = Server()
+    monkeypatch.setattr(OpencodeRunner, "_call", staticmethod(answering))
+    monkeypatch.setattr("halyard.agents.opencode._port", lambda: 4096)
+    return answering
+
+
+async def test_a_turn_of_its_own_runs_in_a_session_of_its_own_and_leaves_none(
+    server: Server, tmp_path
+) -> None:
+    """Opened, asked, ended and deleted — in the opencode already running, in
+    the project's directory, with the model and its variant on the message."""
+    said = await OpencodeRunner().ask(
+        "run date +%s",
+        model="zai-coding-plan/glm-5.3",
+        effort="high",
+        cwd=tmp_path,
+        edits=False,
+        purpose="inspect proof · repeat",
+    )
+
+    assert said == "1790280300"
+    steps = [(method, where.split("?")[0].rsplit("/", 1)[-1]) for method, where, _ in server.calls]
+    assert steps == [
+        ("POST", "session"),
+        ("POST", "message"),
+        ("GET", "message"),
+        ("POST", "abort"),
+        ("DELETE", "ses_own1"),
+    ]
+    assert all("directory=" in where for _, where, _ in server.calls)
+    _, _, opened = server.calls[0]
+    assert opened["title"] == "halyard: inspect proof · repeat"
+    _, _, message = server.calls[1]
+    assert message["model"] == {"providerID": "zai-coding-plan", "modelID": "glm-5.3"}
+    assert message["variant"] == "high"
+    assert message["parts"] == [{"type": "text", "text": "run date +%s"}]
+
+
+async def test_a_turn_that_edits_nothing_cannot_edit_but_still_asks(server: Server) -> None:
+    """Denied on top of the project's rules, which stay: measured, a session's
+    rules come last, so `bash: ask` still sends a command to Halyard."""
+    await OpencodeRunner().ask("look", edits=False)
+
+    _, _, opened = server.calls[0]
+    assert {"permission": "edit", "pattern": "*", "action": "deny"} in opened["permission"]
+    assert {"permission": "webfetch", "pattern": "*", "action": "deny"} in opened["permission"]
+    assert not any(rule["permission"] == "bash" for rule in opened["permission"])
+
+
+async def test_whoever_started_it_hears_its_session_before_the_message_goes(
+    server: Server,
+) -> None:
+    """Its questions and its reply arrive under opencode's id, not the caller's."""
+    heard: list[tuple[str, int]] = []
+
+    await OpencodeRunner().ask(
+        "look",
+        session_id="the-callers-id",
+        started=lambda ident: heard.append((ident, len(server.calls))),
+    )
+
+    assert heard == [("ses_own1", 1)], "told after the session opened, before the message"
+
+
+async def test_every_step_s_tokens_are_one_row_under_the_caller_s_id(
+    server: Server, tmp_path
+) -> None:
+    """What joins the record the caller keeps; the model's reasoning counted
+    with what it wrote."""
+    import sqlite3
+
+    database = tmp_path / "halyard.db"
+
+    await OpencodeRunner(usage_path=database).ask(
+        "look",
+        session_id="the-callers-id",
+        model="zai-coding-plan/glm-5.3",
+        purpose="inspect proof · repeat",
+        project="alpha-engine",
+    )
+
+    with sqlite3.connect(database) as db:
+        [row] = db.execute(
+            "SELECT runtime, session_id, model, purpose, project, input_tokens, output_tokens, "
+            "cache_write_tokens, cache_read_tokens FROM turn_usage"
+        ).fetchall()
+    assert row == (
+        "opencode",
+        "the-callers-id",
+        "zai-coding-plan/glm-5.3",
+        "inspect proof · repeat",
+        "alpha-engine",
+        148,
+        41,
+        0,
+        68992,
+    )
+
+
+async def test_a_turn_stopped_part_way_is_ended_and_deleted(monkeypatch) -> None:
+    """Somebody pressed Stop: the turn ends where it runs rather than carrying
+    on for nobody, and its session goes."""
+    import asyncio
+
+    hanging = Server(hangs=True)
+    monkeypatch.setattr(OpencodeRunner, "_call", staticmethod(hanging))
+    monkeypatch.setattr("halyard.agents.opencode._port", lambda: 4096)
+
+    turn = asyncio.ensure_future(OpencodeRunner().ask("look"))
+    await asyncio.sleep(0.2)
+    turn.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await turn
+
+    methods = [method for method, _, _ in hanging.calls]
+    assert methods[-2:] == ["POST", "DELETE"]
+    assert hanging.calls[-2][1].split("?")[0].endswith("/abort")
+
+
+async def test_an_opencode_that_is_not_there_is_no_answer(monkeypatch) -> None:
+    monkeypatch.setattr(OpencodeRunner, "_call", staticmethod(lambda *args: None))
+    monkeypatch.setattr("halyard.agents.opencode._port", lambda: 4096)
+
+    assert await OpencodeRunner().ask("look") is None

@@ -31,9 +31,10 @@ import re
 import shutil
 import signal
 import subprocess
+from collections.abc import Callable
 from pathlib import Path
 
-from halyard.agents.turns import WEDGED_AFTER_SECONDS, LateFailure, Turns
+from halyard.agents.turns import WEDGED_AFTER_SECONDS, LateFailure, Turns, say_started
 from halyard.core import usage
 
 logger = logging.getLogger(__name__)
@@ -453,6 +454,7 @@ class ClaudeCodeRunner:
         project: str | None = None,
         system: str | None = None,
         effort: str | None = None,
+        started: Callable[[str], object] | None = None,
     ) -> str | None:
         """Run one prompt in a session of its own and return what came back.
 
@@ -470,7 +472,9 @@ class ClaudeCodeRunner:
         `READING_TOOLS`. `session_id` is the id it runs under, chosen by the
         caller so that what the turn asks for can be recognised as it arrives.
         `effort` is `--effort`; without it the CLI uses its default for the
-        model, which is not the same for every model.
+        model, which is not the same for every model. `started` is told the id
+        the session runs under before the turn begins, so whoever started it can
+        say the session is theirs before anything it does is heard from.
 
         `system` is for a turn that needs nothing but the text it is given: it
         replaces Claude Code's own system prompt, and the turn runs with no
@@ -512,6 +516,7 @@ class ClaudeCodeRunner:
         if cwd is not None or system is not None:
             arguments.append("--no-session-persistence")
         arguments.append(text)
+        await say_started(started, session_id)
         try:
             process = await asyncio.create_subprocess_exec(
                 *arguments,
