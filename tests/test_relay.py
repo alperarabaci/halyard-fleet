@@ -157,6 +157,36 @@ async def test_a_paused_relay_still_sees_the_session(tmp_path: Path) -> None:
     assert session is not None and session.cwd == "/repo"
 
 
+async def test_a_turn_of_halyard_s_own_is_kept_out_of_the_chat_and_off_every_task(
+    tmp_path: Path,
+) -> None:
+    """An inspection run again from the command line said its answer here as a
+    stranger's reply, and an opencode one — seen as the project's opencode seat
+    at work — put `driver:opencode` on the task. Measured on 2026-09-24."""
+    relay, channel, sink, registry = build(tmp_path)
+    await sink.open()
+    registry.mark_own("ses_own1", "proof · repeat")
+
+    assert await say(relay, session_id="ses_own1", agent_id="opencode") is False
+    assert channel.messages == []
+    assert await registry.get("ses_own1") is None, "never seen, so never taken for a seat"
+    [record] = [json.loads(line) for line in (tmp_path / "audit.jsonl").read_text().splitlines()]
+    assert (record["session_id"], record["detail"]["delivered"]) == ("ses_own1", False)
+
+
+def test_a_session_is_halyard_s_own_for_an_hour_and_then_nobody_s() -> None:
+    from datetime import UTC, datetime, timedelta
+
+    now = [datetime(2026, 9, 24, 20, 0, tzinfo=UTC)]
+    registry = SessionRegistry(clock=lambda: now[0])
+    registry.mark_own("ses_own1", "proof · repeat")
+
+    assert registry.own("ses_own1") == "proof · repeat"
+    assert registry.own("somebody-else") is None
+    now[0] += timedelta(minutes=61)
+    assert registry.own("ses_own1") is None
+
+
 async def test_a_long_reply_still_arrives_as_a_message(tmp_path: Path) -> None:
     relay, channel, sink, _ = build(tmp_path)
     await sink.open()

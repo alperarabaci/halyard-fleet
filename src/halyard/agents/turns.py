@@ -275,3 +275,17 @@ class Turns:
             )
             or "no output"
         )
+
+
+async def say_started(started: Callable[[str], object] | None, session_id: str | None) -> None:
+    """Tell whoever started a turn of its own the id it runs under, before the
+    turn begins. Awaited when it answers with something to wait for; never
+    raises, because a turn that cannot be marked is still worth taking."""
+    if started is None or not session_id:
+        return
+    try:
+        told = started(session_id)
+        if isinstance(told, Awaitable):
+            await told
+    except Exception:
+        logger.warning("Could not say which session %s is", session_id, exc_info=True)

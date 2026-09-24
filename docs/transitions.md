@@ -74,6 +74,12 @@ refuses it and ends the inspection, along with anything it started. A command
 refused, an inspection stopped, or one that runs out of time leaves the
 inspection unmeasured rather than clean.
 
+An inspection's turn is Halyard's own, not an agent's, and it is marked so
+before it begins. Its answer arrives as the inspection's; the raw reply its
+runtime reports is kept out of the chat, and it is never seen working on a task
+— so `label_work` puts no label on anything for it. Its commands meet the same
+rules as anyone's.
+
 ## An inspection runs on the machine's model, or its own
 
 Every inspection runs on one model, and thinks as hard as one effort says —
@@ -187,20 +193,33 @@ uv run halyard inspect recent                          # the last runs, with the
 uv run halyard inspect repeat 5f0c9a2e --model opus    # the same input, another model
 uv run halyard inspect repeat 5f0c9a2e --effort max    # the same model, thinking harder
 uv run halyard inspect repeat 5f0c9a2e --times 3       # the same again, three times
+uv run halyard inspect repeat 5f0c9a2e --runtime opencode --model zai-coding-plan/glm-5.3 --effort high
 uv run halyard inspect compare 5f0c9a2e                # the runs side by side
 ```
 
-A repeat changes only what it is told to: a model or an effort left out is the
-original's, so one thing changes at a time — and `--effort default` hands the
-effort back to the runtime. Runs kept before efforts were recorded show
-`default`, which is what they ran at.
+A repeat changes only what it is told to: a model, an effort or a runtime left
+out is the original's, so one thing changes at a time — and `--effort default`
+hands the effort back to the runtime. On another runtime the model has to be
+named, since one runtime's model names mean nothing to another, and the effort
+is that runtime's own unless named too. Runs kept before efforts were recorded
+show `default`, which is what they ran at.
 
-An id can be cut to any start of it that no other id has. A repeat runs on
-Claude Code in the project's directory, with the tools an inspection has, one
-run after another: a command its model asks to run comes to Telegram as a card
-from its session — whose start it prints — and with Halyard stopped it is
-refused. Its tokens are recorded as `inspect <name> · repeat`, apart from the
-work's.
+An id can be cut to any start of it that no other id has. A repeat runs in the
+project's directory, with the tools an inspection has, one run after another.
+It is marked as Halyard's own with the running service before it begins, like
+any inspection: a command its model asks to run comes to Telegram as the
+repeat's card — the session it prints is the one the card names — its reply
+stays out of the chat, and it labels no task. With Halyard stopped, a command
+is refused. Its tokens are recorded as `inspect <name> · repeat`, apart from
+the work's.
+
+**On opencode** — GLM, say — a repeat runs in the opencode already open at the
+desk, which answers on `127.0.0.1:4096` (or the port its entry under
+`runtimes:` names), in a session of its own titled `halyard: …`: unable to edit
+a file or fetch a page, asking about commands as the project's rules say, and
+deleted when the turn ends. Its effort is opencode's *variant* — `low`, `high`
+or `max` for GLM 5.3. Not `opencode run`: run without a terminal, it refuses
+every question itself before Halyard hears of it.
 
 The files are where they are when it runs; nothing is checked out. The model
 reads the envelope the first run was given, and the row keeps where the files

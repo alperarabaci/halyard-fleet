@@ -150,6 +150,25 @@ async def test_an_approved_request_comes_back_allowed(tmp_path: Path) -> None:
     ]
 
 
+async def test_a_turn_of_halyard_s_own_is_asked_like_anyone_and_seen_working_nowhere(
+    tmp_path: Path,
+) -> None:
+    """Its commands meet the same rules and the same card. It is only never
+    taken for a seat: seen, an opencode one put its runtime's label on a task."""
+    service, _, sink = build_service(tmp_path)
+    await sink.open()
+    service._registry.mark_own("ses_own1", "proof · repeat")
+
+    outcome = await ask(service, "git status", session_id="ses_own1", agent_id="opencode")
+
+    assert outcome.allowed
+    assert [r.action for r in await sink.read_all()] == [
+        AuditAction.APPROVAL_REQUESTED,
+        AuditAction.APPROVAL_RESOLVED,
+    ]
+    assert await service._registry.get("ses_own1") is None
+
+
 async def test_a_refused_request_comes_back_denied(tmp_path: Path) -> None:
     store = ApprovalStore()
     service, _, sink = build_service(

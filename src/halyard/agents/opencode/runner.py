@@ -16,7 +16,9 @@ to reach into the interface you are typing in.
 The *variant* — opencode's name for the axis reasoning is lowered on — is one
 of those things the interface keeps. Measured in 1.18.29: the binary carries
 `command.model.variant.cycle` as a keybinding, and the message body has no
-field for it. So it is chosen at the desk and left alone here.
+field for it. So it is chosen at the desk and left alone here. By 1.18.30 the
+message body carries a `variant`, and `ask` — a turn of Halyard's own, in a
+session nobody is looking at — sends one.
 
 Nothing here starts opencode. If it is not running there is no session to write
 into, and starting one would produce a second instance holding a different
@@ -30,9 +32,13 @@ import json
 import logging
 import urllib.error
 import urllib.request
+from collections.abc import Callable
+from pathlib import Path
+from urllib.parse import quote
 
 from halyard.agents.base import SessionRef
-from halyard.agents.turns import LateFailure
+from halyard.agents.turns import LateFailure, say_started
+from halyard.core import usage
 
 logger = logging.getLogger(__name__)
 
@@ -54,11 +60,27 @@ PROMPT = "prompt_async"
 #: being waited for now is acceptance, not work.
 TIMEOUT = 30.0
 
+#: How a session Halyard opens for a turn of its own is titled: its own, in
+#: any list it turns up in — the desk's among them, should it outlive its turn.
+OWN_TITLE = "halyard: "
+
+#: What a turn that edits nothing may not do, on top of the project's own
+#: rules — which still decide what it has to ask about. Measured on 1.18.30:
+#: a session's rules come after the project's, and the last one that matches
+#: decides, so `bash: ask` stays and the command still reaches Halyard.
+READING_ONLY = (
+    {"permission": "edit", "pattern": "*", "action": "deny"},
+    {"permission": "webfetch", "pattern": "*", "action": "deny"},
+)
+
 
 class OpencodeRunner:
     """Delivers into an opencode session over its own local API."""
 
-    def __init__(self) -> None:
+    def __init__(self, usage_path: Path | None = None) -> None:
+        #: Where what a turn of Halyard's own used is recorded, as the other
+        #: runners record theirs. None records nothing.
+        self._usage_path = usage_path
         #: What this runner sends with, per session. Empty means whatever the
         #: session is already using, which is the right default: somebody who
         #: has not chosen from the phone has chosen at the desk.
@@ -199,3 +221,186 @@ class OpencodeRunner:
         except (urllib.error.URLError, OSError, TimeoutError) as unreachable:
             logger.warning("Could not reach opencode: %s", unreachable)
             return False
+
+    # --- a turn of Halyard's own ----------------------------------------------
+
+    async def ask(
+        self,
+        text: str,
+        *,
+        timeout: float = 180.0,
+        model: str | None = None,
+        cwd: Path | None = None,
+        edits: bool = True,
+        session_id: str | None = None,
+        purpose: str | None = None,
+        project: str | None = None,
+        system: str | None = None,
+        effort: str | None = None,
+        started: Callable[[str], object] | None = None,
+    ) -> str | None:
+        """One turn in a session of its own, in the opencode already running here.
+
+        Not `opencode run`. Measured on 1.18.32: run without a terminal, it
+        rejects every question it would have asked — "auto-rejecting" — before
+        Halyard hears of it, so a turn whose one command needs allowing cannot
+        have it. The opencode already running asks as it does for any session:
+        through the plugin, to Halyard, a card when the rules say so.
+
+        So this opens a session titled `halyard: <purpose>` — unable to edit a
+        file or fetch a page when `edits` is False — sends one message with the
+        model and its `variant`, which is what opencode calls effort (`low`,
+        `high`, `max` for GLM 5.3), waits for the turn, and deletes the session.
+        What every step of the turn used is added up and recorded under
+        `session_id`, the caller's own id for the turn, so it joins whatever the
+        caller keeps; output counts the model's reasoning as well.
+
+        `started` is told the session's own id before the message goes: its
+        questions and its reply arrive under that id, not the caller's.
+
+        Returns the text of the last reply, or None on any failure.
+        """
+        if not (text or "").strip():
+            return None
+        from halyard.agents import opencode
+
+        base = f"http://127.0.0.1:{opencode._port()}"
+        where = f"?directory={quote(str(cwd), safe='')}" if cwd else ""
+        opened = await asyncio.to_thread(
+            self._call,
+            "POST",
+            f"{base}/session{where}",
+            {
+                "title": OWN_TITLE + (purpose or "a turn of its own"),
+                **({} if edits else {"permission": list(READING_ONLY)}),
+            },
+            TIMEOUT,
+        )
+        ident = (opened or {}).get("id")
+        if not ident:
+            return None
+        body: dict = {"parts": [{"type": "text", "text": text}]}
+        if model:
+            provider, _, name = model.partition("/")
+            if name:
+                body["model"] = {"providerID": provider, "modelID": name}
+        if effort:
+            body["variant"] = effort
+        if system:
+            body["system"] = system
+        try:
+            await say_started(started, ident)
+            answered = await asyncio.to_thread(
+                self._call, "POST", f"{base}/session/{ident}/message{where}", body, timeout
+            )
+            steps = await asyncio.to_thread(
+                self._call, "GET", f"{base}/session/{ident}/message{where}", None, TIMEOUT
+            )
+        finally:
+            # Ended where it runs, then gone. Stopped by somebody or past its
+            # time, a turn left going would carry on for nobody; finished, the
+            # abort is a no-op. Shielded, because this runs while a stop is
+            # still unwinding.
+            await asyncio.shield(
+                asyncio.to_thread(
+                    self._call, "POST", f"{base}/session/{ident}/abort{where}", {}, TIMEOUT
+                )
+            )
+            await asyncio.shield(
+                asyncio.to_thread(
+                    self._call, "DELETE", f"{base}/session/{ident}{where}", None, TIMEOUT
+                )
+            )
+        info = (answered or {}).get("info") or {}
+        if info.get("error"):
+            logger.warning("opencode's turn failed: %s", json.dumps(info["error"])[:300])
+        self._record(
+            steps if isinstance(steps, list) else [],
+            session_id=session_id or ident,
+            model=model,
+            purpose=purpose,
+            project=project,
+        )
+        said = "\n".join(
+            part.get("text", "")
+            for part in (answered or {}).get("parts") or []
+            if part.get("type") == "text"
+        ).strip()
+        return said or None
+
+    def _record(
+        self,
+        steps: list,
+        *,
+        session_id: str,
+        model: str | None,
+        purpose: str | None,
+        project: str | None,
+    ) -> None:
+        """What every step of a turn used, as one row. Never raises."""
+        if self._usage_path is None:
+            return
+        read = wrote = cache_read = cache_write = 0
+        cost = 0.0
+        answered_by = model
+        for step in steps:
+            info = (step.get("info") or {}) if isinstance(step, dict) else {}
+            if info.get("role") != "assistant":
+                continue
+            used = info.get("tokens") or {}
+            cache = used.get("cache") or {}
+            read += int(used.get("input") or 0)
+            wrote += int(used.get("output") or 0) + int(used.get("reasoning") or 0)
+            cache_read += int(cache.get("read") or 0)
+            cache_write += int(cache.get("write") or 0)
+            cost += float(info.get("cost") or 0.0)
+            if info.get("providerID") and info.get("modelID"):
+                answered_by = f"{info['providerID']}/{info['modelID']}"
+        if not (read or wrote or cache_read or cache_write):
+            return
+        usage.record(
+            self._usage_path,
+            [
+                usage.Turn(
+                    self.id,
+                    session_id,
+                    answered_by,
+                    purpose,
+                    project,
+                    read,
+                    wrote,
+                    cache_write,
+                    cache_read,
+                    cost,
+                )
+            ],
+        )
+
+    @staticmethod
+    def _call(method: str, where: str, body: dict | None, timeout: float):
+        """One request to opencode's API, and its answer as JSON — or None when
+        it refused or could not be reached, said in the log in its own words."""
+        request = urllib.request.Request(
+            where,
+            data=json.dumps(body).encode("utf-8") if body is not None else None,
+            headers={"content-type": "application/json"},
+            method=method,
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=timeout) as answered:
+                raw = answered.read().decode("utf-8", "replace")
+        except urllib.error.HTTPError as refused:
+            said = ""
+            try:
+                said = refused.read().decode("utf-8", "replace")[:200]
+            except Exception:
+                said = ""
+            logger.warning("opencode refused %s %s: %s %s", method, where, refused.code, said)
+            return None
+        except (urllib.error.URLError, OSError, TimeoutError) as unreachable:
+            logger.warning("Could not reach opencode for %s %s: %s", method, where, unreachable)
+            return None
+        try:
+            return json.loads(raw) if raw.strip() else {}
+        except ValueError:
+            return {}

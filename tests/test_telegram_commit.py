@@ -2124,6 +2124,19 @@ async def test_a_workflow_step_waits_for_the_label_and_the_pick_sends_it(
     assert "- Workflow: level3 · step 1 of 1 · close" in text
 
 
+async def test_an_inspection_s_session_is_marked_as_halyard_s_own(tmp_path: Path, wired) -> None:
+    """Before its turn begins, so its reply is not relayed as a stranger's and
+    it is never taken for a seat at work."""
+    channel, _, runner, repo = wired
+    inspections_in(channel, repo, tmp_path, proof="# proof")
+
+    await channel._handle_callback(pressed_inspection("proof"))
+    await settled(channel)
+
+    [session] = runner.session_ids
+    assert channel._registry.own(session) == "proof"
+
+
 async def test_pressing_a_check_runs_that_one_over_the_last_reply(tmp_path: Path, wired) -> None:
     """Its own instructions, the whole reply, and what Halyard can see."""
     from halyard.channels.telegram.adapter import INSPECTION_MODEL

@@ -11,7 +11,12 @@ Phase 1 keeps this in memory. Sessions are scoped to a running Claude Code
 process and do not outlive a control plane restart, so persisting them would
 mostly mean reloading rows describing sessions that no longer exist. Phase 5
 (state persistence) is where durable session identity is actually needed, and it
-will want a schema shaped by transition, not by this.
+will want a schema shaped by how sessions change hands, not by this.
+
+**Some sessions are Halyard's own.** An inspection, or one run again, is a turn
+Halyard starts in a session of its own — no agent's, working on no task. Its
+hooks and plugins report it like any other, so it is marked here before its
+turn begins (`mark_own`), and what hears from it asks (`own`).
 """
 
 from __future__ import annotations
@@ -19,7 +24,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Callable
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 
 from pydantic import BaseModel, ConfigDict
@@ -83,12 +88,40 @@ class SessionRegistry:
     must not race into two entries or lose the original `first_seen_at`.
     """
 
+    #: How long a session stays marked as Halyard's own. Longer than any turn
+    #: Halyard starts for itself, so its last reply is still recognised.
+    OWN_FOR = timedelta(hours=1)
+
     def __init__(self, *, clock: Clock = _default_clock) -> None:
         self._sessions: dict[str, SessionInfo] = {}
         self._lock = asyncio.Lock()
         self._clock = clock
         #: Told about every sighting. See `listen`.
         self._listeners: list[Callable[[SessionInfo], None]] = []
+        #: Halyard's own sessions: what each turn is — `proof · repeat` — and
+        #: when it was marked.
+        self._own: dict[str, tuple[str, datetime]] = {}
+
+    def mark_own(self, session_id: str, label: str) -> None:
+        """A session Halyard opened for a turn of its own, and what that turn is.
+
+        Not an agent's: what it says is kept out of the chat, it is seen working
+        on no task, and a command it asks to run is shown as `label`'s.
+        """
+        if session_id:
+            self._own[session_id] = (label or "Halyard", self._clock())
+
+    def own(self, session_id: str | None) -> str | None:
+        """What turn of Halyard's own this session is, or None when it is an
+        agent's — or was Halyard's too long ago to still say."""
+        found = self._own.get(session_id or "")
+        if found is None:
+            return None
+        label, marked = found
+        if self._clock() - marked > self.OWN_FOR:
+            self._own.pop(session_id or "", None)
+            return None
+        return label
 
     async def observe(
         self,

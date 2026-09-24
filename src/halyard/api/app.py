@@ -244,6 +244,21 @@ class MessageResponse(BaseModel):
     delivered: bool
 
 
+class OwnBody(BaseModel):
+    """A turn Halyard started for itself outside this process — `halyard
+    inspect repeat` — saying which session it runs in, before it begins."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    session_id: str
+    #: What the turn is, as its cards say it: `proof · repeat`.
+    label: str
+
+
+class OwnResponse(BaseModel):
+    marked: bool
+
+
 class InjectBody(BaseModel):
     """What the `PreInvocation` hook asks: is anything owed to this session?"""
 
@@ -766,6 +781,18 @@ def create_app(settings: Settings, *, channel=None) -> FastAPI:
             session_name=body.session_name,
         )
         return MessageResponse(delivered=delivered)
+
+    @app.post("/v1/own", response_model=OwnResponse)
+    async def mark_own(body: OwnBody) -> OwnResponse:
+        """Mark a session as a turn of Halyard's own. Answers at once.
+
+        What it changes is only what Halyard does with what it hears from that
+        session: its reply stays out of the chat, it is seen working on no task,
+        and its commands' cards say whose they are. The rules those commands
+        meet are the same as anyone's.
+        """
+        registry.mark_own(body.session_id, body.label)
+        return OwnResponse(marked=True)
 
     @app.post("/v1/inject", response_model=InjectResponse)
     async def inject(body: InjectBody) -> InjectResponse:

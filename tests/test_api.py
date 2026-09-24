@@ -207,6 +207,22 @@ async def test_relaying_never_blocks_on_a_decision(denying) -> None:
     assert response.status_code == 200
 
 
+async def test_a_turn_marked_as_halyard_s_own_is_not_relayed(allowing) -> None:
+    """`halyard inspect repeat` marks its session before its turn begins; what
+    that turn says afterwards stays out of the chat."""
+    client, _ = allowing
+
+    marked = await client.post(
+        "/v1/own", json={"session_id": "ses_own1", "label": "proof · repeat"}
+    )
+    relayed = await client.post(
+        "/v1/messages", json={"session_id": "ses_own1", "agent_id": "opencode", "text": "done"}
+    )
+
+    assert marked.json() == {"marked": True}
+    assert relayed.json() == {"delivered": False}
+
+
 async def test_a_relayed_message_needs_a_session_and_text(allowing) -> None:
     client, _ = allowing
 

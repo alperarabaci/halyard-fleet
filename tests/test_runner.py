@@ -421,6 +421,20 @@ async def test_an_ordinary_one_shot_turn_is_left_as_it_was(
     assert "--effort" not in arguments, "left to the CLI, whose default is per model"
 
 
+async def test_whoever_started_a_turn_hears_its_session_before_it_begins(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """So it can be marked as Halyard's own before anything it does is heard."""
+    calls = spying_on_the_turn(monkeypatch)
+    heard: list[tuple[str, int]] = []
+
+    await runner().ask(
+        "check this", session_id="the-id", started=lambda ident: heard.append((ident, len(calls)))
+    )
+
+    assert heard == [("the-id", 0)], "told before the process started"
+
+
 async def test_a_one_shot_turn_thinks_as_hard_as_it_is_asked(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

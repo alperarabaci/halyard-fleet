@@ -219,6 +219,26 @@ async def test_the_card_shows_what_is_needed_to_decide(setup) -> None:
     assert "Expires in" in text
 
 
+async def test_a_command_from_a_turn_of_halyard_s_own_says_whose_it_is(setup) -> None:
+    """A repeat started from the command line: marked as Halyard's own, its
+    card says which inspection it is rather than AGENT over a session nobody
+    has seen. It has no Stop — nothing here holds that turn to stop."""
+    from halyard.core.registry import SessionRegistry
+
+    channel, api, store, _ = setup
+    channel._registry = SessionRegistry()
+    channel._registry.mark_own("ses_own1", "proof · repeat")
+    request = await an_approval(store, session_id="ses_own1", agent_id="opencode", role=None)
+
+    await channel.send_approval_request(request)
+
+    text = api.sent[0]["text"]
+    assert text.startswith("<b>[INSPECTION — PERMISSION REQUEST]</b>")
+    assert "Inspection: <b>proof · repeat</b>" in text
+    keys = [key["text"] for row in api.sent[0]["reply_markup"]["inline_keyboard"] for key in row]
+    assert "⏹ Stop the inspection" not in keys
+
+
 async def test_allow_and_deny_sit_apart_from_anything_harmless(setup) -> None:
     channel, api, store, _ = setup
     request = await an_approval(store, command_full="x" * 500, command_summary="x" * 40)
