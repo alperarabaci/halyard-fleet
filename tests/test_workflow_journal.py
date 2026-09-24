@@ -52,7 +52,7 @@ def test_a_flow_without_phases_says_its_steps_in_order() -> None:
 
 
 def test_a_run_that_reached_nobody_says_so() -> None:
-    assert steps_line(went(), flow=FLOW, stretch=STRETCH) == "no step reached its seat"
+    assert steps_line(went(), flow=FLOW, stretch=STRETCH) == "no step reached its agent"
 
 
 def test_how_long_is_said_the_way_somebody_would() -> None:
@@ -95,13 +95,46 @@ def test_a_finished_run_is_kept_beside_the_tokens(tmp_path: Path) -> None:
             "SELECT project, work, workflow, outcome, phases, deliveries FROM workflow_runs"
         ).fetchall()
         steps = db.execute(
-            "SELECT step, phase, round, seat FROM workflow_steps WHERE run_id = ? ORDER BY at",
+            "SELECT step, phase, round, agent FROM workflow_steps WHERE run_id = ? ORDER BY at",
             (run_id(RUN, "alpha-engine#386"),),
         ).fetchall()
     assert row == ("alpha-engine", "alpha-engine#386", "level3phased", "done", 2, 11)
     assert steps[0] == ("to_nav", None, 1, "nav")
     assert steps[-1] == ("close", None, 1, "nav")
     assert ("develop", 2, 1, "xdrv") in steps
+
+
+def test_steps_kept_while_agents_were_seats_keep_their_rows(tmp_path: Path) -> None:
+    """`workflow_steps.seat` until 2026-09-24. A machine that kept runs then has
+    the column renamed on the next run it keeps, and the old rows with it."""
+    import contextlib
+
+    from halyard.workflows import journal
+
+    database = tmp_path / "halyard.db"
+    before = journal._SCHEMA.replace("    agent  TEXT NOT NULL", "    seat   TEXT NOT NULL")
+    assert "agent" not in before, "the table as it was, or this proves nothing"
+    with contextlib.closing(sqlite3.connect(database)) as db:
+        db.executescript(before)
+        db.execute(
+            "INSERT INTO workflow_steps VALUES "
+            "('an older run', '2026-09-23T09:00:00+00:00', 'review', NULL, 1, 'xreview')"
+        )
+        db.commit()
+
+    record(
+        database,
+        RUN,
+        project="alpha-engine",
+        work="alpha-engine#386",
+        outcome="done",
+        finished=AT + timedelta(minutes=220),
+    )
+
+    with contextlib.closing(sqlite3.connect(database)) as db:
+        kept = db.execute("SELECT run_id, agent FROM workflow_steps ORDER BY at").fetchall()
+    assert kept[0] == ("an older run", "xreview")
+    assert len(kept) == 12
 
 
 def test_keeping_the_same_run_twice_keeps_it_once(tmp_path: Path) -> None:

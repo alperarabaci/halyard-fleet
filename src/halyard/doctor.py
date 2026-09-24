@@ -647,7 +647,7 @@ def run() -> int:
         seats = configured()
     except ValueError as error:
         # A seat that will not parse is a seat you believe you have.
-        print(f"{FAIL}seats: {error}")
+        print(f"{FAIL}agents: {error}")
         seats = []
         problems += 1
 
@@ -655,13 +655,13 @@ def run() -> int:
         # Silence used to mean "checked and fine". It meant "checked nothing":
         # when seats replaced the two role settings this stopped looking at
         # anything and still printed a clean bill of health.
-        print(f"{WARN}no seats configured — nothing is being routed anywhere")
+        print(f"{WARN}no agents configured — nothing is being routed anywhere")
         print("        run `halyard init`, or add a `projects:` block to halyard.yaml")
     else:
         # Which file the seats came from, because the two dialects do not merge
         # and a file left behind would otherwise silently outrank what was
         # somebody had just edited.
-        print(f"{OK}seats read from {source if source else 'the environment'}")
+        print(f"{OK}agents read from {source if source else 'the environment'}")
         for project in sorted({seat.project for seat in seats if seat.project}):
             labels = ", ".join(s.label for s in seats if s.project == project)
             print(f"        {project}: {labels}")
@@ -817,20 +817,20 @@ def sessions() -> int:
         # way that looks like the name being wrong.
         print(f"{'':20}{ref.cwd or '(directory not recorded)'}")
     print(
-        "\nGive one to a seat, exactly as printed above:\n"
+        "\nGive one to an agent, exactly as printed above:\n"
         "\n"
-        "  seats:\n"
+        "  agents:\n"
         "    drv:\n"
         "      runtime: <the runtime column>\n"
         "      session: <one of the names above>\n"
-        '      chat: "-100..."      # the group this seat speaks in\n'
+        '      chat: "-100..."      # the group this agent speaks in\n'
         "\n"
-        "Seats are read at startup, so restart the control plane afterwards."
+        "Agents are read at startup, so restart the control plane afterwards."
     )
     if generated:
         print(
             f"\n{WARN}A name marked auto-titled was written by the runtime, not by you.\n"
-            "        Those are rewritten as a conversation moves, so a seat pointed at\n"
+            "        Those are rewritten as a conversation moves, so an agent pointed at\n"
             "        one works today and silently stops later. Rename it first."
         )
     return 0

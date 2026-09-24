@@ -1,4 +1,4 @@
-# Telegram, seats, and what answers you
+# Telegram, agents, and what answers you
 
 Creating the bot, routing a navigator and a driver to different places, and
 choosing which model replies to a message sent from your phone.
@@ -124,13 +124,13 @@ HALYARD_CLAUDE_DEFAULT_MODEL=sonnet
 An explicit `HALYARD_CLAUDE_BINARY` similarly overrides the selected
 executable. `/status` shows the session model and any Halyard override
 separately — "at the desk" is what the session itself is on, "from here" is what
-a turn sent from the phone would use. A Codex seat also shows how full its usage
-windows are; Claude Code publishes no such number, so its seats show none.
+a turn sent from the phone would use. A Codex agent also shows how full its usage
+windows are; Claude Code publishes no such number, so its agents show none.
 
 ### Optional: keep a navigator and a driver apart
 
 Two sessions working one codebase in one chat is a mess to read on a phone. To split them, give
-each seat its own conversation.
+each agent its own conversation.
 
 **One bot is enough.** A bot is an identity, not a conversation — the same way one person is in many
 group chats. The limit people run into is that a bot can hold only *one private chat* with you, so
@@ -168,7 +168,7 @@ separate conversations means separate **groups**, not separate bots.
    Either one may be a forum topic instead of a group of its own — `-1001234567890:12` sends to
    topic 12 in a shared group.
 
-Then tell each session which seat it is when you launch it. There is no pairing step and no list to
+Then tell each session which agent it is when you launch it. There is no pairing step and no list to
 pick from: the environment a session was started with is the answer, and every hook it fires
 inherits it.
 

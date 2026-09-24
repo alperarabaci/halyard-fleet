@@ -1,5 +1,10 @@
 """Seats from a YAML file, arranged by project.
 
+The file calls them agents, as every message does — `agents:`, and a step's
+`agent:`; they were seats there until 2026-09-24, and `seats:` still works.
+The code keeps `Seat`, because `agent` already means a runtime in it — see
+`halyard.core.seats`.
+
 The environment dialect works and stays. It stops being readable at about four
 seats, though, and it cannot say which project a seat belongs to at all — one
 flat list, one project, and a `HALYARD_SEAT_XDRV=runtime=codex session=…` line
@@ -8,7 +13,7 @@ that has to be parsed by eye.
     projects:
       alpha-engine:
         path: ~/code/alpha-engine
-        seats:
+        agents:
           nav:
             runtime: claude-code
             session: alpha-navigator
@@ -49,6 +54,8 @@ from halyard.core.seats import Seat, _default_runtime, known_runtimes
 #: Where a project's own settings live, beside its seats.
 _PROJECT_FIELDS = {
     "path",
+    "agents",
+    # The name `agents:` had until 2026-09-24, still read.
     "seats",
     "name",
     "validate",
@@ -473,7 +480,7 @@ def _transitions_from(
         if to and to.lower() not in roles and to not in labels:
             raise ValueError(
                 f"{where}: `to:` must be a role ({', '.join(sorted(roles))}) "
-                "or one of this project's seats."
+                "or one of this project's agents."
             )
         found[name] = Transition(
             name=name,
@@ -493,6 +500,8 @@ _STEP_FIELDS = {
     "transition",
     # The name `transition:` had until 2026-09-24, still read.
     "handoff",
+    "agent",
+    # The name `agent:` had until 2026-09-24, still read.
     "seat",
     "rounds",
     "decided_by",
@@ -656,11 +665,14 @@ def _steps_from(
             raise ValueError(
                 f"{where} names the transition {transition!r}, which this project does not define."
             )
-        seat = _as_text(spec.get("seat"))
+        said, spelled = _spelled(project, spec, "agent", "seat", f"step {name!r}")
+        if spelled is not None and older is not None:
+            older.append(spelled)
+        seat = _as_text(said)
         if seat and seat.lower() not in roles and seat not in labels:
             raise ValueError(
-                f"{where}: `seat:` must be a role ({', '.join(sorted(roles))}) "
-                "or one of this project's seats."
+                f"{where}: `agent:` must be a role ({', '.join(sorted(roles))}) "
+                "or one of this project's agents."
             )
         rounds = spec.get("rounds", _DEFAULT_ROUNDS)
         if isinstance(rounds, bool) or not isinstance(rounds, int) or rounds < 1:
@@ -906,7 +918,7 @@ def _task_label_from(label: str, project: str, value: Any) -> str | None:
     text = _as_text(value)
     if text and "," in text:
         raise ValueError(
-            f"Seat {label!r} in project {project!r}: `task_label:` cannot contain a "
+            f"Agent {label!r} in project {project!r}: `task_label:` cannot contain a "
             "comma, which the tracker would read as two labels."
         )
     return text
@@ -915,7 +927,7 @@ def _task_label_from(label: str, project: str, value: Any) -> str | None:
 def _seat_from(label: str, spec: Any, project: str) -> Seat:
     if not isinstance(spec, dict):
         raise ValueError(
-            f"Seat {label!r} in project {project!r} must be a mapping of "
+            f"Agent {label!r} in project {project!r} must be a mapping of "
             f"{', '.join(sorted(_SEAT_FIELDS))}, not {type(spec).__name__}."
         )
     unknown = set(spec) - _SEAT_FIELDS
@@ -924,14 +936,14 @@ def _seat_from(label: str, spec: Any, project: str) -> Seat:
         # a seat missing the setting you believe you gave it, with nothing
         # anywhere saying so, is worse than a file that will not load.
         raise ValueError(
-            f"Seat {label!r} in project {project!r}: unknown field(s) {', '.join(sorted(unknown))}"
+            f"Agent {label!r} in project {project!r}: unknown field(s) {', '.join(sorted(unknown))}"
         )
 
     runtime = (_as_text(spec.get("runtime")) or _default_runtime()).lower()
     allowed = known_runtimes()
     if runtime not in allowed:
         raise ValueError(
-            f"Seat {label!r} has runtime {runtime!r}. Use one of: {', '.join(allowed)}."
+            f"Agent {label!r} has runtime {runtime!r}. Use one of: {', '.join(allowed)}."
         )
     role = _as_text(spec.get("role"))
     return Seat(
@@ -982,9 +994,13 @@ def projects_from_yaml(text: str) -> list[Project]:
         if unknown:
             raise ValueError(f"Project {project!r}: unknown field(s) {', '.join(sorted(unknown))}")
 
-        raw_seats = body.get("seats") or {}
+        older: list[str] = []
+        raw_seats, spelled = _spelled(project, body, "agents", "seats", "the project")
+        if spelled is not None:
+            older.append(spelled)
+        raw_seats = raw_seats or {}
         if not isinstance(raw_seats, dict):
-            raise ValueError(f"Project {project!r}: `seats:` must be a mapping of label to seat.")
+            raise ValueError(f"Project {project!r}: `agents:` must be a mapping of label to agent.")
 
         seats = []
         for label, spec in raw_seats.items():
@@ -993,7 +1009,7 @@ def projects_from_yaml(text: str) -> list[Project]:
                 # Labels are how a seat is named in `doctor` and found by
                 # `find`; two of them makes one unreachable and says nothing.
                 raise ValueError(
-                    f"Seat label {label!r} is used by both {seen[label]!r} and {project!r}. "
+                    f"Agent label {label!r} is used by both {seen[label]!r} and {project!r}. "
                     "Labels have to be unique across projects."
                 )
             seen[label] = project
@@ -1009,14 +1025,13 @@ def projects_from_yaml(text: str) -> list[Project]:
         for (runtime, role), labels in wanted.items():
             if len(labels) > 1:
                 shown = ", ".join(sorted(repr(x) if x else "the default" for x in labels))
-                kind = f"{role.value} seats" if role else "seats without a role"
+                kind = f"{role.value} agents" if role else "agents without a role"
                 raise ValueError(
                     f"Project {project!r}: its {runtime} {kind} ask for different "
                     f"task labels ({shown}), and nothing that labels a task can tell them apart."
                 )
 
         path = _as_text(body.get("path"))
-        older: list[str] = []
         written, spelled = _spelled(project, body, "inspections", "checks", "the project")
         if spelled is not None:
             older.append(spelled)

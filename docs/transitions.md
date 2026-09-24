@@ -1,11 +1,11 @@
 # Inspections and transitions
 
 Two things a project can add once the basics work, and nothing else needs
-either of them. An **inspection** is the project's own text, run over a seat's
+either of them. An **inspection** is the project's own text, run over an agent's
 reply as a turn of its own: `/inspect` offers each one, and its answer comes
-back with a button per seat to hand it on. A **transition** takes the work to
-its next stage the way the project defines it — a seat's reply, carried to the
-seat that works on it next: `/transition` puts the project's prompt in front,
+back with a button per agent to hand it on. A **transition** takes the work to
+its next stage the way the project defines it — an agent's reply, carried to the
+agent that works on it next: `/transition` puts the project's prompt in front,
 runs its commands and then its inspections, and delivers all of it together.
 
 The names are the ones a workflow standard uses. In BPMN, in a statechart or in
@@ -13,14 +13,15 @@ a Jira workflow, work sits in a **stage** — a state, a status — and moves
 between stages by a **transition**, which can have checks of its own and
 something it does once taken. Here a workflow's step is a stage, a transition
 is how the work enters it, its commands and inspections are what it checks on
-the way, and delivering to the seat is what it does. The word a reply ends
+the way, and delivering to the agent is what it does. The word a reply ends
 with — `forward`, `back` — is the event that picks the transition. See
 [Workflows](workflows.md).
 
-Transitions were called handoffs until 2026-09-24, and inspections were called
-checks until 2026-09-23. A configuration that still says `handoffs:`, a step
-that says `handoff:`, or one that says `checks:` works as it did; `/handoff`
-and `/checks` still answer, and `halyard doctor` says what to rename.
+Transitions were called handoffs and agents were called seats until
+2026-09-24, and inspections were called checks until 2026-09-23. A
+configuration that still says `handoffs:`, `seats:` or `checks:`, or a step
+that says `handoff:` or `seat:`, works as it did; `/handoff` and `/checks`
+still answer, and `halyard doctor` says what to rename.
 
 Everything here sits under the project in `halyard.yaml`, and every file it
 names is the project's own, read relative to its `path:`.
@@ -56,8 +57,8 @@ projects:
 ```
 
 A transition carries the chat's last reply unless it says
-`include_last_message: false`, and goes to the seat or role in `to:` — every
-seat is offered when it names none. An inspection, a command or a seat it names that
+`include_last_message: false`, and goes to the agent or role in `to:` — every
+agent is offered when it names none. An inspection, a command or an agent it names that
 the project does not define is refused when the file is read, rather than when
 somebody presses the button from a phone.
 
@@ -220,7 +221,7 @@ failed. One still running after ten minutes is stopped, and its line says so.
 
 The inspections read that one line and nothing more, so a command whose results
 an inspection has to compare — several targets, each with a count and an exit code —
-says all of them on its last line. The seat receiving the transition gets the tail
+says all of them on its last line. The agent receiving the transition gets the tail
 of the output as well: the last five lines when the command passed, the last
 twenty-five when it failed.
 
@@ -287,7 +288,7 @@ first:
 ```
 
 From the second round on that one goes in front instead of `prompt:`, and the
-seat is handed its own answer to the round before, ahead of the reply — so a
+agent is handed its own answer to the round before, ahead of the reply — so a
 reviewer asked again sees what it found last time rather than being set to find
 everything afresh. A transition without one sends its `prompt:` every round.
 

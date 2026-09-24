@@ -491,7 +491,7 @@ def wire(directory: Path, runtimes: tuple[RuntimeSpec, ...] | None = None) -> in
     if described is not None and not described:
         # Described and empty is a real answer: the project exists in the
         # configuration with no seats. Saying so beats wiring by guesswork.
-        print("  no seats are configured for this project, so nothing to wire")
+        print("  no agents are configured for this project, so nothing to wire")
         return 0
     for runtime in chosen:
         if _wire_one(directory, runtime):

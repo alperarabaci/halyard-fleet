@@ -315,7 +315,7 @@ async def test_a_chat_with_no_repository_says_so(tmp_path: Path) -> None:
         await deliver(channel, typed("/commit"))
         said = api.sent[-1]["text"]
         assert "do not know which repository" in said
-        assert f"no seat has it. Give a seat <code>chat: {CHAT}</code>" in said
+        assert f"no agent has it. Give an agent <code>chat: {CHAT}</code>" in said
     finally:
         await audit.close()
 

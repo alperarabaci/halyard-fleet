@@ -110,19 +110,19 @@ POLL_RETRY_MAX_SECONDS = 30.0
 #: lowercase letters, digits and underscores, at most 32 characters, and the
 #: description at most 256. Anything else is rejected for the whole list.
 COMMANDS: tuple[tuple[str, str], ...] = (
-    ("chat", "Send a message into this seat's session"),
-    ("forward", "Hand this chat's last reply to another seat"),
+    ("chat", "Send a message into this agent's session"),
+    ("forward", "Hand this chat's last reply to another agent"),
     ("inspect", "Run one of this project's inspections over this chat's last reply"),
     ("transition", "Take this chat's last reply to its next stage, as this project defines it"),
     ("workflow", "Take this project's transitions in the order it wrote them down"),
     ("commit", "Commit this branch's work, with a message to approve"),
     ("review_and_commit", "The same, with this project's checks and its review round"),
-    ("open", "Open an agent on the machine — claude, codex, gemini"),
+    ("open", "Open an app on the machine — claude, codex, gemini"),
     ("command", "Run one of this project's own commands"),
     ("label", "Put a label on the task this branch is for"),
     ("status", "What is happening right now"),
     ("doctor", "Check the configuration and say what is wrong with it"),
-    ("options", "Models and effort levels this seat accepts"),
+    ("options", "Models and effort levels this agent accepts"),
     ("model", "Choose what answers, for turns sent from here"),
     ("effort", "Choose how hard it thinks"),
     ("pause", "Step aside — the runtime decides on its own"),
@@ -1158,7 +1158,7 @@ class TelegramChannel:
             logger.info(
                 "Message from %s → %s (replying to %r)",
                 actor,
-                f"seat {answering}" if answering else "this chat's own seat",
+                f"agent {answering}" if answering else "this chat's own agent",
                 replied[:60],
             )
             if answering:
@@ -1307,7 +1307,7 @@ class TelegramChannel:
         second thing to remember.
         """
         if not self._seats:
-            return "No seats are configured."
+            return "No agents are configured."
         lines = []
         for seat in self._seats:
             where = " (this chat)" if seat.chat and seat.chat.split(":")[0] == self._here else ""
@@ -1316,7 +1316,7 @@ class TelegramChannel:
                 f"{html.escape(seat.runtime)}"
                 f"{' · ' + html.escape(seat.session) if seat.session else ''}{where}"
             )
-        return "Seats you can send to:\n" + "\n".join(lines)
+        return "Agents you can send to:\n" + "\n".join(lines)
 
     async def _forward_to_seat(
         self,
@@ -1379,7 +1379,7 @@ class TelegramChannel:
         seat = find(self._seats, label)
         if seat is None:
             await self._say(
-                f"No seat called <b>{html.escape(label)}</b>.\n\n" + self._seat_list(),
+                f"No agent called <b>{html.escape(label)}</b>.\n\n" + self._seat_list(),
                 chat_id,
                 thread_id,
             )
@@ -1481,7 +1481,7 @@ class TelegramChannel:
         seat = find(self._seats, label)
         if seat is None:
             await self._say(
-                f"No seat called <b>{html.escape(label)}</b>.\n\n" + self._seat_list(),
+                f"No agent called <b>{html.escape(label)}</b>.\n\n" + self._seat_list(),
                 chat_id,
                 thread_id,
             )
@@ -2061,7 +2061,7 @@ class TelegramChannel:
         seat = for_chat(self._seats, chat_id) if chat_id else None
         if seat is None:
             return (
-                f"{head}: no seat has it. Give a seat "
+                f"{head}: no agent has it. Give an agent "
                 f"<code>chat: {html.escape(chat_id)}</code> in <code>halyard.yaml</code>."
             )
         label = html.escape(seat.label)
@@ -2510,7 +2510,7 @@ class TelegramChannel:
                 return
             when = _local(said.at).strftime("%H:%M")
             await self._say(
-                f"Hand the reply from <b>{when}</b> to which seat?"
+                f"Hand the reply from <b>{when}</b> to which agent?"
                 f"\n\n<i>{html.escape(said.text[:200])}"
                 f"{'…' if len(said.text) > 200 else ''}</i>",
                 chat_id,
@@ -2529,7 +2529,7 @@ class TelegramChannel:
                 thread_id,
             )
 
-        logger.info("Forwarding to seat %s from %s: %r", label, actor, said.text[:60])
+        logger.info("Forwarding to agent %s from %s: %r", label, actor, said.text[:60])
         await self._forward_to_seat(f"{label} {said.text}", actor, chat_id, thread_id)
 
     async def _run_inspection(self, typed: str, chat_id: str, thread_id: int | None) -> None:
@@ -3128,7 +3128,7 @@ class TelegramChannel:
         seats = self._seats_for(found.name, to or transition.to)
         if len(seats) != 1:
             await self._say(
-                f"Hand <b>{html.escape(name)}</b> to which seat?",
+                f"Hand <b>{html.escape(name)}</b> to which agent?",
                 chat_id,
                 thread_id,
                 reply_markup=cards.transition_seat_choices(
@@ -3494,7 +3494,7 @@ class TelegramChannel:
         if len(seats) != 1:
             # A role two seats hold, and a step that did not say which. Said
             # rather than guessed: the wrong driver is a turn of somebody's work.
-            await self._stopped(found, work, run.held(f"{step.name} names no one seat to go to"))
+            await self._stopped(found, work, run.held(f"{step.name} names no one agent to go to"))
             return
         [seat] = seats
 
@@ -3897,7 +3897,7 @@ class TelegramChannel:
             return
         preview = text if len(text) <= 200 else text[:200] + "…"
         await self._say(
-            f"Send this to which seat?\n\n<blockquote>{html.escape(preview)}</blockquote>",
+            f"Send this to which agent?\n\n<blockquote>{html.escape(preview)}</blockquote>",
             chat_id,
             thread_id,
             reply_markup=keyboard,
@@ -3950,7 +3950,7 @@ class TelegramChannel:
             why = await self._why_unreachable(seat) if seat is not None else None
             if seat is None:
                 said = (
-                    f"No seat owns this chat (<code>{chat_id}</code>). Add it to a "
+                    f"No agent owns this chat (<code>{chat_id}</code>). Add it to a "
                     "seat's <code>chat:</code> in your seat configuration, then "
                     "restart — seats are read at startup."
                 )
@@ -3961,13 +3961,13 @@ class TelegramChannel:
                 # comes back empty, and this said the seat's session did not
                 # exist — while it sat open on the screen under that exact name.
                 said = (
-                    f"The <b>{html.escape(seat.label)}</b> seat's session could not "
+                    f"The <b>{html.escape(seat.label)}</b> agent's session could not "
                     f"be looked up — {html.escape(seat.runtime)} did not answer."
                     f"\n\n<pre>{html.escape(why)}</pre>"
                 )
             else:
                 said = (
-                    f"The <b>{seat.label}</b> seat owns this chat, but "
+                    f"The <b>{seat.label}</b> agent owns this chat, but "
                     f"{seat.runtime} has no session named "
                     f"<code>{seat.session}</code>. Check it with "
                     "<code>halyard doctor</code>."
@@ -4003,7 +4003,7 @@ class TelegramChannel:
                 if runner is not None:
                     return _SessionTarget(found.session_id, self._project, found.cwd, runner)
             logger.warning(
-                "No session named %r for the %s seat", name, seat.label if seat else role
+                "No session named %r for the %s agent", name, seat.label if seat else role
             )
 
         # A chat no seat owns, which is a real way to work: sessions started for
@@ -4517,7 +4517,7 @@ class TelegramChannel:
                 # Said here as well as on the typed path. This one had no line
                 # at all, so a message handed over by a button went wherever it
                 # went without a trace, and working out where took a screenshot.
-                logger.info("Handing to seat %s from tg:%s: %r", value, user_id, carried[:60])
+                logger.info("Handing to agent %s from tg:%s: %r", value, user_id, carried[:60])
                 await self._forward_to_seat(
                     f"{value} {carried}",
                     f"tg:{user_id}",

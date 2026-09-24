@@ -180,7 +180,7 @@ class Attribution:
             return
         self._said_no_seat.add(session.session_id)
         logger.info(
-            "Not labelling for %s session %s in %s: it matches no seat",
+            "Not labelling for %s session %s in %s: it matches no agent",
             session.agent_id,
             session.session_name or session.session_id,
             project,

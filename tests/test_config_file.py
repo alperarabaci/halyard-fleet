@@ -318,7 +318,7 @@ def a_project(tmp_path, **body) -> list:
     written = "\n".join(f"    {line}" for line in body.pop("lines", []))
     return projects_from_yaml(
         f"projects:\n  alpha-engine:\n    path: {code}\n{written}\n"
-        "    seats:\n      nav: {runtime: claude-code}\n"
+        "    agents:\n      nav: {runtime: claude-code}\n"
     )
 
 
@@ -417,6 +417,37 @@ def test_the_names_transitions_had_before_are_still_read_and_said(tmp_path) -> N
         "the project: `handoffs:` is now `transitions:`",
         "step 'reviewing': `handoff:` is now `transition:`",
     )
+
+
+def test_the_names_agents_had_before_are_still_read_and_said(tmp_path) -> None:
+    """`seats:` until 2026-09-24, and a step's `seat:`. A configuration written
+    then keeps working, and `doctor` says what to rename."""
+    from halyard.core.config_file import projects_from_yaml
+
+    code = tmp_path / "alpha-engine"
+    code.mkdir()
+    [project] = projects_from_yaml(
+        f"projects:\n  alpha-engine:\n    path: {code}\n"
+        "    seats:\n      nav: {runtime: claude-code, role: navigator}\n"
+        "    transitions:\n      review: {to: navigator}\n"
+        "    workflows:\n"
+        "      steps:\n        reviewing: {transition: review, seat: nav}\n"
+        "      level1: [reviewing]\n"
+    )
+
+    assert [seat.label for seat in project.seats] == ["nav"]
+    assert project.workflows.steps["reviewing"].seat == "nav"
+    assert project.older == (
+        "the project: `seats:` is now `agents:`",
+        "step 'reviewing': `seat:` is now `agent:`",
+    )
+
+
+def test_both_names_for_agents_at_once_are_refused() -> None:
+    from halyard.core.config_file import projects_from_yaml
+
+    with pytest.raises(ValueError, match="both `agents:` and `seats:`"):
+        projects_from_yaml("projects:\n  a:\n    seats: {}\n    agents: {}\n")
 
 
 def test_both_names_for_transitions_at_once_are_refused(tmp_path) -> None:
