@@ -96,6 +96,7 @@ RUNTIME = RuntimeSpec(
         settings=".codex/hooks.json",
         matcher="^(Bash|exec|exec_command|shell)$",
         extra=(("PermissionRequest", "Bash", "permission_hook.sh", 600),),
+        guarded=(".codex",),
     ),
     runner=_runner,
     find_session=late("halyard.agents.codex", "find_session"),

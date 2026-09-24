@@ -69,7 +69,12 @@ RUNTIME = RuntimeSpec(
     # `present` is what answers whether it is here.
     binary="zcode",
     prefix="z",
-    hooks=Hooks(settings=str(wiring.CONFIG), matcher=wiring.MATCHER, dialect="events"),
+    hooks=Hooks(
+        settings=str(wiring.CONFIG),
+        matcher=wiring.MATCHER,
+        dialect="events",
+        guarded=(wiring.CONFIG.parts[0],),
+    ),
     runner=_runner,
     find_session=sessions.find_session,
     list_sessions=sessions.list_sessions,
