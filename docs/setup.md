@@ -3,7 +3,7 @@
 Getting the control plane running, and putting the gate on a project.
 
 > Wiring a project makes it depend on this process. Read
-> [the three rules](../README.md#read-this-before-you-wire-it-into-anything) first.
+> [what to expect](before-you-wire-it.md) first.
 
 ## Running it
 
@@ -59,11 +59,14 @@ document:
 
 - Claude Code: `.claude/settings.local.json`
 - Codex: `.codex/hooks.json`
+- opencode: `.opencode/plugins/halyard.ts`, and a `permission` block in `opencode.json` — see [opencode](#opencode)
+- ZCode: `.zcode/config.json` — see [ZCode](#zcode)
 - Antigravity: `.agents/hooks.json`
 
-**Add those to the project's `.gitignore`.** They name absolute paths, so a
+**Add the hooks files to the project's `.gitignore`.** They name absolute paths, so a
 committed one arrives on the next machine pointing at a home directory that
-does not exist there. `halyard doctor` says so if you forget.
+does not exist there. `halyard doctor` says so if you forget. opencode's two are
+different: the plugin names no path, and `opencode.json` is the project's own file.
 
 A session opened in a subdirectory is gated from the top of its repository, so
 wiring next to the session would gate nothing while looking like it had.
@@ -167,6 +170,71 @@ every error, because something is waiting on its answer. The relay swallows ever
 nothing, because a lost chat message is not worth interrupting a session over. Neither should ever
 be given the other's behaviour.
 
+### opencode
+
+opencode has no hooks file to write into. Its gate is a plugin, and `halyard wire` puts two
+things in the project:
+
+- `.opencode/plugins/halyard.ts`, a copy of `bridge/opencode.ts`. opencode loads its plugins
+  when it starts, so restart it after wiring.
+- `"permission"` in `opencode.json`, set to `ask` for `edit`, `bash`, `webfetch` and
+  `external_directory`. Without it opencode asks about nothing, and the plugin is loaded and
+  never consulted. Everything else in that file is left as it was.
+
+Start opencode with a port, `opencode --port 4096`. With `opencode` alone it listens on no port
+at all: the question still reaches your phone, but the answer has no way back in, and neither
+has a message. Another port goes in `halyard.yaml`:
+
+```yaml
+runtimes:
+  opencode:
+    port: 4097
+```
+
+The question stays on opencode's own screen while it is on your phone, and the first answer
+wins — one given at the desk closes the card. With Halyard down nothing is denied and nothing
+is let through: the question waits for whoever is at the desk. An allow from the phone is
+always *once*, never *always*: a saved *always* would move the decision into opencode's own
+list, where nothing is audited and `/pause` does not reach.
+
+A category somebody answered with "always allow" at the desk is rewritten by opencode into a
+list of patterns. Wiring leaves that list alone, and `doctor` names the patterns opencode now
+answers by itself.
+
+The plugin is a copy, so a Halyard update that changes it reaches no project by itself.
+`doctor` says when a project's copy is out of date; `halyard wire` and an opencode restart
+bring it up to date.
+
+### ZCode
+
+ZCode's hooks are Claude Code's with three differences, measured on ZCode 3.11.2 — see the
+[ZCode notes](zcode-payload-notes.md):
+
+- They live in the workspace's `.zcode/config.json` under `hooks.events`, and none of them run
+  unless `hooks.enabled` is true. `halyard wire` writes both, with a ten-minute timeout where
+  ZCode's default is one minute.
+- A workspace's hooks wait until somebody trusts them in ZCode, one at a time, and a changed
+  one waits again. `halyard wire` asks ZCode whether it trusts Halyard's and prints the command
+  that trusts exactly those; Halyard never trusts them itself.
+- Sessions are found by the title in ZCode's own list. Rename a session there to match the
+  agent's `session:` — a title set by hand stays, and one ZCode generated changes.
+
+A message from the phone needs a key of its own. ZCode has no port and no send command, so
+Halyard starts ZCode's engine and drives it the way the application does, answering its gate
+itself:
+
+```yaml
+settings:
+  ZCODE_TOKEN: "a coding-plan key from Z.AI's console"
+  ZCODE_MODEL: "account:zai-individual-coding-plan/GLM-5.3-Flash"
+```
+
+Use a coding-plan key: the application's own login is short-lived, and refreshing it from here
+would log the desk out. Without a key a ZCode agent takes its messages at the desk, and its
+approvals still come to your phone. Before every send the session is set to ask, so one left
+on "Edit automatically" asks from then on. A turn that meets a captcha stops and says so; solve
+it in ZCode and send again.
+
 ### Once the hook is wired, the terminal stops asking
 
 This is the part worth understanding before you wire it up.
@@ -250,6 +318,8 @@ projects:
         chat: "-2001"
         role: navigator
 ```
+
+An agent's `runtime:` is `claude-code`, `codex`, `opencode` or `zcode`.
 
 An agent's `role:` is `navigator`, `driver` or `reviewer`, and it is optional. None
 of them is special to routing: a card goes to the agent it came from and says
