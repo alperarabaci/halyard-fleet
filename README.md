@@ -100,7 +100,7 @@ writes the gate, and `halyard doctor` says what is still missing.
 |---|---|---|
 | Claude Code | hooks in `.claude/settings.local.json` | resumes the session |
 | Codex | hooks in `.codex/hooks.json`, trusted once in Codex | resumes the thread |
-| opencode | a plugin in `.opencode/plugins/`, and `permission` in `opencode.json` | goes into the opencode that is open, started with `opencode --port 4096` |
+| opencode | a plugin in `.opencode/plugins/`, and `permission` in `opencode.json`; opencode started with `--port 4096` | goes into the opencode that is open |
 | ZCode | hooks in `.zcode/config.json`, trusted once in ZCode | needs `ZCODE_TOKEN` and `ZCODE_MODEL` in `halyard.yaml`; without them the agent takes its messages at the desk |
 
 Codex and ZCode skip hooks nobody has trusted, without a word; `halyard wire` says how
