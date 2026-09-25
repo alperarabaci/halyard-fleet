@@ -71,6 +71,14 @@ settings:
   # that sleeps denies every command on the machine and says nothing.
   # HALYARD_KEEP_AWAKE: false
 
+  # Let a shell command through without a card when it is a read the gate
+  # understands whole: every part a known read (`grep`, `sed -n`, `git log`…)
+  # with options that only read, nothing it cannot parse (`$VAR`, `$(…)`, a
+  # heredoc, a redirect into a file), and every path inside the project and
+  # not a file that may hold a secret. Anything else is a card, as before.
+  # Off unless set; `low` is the only value it takes.
+  # HALYARD_ALLOW_RISK_AT_OR_BELOW: low
+
   # Keep every inspection run in the database — what the model was given, word
   # for word, and what it said — to compare models on the same input later.
   # Off unless set, because it is the one place Halyard keeps text: the input

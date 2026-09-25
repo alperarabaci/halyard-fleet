@@ -1,4 +1,11 @@
-"""Deciding how dangerous a tool call is.
+"""Deciding how dangerous a tool call looks — the label on its card.
+
+The label is for the person reading the card, and it decides nothing on its
+own. It used to: a command labelled low went through unasked, and a label
+that recognised one part of a command said nothing about the rest, so
+`ls | xargs rm` went through as a read. Letting a command through is
+`reads.py`'s question now, and it asks a stricter one. A high label still
+keeps a command out of that, whatever `reads.py` thinks of it.
 
 Risk is assigned here and nowhere else. An agent may say a command is harmless,
 and that claim is worth something — but it comes from the same reasoning that
@@ -18,8 +25,9 @@ symmetric: an over-cautious label wastes a moment of the approver's attention,
 while an under-cautious one is how something destructive gets waved through.
 
 Rules are data, so extending them is a line in a list. They are matched against
-the *redacted* command, which means policy never sees a secret — and also means
-rules must not depend on the shape of a value that has been masked away.
+the command as it will run, in memory; what is shown and kept is redacted. They
+were matched redacted until `TOKEN=$(python3 x.py) git status` arrived as
+`TOKEN=*** git status` and looked like a status.
 """
 
 from __future__ import annotations

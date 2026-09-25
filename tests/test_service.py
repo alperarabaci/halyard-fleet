@@ -869,34 +869,153 @@ class NeverAsked(StubChannel):
         return await super().send_approval_request(request)
 
 
-async def test_a_low_risk_command_is_allowed_without_a_card(tmp_path: Path) -> None:
-    """The point of the setting: three hundred cards a day is a phone somebody
-    stops reading, and the ones that matter arrive in that noise."""
+def a_project(tmp_path: Path) -> Path:
+    root = tmp_path / "project"
+    (root / ".git").mkdir(parents=True)
+    (root / "src").mkdir()
+    (tmp_path / "outside").mkdir(exist_ok=True)
+    return root
+
+
+def asking_nobody(tmp_path: Path, **more):
+    """A service with reads switched on and a channel that counts its cards."""
     store = ApprovalStore(ttl=timedelta(minutes=5))
     channel = NeverAsked(store)
     service, _, sink = build_service(
-        tmp_path, channel=channel, store=store, allow_risk_at_or_below=RiskLevel.LOW
+        tmp_path,
+        channel=channel,
+        store=store,
+        allow_risk_at_or_below=RiskLevel.LOW,
+        **more,
     )
+    return service, channel, sink
+
+
+async def test_a_read_inside_the_project_is_allowed_without_a_card(tmp_path: Path) -> None:
+    """The point of the setting: three hundred cards a day is a phone somebody
+    stops reading, and the ones that matter arrive in that noise."""
+    project = a_project(tmp_path)
+    service, channel, sink = asking_nobody(tmp_path)
     await sink.open()
 
-    outcome = await ask(service, "cd /a/project && grep -rn thing .")
+    outcome = await ask(service, f"cd {project} && grep -rn thing .", project_dir=str(project))
 
     assert outcome.decision is BridgeDecision.ALLOW
     assert channel.asked == 0, "nobody should have been asked"
-    assert any(r.action.value == "risk.preauthorized" for r in await sink.read_all())
 
 
-async def test_the_rules_that_allowed_it_are_written_down(tmp_path: Path) -> None:
-    """The same reason the other two grants record their pattern: this is a
-    path where nobody was asked, and afterwards the only way to know why is
-    what was written here."""
-    service, _, sink = build_service(tmp_path, allow_risk_at_or_below=RiskLevel.LOW)
+async def test_what_let_it_through_is_written_down_whole(tmp_path: Path) -> None:
+    """The command, where it ran, why it counted as a read and which rules
+    said so. The first version kept the rule names alone, and whether a
+    command had gone through a hole in them could not be told from the log."""
+    project = a_project(tmp_path)
+    service, _, sink = asking_nobody(tmp_path)
     await sink.open()
 
-    await ask(service, "git status")
+    await ask(service, "git status && git log -3", project_dir=str(project), cwd=str(project))
 
-    granted = [r for r in await sink.read_all() if r.action.value == "risk.preauthorized"]
-    assert granted and "git_read" in granted[0].detail["matched"]
+    [granted] = [r for r in await sink.read_all() if r.action.value == "risk.preauthorized"]
+    assert granted.detail["command"] == "git status && git log -3"
+    assert granted.detail["cwd"] == str(project)
+    assert granted.detail["why"] == "a read inside the project: git status, git log"
+    assert granted.detail["rules"] == "reads/1"
+
+
+@pytest.mark.parametrize(
+    ("tool", "command"),
+    [
+        ("Write", "Write /project/pytest/report.txt"),
+        ("Edit", "Edit /project/ruff/config.py"),
+        ("edit", ".opencode/plugins/prettier.ts"),
+        ("mcp__db__delete_rows", 'mcp__db__delete_rows {"table": "ls"}'),
+    ],
+)
+async def test_only_a_shell_command_is_judged_as_one(
+    tmp_path: Path, tool: str, command: str
+) -> None:
+    """Measured: a `Write` whose path held `pytest`, and an opencode edit of a
+    plugin named for `prettier`, went through as low-risk test and lint runs —
+    the second past the guard on the gate's own files."""
+    project = a_project(tmp_path)
+    service, channel, sink = asking_nobody(tmp_path)
+    await sink.open()
+
+    await ask(service, command, tool=tool, project_dir=str(project))
+
+    assert channel.asked == 1
+
+
+async def test_a_command_redaction_would_hide_is_still_a_card(tmp_path: Path) -> None:
+    """Judged redacted, this arrived as `TOKEN=*** git status`."""
+    project = a_project(tmp_path)
+    service, channel, sink = asking_nobody(tmp_path)
+    await sink.open()
+
+    await ask(service, "TOKEN=$(python3${IFS}x.py) git status", project_dir=str(project))
+
+    assert channel.asked == 1
+
+
+async def test_a_read_outside_the_project_is_a_card(tmp_path: Path) -> None:
+    project = a_project(tmp_path)
+    service, channel, sink = asking_nobody(tmp_path)
+    await sink.open()
+
+    await ask(service, "cat ../outside/passwd", project_dir=str(project), cwd=str(project))
+
+    assert channel.asked == 1
+
+
+class RefusingSink:
+    """An audit sink that cannot write anything."""
+
+    async def open(self) -> None:
+        return None
+
+    async def close(self) -> None:
+        return None
+
+    async def write(self, record) -> None:
+        raise OSError("disk full")
+
+
+async def test_a_grant_that_cannot_be_written_down_is_not_made(tmp_path: Path) -> None:
+    """Every grant is recorded, or it is not made: nobody was asked, and the
+    record is the only answer to why. What follows is the card, and a card
+    that cannot be recorded either fails closed — so with the log down, the
+    answer is no, where it used to be yes."""
+    project = a_project(tmp_path)
+    service, _, _ = asking_nobody(tmp_path, audit=AuditLog([RefusingSink()]))
+
+    outcome = await ask(service, "git status", project_dir=str(project))
+
+    assert outcome.decision is BridgeDecision.DENY
+
+
+async def test_a_write_grant_that_cannot_be_written_down_is_not_made(tmp_path: Path) -> None:
+    project = a_project(tmp_path)
+    store = ApprovalStore(ttl=timedelta(minutes=5))
+    channel = NeverAsked(store)
+    service = ApprovalService(
+        store=store,
+        policy=Policy(),
+        redactor=Redactor(),
+        audit=AuditLog([RefusingSink()]),
+        registry=SessionRegistry(),
+        channel=channel,
+        project="alpha-engine",
+        allowed_writes=("src/**",),
+    )
+
+    outcome = await ask(
+        service,
+        "Write src/a.py",
+        tool="Write",
+        project_dir=str(project),
+        file_path=str(project / "src" / "a.py"),
+    )
+
+    assert outcome.decision is BridgeDecision.DENY
 
 
 async def test_a_higher_risk_command_still_asks(tmp_path: Path) -> None:

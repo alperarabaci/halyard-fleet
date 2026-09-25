@@ -195,13 +195,21 @@ def risk_preauthorized(
     project: str,
     tool: str,
     matched: tuple[str, ...],
+    command: str = "",
+    cwd: str = "",
+    why: str = "",
+    rules: str = "",
     now: datetime | None = None,
 ) -> AuditRecord:
-    """A command let through because the rules called it low risk.
+    """A shell command let through as a read the gate understood whole.
 
-    Recorded with the rules that said so, for the same reason the other two
-    grants record their pattern: this is a path where nobody was asked, and
-    afterwards the only way to know why is what was written down here.
+    The action keeps the name it had when a low risk label was the reason, so
+    records from before and after read as one series. Recorded with the
+    command (redacted), where it ran, why it counted as a read and which
+    version of those rules said so: this is a path where nobody was asked, and
+    afterwards the only way to know why is what was written down here. The
+    first version kept the rule names alone, and whether a command had gone
+    through a hole in them could not be told from the log.
     """
     return AuditRecord(
         action=AuditAction.RISK_PREAUTHORIZED,
@@ -210,7 +218,14 @@ def risk_preauthorized(
         session_id=session_id,
         agent_id=agent_id,
         project=project,
-        detail={"tool": tool, "matched": list(matched)},
+        detail={
+            "tool": tool,
+            "matched": list(matched),
+            "command": command,
+            "cwd": cwd,
+            "why": why,
+            "rules": rules,
+        },
     )
 
 

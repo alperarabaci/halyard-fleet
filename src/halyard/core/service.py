@@ -18,7 +18,7 @@ import logging
 from dataclasses import dataclass
 from enum import StrEnum
 
-from halyard.core import refusals, tools, writes
+from halyard.core import reads, refusals, tools, writes
 from halyard.core.approvals import (
     ApprovalRequest,
     ApprovalStore,
@@ -40,7 +40,7 @@ from halyard.core.audit import (
 )
 from halyard.core.events import RiskLevel, Role
 from halyard.core.gate import Gate
-from halyard.core.policy import _SEVERITY, Policy
+from halyard.core.policy import Policy
 from halyard.core.questions import Choice, QuestionStore
 from halyard.core.redaction import Redactor
 from halyard.core.registry import SessionRegistry
@@ -620,9 +620,6 @@ class ApprovalService:
             )
             return ApprovalOutcome(decision=BridgeDecision.DENY, reason=refusals.why(act))
 
-        # Redaction first, before the command is copied anywhere. Everything
-        # downstream — policy, the store, the audit log, the card — sees only
-        # what comes out of here.
         if self._gate.paused:
             # Nothing is created, nothing is asked, nothing is decided. Claude
             # Code falls back to its own permission prompt, which is where the
@@ -633,71 +630,73 @@ class ApprovalService:
                 reason="Halyard is paused; this was not relayed for approval.",
             )
 
+        # What is shown and kept is redacted; what is judged is the command as
+        # it will run. Judged redacted, `TOKEN=$(python3 x.py) git status`
+        # arrived as `TOKEN=*** git status` and read as a harmless status.
         prepared = self._redactor.prepare(command)
-        classification = self._policy.classify(prepared.full, declared=declared_risk)
+        classification = self._policy.classify(command, declared=declared_risk)
 
-        # Named in `tools:` — an MCP query, a search. Checked before the write
-        # grant below because it is the cheaper question, and it can never reach
-        # `Bash` or a file tool: `tools.NEVER` refuses those at both ends.
+        # Three grants, each for one kind of call and blind to the others: a
+        # name under `tools:`, a read the gate understands, a destination under
+        # `writes:`. Each goes through only once it is written down — a grant
+        # the audit log could not take is a card instead.
+
+        # Named in `tools:` — an MCP query, a search. It can never reach `Bash`
+        # or a file tool: `tools.NEVER` refuses those at both ends.
         by_name = tools.allowed_by(tool, self._tools)
-        if by_name is not None:
-            await self._try_to_record(
-                tool_preauthorized(
-                    session_id=session_id,
-                    agent_id=agent_id,
-                    project=project,
-                    tool=tool,
-                    pattern=by_name,
-                )
+        if by_name is not None and await self._try_to_record(
+            tool_preauthorized(
+                session_id=session_id,
+                agent_id=agent_id,
+                project=project,
+                tool=tool,
+                pattern=by_name,
             )
+        ):
             return ApprovalOutcome(
                 decision=BridgeDecision.ALLOW,
                 reason=f"Allowed without asking: {tool} matches {by_name!r} under `tools:`.",
                 risk=classification.risk,
             )
 
-        # Let through because the rules recognised it and called it low. Third
-        # of the three grants, and the only one that reads the command rather
-        # than a name or a destination — which is why it leans entirely on
-        # `policy.py` taking the *highest* risk of everything it matches. A
-        # command is low here only when nothing in it is anything else.
-        #
-        # `defaulted` is excluded on purpose. Nothing matching is not a quiet
-        # kind of low; it is a command no rule has an opinion about, and those
-        # are the ones worth a person.
+        # A shell command that is a read, understood whole and inside the
+        # project — see `reads.py`. Only a shell command: judged as text, a
+        # `Write` to `pytest/report.txt` once read as a test run. The risk
+        # label does not decide it; it is what the card shows, and a high one
+        # is still a question however plain the command looks.
         if (
             self._allow_at_or_below
-            and not classification.defaulted
-            and _SEVERITY[classification.risk] <= _SEVERITY[self._allow_at_or_below]
+            and tool in reads.SHELL_TOOLS
+            and classification.risk is not RiskLevel.HIGH
         ):
-            await self._try_to_record(
+            verdict = reads.judge(command, cwd=cwd, project=project_dir or cwd)
+            if verdict.allowed and await self._try_to_record(
                 risk_preauthorized(
                     session_id=session_id,
                     agent_id=agent_id,
                     project=project,
                     tool=tool,
                     matched=classification.matched,
+                    command=prepared.full,
+                    cwd=cwd or project_dir or "",
+                    why=verdict.why,
+                    rules=reads.VERSION,
                 )
-            )
-            return ApprovalOutcome(
-                decision=BridgeDecision.ALLOW,
-                reason=(
-                    f"Allowed without asking: {classification.risk.value} risk "
-                    f"({', '.join(classification.matched)})."
-                ),
-                risk=classification.risk,
-            )
+            ):
+                return ApprovalOutcome(
+                    decision=BridgeDecision.ALLOW,
+                    reason=f"Allowed without asking: {verdict.why}.",
+                    risk=classification.risk,
+                )
 
-        # The one grant in this system. A write to a path the configuration
-        # names is let through without a card — see `writes.py` for why every
-        # rule there is narrow. Recorded with the pattern that allowed it,
-        # because this is the single path where nobody was asked. A change to
-        # several files at once goes through only if every one of them may.
+        # A write to a path the configuration names — see `writes.py` for why
+        # every rule there is narrow. A change to several files at once goes
+        # through only if every one of them may, and every one is written down.
         if tool in writes.FILE_TOOLS:
             paths = tuple(file_paths or ([file_path] if file_path else []))
             granted = writes.allowed_all(paths, project_dir or cwd, self._writes)
             if granted is not None:
-                for path, pattern in zip(paths, granted, strict=True):
+                recorded = [
                     await self._try_to_record(
                         write_preauthorized(
                             session_id=session_id,
@@ -708,15 +707,20 @@ class ApprovalService:
                             pattern=pattern,
                         )
                     )
-                matched = ", ".join(
-                    f"{path} matches {pattern!r}"
                     for path, pattern in zip(paths, granted, strict=True)
-                )
-                return ApprovalOutcome(
-                    decision=BridgeDecision.ALLOW,
-                    reason=f"Allowed without asking: {matched} under `writes:` in halyard.yaml.",
-                    risk=classification.risk,
-                )
+                ]
+                if all(recorded):
+                    matched = ", ".join(
+                        f"{path} matches {pattern!r}"
+                        for path, pattern in zip(paths, granted, strict=True)
+                    )
+                    return ApprovalOutcome(
+                        decision=BridgeDecision.ALLOW,
+                        reason=(
+                            f"Allowed without asking: {matched} under `writes:` in halyard.yaml."
+                        ),
+                        risk=classification.risk,
+                    )
 
         request = await self._store.create(
             session_id=session_id,
