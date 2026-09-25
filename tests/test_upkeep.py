@@ -452,3 +452,23 @@ def test_only_a_runtime_that_promises_it_answers_without_tools() -> None:
     assert ClaudeCodeRunner.answers_without_tools is True
     assert not getattr(CodexRunner, "answers_without_tools", False)
     assert not getattr(OpencodeRunner, "answers_without_tools", False)
+
+
+def test_a_prompt_of_ones_own_that_is_not_there_is_said(
+    machine: Path, tmp_path: Path, monkeypatch, capsys
+) -> None:
+    """Never swapped for the one that ships: the answer would look like it
+    followed yours."""
+    from halyard import upkeep_cli
+
+    logged(machine, {"command": "uv run pytest -q"})
+    missing = tmp_path / "prompts" / "upkeep" / "runs-advice.md"
+    monkeypatch.setattr(
+        upkeep_cli.upkeep, "load", lambda name: upkeep.Job(name, prompt=missing, timeout=5)
+    )
+    runner = Answering(answered())
+    asking(monkeypatch, runner)
+
+    assert run() == 2
+    assert str(missing) in capsys.readouterr().err
+    assert runner.asked == []

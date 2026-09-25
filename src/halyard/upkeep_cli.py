@@ -88,7 +88,19 @@ def main(args: Sequence[str]) -> int:
         return 1
     model = job.model or settings.inspection_model or "sonnet"
     effort = job.effort or settings.inspection_effort
-    prompt = (job.prompt or runs_advice.PROMPT).read_text(encoding="utf-8")
+    # A prompt of one's own that cannot be read is said, never swapped for the
+    # one that ships: an answer would come back looking like it followed yours.
+    source = job.prompt or runs_advice.PROMPT
+    try:
+        prompt = source.read_text(encoding="utf-8")
+    except OSError as error:
+        print(
+            f"halyard upkeep: cannot read the prompt {source}: {error.strerror or error}. "
+            "`prompt:` under `upkeep: runs-advice:` names it; without one, the prompt "
+            "that ships is used.",
+            file=sys.stderr,
+        )
+        return 2
     still = sum(card.today == "card" for card in found.cards)
     print(f"Asking {model} about {still} cards…", file=sys.stderr, flush=True)
     # An empty directory to run in: the turn has no tools, and nothing it
