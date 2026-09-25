@@ -53,15 +53,26 @@ def entries(path: Path, project: str | None = None) -> dict[str, tuple[str, ...]
     try:
         with contextlib.closing(sqlite3.connect(path)) as db:
             db.executescript(_SCHEMA)
-            rows = db.execute(
-                "SELECT project, entry FROM trusted_runs "
-                + ("WHERE project = ? " if project is not None else "")
-                + "ORDER BY added_at, rowid",
-                (project,) if project is not None else (),
-            ).fetchall()
+            return read(db, project)
     except sqlite3.Error:
         logger.warning("Could not read the trusted runs in %s", path, exc_info=True)
         return {}
+
+
+def read(db: sqlite3.Connection, project: str | None = None) -> dict[str, tuple[str, ...]]:
+    """The same, from a connection the caller opened — read-only, for one that
+    must write nothing. A database with no table yet has kept nothing."""
+    try:
+        rows = db.execute(
+            "SELECT project, entry FROM trusted_runs "
+            + ("WHERE project = ? " if project is not None else "")
+            + "ORDER BY added_at, rowid",
+            (project,) if project is not None else (),
+        ).fetchall()
+    except sqlite3.OperationalError as error:
+        if "no such table" in str(error):
+            return {}
+        raise
     found: dict[str, list[str]] = {}
     for name, entry in rows:
         try:

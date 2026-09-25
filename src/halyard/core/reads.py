@@ -1012,6 +1012,15 @@ def _matches(run: Run, environment: set[str], words: Sequence[_Word], where: _Wh
     return True
 
 
+def parts(command: str) -> tuple[tuple[str, ...], ...] | None:
+    """Each simple command in `command`, as its words — or None when it cannot
+    be parsed. For grouping and showing commands, never for judging them."""
+    try:
+        return tuple(tuple(word.text for word in part.words) for part in _parse(command))
+    except _NotUnderstoodError:
+        return None
+
+
 # --- judging -------------------------------------------------------------------
 
 

@@ -21,7 +21,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from enum import StrEnum
 
-from halyard.core import reads, refusals, tools, writes
+from halyard.core import grants, reads, refusals
 from halyard.core.approvals import (
     ApprovalRequest,
     ApprovalStore,
@@ -477,22 +477,75 @@ class ApprovalService:
         self._store = store
         self._gate = gate or Gate()
         self._policy = policy
-        # Paths a write may reach without a card. Empty unless configured.
         #: Off unless somebody says otherwise, so nothing changes for anybody
         #: who has not asked for it. See `core/refusals.py`.
         self._refuse_agent_commits = refuse_agent_commits
-        self._writes = tuple(allowed_writes)
-        # Tools that may run without a card, by name. Also empty by default.
-        self._tools = tuple(allowed_tools)
-        #: The level at which a command stops being worth asking about.
-        #: None means every one of them is, which is how this shipped and
-        #: is still the default.
-        self._allow_at_or_below = allow_risk_at_or_below
+        #: What goes through without a card: paths under `writes:`, tools
+        #: under `tools:`, and — with the setting on — shell commands `reads`
+        #: understands. All empty or off by default, which is how this shipped.
+        self._rules = grants.Rules(
+            tools=tuple(allowed_tools),
+            writes=tuple(allowed_writes),
+            reads=allow_risk_at_or_below is not None,
+        )
         self._redactor = redactor
         self._audit = audit
         self._registry = registry
         self._channel = channel
         self._project = project
+
+    async def _recorded(
+        self,
+        grant: grants.Grant,
+        *,
+        session_id: str,
+        agent_id: str,
+        project: str,
+        tool: str,
+        matched: tuple[str, ...],
+        command: str,
+        cwd: str,
+    ) -> bool:
+        """Write a grant down, every part of it. False when any of it could not
+        be, which makes it a card."""
+        if grant.kind == "tools":
+            return await self._try_to_record(
+                tool_preauthorized(
+                    session_id=session_id,
+                    agent_id=agent_id,
+                    project=project,
+                    tool=tool,
+                    pattern=grant.pattern,
+                )
+            )
+        if grant.kind == "reads":
+            return await self._try_to_record(
+                risk_preauthorized(
+                    session_id=session_id,
+                    agent_id=agent_id,
+                    project=project,
+                    tool=tool,
+                    matched=matched,
+                    command=command,
+                    cwd=cwd,
+                    why=grant.why,
+                    rules=reads.VERSION,
+                )
+            )
+        recorded = [
+            await self._try_to_record(
+                write_preauthorized(
+                    session_id=session_id,
+                    agent_id=agent_id,
+                    project=project,
+                    tool=tool,
+                    file_path=path,
+                    pattern=pattern,
+                )
+            )
+            for path, pattern in zip(grant.paths, grant.patterns, strict=True)
+        ]
+        return all(recorded)
 
     def _entries(self, texts: Sequence[str]) -> tuple[reads.Run, ...]:
         """Entries as `reads` takes them, each parsed once however often it is
@@ -682,94 +735,41 @@ class ApprovalService:
         prepared = self._redactor.prepare(command)
         classification = self._policy.classify(command, declared=declared_risk)
 
-        # Three grants, each for one kind of call and blind to the others: a
-        # name under `tools:`, a read the gate understands, a destination under
-        # `writes:`. Each goes through only once it is written down — a grant
-        # the audit log could not take is a card instead.
-
-        # Named in `tools:` — an MCP query, a search. It can never reach `Bash`
-        # or a file tool: `tools.NEVER` refuses those at both ends.
-        by_name = tools.allowed_by(tool, self._tools)
-        if by_name is not None and await self._try_to_record(
-            tool_preauthorized(
-                session_id=session_id,
-                agent_id=agent_id,
-                project=project,
-                tool=tool,
-                pattern=by_name,
-            )
+        # Whether it goes through without a card is decided in `grants.py`, in
+        # one place, so what `halyard upkeep` works out from the log is what
+        # happens here. Only a shell command needs the project's trusted
+        # commands, and only then are they read.
+        runs = (
+            await self._runs_for(project_dir or cwd)
+            if grants.shell_judged(tool, self._rules)
+            else ()
+        )
+        grant = grants.grant_for(
+            tool=tool,
+            command=command,
+            risk=classification.risk,
+            cwd=cwd,
+            project_dir=project_dir,
+            rules=self._rules,
+            runs=runs,
+            file_path=file_path,
+            file_paths=file_paths,
+        )
+        # A grant goes through only once it is written down: one the audit log
+        # could not take is a card instead.
+        if grant is not None and await self._recorded(
+            grant,
+            session_id=session_id,
+            agent_id=agent_id,
+            project=project,
+            tool=tool,
+            matched=classification.matched,
+            command=prepared.full,
+            cwd=cwd or project_dir or "",
         ):
             return ApprovalOutcome(
-                decision=BridgeDecision.ALLOW,
-                reason=f"Allowed without asking: {tool} matches {by_name!r} under `tools:`.",
-                risk=classification.risk,
+                decision=BridgeDecision.ALLOW, reason=grant.reason, risk=classification.risk
             )
-
-        # A shell command understood whole inside the project: reads, and the
-        # commands the project named under `runs:` — see `reads.py`. Only a
-        # shell command: judged as text, a `Write` to `pytest/report.txt` once
-        # read as a test run. The risk label does not decide it; it is what the
-        # card shows, and a high one is still a question however plain the
-        # command looks.
-        if (
-            self._allow_at_or_below
-            and tool in reads.SHELL_TOOLS
-            and classification.risk is not RiskLevel.HIGH
-        ):
-            root = project_dir or cwd
-            runs = await self._runs_for(root)
-            verdict = reads.judge(command, cwd=cwd, project=root, runs=runs)
-            if verdict.allowed and await self._try_to_record(
-                risk_preauthorized(
-                    session_id=session_id,
-                    agent_id=agent_id,
-                    project=project,
-                    tool=tool,
-                    matched=classification.matched,
-                    command=prepared.full,
-                    cwd=cwd or project_dir or "",
-                    why=verdict.why,
-                    rules=reads.VERSION,
-                )
-            ):
-                return ApprovalOutcome(
-                    decision=BridgeDecision.ALLOW,
-                    reason=f"Allowed without asking: {verdict.why}.",
-                    risk=classification.risk,
-                )
-
-        # A write to a path the configuration names — see `writes.py` for why
-        # every rule there is narrow. A change to several files at once goes
-        # through only if every one of them may, and every one is written down.
-        if tool in writes.FILE_TOOLS:
-            paths = tuple(file_paths or ([file_path] if file_path else []))
-            granted = writes.allowed_all(paths, project_dir or cwd, self._writes)
-            if granted is not None:
-                recorded = [
-                    await self._try_to_record(
-                        write_preauthorized(
-                            session_id=session_id,
-                            agent_id=agent_id,
-                            project=project,
-                            tool=tool,
-                            file_path=path,
-                            pattern=pattern,
-                        )
-                    )
-                    for path, pattern in zip(paths, granted, strict=True)
-                ]
-                if all(recorded):
-                    matched = ", ".join(
-                        f"{path} matches {pattern!r}"
-                        for path, pattern in zip(paths, granted, strict=True)
-                    )
-                    return ApprovalOutcome(
-                        decision=BridgeDecision.ALLOW,
-                        reason=(
-                            f"Allowed without asking: {matched} under `writes:` in halyard.yaml."
-                        ),
-                        risk=classification.risk,
-                    )
 
         request = await self._store.create(
             session_id=session_id,
@@ -785,6 +785,9 @@ class ApprovalService:
             reason=reason,
             asks=asks,
             patterns=patterns,
+            cwd=cwd,
+            project_dir=project_dir,
+            redacted=prepared.full != command,
         )
 
         # Record that it was asked before anybody can act on it. An approval

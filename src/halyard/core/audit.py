@@ -130,6 +130,12 @@ def approval_requested(request: ApprovalRequest, *, now: datetime | None = None)
             "reason": request.reason,
             "tool_use_id": request.tool_use_id,
             "expires_at": request.expires_at.isoformat(),
+            # Where it ran, what it was judged against, and whether the command
+            # above is less than what ran — so the log can be judged again later
+            # by the rules of the day, and says when it cannot be.
+            "cwd": request.cwd,
+            "project_dir": request.project_dir,
+            "redacted": request.redacted,
             # What was actually asked, where that was not the command — so "what
             # did I approve" has the answer the screen had, not only its occasion.
             # Absent otherwise, so every other record keeps exactly its shape.

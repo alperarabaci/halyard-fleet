@@ -142,6 +142,19 @@ settings:
 #   - mcp__*__list_*
 #   - mcp__*__get_*
 
+# Jobs Halyard does about itself, run from the terminal — Halyard is not a
+# project, and nothing here is wired. `runs-advice` reads the cards a project
+# still asks and has a model propose what it could trust under `runs:`; every
+# count is Halyard's, and you add what you agree with. docs/upkeep.md.
+#
+#   make runs-advice p=alpha-engine
+#
+# upkeep:
+#   runs-advice:
+#     model: opus          # HALYARD_INSPECTION_MODEL when unset
+#     effort: high
+#     days: 14
+
 # Sentences you say often enough to want a name for. Each key becomes a
 # command, so this one is `/md`, and anything typed after it is added on the
 # end — `/md the failing test` arrives as the prompt with that appended.
