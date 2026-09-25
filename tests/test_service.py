@@ -1202,3 +1202,20 @@ async def test_an_entry_added_from_the_command_line_applies_at_once(tmp_path: Pa
     await ask(service, "make test-fast", project_dir=str(project))
 
     assert channel.asked == 1
+
+
+async def test_a_card_says_where_it_ran_and_whether_redaction_changed_it(tmp_path: Path) -> None:
+    """So the log can be judged again later, and says when it cannot be."""
+    service, _, sink = build_service(tmp_path)
+    await sink.open()
+
+    await ask(service, "export API_KEY=abcdef1234567890 && ls", cwd="/p/src", project_dir="/p")
+    await ask(service, "ls", cwd="/p")
+
+    first, second = [
+        record.detail
+        for record in await sink.read_all()
+        if record.action is AuditAction.APPROVAL_REQUESTED
+    ]
+    assert (first["cwd"], first["project_dir"], first["redacted"]) == ("/p/src", "/p", True)
+    assert (second["cwd"], second["project_dir"], second["redacted"]) == ("/p", None, False)

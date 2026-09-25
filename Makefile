@@ -1,7 +1,7 @@
 # The handful of things you actually type. Everything here is a shortcut for a
 # command in the README, not a new way of doing anything.
 
-.PHONY: help run service restart stop doctor sessions usage init wire unwire verify test lint fmt check
+.PHONY: help run service restart stop doctor sessions usage runs-advice init wire unwire verify test lint fmt check
 
 help:  ## Show this help
 	@grep -hE '^[a-z-]+:.*?## ' $(MAKEFILE_LIST) \
@@ -36,6 +36,11 @@ sessions:  ## List the session names this machine can see
 #     make usage d=1    the last one
 usage:  ## What the turns Halyard started itself used, by model and purpose  [d=<days>]
 	@uv run halyard usage $(d)
+
+#     make runs-advice p=alpha-engine            a model proposes, you add what you agree with
+#     make runs-advice p=alpha-engine e=1        only the evidence, and no model
+runs-advice:  ## What project p could trust to run without a card  [p=<project> d=<days> e=1]
+	@uv run halyard upkeep runs-advice $(p) $(if $(d),--days $(d)) $(if $(e),--evidence)
 
 init:  ## Build halyard.yaml, wire a project, and check it
 	uv run halyard init
