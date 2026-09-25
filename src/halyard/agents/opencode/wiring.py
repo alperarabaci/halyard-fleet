@@ -54,6 +54,9 @@ PLUGIN = "halyard.ts"
 #: The bridge, by name, in whichever directory this install keeps them.
 SOURCE = "opencode.ts"
 
+#: This install's bridges, for `doctor` to hold a project's copy up against.
+BRIDGE_DIR = Path(__file__).resolve().parents[4] / "bridge"
+
 #: The project's own configuration. `opencode.jsonc` is also read, and is not
 #: written here: choosing between two files a project may have is guesswork,
 #: and the one without comments is the one that can be rewritten safely.
@@ -104,6 +107,15 @@ def answered_without_asking(setting: object) -> list[str]:
     return sorted(
         pattern for pattern, how in setting.items() if pattern != EVERYTHING and how != "ask"
     )
+
+
+def current(plugin: Path, bridges: Path) -> bool | None:
+    """Whether a project's copy of the plugin is this install's bridge — or
+    None when either cannot be read, which says nothing either way."""
+    try:
+        return plugin.read_text(encoding="utf-8") == (bridges / SOURCE).read_text(encoding="utf-8")
+    except OSError:
+        return None
 
 
 def _read(path: Path) -> dict:
