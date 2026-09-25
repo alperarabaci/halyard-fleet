@@ -334,6 +334,25 @@ issue tracker on its own. An agent without a role is labelled with its runtime
 alone, `claude`; in a project that does give roles, a session without one is
 not labelled, since it could be any of them.
 
+**`runs:`** names the commands an agent may run in this project without a card —
+its test and lint targets, written the way an agent types them:
+
+```yaml
+    runs:
+      - make test-fast
+      - UV_CACHE_DIR=* uv run pytest *
+```
+
+They run the project's code, so they are never taken for reads; the list says you
+trust these. A last `*` takes further arguments — options, and paths inside the
+project — so `uv run pytest -q tests/x.py` matches the second line and
+`make test-fast clean` does not match the first. `NAME=*` says that setting may be
+given. A command still goes through only when every part of it is understood:
+`make test-fast 2>&1 | tail -20` is a run and a read, and `make test-fast > /tmp/log`
+is a card. It needs `HALYARD_ALLOW_RISK_AT_OR_BELOW: low`. An entry that could run
+anything — `bash *`, `python -c *`, `uv run *`, `make *` — is ignored rather than
+trusted, and `halyard doctor` says which.
+
 An agent can choose its own label with `task_label:` — `navigator:agent`, to
 match labels the tracker already uses. It is written as given, so leave the
 model out of it: an agent keeps its runtime and its role, but its model is chosen

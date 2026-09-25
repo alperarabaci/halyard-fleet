@@ -52,8 +52,9 @@ from pathlib import Path
 SHELL_TOOLS = frozenset({"Bash", "bash", "exec_command", "exec", "shell", "run_command"})
 
 #: Written into the audit record of every command this let through, so a rule
-#: that later turns out wrong can be traced to the grants it made.
-VERSION = "reads/1"
+#: that later turns out wrong can be traced to the grants it made. `reads/2`
+#: added a project's `runs:`.
+VERSION = "reads/2"
 
 #: Files that may hold a secret. Asked about even inside the project.
 SENSITIVE = (
@@ -848,8 +849,181 @@ _COMMANDS: dict[str, Callable[[Sequence[_Word], _Where], None]] = {
 _ASSIGNMENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 
 
-def judge(command: str, *, cwd: str | None, project: str | None) -> Verdict:
-    """Whether this command is a read, understood whole, inside `project`.
+# --- a project's own commands --------------------------------------------------
+#
+# A test run is not a read: it runs the project's code, and a test the agent
+# just wrote runs with it. So it is never let through as one. A project may
+# name the commands it trusts that way under `runs:` — its test and lint
+# targets — and those go through too, judged part by part like everything
+# else: `make test-fast 2>&1 | tail -20` is a run and a read.
+
+
+@dataclass(frozen=True)
+class Run:
+    """One entry under a project's `runs:`, as its words.
+
+    Written the way an agent types the command: `make test-fast`, or
+    `uv run pytest *` where a last `*` takes any further arguments — each of
+    them an option or a path inside the project. A `*` anywhere else is one
+    word, and a word with `*` or `?` in it one word matching it. `NAME=*` at the
+    front says that setting may be given; the command matches without it too.
+    """
+
+    text: str
+    words: tuple[str, ...]
+    environment: frozenset[str]
+    #: A last `*`: further arguments allowed.
+    open: bool
+
+
+#: Commands that run another command, whatever is named after them. An entry
+#: starting with one would let anything through under a respectable name.
+RUNS_ANYTHING = frozenset(
+    {
+        "sudo",
+        "doas",
+        "env",
+        "xargs",
+        "eval",
+        "exec",
+        "command",
+        "builtin",
+        "time",
+        "nice",
+        "nohup",
+        "timeout",
+        "watch",
+        "bash",
+        "sh",
+        "zsh",
+        "dash",
+        "fish",
+        "ksh",
+        "ssh",
+        "scp",
+        "docker",
+        "podman",
+        "kubectl",
+    }
+)
+
+#: Interpreters, which run code given them as an argument.
+INTERPRETERS = frozenset(
+    {"python", "python3", "node", "ruby", "perl", "php", "deno", "bun", "lua", "Rscript"}
+)
+
+#: What hands an interpreter its code on the command line.
+_CODE_FLAGS = frozenset({"*", "-c", "-e", "--eval", "-p", "--print", "-"})
+
+#: Words after which the next named word is what runs: `npx vitest`, `make test`.
+_RUNS_NEXT = frozenset({"npx", "uvx", "bunx", "make"})
+
+#: The same, after a package manager: `uv run pytest`, `pnpm exec vitest`.
+#: Only there — `vitest run` is vitest's own word.
+_PACKAGE_MANAGERS = frozenset(
+    {"uv", "npm", "pnpm", "yarn", "poetry", "pipenv", "pipx", "bundle", "cargo", "go", "bun"}
+)
+
+
+def _wild(word: str) -> bool:
+    return any(c in word for c in "*?[")
+
+
+def _runner_at(words: Sequence[str], index: int) -> bool:
+    word = words[index]
+    if word in _RUNS_NEXT:
+        return True
+    return word in ("run", "exec", "dlx") and index > 0 and words[index - 1] in _PACKAGE_MANAGERS
+
+
+def _program_after(words: Sequence[str], index: int) -> str:
+    """The word that names what runs after a runner, or nothing. A pattern
+    right after an option is that option's value — `--package *` — not it."""
+    previous = ""
+    for word in words[index + 1 :]:
+        if word.startswith("-"):
+            previous = word
+            continue
+        if previous and _wild(word):
+            previous = ""
+            continue
+        return word
+    return ""
+
+
+def run_entry(text: str) -> Run:
+    """An entry under `runs:`, or `ValueError` saying why it cannot be one.
+
+    Refused when it could run anything: a shell, a wrapper or a remote runner
+    first (`bash`, `sudo`, `env`, `ssh`, `docker`), an interpreter handed code
+    (`python -c *`), or a runner with no named program after it (`uv run *`,
+    `make *`). Everything else is the project's to decide.
+    """
+    try:
+        parts = _parse(text)
+    except _NotUnderstoodError as why:
+        raise ValueError(f"`{text}` is not a plain command: {why}") from None
+    if len(parts) != 1 or parts[0].inputs or not parts[0].words:
+        raise ValueError(f"`{text}` must be one command, with no pipes, separators or redirects")
+    words = [word.text for word in parts[0].words]
+    environment = set()
+    while words and _ASSIGNMENT.match(words[0]):
+        environment.add(words.pop(0).split("=", 1)[0])
+    if not words:
+        raise ValueError(f"`{text}` names no command")
+    first = words[0]
+    if _wild(first) or os.path.basename(first) in RUNS_ANYTHING:
+        raise ValueError(f"`{text}` could run anything: `{first}` runs whatever follows it")
+    for index, word in enumerate(words):
+        following = words[index + 1] if index + 1 < len(words) else ""
+        called = os.path.basename(word)
+        if (called in INTERPRETERS or called.startswith("python3.")) and (
+            following in _CODE_FLAGS or not following
+        ):
+            raise ValueError(f"`{text}` could run anything: `{word}` given its code")
+        if _runner_at(words, index):
+            program = _program_after(words, index)
+            if not program or _wild(program):
+                raise ValueError(f"`{text}` could run anything: nothing named after `{word}`")
+    opened = words[-1] == "*"
+    return Run(
+        text=text,
+        words=tuple(words[:-1] if opened else words),
+        environment=frozenset(environment),
+        open=opened,
+    )
+
+
+def _matches(run: Run, environment: set[str], words: Sequence[_Word], where: _Where) -> bool:
+    """Whether a part is this entry: its settings allowed, its words in place,
+    and anything past them — for an entry that takes more — inside the project."""
+    if not environment <= (run.environment | SAFE_ENVIRONMENT):
+        return False
+    if len(words) < len(run.words) or (not run.open and len(words) != len(run.words)):
+        return False
+    for pattern, word in zip(run.words, words, strict=False):
+        if any(c in pattern for c in "*?["):
+            if not fnmatch.fnmatchcase(word.text, pattern):
+                return False
+            _check_path(word, where)
+        elif word.text != pattern or word.globbed:
+            return False
+    _files("the rest")(words[len(run.words) :], where)
+    return True
+
+
+# --- judging -------------------------------------------------------------------
+
+
+def judge(
+    command: str,
+    *,
+    cwd: str | None,
+    project: str | None,
+    runs: Sequence[Run] = (),
+) -> Verdict:
+    """Whether this command is understood whole, inside `project`: reads, and
+    the commands the project named under `runs:`.
 
     `cwd` is where it runs; without one it runs at the project's root. Without
     a project there is nothing to measure a path against, and nothing is let
@@ -863,28 +1037,47 @@ def judge(command: str, *, cwd: str | None, project: str | None) -> Verdict:
     if not where.inside(here):
         return Verdict(False, "it runs outside the project")
     names: list[str] = []
+    ran: list[str] = []
     try:
         for part in _parse(command):
-            where = _judge_part(part, where, names)
+            where = _judge_part(part, where, names, runs, ran)
     except _NotUnderstoodError as why:
         return Verdict(False, str(why))
     if not names:
         return Verdict(False, "nothing to run")
-    return Verdict(True, "a read inside the project: " + ", ".join(dict.fromkeys(names)))
+    listed = ", ".join(dict.fromkeys(names))
+    if ran:
+        return Verdict(True, f"the project's own `runs:` and reads inside it: {listed}")
+    return Verdict(True, f"a read inside the project: {listed}")
 
 
-def _judge_part(part: _Part, where: _Where, names: list[str]) -> _Where:
+def _judge_part(
+    part: _Part, where: _Where, names: list[str], runs: Sequence[Run], ran: list[str]
+) -> _Where:
     """Judge one simple command, and say where the next one may be running."""
     for given in part.inputs:
         _check_path(given, where)
     words = list(part.words)
+    environment: set[str] = set()
     while words and _ASSIGNMENT.match(words[0].text):
-        name = words[0].text.split("=", 1)[0]
-        if name not in SAFE_ENVIRONMENT:
-            raise _NotUnderstoodError(f"`{name}=` set for it, which can change what runs")
-        words.pop(0)
+        environment.add(words.pop(0).text.split("=", 1)[0])
     if not words:
+        if environment - SAFE_ENVIRONMENT:
+            raise _NotUnderstoodError("a setting made for what runs after it")
         return where
+    # The project's own, first: it is what somebody wrote down for exactly
+    # this, and it may name a command no read covers — `git fetch`.
+    for run in runs:
+        try:
+            if _matches(run, environment, words, where):
+                names.append(run.text)
+                ran.append(run.text)
+                return where
+        except _NotUnderstoodError:
+            continue
+    unsafe = sorted(environment - SAFE_ENVIRONMENT)
+    if unsafe:
+        raise _NotUnderstoodError(f"`{unsafe[0]}=` set for it, which can change what runs")
     name = words[0].text
     if (words[0].globbed and name != "[") or words[0].tilde or "/" in name:
         raise _NotUnderstoodError(f"`{name}`, a program named by its path or a pattern")

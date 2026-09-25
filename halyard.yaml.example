@@ -75,8 +75,9 @@ settings:
   # understands whole: every part a known read (`grep`, `sed -n`, `git log`…)
   # with options that only read, nothing it cannot parse (`$VAR`, `$(…)`, a
   # heredoc, a redirect into a file), and every path inside the project and
-  # not a file that may hold a secret. Anything else is a card, as before.
-  # Off unless set; `low` is the only value it takes.
+  # not a file that may hold a secret. A project's own `runs:` count as well.
+  # Anything else is a card, as before. Off unless set; `low` is the only
+  # value it takes.
   # HALYARD_ALLOW_RISK_AT_OR_BELOW: low
 
   # Keep every inspection run in the database — what the model was given, word
@@ -183,6 +184,18 @@ projects:
     #   pull-branch: make pull-branch TASK={input.task}   # typed when /command runs it
     #   next-task: [cleanup, pull-branch]              # a list: one after another, stops at a failure
     # validate: test-fast             # run first by /review_and_commit
+    # Commands an agent may run here without a card, written as they are typed.
+    # They run this project's code, so they are never taken for reads; this says
+    # you trust them. A last `*` takes further arguments — options, and paths
+    # inside the project — and `NAME=*` says that setting may be given. Only with
+    # HALYARD_ALLOW_RISK_AT_OR_BELOW on. An entry that could run anything
+    # (`bash *`, `python -c *`, `uv run *`, `make *`) is ignored, and doctor says so.
+    # runs:
+    #   - make test-fast
+    #   - make lint-be
+    #   - UV_CACHE_DIR=* uv run pytest *
+    #   - uv run --package * pytest *
+    #   - npx vitest run *
     # Inspections `/inspect` offers over a chat's last reply, and transitions
     # `/transition` offers — each the project's own file, read relative to `path`. A
     # transition carries the last reply, puts its prompt in front, runs its commands
