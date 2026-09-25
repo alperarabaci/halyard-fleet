@@ -494,6 +494,7 @@ class ApprovalService:
         file_path: str | None = None,
         asks: str | None = None,
         patterns: list[str] | None = None,
+        file_paths: list[str] | None = None,
     ) -> ApprovalOutcome:
         """Ask for permission, and answer. Never raises."""
         try:
@@ -512,6 +513,7 @@ class ApprovalService:
                 file_path=file_path,
                 asks=asks,
                 patterns=patterns,
+                file_paths=file_paths,
             )
         except Exception:
             # The outer net. Anything not handled below still has to come out of
@@ -578,6 +580,7 @@ class ApprovalService:
         file_path: str | None = None,
         asks: str | None = None,
         patterns: list[str] | None = None,
+        file_paths: list[str] | None = None,
     ) -> ApprovalOutcome:
         project = project_name(project_dir, cwd, self._project)
         role = seat_of(role, session_name, self._seats)
@@ -688,26 +691,30 @@ class ApprovalService:
         # The one grant in this system. A write to a path the configuration
         # names is let through without a card — see `writes.py` for why every
         # rule there is narrow. Recorded with the pattern that allowed it,
-        # because this is the single path where nobody was asked.
+        # because this is the single path where nobody was asked. A change to
+        # several files at once goes through only if every one of them may.
         if tool in writes.FILE_TOOLS:
-            pattern = writes.allowed_by(file_path, project_dir or cwd, self._writes)
-            if pattern is not None:
-                await self._try_to_record(
-                    write_preauthorized(
-                        session_id=session_id,
-                        agent_id=agent_id,
-                        project=project,
-                        tool=tool,
-                        file_path=file_path or "",
-                        pattern=pattern,
+            paths = tuple(file_paths or ([file_path] if file_path else []))
+            granted = writes.allowed_all(paths, project_dir or cwd, self._writes)
+            if granted is not None:
+                for path, pattern in zip(paths, granted, strict=True):
+                    await self._try_to_record(
+                        write_preauthorized(
+                            session_id=session_id,
+                            agent_id=agent_id,
+                            project=project,
+                            tool=tool,
+                            file_path=path,
+                            pattern=pattern,
+                        )
                     )
+                matched = ", ".join(
+                    f"{path} matches {pattern!r}"
+                    for path, pattern in zip(paths, granted, strict=True)
                 )
                 return ApprovalOutcome(
                     decision=BridgeDecision.ALLOW,
-                    reason=(
-                        f"Allowed without asking: {file_path} matches "
-                        f"{pattern!r} under `writes:` in halyard.yaml."
-                    ),
+                    reason=f"Allowed without asking: {matched} under `writes:` in halyard.yaml.",
                     risk=classification.risk,
                 )
 

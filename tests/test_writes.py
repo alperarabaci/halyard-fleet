@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 
-from halyard.core.writes import FILE_TOOLS, allowed_by
+from halyard.core.writes import FILE_TOOLS, allowed_all, allowed_by
 
 
 @pytest.fixture
@@ -192,11 +192,33 @@ def test_the_log_says_why_a_matching_write_was_asked(
     assert "'**'" in caplog.text and ".git" in caplog.text
 
 
+# --- a change to several files -----------------------------------------------
+
+
+def test_several_files_are_granted_when_every_one_is(project: Path) -> None:
+    granted = allowed_all(("NOTES/a.md", "docs/b.md"), str(project), ("NOTES/**", "docs/**"))
+
+    assert granted == ("NOTES/**", "docs/**")
+
+
+def test_one_file_outside_the_grant_asks_for_all_of_them(project: Path) -> None:
+    """One question at the runtime covers them all, so a grant covering four
+    of five would answer the fifth for somebody who never saw it."""
+    assert allowed_all(("NOTES/a.md", "src/main.py"), str(project), ("NOTES/**",)) is None
+    assert allowed_all(("NOTES/a.md", ".opencode/plugins/x.ts"), str(project), ("**",)) is None
+
+
+def test_no_files_is_no_grant(project: Path) -> None:
+    assert allowed_all((), str(project), ("**",)) is None
+
+
 # --- the shape of the thing --------------------------------------------------
 
 
 def test_the_file_tools_are_the_ones_that_take_a_path() -> None:
     assert "Write" in FILE_TOOLS and "Edit" in FILE_TOOLS
+    # opencode asks about every file change as `edit`.
+    assert "edit" in FILE_TOOLS
     # Bash is gated too, but it is not a file tool and is never pre-authorized
     # by a path — its whole argument is a command, not a destination.
     assert "Bash" not in FILE_TOOLS

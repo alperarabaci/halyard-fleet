@@ -114,6 +114,10 @@ class ApprovalRequestBody(BaseModel):
     #: The destination of a file tool, matched against the `writes:` block to
     #: decide whether this one may go through without a card.
     file_path: str | None = None
+    #: Every file a change touches, for a runtime whose one question can cover
+    #: several — opencode's patch — each matched the same way. Relative ones
+    #: are measured from `project_dir`.
+    file_paths: list[str] | None = None
     #: What the runtime says it is asking, in its own words, and what that
     #: covers — sent by a bridge whose runtime asks about something other than
     #: the command itself. See `ApprovalRequest.asks`.
@@ -671,6 +675,7 @@ def create_app(settings: Settings, *, channel=None) -> FastAPI:
             file_path=body.file_path,
             asks=body.asks,
             patterns=body.patterns,
+            file_paths=body.file_paths,
         )
         return ApprovalResponse(
             decision=outcome.decision,

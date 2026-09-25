@@ -577,6 +577,78 @@ async def test_a_write_outside_the_configured_paths_still_asks(tmp_path: Path) -
     assert AuditAction.APPROVAL_REQUESTED in {r.action for r in await sink.read_all()}
 
 
+async def test_an_opencode_edit_is_granted_by_where_it_writes(tmp_path: Path) -> None:
+    """opencode asks about every file change as `edit`, with the files relative
+    to its worktree. Until they were sent, every one was a card."""
+    project = tmp_path / "repo"
+    (project / "NOTES").mkdir(parents=True)
+    service, sink = build_with_writes(tmp_path, ("NOTES/**",))
+    await sink.open()
+
+    outcome = await service.request(
+        session_id="ses_1",
+        agent_id="opencode",
+        tool="edit",
+        command="NOTES/p2.md",
+        project_dir=str(project),
+        file_paths=["NOTES/p2.md"],
+    )
+
+    assert outcome.allowed
+    assert "NOTES/p2.md matches 'NOTES/**'" in outcome.reason
+    [kept] = await sink.read_all()
+    assert (kept.action, kept.detail["path"]) == (AuditAction.WRITE_PREAUTHORIZED, "NOTES/p2.md")
+
+
+async def test_a_change_to_several_files_goes_through_only_if_every_one_may(
+    tmp_path: Path,
+) -> None:
+    project = tmp_path / "repo"
+    (project / "NOTES").mkdir(parents=True)
+    service, sink = build_with_writes(tmp_path, ("NOTES/**",))
+    await sink.open()
+
+    both = await service.request(
+        session_id="ses_1",
+        agent_id="opencode",
+        tool="edit",
+        command="NOTES/a.md",
+        project_dir=str(project),
+        file_paths=["NOTES/a.md", "NOTES/b.md"],
+    )
+    one_outside = await service.request(
+        session_id="ses_1",
+        agent_id="opencode",
+        tool="edit",
+        command="NOTES/a.md",
+        project_dir=str(project),
+        file_paths=["NOTES/a.md", "src/main.py"],
+    )
+
+    assert both.allowed
+    assert not one_outside.allowed
+    actions = [record.action for record in await sink.read_all()]
+    assert actions.count(AuditAction.WRITE_PREAUTHORIZED) == 2, "one record per file granted"
+    assert AuditAction.APPROVAL_REQUESTED in actions
+
+
+async def test_an_opencode_edit_that_names_no_file_asks(tmp_path: Path) -> None:
+    project = tmp_path / "repo"
+    (project / "NOTES").mkdir(parents=True)
+    service, sink = build_with_writes(tmp_path, ("**",))
+    await sink.open()
+
+    outcome = await service.request(
+        session_id="ses_1",
+        agent_id="opencode",
+        tool="edit",
+        command="(no command given)",
+        project_dir=str(project),
+    )
+
+    assert not outcome.allowed
+
+
 async def test_the_widest_pattern_still_asks_before_the_gates_own_files(tmp_path: Path) -> None:
     """`**` covers the directory the gate's hooks are read from, and granting
     that would let an agent take the gate off without a card."""

@@ -150,6 +150,26 @@ const asksAbout = (asked: Asked): string | undefined => {
   return `Access external directory ${shown}`
 }
 
+/**
+ * Every file an `edit` question would change, relative to the worktree, for
+ * `writes:` in `halyard.yaml` to be matched against. Nothing for any other
+ * question.
+ *
+ * Read out of 1.18.32's own source: the edit and write tools ask with their
+ * one file in `patterns`, relative to the worktree, and the patch tool asks
+ * with every file it touches there. A move is the exception — `patterns` names
+ * where the file was, and only `metadata.files[].relativePath` where it goes.
+ * Both are sent, because a write to either is a write.
+ */
+const touched = (asked: Asked): string[] | undefined => {
+  if (asked.permission !== "edit") return undefined
+  const files = Array.isArray(asked.metadata?.files) ? asked.metadata.files : []
+  const paths = [...(asked.patterns ?? []), ...files.map((file: any) => file?.relativePath)].filter(
+    (path) => typeof path === "string" && path !== "",
+  )
+  return paths.length ? [...new Set(paths)] : undefined
+}
+
 export const HalyardGate = async ({ client, directory, worktree }: any) => {
   log("loaded", { directory, halyard: HALYARD })
 
@@ -165,6 +185,7 @@ export const HalyardGate = async ({ client, directory, worktree }: any) => {
   const answer = async (asked: Asked) => {
     const command = describe(asked)
     const asks = asksAbout(asked)
+    const files = touched(asked)
 
     let decision: string | undefined
     try {
@@ -184,6 +205,8 @@ export const HalyardGate = async ({ client, directory, worktree }: any) => {
           // Only where the question is not simply the command: for a shell call
           // the pattern *is* the command, and showing it twice is noise.
           ...(asks ? { asks, patterns: asked.patterns } : {}),
+          // Measured from the worktree, which `project_dir` above is.
+          ...(files ? { file_paths: files } : {}),
         }),
         signal: AbortSignal.timeout(TIMEOUT_MS),
       })

@@ -132,7 +132,8 @@ it, and patterns are matched *inside the project the write belongs to* — a pat
 that climbs out with `..` or through a symlink is refused however it is spelled.
 The gate's own files always ask, whatever the pattern: `.git/` and the
 directories the runtimes read their hooks from, so even `**` cannot let an agent
-switch the gate off.
+switch the gate off. opencode's edits are matched the same way, and a change to
+several files at once goes through only when every one of them may.
 
 **MCP calls and web fetches** are gated the same way, and for the same reason:
 at the desk they are a popup, and from a phone they were denied with nothing to
