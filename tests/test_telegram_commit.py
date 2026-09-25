@@ -1189,6 +1189,14 @@ async def test_a_finished_run_reports_what_it_did_and_is_kept(tmp_path: Path, wi
         assert db.execute("SELECT workflow, outcome, deliveries FROM workflow_runs").fetchall() == [
             ("level3", "done", 4)
         ]
+        assert db.execute(
+            "SELECT step, round, decision, decided_by FROM workflow_steps ORDER BY at"
+        ).fetchall() == [
+            ("review", 1, "forward", "review"),
+            ("to_nav", 1, "back", "to_nav"),
+            ("review", 2, "forward", "review"),
+            ("to_nav", 2, "forward", "to_nav"),
+        ]
 
 
 async def test_a_stopped_run_is_kept_without_a_report(tmp_path: Path, wired) -> None:
@@ -1310,6 +1318,34 @@ async def test_a_review_s_back_reaches_the_navigator_and_its_reply_goes_back(
     assert "Sent back by: nav (navigator)" in text
     assert "- Round: 2/2" in text
     assert any("<b>review</b>'s <b>back</b> stands" in sent["text"] for sent in api.sent)
+
+
+async def test_a_decision_the_navigator_acted_on_is_kept_as_the_review_s(
+    tmp_path: Path, wired
+) -> None:
+    """Read back later, a run says on whose word it moved: the navigator's
+    replies here carry no decision, and the reviewer's stand."""
+    import sqlite3
+
+    channel, _, runner, repo = wired
+    channel._database = tmp_path / "halyard.db"
+    flow_in(channel, repo, tmp_path, runner, **REVIEWED)
+    await started(channel)
+    await answered(channel, "xrev", "The loader skips a row.\nDECISION: back")
+    await answered(channel, "nav", "Fixed the loader; the row is read now.")
+    await answered(channel, "xrev", "DECISION: forward")
+
+    await answered(channel, "nav", "Done.")
+
+    with sqlite3.connect(channel._database) as db:
+        assert db.execute(
+            "SELECT step, round, decision, decided_by FROM workflow_steps ORDER BY at"
+        ).fetchall() == [
+            ("review", 1, "back", "review"),
+            ("reviewed", 1, "back", "review"),
+            ("review", 2, "forward", "review"),
+            ("reviewed", 2, "forward", "review"),
+        ]
 
 
 async def test_the_navigator_s_own_decision_overrules_the_review(tmp_path: Path, wired) -> None:

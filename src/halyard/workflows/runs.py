@@ -44,6 +44,12 @@ class Round:
     at: datetime
     #: The seat's label. The answer to this round is what that seat says next.
     to: str
+    #: What the run did on that answer — `forward`, `back`, `wait`, `next` —
+    #: and whose word it was: this step's own, or the one before it when this
+    #: step acts on it (`decided_by:`). Empty until the answer comes, and for
+    #: an answer that decided nothing.
+    decision: str = ""
+    decided_by: str = ""
 
 
 @dataclass(frozen=True)
@@ -161,7 +167,12 @@ def _rounds_from(value: object) -> dict[str, tuple[Round, ...]]:
             except (TypeError, ValueError):
                 continue
             kept.append(
-                Round(at=at if at.tzinfo else at.replace(tzinfo=UTC), to=str(entry.get("to") or ""))
+                Round(
+                    at=at if at.tzinfo else at.replace(tzinfo=UTC),
+                    to=str(entry.get("to") or ""),
+                    decision=str(entry.get("decision") or ""),
+                    decided_by=str(entry.get("decided_by") or ""),
+                )
             )
         found[str(key)] = tuple(kept)
     return found
@@ -221,7 +232,15 @@ def save(where: Path, work: str, run: Run) -> None:
         "entered": run.entered,
         "leaving": run.leaving,
         "rounds": {
-            key: [{"at": entry.at.isoformat(), "to": entry.to} for entry in entries]
+            key: [
+                {
+                    "at": entry.at.isoformat(),
+                    "to": entry.to,
+                    "decision": entry.decision,
+                    "decided_by": entry.decided_by,
+                }
+                for entry in entries
+            ]
             for key, entries in run.rounds.items()
         },
     }
@@ -248,6 +267,17 @@ def record(where: Path, work: str, key: str, *, to: str, now: datetime | None = 
     entries = (*run.rounds.get(key, ()), Round(at=now or datetime.now(UTC), to=to))
     save(where, work, replace(run, rounds={**run.rounds, key: entries}))
     return len(entries)
+
+
+def answered(run: Run, key: str, *, decision: str, decided_by: str) -> Run:
+    """The same run, the latest round of `key` marked with what its answer
+    decided. Unchanged when that step has had no round: its message reached
+    nobody, so there is no answer to mark."""
+    entries = run.rounds.get(key, ())
+    if not entries:
+        return run
+    marked = replace(entries[-1], decision=decision, decided_by=decided_by)
+    return replace(run, rounds={**run.rounds, key: (*entries[:-1], marked)})
 
 
 def clear(where: Path, work: str) -> None:

@@ -24,8 +24,9 @@ says to wait, and when a message reached nobody — and each of those is said in
 the chat it was started from, with the run kept so it can go on afterwards.
 
 **What a run did outlives it.** When it ends — finished or stopped — its steps
-are kept in the database beside the tokens, and a finished one says in the
-chat when it started, when it ended and which steps it took — see `journal`.
+are kept in the database beside the tokens, each with what its answer decided
+and on whose word, and a finished one says in the chat when it started, when it
+ended and which steps it took — see `journal`. `halyard runs` reads them back.
 
 **Nothing here knows a chat or a runtime.** A step is delivered by whatever
 drives it — the Telegram channel today — through `halyard.transitions`, which is
@@ -37,7 +38,16 @@ from halyard.workflows import journal
 from halyard.workflows.decisions import Decision, decided, read, word_for
 from halyard.workflows.envelope import lines_for
 from halyard.workflows.flow import PHASES, Next, after
-from halyard.workflows.runs import Round, Run, clear, counted_as, current, record, save
+from halyard.workflows.runs import (
+    Round,
+    Run,
+    answered,
+    clear,
+    counted_as,
+    current,
+    record,
+    save,
+)
 
 __all__ = [
     "PHASES",
@@ -46,6 +56,7 @@ __all__ = [
     "Round",
     "Run",
     "after",
+    "answered",
     "clear",
     "counted_as",
     "current",

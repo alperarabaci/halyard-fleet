@@ -220,8 +220,31 @@ to_nav · review x2 · reviewed x2 · phase 1: discover, develop, developed · p
 The same run is kept in Halyard's database, beside the tokens the turns Halyard starts
 use: one row per run in `workflow_runs` (`project`, `work`, `workflow`, `started_at`,
 `finished_at`, `outcome`, `phases`, `deliveries`) and one per step delivered in
-`workflow_steps` (`at`, `step`, `phase`, `round`, `agent`). A run stopped with **⏹** is
-kept too, as `stopped`, without the report. The two join on the project and the time:
+`workflow_steps` (`at`, `step`, `phase`, `round`, `agent`, `decision`, `decided_by`). A run
+stopped with **⏹** is kept too, as `stopped`, without the report.
+
+`decision` is what the run did on that step's answer — `forward`, `back`, `wait` or `next`,
+whatever words the project's prompts use for them — and `decided_by` is whose word it was:
+the step itself, or the one before it for a step that acts on it (`decided_by:`). Both are
+empty for an answer that decided nothing or never came, and for steps kept before
+2026-09-25.
+
+`halyard runs` reads them back without SQL: the latest runs a line each, or one piece of
+work's runs step by step.
+
+```
+$ halyard runs #386
+alpha-engine#386 · level3 · done
+09-25 12:00 → 12:35 · 35 min
+
+  at     step      round  agent  decided
+  12:00  review    1      xrev   back
+  12:05  reviewed  1      nav    back (review)
+  12:20  review    2      xrev   forward
+  12:30  reviewed  2      nav    forward (review)
+```
+
+The tables join the tokens on the project and the time:
 
 ```sql
 SELECT s.step, s.phase, s.round, s.agent, SUM(u.output_tokens)
