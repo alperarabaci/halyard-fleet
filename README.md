@@ -6,8 +6,8 @@
 
 Halyard Fleet puts your coding agent's permission prompt on your phone.
 
-When Claude Code or Codex wants to run something, you see the command, the project it
-came from, and how risky it is — then you allow or deny from Telegram. You can also
+When Claude Code, Codex, opencode or ZCode wants to run something, you see the command,
+the project it came from, and how risky it is — then you allow or deny from Telegram. You can also
 send new instructions into the running session and read its replies there. And when a
 turn dies on a server error the desk would otherwise swallow — an overloaded model, a
 usage limit hit mid-run — that reaches you too, instead of the session just going quiet.
@@ -19,7 +19,7 @@ control plane — denies. Two things go through without a person, both empty unt
 fill them in: writes to paths you named, and tools you named. Every one is written to
 the audit log with the pattern that allowed it.
 
-**Runtimes:** Claude Code, Codex &nbsp;·&nbsp; **Channel:** Telegram &nbsp;·&nbsp; **Tested on:** macOS
+**Runtimes:** Claude Code, Codex, opencode, ZCode &nbsp;·&nbsp; **Channel:** Telegram &nbsp;·&nbsp; **Tested on:** macOS
 
 
 <p align="center">
@@ -81,13 +81,32 @@ overrides it — so a container can pass a token in without writing it to disk.
 
 > **A wired project depends on this process.** With Halyard down, a Bash command in
 > that project is *denied* — all of them — and there is no terminal prompt to approve
-> it with. `halyard unwire <path>` hands the project back.
+> it with. opencode is the exception: its question waits on its own screen for
+> whoever is at the desk. `halyard unwire <path>` hands the project back.
 > [The rest of what to expect](docs/before-you-wire-it.md) is worth five minutes
 > before you walk away from the machine.
 
 Check it any time with `uv run halyard doctor`, and prove the gate actually stops
 things with `uv run halyard verify` — which runs real commands into it rather than
 reading configuration.
+
+## Runtimes
+
+Each runtime brings its approvals to your phone and its replies with them. They differ
+in where the gate lives and in what a message from the phone needs. `halyard wire`
+writes the gate, and `halyard doctor` says what is still missing.
+
+| Runtime | The gate | A message from the phone |
+|---|---|---|
+| Claude Code | hooks in `.claude/settings.local.json` | resumes the session |
+| Codex | hooks in `.codex/hooks.json`, trusted once in Codex | resumes the thread |
+| opencode | a plugin in `.opencode/plugins/`, and `permission` in `opencode.json` | goes into the opencode that is open, started with `opencode --port 4096` |
+| ZCode | hooks in `.zcode/config.json`, trusted once in ZCode | needs `ZCODE_TOKEN` and `ZCODE_MODEL` in `halyard.yaml`; without them the agent takes its messages at the desk |
+
+Codex and ZCode skip hooks nobody has trusted, without a word; `halyard wire` says how
+to trust them, and never does it itself. opencode's question is on its
+own screen as well as your phone: either can answer, and the first answer wins. A ZCode
+turn stops at a captcha — see [Known limitations](#known-limitations).
 
 ## Commands
 
