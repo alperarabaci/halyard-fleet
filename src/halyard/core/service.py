@@ -14,9 +14,10 @@ exception escaping this method would eventually become an approval.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from enum import StrEnum
 
@@ -458,19 +459,21 @@ class ApprovalService:
         refuse_agent_commits: bool = False,
         allow_risk_at_or_below: RiskLevel | None = None,
         runs_by_project: Mapping[str, Sequence[str]] | None = None,
+        trusted_runs: Callable[[str], Sequence[str]] | None = None,
     ) -> None:
         self._seats = seats or {}
-        # Each project's `runs:`, by where the project is. An entry that no
-        # longer reads is dropped here too; the configuration already said so.
-        self._runs: dict[str, tuple[reads.Run, ...]] = {}
-        for path, texts in (runs_by_project or {}).items():
-            entries = []
-            for text in texts:
-                try:
-                    entries.append(reads.run_entry(text))
-                except ValueError:
-                    logger.warning("Ignoring `runs:` entry %r for %s", text, path)
-            self._runs[os.path.realpath(os.path.expanduser(path))] = tuple(entries)
+        # Each configured project's `runs:`, by where the project is — every
+        # project, since the table may hold entries for one the file has none
+        # for. An entry that no longer reads is dropped here too.
+        self._parsed: dict[str, reads.Run | None] = {}
+        self._runs: dict[str, tuple[reads.Run, ...]] = {
+            os.path.realpath(os.path.expanduser(path)): self._entries(texts)
+            for path, texts in (runs_by_project or {}).items()
+        }
+        #: The same project's entries kept in the database, read each time:
+        #: one added from the command line applies without a restart. Given the
+        #: project's path as a key of `runs_by_project`.
+        self._trusted = trusted_runs
         self._store = store
         self._gate = gate or Gate()
         self._policy = policy
@@ -491,14 +494,34 @@ class ApprovalService:
         self._channel = channel
         self._project = project
 
-    def _runs_for(self, root: str | None) -> tuple[reads.Run, ...]:
-        """The `runs:` of the configured project this directory is in — the
-        innermost, when one project sits inside another."""
+    def _entries(self, texts: Sequence[str]) -> tuple[reads.Run, ...]:
+        """Entries as `reads` takes them, each parsed once however often it is
+        read back. One that no longer stands is left out, and said once."""
+        kept = []
+        for text in texts:
+            if text not in self._parsed:
+                try:
+                    self._parsed[text] = reads.run_entry(text)
+                except ValueError as why:
+                    logger.warning("Ignoring a `runs:` entry: %s", why)
+                    self._parsed[text] = None
+            if (parsed := self._parsed[text]) is not None:
+                kept.append(parsed)
+        return tuple(kept)
+
+    async def _runs_for(self, root: str | None) -> tuple[reads.Run, ...]:
+        """What the configured project this directory is in trusts to run — the
+        innermost, when one project sits inside another: its `runs:`, and the
+        entries kept for it in the database."""
         if not root or not self._runs:
             return ()
         here = os.path.realpath(os.path.expanduser(root))
         inside = [path for path in self._runs if os.path.commonpath([here, path]) == path]
-        return self._runs[max(inside, key=len)] if inside else ()
+        if not inside:
+            return ()
+        found = max(inside, key=len)
+        kept = await asyncio.to_thread(self._trusted, found) if self._trusted else ()
+        return (*self._runs[found], *self._entries(kept))
 
     async def request(
         self,
@@ -694,7 +717,8 @@ class ApprovalService:
             and classification.risk is not RiskLevel.HIGH
         ):
             root = project_dir or cwd
-            verdict = reads.judge(command, cwd=cwd, project=root, runs=self._runs_for(root))
+            runs = await self._runs_for(root)
+            verdict = reads.judge(command, cwd=cwd, project=root, runs=runs)
             if verdict.allowed and await self._try_to_record(
                 risk_preauthorized(
                     session_id=session_id,

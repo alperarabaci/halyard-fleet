@@ -353,6 +353,21 @@ is a card. It needs `HALYARD_ALLOW_RISK_AT_OR_BELOW: low`. An entry that could r
 anything — `bash *`, `python -c *`, `uv run *`, `make *` — is ignored rather than
 trusted, and `halyard doctor` says which.
 
+The same list can be kept without editing the file, in Halyard's database:
+
+```bash
+halyard rules add alpha-engine "uv run pytest *"   # quoted: the * is Halyard's
+halyard rules                                      # both places, and where each is written
+halyard rules export rules.yaml                    # on this machine
+halyard rules import rules.yaml                    # on the other one
+```
+
+What is added this way applies from the next command, without a restart, and is
+checked like an entry in the file: one that could run anything is not kept.
+`remove` takes back only what was added here — `runs:` in `halyard.yaml` is yours to
+edit. Projects are matched by name, so an export works on a machine that keeps the
+project somewhere else.
+
 An agent can choose its own label with `task_label:` — `navigator:agent`, to
 match labels the tracker already uses. It is written as given, so leave the
 model out of it: an agent keeps its runtime and its role, but its model is chosen

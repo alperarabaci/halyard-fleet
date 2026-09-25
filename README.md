@@ -264,6 +264,7 @@ missing costs orientation, never the session.
 | `halyard sessions` | session names this machine can see |
 | `halyard usage` | what the turns Halyard started itself used, by model and purpose |
 | `halyard runs` | what workflow runs did: the latest, or one work's steps and decisions |
+| `halyard rules` | the commands each project trusts to run without asking; add, export, import |
 | `halyard service install` | run it as a launchd service (macOS) that updates itself first |
 
 `halyard service install` sets up a launchd agent that comes back after a crash

@@ -82,6 +82,7 @@ USAGE = """usage: halyard [command]
   usage [days]  what the turns Halyard started itself used, by model and purpose
   inspect ...   give a kept inspection to another model, and compare the runs
   runs [..]     what workflow runs did: the latest, or one work's step by step
+  rules [..]    the commands each project trusts to run without asking
 """
 
 
@@ -163,6 +164,11 @@ def main() -> None:
         from halyard.runs_cli import main as runs_main
 
         raise SystemExit(runs_main(args[1:]))
+
+    if command == "rules":
+        from halyard.rules_cli import main as rules_main
+
+        raise SystemExit(rules_main(args[1:]))
 
     if command not in ("serve",):
         print(f"halyard: unknown command {command!r}\n\n{USAGE}", file=sys.stderr)
