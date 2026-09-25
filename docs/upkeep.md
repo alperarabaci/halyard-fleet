@@ -53,9 +53,23 @@ reason for each, never for counts or commands.
 
 Nothing is added by the job. You run the lines you agree with.
 
+**Every run is kept.** A row in `upkeep_runs` in `halyard.db` holds:
+- the evidence;
+- the model's answer;
+- what Halyard made of it, checked and counted;
+- what you were shown.
+
+The row's id is the one its turn ran under, which is `turn_usage.session_id` for the same turn. A run that got no answer, or one of the wrong shape, is kept too.
+
+```bash
+uv run halyard upkeep recent              # the last runs, with their ids
+uv run halyard upkeep show 3f2a9c1e       # what one printed, again
+uv run halyard upkeep show 3f2a --evidence   # and what it was given
+```
+
 **It works with Halyard stopped.**
 - It reads the database over a read-only connection, closed before the model
-  is asked.
+  is asked. It writes the run's own row only once the turn is over.
 - It never talks to the running service, never waits for a card, and ends when
   the model fails or runs out of time.
 - What the turn used is recorded like any turn Halyard starts: `upkeep
