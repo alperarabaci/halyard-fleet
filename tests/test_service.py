@@ -109,6 +109,7 @@ def build_service(
     refuse_agent_commits: bool = False,
     allow_risk_at_or_below=None,
     runs_by_project=None,
+    trusted_runs=None,
 ) -> tuple[ApprovalService, ApprovalStore, JsonlAuditSink]:
     store = store or ApprovalStore(ttl=ttl)
     sink = JsonlAuditSink(tmp_path / "audit.jsonl")
@@ -125,6 +126,7 @@ def build_service(
         refuse_agent_commits=refuse_agent_commits,
         allow_risk_at_or_below=allow_risk_at_or_below,
         runs_by_project=runs_by_project,
+        trusted_runs=trusted_runs,
     )
     return service, store, sink
 
@@ -1182,5 +1184,21 @@ async def test_the_innermost_project_decides(tmp_path: Path) -> None:
 
     await ask(service, "make test", project_dir=str(inner))
     await ask(service, "make lint", project_dir=str(inner))
+
+    assert channel.asked == 1
+
+
+async def test_an_entry_added_from_the_command_line_applies_at_once(tmp_path: Path) -> None:
+    """Read on every question: `halyard rules add` needs no restart."""
+    project = a_project(tmp_path)
+    kept: list[str] = []
+    service, channel, sink = asking_nobody(
+        tmp_path, runs_by_project={str(project): ()}, trusted_runs=lambda where: tuple(kept)
+    )
+    await sink.open()
+
+    await ask(service, "make test-fast", project_dir=str(project))
+    kept.append("make test-fast")
+    await ask(service, "make test-fast", project_dir=str(project))
 
     assert channel.asked == 1

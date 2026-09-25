@@ -190,6 +190,8 @@ projects:
     # inside the project — and `NAME=*` says that setting may be given. Only with
     # HALYARD_ALLOW_RISK_AT_OR_BELOW on. An entry that could run anything
     # (`bash *`, `python -c *`, `uv run *`, `make *`) is ignored, and doctor says so.
+    # `halyard rules add` keeps more without editing this file, and `halyard rules
+    # export` / `import` carry the whole list to another machine.
     # runs:
     #   - make test-fast
     #   - make lint-be
