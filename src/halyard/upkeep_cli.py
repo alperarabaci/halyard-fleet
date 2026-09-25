@@ -9,16 +9,22 @@ quietly used instead.
 from __future__ import annotations
 
 import asyncio
+import json
 import sys
 import tempfile
+import time
+import uuid
 from collections.abc import Sequence
+from dataclasses import asdict
+from datetime import UTC, datetime
 from pathlib import Path
 
 from halyard import upkeep
 from halyard.core import grants
-from halyard.upkeep import runs_advice
+from halyard.upkeep import record, runs_advice
 
-USAGE = """usage: halyard upkeep runs-advice <project> [--days N] [--evidence]
+USAGE = """usage: halyard upkeep <runs-advice <project> [--days N] [--evidence]
+                      | recent [n] | show <id> [--evidence]>
 
   runs-advice <project>  what the project could trust to run without a card,
                          from the cards it still asks: Halyard gathers the
@@ -26,10 +32,14 @@ USAGE = """usage: halyard upkeep runs-advice <project> [--days N] [--evidence]
                          what you agree with, with `halyard rules add`
     --days N             how far back to read (14, or `days:` below)
     --evidence           print what the model would be given, and ask no model
+  recent [n]             the last n runs (10), with their ids
+  show <id>              what a run printed, again; --evidence adds what it was
+                         given. An id can be cut to any start no other id has.
 
 Configured under `upkeep: runs-advice:` in halyard.yaml — model, effort, days,
-prompt, timeout. Works with Halyard stopped, and changes nothing: every count is
-Halyard's, and what it proposes is added only by you.
+prompt, timeout. Works with Halyard stopped. Each run is kept in the database,
+and nothing else changes: every count is Halyard's, and what it proposes is added
+only by you.
 """
 
 
@@ -50,9 +60,26 @@ def main(args: Sequence[str]) -> int:
             return 2
         else:
             words.append(item)
-    if len(words) != 2 or words[0] != "runs-advice":
+    what = words[0] if words else ""
+    fits = {
+        "runs-advice": len(words) == 2,
+        "recent": days is None
+        and not evidence_only
+        and (len(words) == 1 or (len(words) == 2 and words[1].isdigit() and int(words[1]) > 0)),
+        "show": len(words) == 2 and days is None,
+    }
+    if not fits.get(what, False):
         print(USAGE, file=sys.stderr)
         return 2
+    if what in ("recent", "show"):
+        try:
+            database = _settings().db_path
+        except ValueError as error:
+            print(f"halyard upkeep: {error}", file=sys.stderr)
+            return 2
+        if what == "recent":
+            return _recent(database, int(words[1]) if len(words) == 2 else 10)
+        return _show(database, words[1], with_evidence=evidence_only)
 
     try:
         settings = _settings()
@@ -103,6 +130,10 @@ def main(args: Sequence[str]) -> int:
         return 2
     still = sum(card.today == "card" for card in found.cards)
     print(f"Asking {model} about {still} cards…", file=sys.stderr, flush=True)
+    # The id the turn runs under is the run's own, so its row joins the tokens
+    # it used in `turn_usage`.
+    ident = str(uuid.uuid4())
+    started, began = datetime.now(UTC), time.monotonic()
     # An empty directory to run in: the turn has no tools, and nothing it
     # could pick up from where it stands belongs in it.
     with tempfile.TemporaryDirectory(prefix="halyard-upkeep-") as nowhere:
@@ -114,10 +145,32 @@ def main(args: Sequence[str]) -> int:
                 effort=effort,
                 timeout=job.timeout,
                 cwd=Path(nowhere),
+                session_id=ident,
                 purpose="upkeep runs-advice",
                 project=project.name,
             )
         )
+    took = time.monotonic() - began
+    advice = runs_advice.advise(answer, found) if answer else None
+    printed = runs_advice.render_advice(found, advice) if advice is not None else None
+    record.keep(
+        settings.db_path,
+        record.Kept(
+            id=ident,
+            at=started,
+            job="runs-advice",
+            project=project.name,
+            model=model,
+            effort=effort,
+            days=found.days,
+            took=took,
+            outcome="answered" if advice else "wrong shape" if answer else "no answer",
+            evidence=text,
+            answer=answer,
+            advice=json.dumps(asdict(advice)) if advice is not None else None,
+            printed=printed,
+        ),
+    )
     if not answer:
         print(
             "halyard upkeep: no answer — the model failed, or took longer than "
@@ -125,8 +178,7 @@ def main(args: Sequence[str]) -> int:
             file=sys.stderr,
         )
         return 1
-    advice = runs_advice.advise(answer, found)
-    if advice is None:
+    if printed is None:
         print(answer)
         print(
             "\nhalyard upkeep: that answer is not in the shape asked for, so nothing in it was "
@@ -134,7 +186,43 @@ def main(args: Sequence[str]) -> int:
             file=sys.stderr,
         )
         return 1
-    print(runs_advice.render_advice(found, advice), end="")
+    print(printed, end="")
+    print(f"\nKept as {ident[:8]} — `halyard upkeep show {ident[:8]}` prints it again.")
+    return 0
+
+
+def _recent(database: Path, limit: int) -> int:
+    runs = record.recent(database, limit)
+    if not runs:
+        print(f"No upkeep run is kept in {database} yet.")
+        return 0
+    for run in runs:
+        chosen = f"{run.model}@{run.effort}" if run.effort else str(run.model)
+        print(
+            f"{run.id[:8]}  {run.at.astimezone():%m-%d %H:%M}  {run.job}  {run.project}  "
+            f"{chosen}  {run.took:.0f}s  {run.outcome}  "
+            f"{record.proposals_of(run)} proposals"
+        )
+    return 0
+
+
+def _show(database: Path, prefix: str, *, with_evidence: bool) -> int:
+    try:
+        run = record.find(database, prefix)
+    except ValueError as several:
+        print(f"halyard upkeep: {several}", file=sys.stderr)
+        return 2
+    if run is None:
+        print(f"halyard upkeep: no run kept in {database} has an id starting {prefix!r}")
+        return 2
+    chosen = f"{run.model}@{run.effort}" if run.effort else str(run.model)
+    print(
+        f"{run.job} for {run.project} · {run.at.astimezone():%Y-%m-%d %H:%M} · {chosen} · "
+        f"{run.took:.0f}s · {run.outcome}\n"
+    )
+    if with_evidence:
+        print(run.evidence)
+    print(run.printed if run.printed is not None else (run.answer or "(no answer)"), end="")
     return 0
 
 

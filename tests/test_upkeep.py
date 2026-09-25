@@ -472,3 +472,92 @@ def test_a_prompt_of_ones_own_that_is_not_there_is_said(
     assert run() == 2
     assert str(missing) in capsys.readouterr().err
     assert runner.asked == []
+
+
+# --- what is kept ------------------------------------------------------------------
+
+
+def test_a_run_is_kept_under_the_id_its_turn_ran_as(machine: Path, monkeypatch, capsys) -> None:
+    """So its row joins the tokens it used in `turn_usage`."""
+    from halyard.upkeep import record
+
+    logged(machine, {"command": "uv run pytest -q"})
+    runner = Answering(answered({"entry": "uv run pytest *", "why": "tests"}))
+    asking(monkeypatch, runner)
+
+    assert run() == 0
+
+    [(_, given)] = runner.asked
+    [kept] = record.recent(machine)
+    assert kept.id == given["session_id"]
+    assert (kept.job, kept.project, kept.model, kept.outcome) == (
+        "runs-advice",
+        "alpha-engine",
+        "opus",
+        "answered",
+    )
+    assert "Still cards today" in kept.evidence
+    assert json.loads(kept.advice)["proposals"][0]["spared"] == 1
+    assert "halyard rules add alpha-engine 'uv run pytest *'" in kept.printed
+    assert f"Kept as {kept.id[:8]}" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize(("answer", "outcome"), [(None, "no answer"), ("Trust it.", "wrong shape")])
+def test_a_run_with_nothing_to_take_is_kept_too(
+    machine: Path, monkeypatch, answer, outcome
+) -> None:
+    """How often that happens is part of the record."""
+    from halyard.upkeep import record
+
+    logged(machine, {"command": "uv run pytest -q"})
+    asking(monkeypatch, Answering(answer))
+
+    assert run() == 1
+
+    [kept] = record.recent(machine)
+    assert (kept.outcome, kept.answer, kept.printed) == (outcome, answer, None)
+
+
+def test_the_evidence_alone_keeps_nothing(machine: Path, monkeypatch) -> None:
+    from halyard.upkeep import record
+
+    logged(machine, {"command": "uv run pytest -q"})
+
+    assert run("--evidence") == 0
+    assert record.recent(machine) == []
+
+
+def test_a_kept_run_is_listed_and_shown_again(machine: Path, monkeypatch, capsys) -> None:
+    from halyard import upkeep_cli
+
+    logged(machine, {"command": "uv run pytest -q"})
+    asking(monkeypatch, Answering(answered({"entry": "uv run pytest *", "why": "tests"})))
+    run()
+    capsys.readouterr()
+
+    assert upkeep_cli.main(["recent"]) == 0
+    [line] = capsys.readouterr().out.splitlines()
+    ident = line.split()[0]
+    assert line.split()[3:] == [
+        "runs-advice",
+        "alpha-engine",
+        "opus",
+        "0s",
+        "answered",
+        "1",
+        "proposals",
+    ]
+
+    assert upkeep_cli.main(["show", ident, "--evidence"]) == 0
+    shown = capsys.readouterr().out
+    assert "runs-advice for alpha-engine" in shown
+    assert "Still cards today" in shown
+    assert "halyard rules add alpha-engine 'uv run pytest *'" in shown
+
+
+def test_an_id_nobody_kept_is_said(machine: Path, capsys) -> None:
+    from halyard import upkeep_cli
+
+    assert upkeep_cli.main(["show", "deadbeef"]) == 2
+    assert upkeep_cli.main(["recent"]) == 0
+    assert "No upkeep run is kept" in capsys.readouterr().out
