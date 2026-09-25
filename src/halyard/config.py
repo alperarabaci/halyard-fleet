@@ -344,21 +344,22 @@ class Settings(BaseSettings):
         default=False, validation_alias="HALYARD_REFUSE_AGENT_COMMITS"
     )
 
-    #: Let a command through without asking when the rules call it low risk.
+    #: Let a shell command through without asking when it is a read the gate
+    #: understands whole, inside the project — see `core/reads.py`.
     #:
     #: Off by default, and `low` is the only thing it accepts. Everything above
     #: that changes the machine — `git commit`, `mv`, `docker compose up` are
     #: all medium — and a setting that could be turned up to medium would be a
     #: switch for disabling the gate, written to look like a preference.
     #:
-    #: What it buys, measured over two weeks of real use: 1406 shell approvals
-    #: from one runtime, of which the great majority were a `grep`, an `ls` or a
-    #: test run. A phone that asks three hundred times a day is a phone somebody
-    #: stops reading, and the cards that matter arrive in that noise.
+    #: What it buys, measured on one machine from 2026-07-20 to 2026-09-25:
+    #: 15,951 cards, 99% allowed, and 38% of the shell ones a read that
+    #: `reads.py` passes. A phone that asks three hundred times a day is a phone
+    #: somebody stops reading, and the cards that matter arrive in that noise.
     #:
-    #: Only a command the rules actually recognised. An unmatched one defaults
-    #: to medium and stays a question: not knowing what something is has never
-    #: been a reason to allow it.
+    #: The name is from when a low risk label was the test. That test let one
+    #: read carry a whole command — `ls | xargs rm` — and it no longer decides:
+    #: every part has to be understood, and a part that is not is a question.
     allow_risk_at_or_below: str | None = Field(
         default=None, validation_alias="HALYARD_ALLOW_RISK_AT_OR_BELOW"
     )

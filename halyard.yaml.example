@@ -71,6 +71,15 @@ settings:
   # that sleeps denies every command on the machine and says nothing.
   # HALYARD_KEEP_AWAKE: false
 
+  # Let a shell command through without a card when it is a read the gate
+  # understands whole: every part a known read (`grep`, `sed -n`, `git log`…)
+  # with options that only read, nothing it cannot parse (`$VAR`, `$(…)`, a
+  # heredoc, a redirect into a file), and every path inside the project and
+  # not a file that may hold a secret. A project's own `runs:` count as well.
+  # Anything else is a card, as before. Off unless set; `low` is the only
+  # value it takes.
+  # HALYARD_ALLOW_RISK_AT_OR_BELOW: low
+
   # Keep every inspection run in the database — what the model was given, word
   # for word, and what it said — to compare models on the same input later.
   # Off unless set, because it is the one place Halyard keeps text: the input
@@ -133,6 +142,19 @@ settings:
 #   - mcp__*__list_*
 #   - mcp__*__get_*
 
+# Jobs Halyard does about itself, run from the terminal — Halyard is not a
+# project, and nothing here is wired. `runs-advice` reads the cards a project
+# still asks and has a model propose what it could trust under `runs:`; every
+# count is Halyard's, and you add what you agree with. docs/upkeep.md.
+#
+#   make runs-advice p=alpha-engine
+#
+# upkeep:
+#   runs-advice:
+#     model: opus          # HALYARD_INSPECTION_MODEL when unset
+#     effort: high
+#     days: 14
+
 # Sentences you say often enough to want a name for. Each key becomes a
 # command, so this one is `/md`, and anything typed after it is added on the
 # end — `/md the failing test` arrives as the prompt with that appended.
@@ -175,6 +197,20 @@ projects:
     #   pull-branch: make pull-branch TASK={input.task}   # typed when /command runs it
     #   next-task: [cleanup, pull-branch]              # a list: one after another, stops at a failure
     # validate: test-fast             # run first by /review_and_commit
+    # Commands an agent may run here without a card, written as they are typed.
+    # They run this project's code, so they are never taken for reads; this says
+    # you trust them. A last `*` takes further arguments — options, and paths
+    # inside the project — and `NAME=*` says that setting may be given. Only with
+    # HALYARD_ALLOW_RISK_AT_OR_BELOW on. An entry that could run anything
+    # (`bash *`, `python -c *`, `uv run *`, `make *`) is ignored, and doctor says so.
+    # `halyard rules add` keeps more without editing this file, and `halyard rules
+    # export` / `import` carry the whole list to another machine.
+    # runs:
+    #   - make test-fast
+    #   - make lint-be
+    #   - UV_CACHE_DIR=* uv run pytest *
+    #   - uv run --package * pytest *
+    #   - npx vitest run *
     # Inspections `/inspect` offers over a chat's last reply, and transitions
     # `/transition` offers — each the project's own file, read relative to `path`. A
     # transition carries the last reply, puts its prompt in front, runs its commands

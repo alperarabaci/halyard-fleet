@@ -1159,3 +1159,35 @@ def test_seats_without_a_role_cannot_ask_for_different_labels_either() -> None:
                 "dev: {runtime: claude-code, task_label: developer}", "dev2: {runtime: claude-code}"
             )
         )
+
+
+# --- runs: --------------------------------------------------------------------
+
+
+def test_a_projects_runs_are_read() -> None:
+    [project] = projects_from_yaml(
+        "projects:\n  a:\n    path: /x\n    runs:\n"
+        "      - make test-fast\n      - uv run pytest *\n"
+    )
+
+    assert project.runs == ("make test-fast", "uv run pytest *")
+    assert project.runs_refused == ()
+
+
+def test_an_entry_that_could_run_anything_is_set_aside_not_fatal() -> None:
+    """A grant that cannot be honoured asks instead, and the rest of the
+    configuration — every other project's gate — carries on."""
+    [project] = projects_from_yaml(
+        "projects:\n  a:\n    path: /x\n    runs:\n      - make test-fast\n      - bash *\n"
+    )
+
+    assert project.runs == ("make test-fast",)
+    [(entry, why)] = project.runs_refused
+    assert entry == "bash *" and "could run anything" in why
+
+
+def test_runs_that_are_not_a_list_ask_rather_than_fail() -> None:
+    [project] = projects_from_yaml("projects:\n  a:\n    path: /x\n    runs: make test-fast\n")
+
+    assert project.runs == ()
+    assert project.runs_refused

@@ -268,6 +268,14 @@ _end = end_group
 class ClaudeCodeRunner:
     """Delivers a message into a Claude Code session by resuming it."""
 
+    #: Whether `ask(..., system=...)` is a turn with no tools at all — not a
+    #: file read, not a command, no MCP server — so it can only read what it
+    #: is given. True here: `--tools=` and `--strict-mcp-config`. Not true of
+    #: every runtime: Codex has nowhere to put a system prompt but in front of
+    #: the text, and opencode keeps its tools. A job that needs this asks for
+    #: it by this name rather than trusting whichever runtime is there.
+    answers_without_tools = True
+
     def __init__(
         self,
         *,

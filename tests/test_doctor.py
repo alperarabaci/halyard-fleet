@@ -513,3 +513,40 @@ def test_an_effort_the_runtime_does_not_take_is_named_where_it_was_written() -> 
     [warning] = lines
     assert "alpha-engine's inspection bounded-context asks for effort 'hihg'" in warning
     assert "max" in warning
+
+
+def test_a_projects_runs_are_named_and_what_was_refused_is_said() -> None:
+    """A list nobody switched on is a list somebody believes is working."""
+    from types import SimpleNamespace
+
+    from halyard.core.config_file import projects_from_yaml
+
+    [project] = projects_from_yaml(
+        "projects:\n  a:\n    path: /x\n    runs:\n      - make test-fast\n      - bash *\n"
+    )
+
+    on = doctor._runs(SimpleNamespace(allow_risk_at_or_below="low"), [project])
+    off = doctor._runs(SimpleNamespace(allow_risk_at_or_below=None), [project])
+
+    assert on[0].startswith(doctor.WARN) and "bash *" in on[0]
+    assert on[1] == f"{doctor.OK}a runs without asking: make test-fast"
+    assert off[1].startswith(doctor.WARN) and "still ask" in off[1]
+
+
+def test_what_halyard_rules_keeps_is_named_beside_the_file(tmp_path) -> None:
+    from types import SimpleNamespace
+
+    from halyard.core import trusted_runs
+    from halyard.core.config_file import projects_from_yaml
+
+    database = tmp_path / "halyard.db"
+    trusted_runs.add(database, "a", "uv run pytest *", by="test")
+    [project] = projects_from_yaml("projects:\n  a:\n    path: /x\n    runs: [make test-fast]\n")
+
+    [line] = doctor._runs(
+        SimpleNamespace(allow_risk_at_or_below="low", db_path=database), [project]
+    )
+
+    assert (
+        line == f"{doctor.OK}a runs without asking: make test-fast, uv run pytest * (halyard rules)"
+    )

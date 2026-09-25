@@ -1,15 +1,11 @@
-"""Tests for the third grant: a command the rules call low.
+"""Tests for the risk label on a card, and the setting that lets reads through.
 
-Two weeks of real use produced 1406 shell approvals from one runtime, and the
-great majority were a `grep`, an `ls` or a test run. A phone asked three
-hundred times a day is a phone somebody stops reading, and the cards that
-matter arrive in that noise. So the rules that already classify a command are
-allowed to end the question.
-
-What carries this is `policy.classify` taking the **highest** risk of
-everything it matches. A command is low here only when nothing in it is
-anything else — which is why a compound command is not a special case and does
-not need to be.
+The label used to be the grant: a command labelled low went through unasked.
+It judged with regular expressions and took the highest match, which is right
+for a label and wrong for a grant — a part no rule recognised raised nothing,
+so `ls | xargs rm` was a read. The grant is `reads.py` now (see
+`test_reads.py`); what is tested here is the label, which the card still shows,
+and the setting that switches the grant on.
 """
 
 from __future__ import annotations
@@ -95,7 +91,7 @@ def test_it_is_off_unless_somebody_asks() -> None:
 
 
 @pytest.mark.parametrize(
-    ("command", "skipped"),
+    ("command", "low"),
     [
         ("cd /a && grep -rn x .", True),
         ("cd /a && pytest -q", True),
@@ -110,9 +106,11 @@ def test_it_is_off_unless_somebody_asks() -> None:
         ("terraform apply", False),
     ],
 )
-def test_which_commands_stop_being_questions(command: str, skipped: bool) -> None:
+def test_what_the_label_calls_low(command: str, low: bool) -> None:
+    """The label only. Whether any of these goes through is `reads.py`'s to
+    say, and a test run is not a read."""
     level, defaulted = risk(command)
-    assert ((not defaulted) and level is RiskLevel.LOW) is skipped
+    assert ((not defaulted) and level is RiskLevel.LOW) is low
 
 
 def test_an_unrecognised_command_is_still_a_question() -> None:

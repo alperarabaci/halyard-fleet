@@ -15,9 +15,11 @@ usage limit hit mid-run — that reaches you too, instead of the session just go
 It runs on your own machine. No open ports, no exposed API, nothing to log into.
 
 Nothing is approved by accident: every failure — a crash, a timeout, an unreachable
-control plane — denies. Two things go through without a person, both empty until you
-fill them in: writes to paths you named, and tools you named. Every one is written to
-the audit log with the pattern that allowed it.
+control plane — denies. Three things can go through without a person, all off until you
+turn them on: writes to paths you named, tools you named, and shell commands the gate
+understands whole inside the project — reads, and the test and lint commands a project
+names under `runs:`. Every one is written to the audit log with what allowed it, and one
+the log cannot take is not let through.
 
 **Runtimes:** Claude Code, Codex, opencode, ZCode &nbsp;·&nbsp; **Channel:** Telegram &nbsp;·&nbsp; **Tested on:** macOS
 
@@ -262,6 +264,8 @@ missing costs orientation, never the session.
 | `halyard sessions` | session names this machine can see |
 | `halyard usage` | what the turns Halyard started itself used, by model and purpose |
 | `halyard runs` | what workflow runs did: the latest, or one work's steps and decisions |
+| `halyard rules` | the commands each project trusts to run without asking; add, export, import |
+| `halyard upkeep` | jobs Halyard does about itself — `runs-advice`: what a project could trust, from the cards it still asks; `recent` and `show` read past runs back |
 | `halyard service install` | run it as a launchd service (macOS) that updates itself first |
 
 `halyard service install` sets up a launchd agent that comes back after a crash
@@ -356,6 +360,7 @@ behalf, uncontrolled agent-to-agent messaging, or multi-user RBAC.
 | [Inspections and transitions](docs/transitions.md) | A project's own inspections, and taking the work from one stage to the next |
 | [Workflows](docs/workflows.md) | A project's transitions taken in order, each reply's last line deciding what comes next |
 | [Telegram](docs/telegram.md) | The bot, agents, models and effort |
+| [Upkeep](docs/upkeep.md) | Jobs Halyard does about itself: which commands a project could trust, from its log |
 | [Architecture](docs/architecture.md) | How the layers fit, and the security posture |
 | [Hook behaviour](docs/hook-payload-notes.md) | What the runtimes' hooks actually do — measured |
 | [Session I/O](docs/session-io-notes.md) | Writing into a live session, and what forks it |

@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import os
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 
@@ -28,7 +29,7 @@ from halyard.channels.stub import StubChannel
 from halyard.channels.telegram import TelegramApi, TelegramChannel
 from halyard.config import ChannelKind, Settings
 from halyard.core import compaction as after_compaction
-from halyard.core import credentials
+from halyard.core import credentials, trusted_runs
 from halyard.core import tools as configured_tools
 from halyard.core import writes as configured_writes
 from halyard.core.approvals import ApprovalStore, Decision
@@ -460,6 +461,33 @@ def create_app(settings: Settings, *, channel=None) -> FastAPI:
     if allowed_tools:
         logger.info("Tools %s run without asking", ", ".join(repr(p) for p in allowed_tools))
 
+    # Each project's own commands, by where it is: its `runs:`, and what
+    # `halyard rules` keeps for it, read on every question so an addition
+    # applies without a restart. An entry that was refused asks, and is said
+    # once here, loudly, rather than taking the gate down.
+    runs_by_project: dict[str, tuple[str, ...]] = {}
+    named: dict[str, str] = {}
+    for found in configured_projects().values():
+        for _, why in found.runs_refused:
+            logger.error(
+                "Project %s: ignoring a `runs:` entry, so it will ask: %s", found.name, why
+            )
+        if found.path is None:
+            continue
+        where = os.path.realpath(os.path.expanduser(str(found.path)))
+        runs_by_project[where] = found.runs
+        named[where] = found.name
+        if found.runs:
+            logger.info(
+                "Project %s runs without asking: %s",
+                found.name,
+                ", ".join(repr(run) for run in found.runs),
+            )
+
+    def trusted(where: str) -> tuple[str, ...]:
+        name = named.get(where)
+        return trusted_runs.entries(settings.db_path, name).get(name, ()) if name else ()
+
     service = ApprovalService(
         store=store,
         policy=Policy(),
@@ -476,6 +504,8 @@ def create_app(settings: Settings, *, channel=None) -> FastAPI:
         allow_risk_at_or_below=(
             RiskLevel(settings.allow_risk_at_or_below) if settings.allow_risk_at_or_below else None
         ),
+        runs_by_project=runs_by_project,
+        trusted_runs=trusted,
     )
     questions = QuestionService(
         store=question_store,

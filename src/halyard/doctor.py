@@ -261,6 +261,34 @@ def _older_spellings(projects) -> list[str]:
     ]
 
 
+def _runs(settings, projects) -> list[str]:
+    """What each project trusts to run without asking — its `runs:` and what
+    `halyard rules` keeps for it — what was refused, and whether any of it can
+    apply at all: it only does with `HALYARD_ALLOW_RISK_AT_OR_BELOW` on, and a
+    list nobody switched on is a list somebody believes is working."""
+    from halyard.core import trusted_runs
+
+    switched = bool(getattr(settings, "allow_risk_at_or_below", None))
+    database = getattr(settings, "db_path", None)
+    kept = trusted_runs.entries(database) if database else {}
+    lines = []
+    for project in projects:
+        for _, why in project.runs_refused:
+            lines.append(f"{WARN}{project.name} — a `runs:` entry is ignored and asks: {why}")
+        added = [entry for entry in kept.get(project.name, ()) if entry not in project.runs]
+        listed = [*project.runs, *(f"{entry} (halyard rules)" for entry in added)]
+        if not listed:
+            continue
+        if switched:
+            lines.append(f"{OK}{project.name} runs without asking: {', '.join(listed)}")
+        else:
+            lines.append(
+                f"{WARN}{project.name} trusts commands to run without asking, but "
+                "HALYARD_ALLOW_RISK_AT_OR_BELOW is not set, so they still ask"
+            )
+    return lines
+
+
 def _inspection_efforts(settings, projects) -> list[str]:
     """Each effort asked for inspections that the runtime they run on would
     not take.
@@ -726,6 +754,8 @@ def run() -> int:
     for line in _older_spellings(described):
         print(line)
     for line in _inspection_efforts(settings, described) if settings_ok else []:
+        print(line)
+    for line in _runs(settings if settings_ok else None, described):
         print(line)
     if seats:
         print()
