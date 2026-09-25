@@ -50,7 +50,7 @@ All policy, risk classification, redaction, and routing live in core, where they
 halyard-fleet/
 ├── docs/
 │   ├── setup.md                        # installing it, wiring a project
-│   ├── telegram.md                     # the bot, seats, models
+│   ├── telegram.md                     # the bot, agents, models
 │   ├── architecture.md                 # this file
 │   ├── mobile-agent-control-plane.md   # full design document
 │   ├── hook-payload-notes.md           # observed Claude Code hook behaviour

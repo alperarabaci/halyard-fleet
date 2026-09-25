@@ -650,3 +650,138 @@ def test_a_command_that_merely_fails_does_not_get_the_path(tmp_path, caplog) -> 
 
     said = "\n".join(r.getMessage() for r in caplog.records)
     assert "PATH this ran with" not in said
+
+
+# --- a list of commands, and a value somebody types -----------------------------
+
+
+def listing(channel: TelegramChannel, lists: dict, **commands: str) -> None:
+    """Commands, and lists of them, as `halyard.yaml` would write them."""
+    from dataclasses import replace
+
+    found = channel._repositories["alpha-engine"]
+    channel._repositories["alpha-engine"] = replace(
+        found, commands=commands, command_lists={name: tuple(o) for name, o in lists.items()}
+    )
+
+
+async def ran_to_the_end(channel: TelegramChannel, update: dict) -> None:
+    await deliver(channel, update)
+    await finished(channel)
+    await settled(channel)
+
+
+async def test_a_list_is_offered_with_the_commands(wired) -> None:
+    channel, api, _ = wired
+    listing(channel, {"next-task": ["cleanup"]}, cleanup="echo tidy")
+
+    await deliver(channel, typed("/command"))
+
+    names = [key["text"] for row in api.sent[-1]["reply_markup"]["inline_keyboard"] for key in row]
+    assert "cleanup" in names and "next-task" in names
+
+
+async def test_a_list_runs_its_commands_in_order(wired) -> None:
+    channel, api, place = wired
+    listing(
+        channel,
+        {"both": ["first", "second"]},
+        first="echo one >> ran.txt",
+        second="echo two >> ran.txt",
+    )
+
+    await ran_to_the_end(channel, typed("/command both"))
+
+    assert (place / "ran.txt").read_text() == "one\ntwo\n"
+    assert "Running <b>both</b>: first then second" in api.sent[0]["text"]
+
+
+async def test_a_list_stops_at_the_first_command_that_fails(wired) -> None:
+    """The project is left where the failure left it, and the chat says what
+    did not run."""
+    channel, api, place = wired
+    listing(channel, {"both": ["first", "second"]}, first="exit 3", second="echo two >> ran.txt")
+
+    await ran_to_the_end(channel, typed("/command both"))
+
+    assert not (place / "ran.txt").exists()
+    assert "stopped at <b>first</b>, so second did not run" in api.sent[-1]["text"]
+
+
+async def test_a_value_is_asked_for_before_anything_runs(wired) -> None:
+    """So a list never stops half way to wait for an answer."""
+    channel, api, place = wired
+    listing(
+        channel,
+        {"next-task": ["cleanup", "pull-branch"]},
+        cleanup="echo tidy >> ran.txt",
+        **{"pull-branch": "echo {input.task} > task.txt"},
+    )
+
+    await deliver(channel, typed("/command next-task"))
+
+    assert "<b>next-task</b> takes <b>task</b>" in api.sent[-1]["text"]
+    assert not (place / "ran.txt").exists()
+
+    await ran_to_the_end(channel, typed("369"))
+
+    assert (place / "ran.txt").read_text() == "tidy\n"
+    assert (place / "task.txt").read_text() == "369\n"
+
+
+async def test_a_value_can_follow_the_name(wired) -> None:
+    channel, _, place = wired
+    listing(channel, {}, pull="echo {input.task} > task.txt")
+
+    await ran_to_the_end(channel, typed("/command pull 42"))
+
+    assert (place / "task.txt").read_text() == "42\n"
+
+
+async def test_a_typed_value_is_one_word_to_the_shell(wired) -> None:
+    """Whatever it holds, it cannot become a second command."""
+    channel, _, place = wired
+    listing(channel, {}, pull="echo {input.task} > task.txt")
+
+    await ran_to_the_end(channel, typed("/command pull 7; touch hacked"))
+
+    assert (place / "task.txt").read_text() == "7; touch hacked\n"
+    assert not (place / "hacked").exists()
+
+
+async def test_a_command_that_takes_nothing_says_so_when_given_something(wired) -> None:
+    channel, api, place = wired
+    listing(channel, {}, cleanup="echo tidy >> ran.txt")
+
+    await ran_to_the_end(channel, typed("/command cleanup --force"))
+
+    assert "takes nothing after its name" in api.sent[-1]["text"]
+    assert not (place / "ran.txt").exists()
+
+
+async def test_another_command_drops_the_question(wired) -> None:
+    """Its answer cannot land on something else."""
+    channel, _, place = wired
+    listing(channel, {}, pull="echo {input.task} > task.txt", cleanup="echo tidy")
+
+    await deliver(channel, typed("/command pull"))
+    await ran_to_the_end(channel, typed("/command cleanup"))
+
+    assert channel._inputs == {}
+    assert not (place / "task.txt").exists()
+
+
+async def test_an_answer_after_the_moment_has_passed_is_not_taken(wired) -> None:
+    from datetime import UTC, datetime
+
+    channel, _, place = wired
+    listing(channel, {}, pull="echo {input.task} > task.txt")
+    now = datetime(2026, 9, 17, 10, 0, tzinfo=UTC)
+    channel._clock = lambda: now
+
+    await deliver(channel, typed("/command pull"))
+    now = now + timedelta(minutes=10)
+    await channel._answer_input(CHAT, None, "369")
+    await settled(channel)
+
+    assert not (place / "task.txt").exists()

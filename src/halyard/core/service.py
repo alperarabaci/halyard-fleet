@@ -338,6 +338,16 @@ class MessageRelay:
         """Send an agent's reply out. Returns whether it was delivered."""
         project = project_name(project_dir, cwd, self._project)
         role = seat_of(role, session_name, self._seats)
+        if (own := self._registry.own(session_id)) is not None:
+            # A turn Halyard started for itself: whoever started it has the
+            # answer already. Relayed, it arrived in the chat as a stranger's
+            # reply, and — seen as an agent at work — put that runtime's label
+            # on the task the branch was for.
+            logger.info(
+                "Reply from Halyard's own turn %s (%s) kept out of the chat", session_id, own
+            )
+            await self._try_to_record_message(session_id, agent_id, project, len(text))
+            return False
         try:
             # Seen before the pause, like every call; see `ApprovalService`.
             await self._registry.observe(
@@ -366,14 +376,30 @@ class MessageRelay:
             logger.exception("Could not relay a message from %s", session_id)
             return False
 
+        await self._try_to_record_message(
+            session_id, agent_id, project, len(masked.text), redacted=masked.redacted,
+            delivered=delivered,
+        )  # fmt: skip
+        return delivered
+
+    async def _try_to_record_message(
+        self,
+        session_id: str,
+        agent_id: str,
+        project: str,
+        length: int,
+        *,
+        redacted: bool = False,
+        delivered: bool = False,
+    ) -> None:
         try:
             await self._audit.record(
                 agent_message(
                     session_id=session_id,
                     agent_id=agent_id,
                     project=project,
-                    length=len(masked.text),
-                    redacted=masked.redacted,
+                    length=length,
+                    redacted=redacted,
                     delivered=delivered,
                 )
             )
@@ -381,7 +407,6 @@ class MessageRelay:
             # An unrecorded message is not an unrecorded decision. It does not
             # change what happened, and there is nothing to undo.
             logger.warning("Could not record a relayed message", exc_info=True)
-        return delivered
 
     async def _deliver(
         self,
@@ -469,6 +494,7 @@ class ApprovalService:
         file_path: str | None = None,
         asks: str | None = None,
         patterns: list[str] | None = None,
+        file_paths: list[str] | None = None,
     ) -> ApprovalOutcome:
         """Ask for permission, and answer. Never raises."""
         try:
@@ -487,6 +513,7 @@ class ApprovalService:
                 file_path=file_path,
                 asks=asks,
                 patterns=patterns,
+                file_paths=file_paths,
             )
         except Exception:
             # The outer net. Anything not handled below still has to come out of
@@ -553,6 +580,7 @@ class ApprovalService:
         file_path: str | None = None,
         asks: str | None = None,
         patterns: list[str] | None = None,
+        file_paths: list[str] | None = None,
     ) -> ApprovalOutcome:
         project = project_name(project_dir, cwd, self._project)
         role = seat_of(role, session_name, self._seats)
@@ -562,14 +590,19 @@ class ApprovalService:
         # keeps a record of who worked where. Seen only on the way to a card, that
         # record had gaps exactly where nobody was asked: a reviewer running
         # read-only commands could spend an afternoon on a task and never be seen.
-        await self._registry.observe(
-            session_id=session_id,
-            agent_id=agent_id,
-            project=project,
-            role=role,
-            session_name=session_name,
-            cwd=cwd,
-        )
+        #
+        # Except a turn Halyard started for itself, which is no seat at all: seen,
+        # it put its runtime's label on the task. Everything after this — the
+        # rules, the card — is the same for it as for anyone.
+        if self._registry.own(session_id) is None:
+            await self._registry.observe(
+                session_id=session_id,
+                agent_id=agent_id,
+                project=project,
+                role=role,
+                session_name=session_name,
+                cwd=cwd,
+            )
 
         # Before anything is decided, including the pause. This is not an
         # approval somebody could be asked for and it is not a grant that could
@@ -658,26 +691,30 @@ class ApprovalService:
         # The one grant in this system. A write to a path the configuration
         # names is let through without a card — see `writes.py` for why every
         # rule there is narrow. Recorded with the pattern that allowed it,
-        # because this is the single path where nobody was asked.
+        # because this is the single path where nobody was asked. A change to
+        # several files at once goes through only if every one of them may.
         if tool in writes.FILE_TOOLS:
-            pattern = writes.allowed_by(file_path, project_dir or cwd, self._writes)
-            if pattern is not None:
-                await self._try_to_record(
-                    write_preauthorized(
-                        session_id=session_id,
-                        agent_id=agent_id,
-                        project=project,
-                        tool=tool,
-                        file_path=file_path or "",
-                        pattern=pattern,
+            paths = tuple(file_paths or ([file_path] if file_path else []))
+            granted = writes.allowed_all(paths, project_dir or cwd, self._writes)
+            if granted is not None:
+                for path, pattern in zip(paths, granted, strict=True):
+                    await self._try_to_record(
+                        write_preauthorized(
+                            session_id=session_id,
+                            agent_id=agent_id,
+                            project=project,
+                            tool=tool,
+                            file_path=path,
+                            pattern=pattern,
+                        )
                     )
+                matched = ", ".join(
+                    f"{path} matches {pattern!r}"
+                    for path, pattern in zip(paths, granted, strict=True)
                 )
                 return ApprovalOutcome(
                     decision=BridgeDecision.ALLOW,
-                    reason=(
-                        f"Allowed without asking: {file_path} matches "
-                        f"{pattern!r} under `writes:` in halyard.yaml."
-                    ),
+                    reason=f"Allowed without asking: {matched} under `writes:` in halyard.yaml.",
                     risk=classification.risk,
                 )
 

@@ -50,10 +50,15 @@ def _away_from_the_real_configuration(
     # Nor ask ZCode anything. Whether it is installed, and whether it trusts a
     # workspace's hooks, are both answered by the application on this machine —
     # a wiring test would start its engine to ask about a temporary directory.
+    from halyard.agents.zcode import sessions as zcode_sessions
     from halyard.agents.zcode import trust as zcode_trust
 
     monkeypatch.setattr(zcode_trust, "app", lambda: None)
     monkeypatch.setattr(zcode_trust, "status", lambda project: None)
+    # Nor read ZCode's own database, which holds every session this machine has
+    # had: a test that wants sessions builds a database of its own.
+    nowhere = tmp_path_factory.mktemp("home")
+    monkeypatch.setattr(zcode_sessions, "_home", lambda: nowhere)
 
 
 @pytest.fixture

@@ -318,7 +318,7 @@ def a_project(tmp_path, **body) -> list:
     written = "\n".join(f"    {line}" for line in body.pop("lines", []))
     return projects_from_yaml(
         f"projects:\n  alpha-engine:\n    path: {code}\n{written}\n"
-        "    seats:\n      nav: {runtime: claude-code}\n"
+        "    agents:\n      nav: {runtime: claude-code}\n"
     )
 
 
@@ -349,32 +349,177 @@ def test_a_file_that_is_not_there_is_named_with_its_setting(tmp_path) -> None:
     assert "NOTES/GONE.md" in said[0]
 
 
-def test_checks_are_read_as_names_and_files(tmp_path) -> None:
+def test_inspections_are_read_as_names_and_files(tmp_path) -> None:
     [project] = a_project(
         tmp_path,
-        lines=["checks:", "  proof: NOTES/checks/proof.md", "  claims: NOTES/checks/claims.md"],
+        lines=[
+            "inspections:",
+            "  proof: NOTES/inspections/proof.md",
+            "  claims: NOTES/inspections/claims.md",
+        ],
     )
 
-    assert project.checks == {
-        "proof": Path("NOTES/checks/proof.md"),
-        "claims": Path("NOTES/checks/claims.md"),
+    assert project.inspections == {
+        "proof": Path("NOTES/inspections/proof.md"),
+        "claims": Path("NOTES/inspections/claims.md"),
     }
+    assert project.older == ()
 
 
-def test_a_check_written_as_anything_but_a_file_is_refused(tmp_path) -> None:
+def test_the_name_inspections_had_before_is_still_read_and_said(tmp_path) -> None:
+    """`checks:` until 2026-09-23. A configuration written then keeps working,
+    and `doctor` says what to rename."""
+    [project] = a_project(
+        tmp_path,
+        lines=[
+            "checks:",
+            "  proof: NOTES/checks/proof.md",
+            "transitions:",
+            "  discovery: {checks: [proof]}",
+        ],
+    )
+
+    assert project.inspections == {"proof": Path("NOTES/checks/proof.md")}
+    assert project.transitions["discovery"].inspections == ("proof",)
+    assert project.older == (
+        "the project: `checks:` is now `inspections:`",
+        "transition 'discovery': `checks:` is now `inspect:`",
+    )
+
+
+def test_the_old_name_and_the_new_one_together_are_refused(tmp_path) -> None:
+    """Which of the two was meant is not something to guess."""
+    with pytest.raises(ValueError, match="both `inspections:` and `checks:`"):
+        a_project(
+            tmp_path,
+            lines=["checks:", "  proof: NOTES/p.md", "inspections:", "  claims: NOTES/c.md"],
+        )
+
+
+def test_the_names_transitions_had_before_are_still_read_and_said(tmp_path) -> None:
+    """`handoffs:` until 2026-09-24, and a step's `handoff:`. A configuration
+    written then keeps working, and `doctor` says what to rename."""
+    [project] = a_project(
+        tmp_path,
+        lines=[
+            "handoffs:",
+            "  review: {to: navigator}",
+            "workflows:",
+            "  steps:",
+            "    reviewing: {handoff: review}",
+            "  level1: [reviewing]",
+        ],
+    )
+
+    assert list(project.transitions) == ["review"]
+    assert project.workflows.steps["reviewing"].transition == "review"
+    assert project.older == (
+        "the project: `handoffs:` is now `transitions:`",
+        "step 'reviewing': `handoff:` is now `transition:`",
+    )
+
+
+def test_the_names_agents_had_before_are_still_read_and_said(tmp_path) -> None:
+    """`seats:` until 2026-09-24, and a step's `seat:`. A configuration written
+    then keeps working, and `doctor` says what to rename."""
+    from halyard.core.config_file import projects_from_yaml
+
+    code = tmp_path / "alpha-engine"
+    code.mkdir()
+    [project] = projects_from_yaml(
+        f"projects:\n  alpha-engine:\n    path: {code}\n"
+        "    seats:\n      nav: {runtime: claude-code, role: navigator}\n"
+        "    transitions:\n      review: {to: navigator}\n"
+        "    workflows:\n"
+        "      steps:\n        reviewing: {transition: review, seat: nav}\n"
+        "      level1: [reviewing]\n"
+    )
+
+    assert [seat.label for seat in project.seats] == ["nav"]
+    assert project.workflows.steps["reviewing"].seat == "nav"
+    assert project.older == (
+        "the project: `seats:` is now `agents:`",
+        "step 'reviewing': `seat:` is now `agent:`",
+    )
+
+
+def test_both_names_for_agents_at_once_are_refused() -> None:
+    from halyard.core.config_file import projects_from_yaml
+
+    with pytest.raises(ValueError, match="both `agents:` and `seats:`"):
+        projects_from_yaml("projects:\n  a:\n    seats: {}\n    agents: {}\n")
+
+
+def test_both_names_for_transitions_at_once_are_refused(tmp_path) -> None:
+    with pytest.raises(ValueError, match="both `transitions:` and `handoffs:`"):
+        a_project(
+            tmp_path,
+            lines=["handoffs:", "  a: {to: navigator}", "transitions:", "  b: {to: navigator}"],
+        )
+
+
+def test_an_inspection_written_as_a_mapping_still_needs_its_file(tmp_path) -> None:
     """Otherwise it becomes a path spelled with its own braces, and fails only
     when somebody runs it."""
     with pytest.raises(ValueError, match="needs a file"):
-        a_project(tmp_path, lines=["checks:", "  proof: {prompt: NOTES/checks/proof.md}"])
+        a_project(tmp_path, lines=["inspections:", "  proof: {model: opus}"])
 
 
-def test_a_check_file_that_is_not_there_is_named_too(tmp_path) -> None:
+def test_an_inspection_says_nothing_it_does_not_read(tmp_path) -> None:
+    """`prompt:` is a transition's. Written here, it would be passed over without a
+    word, and the inspection would run on nothing."""
+    with pytest.raises(ValueError, match="has prompt — it takes file, model, effort"):
+        a_project(tmp_path, lines=["inspections:", "  proof: {prompt: NOTES/proof.md}"])
+
+
+def test_an_inspection_can_run_on_a_model_of_its_own(tmp_path) -> None:
+    """One that needs a stronger model says so where it is described; the rest
+    run on the machine's."""
+    from halyard.core.config_file import ModelChoice
+
+    [project] = a_project(
+        tmp_path,
+        lines=[
+            "inspections:",
+            "  proof: NOTES/inspections/proof.md",
+            "  bounded-context:",
+            "    file: NOTES/inspections/bounded-context.md",
+            "    model: opus",
+            "    effort: High",
+        ],
+    )
+
+    assert project.inspections == {
+        "proof": Path("NOTES/inspections/proof.md"),
+        "bounded-context": Path("NOTES/inspections/bounded-context.md"),
+    }
+    assert project.inspection_models == {"bounded-context": ModelChoice("opus", "high")}
+
+
+def test_what_an_inspection_leaves_unsaid_is_the_machine_s(tmp_path) -> None:
+    from halyard.core.config_file import ModelChoice
+
+    [project] = a_project(
+        tmp_path, lines=["inspections:", "  proof: {file: NOTES/proof.md, effort: max}"]
+    )
+
+    [(name, chosen)] = project.inspection_models.items()
+    assert name == "proof"
+    assert chosen.over(ModelChoice("sonnet", "high")) == ModelChoice("sonnet", "max")
+
+
+def test_an_effort_that_is_not_a_name_is_refused(tmp_path) -> None:
+    with pytest.raises(ValueError, match="`effort:` must be a name"):
+        a_project(tmp_path, lines=["inspections:", "  proof: {file: NOTES/p.md, effort: 3}"])
+
+
+def test_an_inspection_file_that_is_not_there_is_named_too(tmp_path) -> None:
     from halyard.core.config_file import missing_files
 
-    found = a_project(tmp_path, lines=["checks:", "  proof: NOTES/GONE.md"])
+    found = a_project(tmp_path, lines=["inspections:", "  proof: NOTES/GONE.md"])
 
     [said] = missing_files(found)
-    assert "checks.proof" in said
+    assert "inspections.proof" in said
     assert "NOTES/GONE.md" in said
 
 
@@ -392,7 +537,7 @@ def test_label_groups_are_read_as_names_and_labels_in_order(tmp_path) -> None:
 
 
 def test_label_groups_are_empty_unless_written(tmp_path) -> None:
-    [project] = a_project(tmp_path, lines=["checks:", "  proof: NOTES/checks/proof.md"])
+    [project] = a_project(tmp_path, lines=["inspections:", "  proof: NOTES/proof.md"])
 
     assert project.label_groups == {}
 
@@ -400,6 +545,106 @@ def test_label_groups_are_empty_unless_written(tmp_path) -> None:
 def test_a_label_group_written_as_a_mapping_is_refused(tmp_path) -> None:
     with pytest.raises(ValueError, match="must be a list of labels"):
         a_project(tmp_path, lines=["label_groups:", "  level: {one: level::1}"])
+
+
+#: A command taking its scope from the task's `ddd-scope` label.
+E2E = "  e2e-scope: scripts/halyard-validate.sh test-e2e-scope SCOPE={label_groups.ddd-scope}"
+
+
+def test_a_command_can_take_a_value_from_a_label_group(tmp_path) -> None:
+    [project] = a_project(
+        tmp_path,
+        lines=["label_groups:", "  ddd-scope: [ddd:capstone, ddd:rag]", "commands:", E2E],
+    )
+
+    assert project.commands["e2e-scope"].endswith("SCOPE={label_groups.ddd-scope}")
+
+
+def test_a_command_taking_a_group_nobody_defined_is_refused(tmp_path) -> None:
+    """Otherwise the braces would reach the shell as they were written."""
+    with pytest.raises(ValueError, match="has no group 'ddd-scope'"):
+        a_project(tmp_path, lines=["label_groups:", "  level: [level::3]", "commands:", E2E])
+
+
+def test_a_command_taking_a_group_with_no_labels_is_refused(tmp_path) -> None:
+    with pytest.raises(ValueError, match="lists no labels"):
+        a_project(tmp_path, lines=["label_groups:", "  ddd-scope: []", "commands:", E2E])
+
+
+def test_a_command_can_be_a_list_of_commands_run_in_order(tmp_path) -> None:
+    [project] = a_project(
+        tmp_path,
+        lines=[
+            "commands:",
+            "  cleanup: make cleanup",
+            "  pull-branch: make pull-branch TASK={input.task}",
+            "  next-task: [cleanup, pull-branch]",
+        ],
+    )
+
+    assert project.command_lists == {"next-task": ("cleanup", "pull-branch")}
+    assert set(project.commands) == {"cleanup", "pull-branch"}, "a list is not a line"
+
+
+def test_a_list_naming_a_command_nobody_defined_is_refused(tmp_path) -> None:
+    with pytest.raises(ValueError, match="does not define: gone"):
+        a_project(tmp_path, lines=["commands:", "  cleanup: make x", "  both: [cleanup, gone]"])
+
+
+def test_a_list_inside_a_list_is_refused(tmp_path) -> None:
+    with pytest.raises(ValueError, match="which is a list itself"):
+        a_project(
+            tmp_path,
+            lines=["commands:", "  a: make a", "  inner: [a]", "  outer: [inner, a]"],
+        )
+
+
+def test_an_empty_list_is_refused(tmp_path) -> None:
+    with pytest.raises(ValueError, match="empty list"):
+        a_project(tmp_path, lines=["commands:", "  nothing: []"])
+
+
+def test_a_transition_naming_a_list_is_told_to_name_its_commands(tmp_path) -> None:
+    with pytest.raises(ValueError, match="which is a list of commands"):
+        a_project(
+            tmp_path,
+            lines=[
+                "commands:",
+                "  a: make a",
+                "  both: [a]",
+                "transitions:",
+                "  close: {commands: [both]}",
+            ],
+        )
+
+
+def test_a_transition_cannot_run_a_command_that_asks_for_a_typed_value(tmp_path) -> None:
+    """A transition has nobody to ask."""
+    with pytest.raises(ValueError, match="nobody to ask"):
+        a_project(
+            tmp_path,
+            lines=[
+                "commands:",
+                "  pull: make pull TASK={input.task}",
+                "transitions:",
+                "  close: {commands: [pull]}",
+            ],
+        )
+
+
+def test_validate_cannot_name_a_command_that_takes_a_label(tmp_path) -> None:
+    """A commit has nowhere to ask for one."""
+    with pytest.raises(ValueError, match="takes a value"):
+        a_project(
+            tmp_path,
+            lines=[
+                "label_groups:",
+                "  ddd-scope: [ddd:capstone]",
+                "commands:",
+                E2E,
+                "validate: e2e-scope",
+            ],
+        )
 
 
 def test_label_findings_are_read_as_phrases(tmp_path) -> None:
@@ -418,58 +663,58 @@ def test_a_finding_phrase_left_unquoted_is_refused_with_why(tmp_path) -> None:
         a_project(tmp_path, lines=["label_findings:", "  - status: candidate"])
 
 
-def test_handoffs_are_read_with_what_they_carry(tmp_path) -> None:
+def test_transitions_are_read_with_what_they_carry(tmp_path) -> None:
     [project] = a_project(
         tmp_path,
         lines=[
-            "checks:",
-            "  proof: NOTES/checks/proof.md",
-            "handoffs:",
-            "  review: {prompt: NOTES/handoffs/review.md, to: reviewer}",
-            "  discover_completed: {checks: [proof], to: navigator}",
+            "inspections:",
+            "  proof: NOTES/inspections/proof.md",
+            "transitions:",
+            "  review: {prompt: NOTES/transitions/review.md, to: reviewer}",
+            "  discover_completed: {inspect: [proof], to: navigator}",
         ],
     )
 
-    review = project.handoffs["review"]
-    assert review.prompt == Path("NOTES/handoffs/review.md")
+    review = project.transitions["review"]
+    assert review.prompt == Path("NOTES/transitions/review.md")
     assert review.include_last_message is True
     assert review.to == "reviewer"
-    assert project.handoffs["discover_completed"].checks == ("proof",)
+    assert project.transitions["discover_completed"].inspections == ("proof",)
 
 
-def test_a_handoff_can_run_the_projects_commands_first(tmp_path) -> None:
+def test_a_transition_can_run_the_projects_commands_first(tmp_path) -> None:
     [project] = a_project(
         tmp_path,
         lines=[
             "commands:",
             "  test-fast: make test-fast",
             "  lint: make lint",
-            "handoffs:",
+            "transitions:",
             "  close: {commands: [lint, test-fast], to: navigator}",
         ],
     )
 
-    assert project.handoffs["close"].commands == ("lint", "test-fast")
+    assert project.transitions["close"].commands == ("lint", "test-fast")
 
 
-def test_a_handoff_naming_a_command_nobody_defined_is_refused(tmp_path) -> None:
+def test_a_transition_naming_a_command_nobody_defined_is_refused(tmp_path) -> None:
     """The same as a check: otherwise it fails only when somebody presses it."""
     with pytest.raises(ValueError, match="does not define: test-all"):
-        a_project(tmp_path, lines=["handoffs:", "  close: {commands: [test-all]}"])
+        a_project(tmp_path, lines=["transitions:", "  close: {commands: [test-all]}"])
 
 
-def test_a_handoff_of_commands_alone_is_something_to_hand_on(tmp_path) -> None:
+def test_a_transition_of_commands_alone_is_something_to_hand_on(tmp_path) -> None:
     [project] = a_project(
         tmp_path,
         lines=[
             "commands:",
             "  test-fast: make test-fast",
-            "handoffs:",
+            "transitions:",
             "  tests: {commands: [test-fast], include_last_message: false}",
         ],
     )
 
-    assert project.handoffs["tests"].include_last_message is False
+    assert project.transitions["tests"].include_last_message is False
 
 
 def test_validate_names_one_of_the_projects_commands(tmp_path) -> None:
@@ -489,24 +734,251 @@ def test_validate_written_as_a_command_line_is_refused(tmp_path) -> None:
         a_project(tmp_path, lines=written)
 
 
-def test_a_handoff_naming_a_check_nobody_defined_is_refused(tmp_path) -> None:
+def test_a_transition_naming_an_inspection_nobody_defined_is_refused(tmp_path) -> None:
     """Otherwise it fails only when somebody presses it, from a phone."""
     with pytest.raises(ValueError, match="does not define: claims"):
-        a_project(tmp_path, lines=["handoffs:", "  discovery: {checks: [claims]}"])
+        a_project(tmp_path, lines=["transitions:", "  discovery: {inspect: [claims]}"])
 
 
-def test_a_handoff_to_a_seat_that_is_not_there_is_refused(tmp_path) -> None:
+def test_a_transition_to_a_seat_that_is_not_there_is_refused(tmp_path) -> None:
     with pytest.raises(ValueError, match="must be a role"):
-        a_project(tmp_path, lines=["handoffs:", "  review: {to: somebody}"])
+        a_project(tmp_path, lines=["transitions:", "  review: {to: somebody}"])
 
 
-def test_a_handoff_prompt_that_is_not_there_is_named(tmp_path) -> None:
+def test_a_transition_prompt_that_is_not_there_is_named(tmp_path) -> None:
     from halyard.core.config_file import missing_files
 
-    found = a_project(tmp_path, lines=["handoffs:", "  review: {prompt: NOTES/GONE.md}"])
+    found = a_project(tmp_path, lines=["transitions:", "  review: {prompt: NOTES/GONE.md}"])
 
     [said] = missing_files(found)
-    assert "handoffs.review.prompt" in said
+    assert "transitions.review.prompt" in said
+
+
+def test_a_transition_can_name_its_text_for_the_rounds_after_the_first(tmp_path) -> None:
+    [project] = a_project(
+        tmp_path,
+        lines=[
+            "transitions:",
+            "  review:",
+            "    prompt: NOTES/transitions/review.md",
+            "    followup_prompt: NOTES/transitions/review-followup.md",
+            "    to: reviewer",
+        ],
+    )
+
+    review = project.transitions["review"]
+    assert review.prompt == Path("NOTES/transitions/review.md")
+    assert review.followup_prompt == Path("NOTES/transitions/review-followup.md")
+
+
+def with_workflows(tmp_path, *lines: str):
+    """A project with two transitions and whatever `workflows:` says here."""
+    return a_project(
+        tmp_path,
+        lines=[
+            "transitions:",
+            "  review: {prompt: NOTES/transitions/review.md, to: reviewer}",
+            "  driver_discover: {prompt: NOTES/transitions/forward.md}",
+            "workflows:",
+            *lines,
+        ],
+    )
+
+
+def test_a_workflow_is_the_steps_it_takes_in_order(tmp_path) -> None:
+    [project] = with_workflows(
+        tmp_path,
+        "  steps:",
+        "    review: {seat: reviewer, rounds: 2}",
+        "    discover: {transition: driver_discover, seat: reviewer}",
+        "  level3: [review, discover, review]",
+    )
+
+    flows = project.workflows
+    assert flows.flows["level3"] == ("review", "discover", "review")
+    assert (flows.steps["review"].transition, flows.steps["review"].rounds) == ("review", 2)
+    assert flows.steps["discover"].transition == "driver_discover"
+    assert flows.steps["discover"].decided_by is None
+
+
+def test_a_step_says_nothing_but_its_name_and_is_still_a_step(tmp_path) -> None:
+    """The transition is the step's own name, and `to:` says where it goes."""
+    [project] = with_workflows(tmp_path, "  steps:", "    review: {}", "  short: [review]")
+
+    step = project.workflows.steps["review"]
+    assert (step.transition, step.seat) == ("review", None)
+    assert step.rounds == 1, "a step goes once unless it says otherwise"
+
+
+def test_a_workflow_naming_a_step_nobody_defined_is_refused(tmp_path) -> None:
+    """Otherwise it fails part-way through a flow, from a phone."""
+    with pytest.raises(ValueError, match="does not define under"):
+        with_workflows(tmp_path, "  steps:", "    review: {}", "  level3: [review, gone]")
+
+
+def test_a_step_naming_a_transition_nobody_defined_is_refused(tmp_path) -> None:
+    with pytest.raises(ValueError, match="names the transition 'close'"):
+        with_workflows(tmp_path, "  steps:", "    close: {}", "  level3: [close]")
+
+
+def test_a_step_seat_that_is_not_there_is_refused(tmp_path) -> None:
+    with pytest.raises(ValueError, match="must be a role"):
+        with_workflows(tmp_path, "  steps:", "    review: {seat: somebody}", "  level3: [review]")
+
+
+def test_rounds_have_to_be_a_whole_number_of_at_least_one(tmp_path) -> None:
+    with pytest.raises(ValueError, match="whole number"):
+        with_workflows(tmp_path, "  steps:", "    review: {rounds: 0}", "  level3: [review]")
+
+
+def test_a_workflow_written_as_anything_but_a_list_is_refused(tmp_path) -> None:
+    """Including the mistake of writing `steps:` under a workflow's own name."""
+    with pytest.raises(ValueError, match="must be a list of step names"):
+        with_workflows(tmp_path, "  steps:", "    review: {}", "  level3: {step1: review}")
+
+
+def test_a_step_can_act_on_the_decision_of_a_step_named_after_it(tmp_path) -> None:
+    """`reviewed` before `review` in the file: the name is checked once every
+    step is known."""
+    [project] = with_workflows(
+        tmp_path,
+        "  steps:",
+        "    reviewed: {transition: review, decided_by: review}",
+        "    review: {}",
+        "  level3: [review, reviewed]",
+    )
+
+    assert project.workflows.steps["reviewed"].decided_by == "review"
+
+
+def test_decided_by_naming_no_step_is_refused(tmp_path) -> None:
+    with pytest.raises(ValueError, match="must name another step"):
+        with_workflows(
+            tmp_path,
+            "  steps:",
+            "    reviewed: {transition: review, decided_by: gone}",
+            "  level3: [reviewed]",
+        )
+
+
+def test_a_step_cannot_act_on_its_own_decision(tmp_path) -> None:
+    with pytest.raises(ValueError, match="must name another step"):
+        with_workflows(tmp_path, "  steps:", "    review: {decided_by: review}", "  l3: [review]")
+
+
+def test_decisions_are_their_own_names_unless_a_project_renames_them(tmp_path) -> None:
+    """Like a key written once standing for its own value: nothing to write
+    for `forward`, `back` and `wait`, and any of them can be renamed."""
+    from halyard.core.config_file import Decisions
+
+    [project] = with_workflows(
+        tmp_path,
+        "  decisions: {forward: go, wait: hold}",
+        "  steps:",
+        "    review: {}",
+        "  level3: [review]",
+    )
+
+    assert project.workflows.decisions == Decisions(forward="go", back="back", wait="hold")
+    assert set(project.workflows.flows) == {"level3"}, "`decisions` is not a workflow"
+
+
+def test_an_unknown_decision_is_refused(tmp_path) -> None:
+    with pytest.raises(ValueError, match="unknown field"):
+        with_workflows(tmp_path, "  decisions: {forward: go, sideways: nope}")
+
+
+def test_two_decisions_cannot_share_a_word(tmp_path) -> None:
+    """Otherwise a reply saying it could mean either."""
+    with pytest.raises(ValueError, match="cannot share a word"):
+        with_workflows(tmp_path, "  decisions: {forward: back}")
+
+
+def test_a_decision_word_cannot_hold_a_colon(tmp_path) -> None:
+    """The word is read after the last colon, so it could never be read."""
+    with pytest.raises(ValueError, match="cannot contain"):
+        with_workflows(tmp_path, '  decisions: {forward: "go: on"}')
+
+
+def test_a_list_inside_a_workflow_is_its_phases(tmp_path) -> None:
+    """The steps before it go once, the ones after it once, and the ones in it
+    once per phase — so the flow is still the steps in order, and the list is
+    where they repeat."""
+    [project] = with_workflows(
+        tmp_path,
+        "  steps:",
+        "    review: {}",
+        "    discover: {transition: driver_discover}",
+        "    discovered: {transition: review}",
+        "  level3: [review, [discover, discovered], review]",
+    )
+
+    assert project.workflows.flows["level3"] == ("review", "discover", "discovered", "review")
+    assert project.workflows.stretches == {"level3": (1, 2)}
+    assert project.workflows.phases == 3, "three phases unless the project says otherwise"
+
+
+def test_how_many_phases_is_the_project_s_to_say(tmp_path) -> None:
+    [project] = with_workflows(
+        tmp_path, "  phases: 4", "  steps:", "    review: {}", "  l3: [[review]]"
+    )
+
+    assert project.workflows.phases == 4
+    assert project.workflows.stretches == {"l3": (0, 0)}
+    assert set(project.workflows.flows) == {"l3"}, "`phases` is not a workflow"
+
+
+def test_a_workflow_has_one_list_of_phases_at_most(tmp_path) -> None:
+    """A second would be a second phase count, and a card could not say which."""
+    with pytest.raises(ValueError, match="two lists of phases"):
+        with_workflows(tmp_path, "  steps:", "    review: {}", "  l3: [[review], [review]]")
+
+
+def test_phases_cannot_be_empty_or_nested(tmp_path) -> None:
+    for flow in ("[review, []]", "[[review, [review]]]"):
+        with pytest.raises(ValueError, match="phases must be a list of step names"):
+            with_workflows(tmp_path, "  steps:", "    review: {}", f"  l3: {flow}")
+
+
+def test_a_phase_step_nobody_defined_is_refused_like_any_other(tmp_path) -> None:
+    with pytest.raises(ValueError, match="does not define under"):
+        with_workflows(tmp_path, "  steps:", "    review: {}", "  l3: [review, [gone]]")
+
+
+def test_the_phase_count_has_to_be_a_whole_number_of_at_least_one(tmp_path) -> None:
+    with pytest.raises(ValueError, match="phases:` must be a whole number"):
+        with_workflows(tmp_path, "  phases: 0", "  steps:", "    review: {}", "  l3: [review]")
+
+
+def test_next_is_a_decision_word_a_project_can_rename_too(tmp_path) -> None:
+    from halyard.core.config_file import Decisions
+
+    [project] = with_workflows(
+        tmp_path, "  decisions: {next: sonraki}", "  steps:", "    review: {}", "  l3: [review]"
+    )
+
+    assert project.workflows.decisions == Decisions(next="sonraki")
+
+
+def test_a_project_with_no_workflows_has_none(tmp_path) -> None:
+    from halyard.core.config_file import Decisions
+
+    [project] = a_project(tmp_path, lines=["inspections:", "  proof: NOTES/proof.md"])
+
+    assert project.workflows.flows == {}
+    assert project.workflows.steps == {}
+    assert project.workflows.decisions == Decisions()
+
+
+def test_a_followup_prompt_that_is_not_there_is_named(tmp_path) -> None:
+    from halyard.core.config_file import missing_files
+
+    found = a_project(
+        tmp_path, lines=["transitions:", "  review: {followup_prompt: NOTES/GONE.md}"]
+    )
+
+    [said] = missing_files(found)
+    assert "transitions.review.followup_prompt" in said
 
 
 def test_a_seat_prompt_file_is_checked_too(tmp_path) -> None:
@@ -655,10 +1127,10 @@ def _seats(*lines: str) -> str:
 
 def test_a_seat_can_name_its_own_task_label() -> None:
     [project] = projects_from_yaml(
-        _seats("nav: {runtime: claude-code, role: navigator, task_label: 'agent:navigator'}")
+        _seats("nav: {runtime: claude-code, role: navigator, task_label: 'navigator:agent'}")
     )
 
-    assert project.seats[0].task_label == "agent:navigator"
+    assert project.seats[0].task_label == "navigator:agent"
 
 
 def test_a_task_label_with_a_comma_is_refused() -> None:

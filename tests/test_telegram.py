@@ -219,6 +219,26 @@ async def test_the_card_shows_what_is_needed_to_decide(setup) -> None:
     assert "Expires in" in text
 
 
+async def test_a_command_from_a_turn_of_halyard_s_own_says_whose_it_is(setup) -> None:
+    """A repeat started from the command line: marked as Halyard's own, its
+    card says which inspection it is rather than AGENT over a session nobody
+    has seen. It has no Stop — nothing here holds that turn to stop."""
+    from halyard.core.registry import SessionRegistry
+
+    channel, api, store, _ = setup
+    channel._registry = SessionRegistry()
+    channel._registry.mark_own("ses_own1", "proof · repeat")
+    request = await an_approval(store, session_id="ses_own1", agent_id="opencode", role=None)
+
+    await channel.send_approval_request(request)
+
+    text = api.sent[0]["text"]
+    assert text.startswith("<b>[INSPECTION — PERMISSION REQUEST]</b>")
+    assert "Inspection: <b>proof · repeat</b>" in text
+    keys = [key["text"] for row in api.sent[0]["reply_markup"]["inline_keyboard"] for key in row]
+    assert "⏹ Stop the inspection" not in keys
+
+
 async def test_allow_and_deny_sit_apart_from_anything_harmless(setup) -> None:
     channel, api, store, _ = setup
     request = await an_approval(store, command_full="x" * 500, command_summary="x" * 40)
@@ -1801,7 +1821,7 @@ async def test_the_help_text_lists_exactly_those(tmp_path: Path) -> None:
 
 
 def test_to_answers_when_typed_but_is_off_the_menu() -> None:
-    """A handoff does from the menu what `/to` did, and one fewer button on a
+    """A transition does from the menu what `/to` did, and one fewer button on a
     phone is worth more than a second way to the same place. Typed, `/to` still
     answers — so a prompt still cannot take its name."""
     listed = {name for name, _ in adapter.COMMANDS}
@@ -1881,7 +1901,7 @@ async def test_an_unknown_seat_answers_with_the_list(tmp_path: Path) -> None:
     await channel._handle_message(typed_in("/to nope hello", DRV_CHAT))
 
     said = api.sent[-1]["text"]
-    assert "No seat called" in said
+    assert "No agent called" in said
     assert "xnav" in said and "drv" in said
 
 
@@ -2515,8 +2535,8 @@ async def test_a_long_message_shows_in_the_seats_chat_in_pieces_telegram_takes(
     tmp_path: Path,
 ) -> None:
     """Telegram refuses a message over 4096 characters, and the refusal was
-    swallowed: a long handoff reached the session and never showed in the
-    seat's own chat, which read as the handoff having gone nowhere."""
+    swallowed: a long transition reached the session and never showed in the
+    seat's own chat, which read as the transition having gone nowhere."""
     channel, api = await with_two_seats(tmp_path)
     long_text = "the review prompt, then the report " + "x" * 9000
 

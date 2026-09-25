@@ -197,6 +197,10 @@ RUNTIME = RuntimeSpec(
             ("PreCompact", None, "compaction.py", 180),
             ("SessionStart", None, "compaction.py", 15),
         ),
+        # The whole directory, not the two settings files: one line there
+        # (`disableAllHooks`) takes the gate off, and the scripts a project's
+        # own hooks run sit beside them and run without asking anybody.
+        guarded=(".claude",),
     ),
     runner=_runner,
     find_session=late("halyard.agents.claude_code", "find_session"),

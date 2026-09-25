@@ -241,10 +241,55 @@ def _without_a_path(where: dict[str, Path | None], seats) -> list[str]:
     machine this printed "Everything checks out" for.
     """
     return [
-        f"{WARN}{name} has no `path:`, so /commit, /command, /checks, /handoff "
+        f"{WARN}{name} has no `path:`, so /commit, /command, /inspect, /transition "
         "and /label have nowhere to run for it"
         for name, path in where.items()
         if path is None and any(seat.project == name for seat in seats)
+    ]
+
+
+def _older_spellings(projects) -> list[str]:
+    """Names a configuration still uses from before they were renamed.
+
+    They work, so this is a warning and never a problem: it says what to
+    rename, whenever somebody gets round to it.
+    """
+    return [
+        f"{WARN}{project.name} — {older}; the old name still works"
+        for project in projects
+        for older in project.older
+    ]
+
+
+def _inspection_efforts(settings, projects) -> list[str]:
+    """Each effort asked for inspections that the runtime they run on would
+    not take.
+
+    A warning, and not a refusal to start: such an inspection still runs, at
+    the model's own effort, and says so in a log nobody is reading. This is
+    where somebody looks. Which efforts there are is the runtime's to say.
+    """
+    from halyard.agents import registry
+
+    spec = registry.get(registry.DEFAULT)
+    runner = spec.runner(settings) if spec is not None else None
+    offered = runner.options() if hasattr(runner, "options") else {}
+    allowed, enforced = offered.get("effort", ((), False))
+    if not enforced:
+        return []
+    asked = [
+        ("HALYARD_INSPECTION_EFFORT", settings.inspection_effort),
+        *(
+            (f"{project.name}'s inspection {name}", chosen.effort)
+            for project in projects
+            for name, chosen in project.inspection_models.items()
+        ),
+    ]
+    return [
+        f"{WARN}{where} asks for effort {effort!r}, which is not one of "
+        f"{', '.join(allowed)} — it runs at the model's own effort instead"
+        for where, effort in asked
+        if effort and effort.strip().lower() not in allowed
     ]
 
 
@@ -602,7 +647,7 @@ def run() -> int:
         seats = configured()
     except ValueError as error:
         # A seat that will not parse is a seat you believe you have.
-        print(f"{FAIL}seats: {error}")
+        print(f"{FAIL}agents: {error}")
         seats = []
         problems += 1
 
@@ -610,13 +655,13 @@ def run() -> int:
         # Silence used to mean "checked and fine". It meant "checked nothing":
         # when seats replaced the two role settings this stopped looking at
         # anything and still printed a clean bill of health.
-        print(f"{WARN}no seats configured — nothing is being routed anywhere")
+        print(f"{WARN}no agents configured — nothing is being routed anywhere")
         print("        run `halyard init`, or add a `projects:` block to halyard.yaml")
     else:
         # Which file the seats came from, because the two dialects do not merge
         # and a file left behind would otherwise silently outrank what was
         # somebody had just edited.
-        print(f"{OK}seats read from {source if source else 'the environment'}")
+        print(f"{OK}agents read from {source if source else 'the environment'}")
         for project in sorted({seat.project for seat in seats if seat.project}):
             labels = ", ".join(s.label for s in seats if s.project == project)
             print(f"        {project}: {labels}")
@@ -669,14 +714,19 @@ def run() -> int:
     from halyard.core.config_file import missing_files
 
     try:
-        absent = missing_files(described_projects())
+        described = described_projects()
     except ValueError:
-        absent = []
+        described = []
+    absent = missing_files(described)
     for line in absent:
         problems += 1
         print(f"{FAIL}{line}")
     if seats and not absent:
         print(f"{OK}every file the configuration names is where it says")
+    for line in _older_spellings(described):
+        print(line)
+    for line in _inspection_efforts(settings, described) if settings_ok else []:
+        print(line)
     if seats:
         print()
 
@@ -767,20 +817,20 @@ def sessions() -> int:
         # way that looks like the name being wrong.
         print(f"{'':20}{ref.cwd or '(directory not recorded)'}")
     print(
-        "\nGive one to a seat, exactly as printed above:\n"
+        "\nGive one to an agent, exactly as printed above:\n"
         "\n"
-        "  seats:\n"
+        "  agents:\n"
         "    drv:\n"
         "      runtime: <the runtime column>\n"
         "      session: <one of the names above>\n"
-        '      chat: "-100..."      # the group this seat speaks in\n'
+        '      chat: "-100..."      # the group this agent speaks in\n'
         "\n"
-        "Seats are read at startup, so restart the control plane afterwards."
+        "Agents are read at startup, so restart the control plane afterwards."
     )
     if generated:
         print(
             f"\n{WARN}A name marked auto-titled was written by the runtime, not by you.\n"
-            "        Those are rewritten as a conversation moves, so a seat pointed at\n"
+            "        Those are rewritten as a conversation moves, so an agent pointed at\n"
             "        one works today and silently stops later. Rename it first."
         )
     return 0

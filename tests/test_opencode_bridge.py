@@ -130,6 +130,56 @@ def test_a_shell_call_sends_nothing_more(tmp_path: Path) -> None:
 
     assert "asks" not in body
     assert "patterns" not in body
+    assert "file_paths" not in body
+
+
+def test_an_edit_sends_the_file_it_changes(tmp_path: Path) -> None:
+    """The edit and write tools, as 1.18.32's own source asks: the one file in
+    `patterns`, relative to the worktree — which is what `writes:` matches."""
+    [body] = posted(
+        tmp_path,
+        asked(
+            "edit",
+            patterns=["NOTES/p2.md"],
+            always=["*"],
+            metadata={"filepath": "/repo/NOTES/p2.md", "diff": "@@ -1 +1 @@"},
+        ),
+    )
+
+    assert body["tool"] == "edit"
+    assert body["file_paths"] == ["NOTES/p2.md"]
+    assert body["project_dir"] == "/repo"
+
+
+def test_a_patch_sends_every_file_and_where_a_moved_one_goes(tmp_path: Path) -> None:
+    """The patch tool asks once for all its files. A move is in `patterns` by
+    where it was, and only `metadata.files` says where it goes."""
+    [body] = posted(
+        tmp_path,
+        asked(
+            "edit",
+            patterns=["NOTES/a.md", "NOTES/old.md"],
+            always=["*"],
+            metadata={
+                "filepath": "NOTES/a.md, NOTES/old.md",
+                "files": [
+                    {
+                        "filePath": "/repo/NOTES/a.md",
+                        "relativePath": "NOTES/a.md",
+                        "type": "update",
+                    },
+                    {
+                        "filePath": "/repo/NOTES/old.md",
+                        "movePath": "/repo/src/new.md",
+                        "relativePath": "src/new.md",
+                        "type": "update",
+                    },
+                ],
+            },
+        ),
+    )
+
+    assert body["file_paths"] == ["NOTES/a.md", "NOTES/old.md", "src/new.md"]
 
 
 #: The bridge with a control plane whose approvals either never come back —

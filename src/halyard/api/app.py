@@ -39,7 +39,7 @@ from halyard.core.audit import (
     JsonlAuditSink,
     SqliteAuditSink,
 )
-from halyard.core.config_file import missing_files
+from halyard.core.config_file import ModelChoice, missing_files
 from halyard.core.events import RiskLevel, Role
 from halyard.core.gate import Gate
 from halyard.core.policy import Policy
@@ -114,6 +114,10 @@ class ApprovalRequestBody(BaseModel):
     #: The destination of a file tool, matched against the `writes:` block to
     #: decide whether this one may go through without a card.
     file_path: str | None = None
+    #: Every file a change touches, for a runtime whose one question can cover
+    #: several — opencode's patch — each matched the same way. Relative ones
+    #: are measured from `project_dir`.
+    file_paths: list[str] | None = None
     #: What the runtime says it is asking, in its own words, and what that
     #: covers — sent by a bridge whose runtime asks about something other than
     #: the command itself. See `ApprovalRequest.asks`.
@@ -244,6 +248,21 @@ class MessageResponse(BaseModel):
     delivered: bool
 
 
+class OwnBody(BaseModel):
+    """A turn Halyard started for itself outside this process — `halyard
+    inspect repeat` — saying which session it runs in, before it begins."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    session_id: str
+    #: What the turn is, as its cards say it: `proof · repeat`.
+    label: str
+
+
+class OwnResponse(BaseModel):
+    marked: bool
+
+
 class InjectBody(BaseModel):
     """What the `PreInvocation` hook asks: is anything owed to this session?"""
 
@@ -352,6 +371,12 @@ def _build_channel(
         # Beside the database, for the same reason the credential note is: it
         # has to survive a restart and is not worth a schema.
         said_path=settings.db_path.parent / "last-said.json",
+        database=settings.db_path,
+        keep_inspections=settings.keep_inspections,
+        inspection_model=ModelChoice(
+            (settings.inspection_model or "").strip() or None,
+            (settings.inspection_effort or "").strip().lower() or None,
+        ),
     )
 
 
@@ -479,7 +504,7 @@ def create_app(settings: Settings, *, channel=None) -> FastAPI:
         )
         # Said once, because nothing else is until a label is written, and "is it
         # on in the process that is running" had no answer from outside it.
-        logger.info("Labelling tasks in %s as seats work on them", ", ".join(sorted(labelled)))
+        logger.info("Labelling tasks in %s as agents work on them", ", ".join(sorted(labelled)))
     elif labelled:
         logger.warning(
             "label_work is on for %s, but there is no forge token to write labels with",
@@ -650,6 +675,7 @@ def create_app(settings: Settings, *, channel=None) -> FastAPI:
             file_path=body.file_path,
             asks=body.asks,
             patterns=body.patterns,
+            file_paths=body.file_paths,
         )
         return ApprovalResponse(
             decision=outcome.decision,
@@ -760,6 +786,18 @@ def create_app(settings: Settings, *, channel=None) -> FastAPI:
             session_name=body.session_name,
         )
         return MessageResponse(delivered=delivered)
+
+    @app.post("/v1/own", response_model=OwnResponse)
+    async def mark_own(body: OwnBody) -> OwnResponse:
+        """Mark a session as a turn of Halyard's own. Answers at once.
+
+        What it changes is only what Halyard does with what it hears from that
+        session: its reply stays out of the chat, it is seen working on no task,
+        and its commands' cards say whose they are. The rules those commands
+        meet are the same as anyone's.
+        """
+        registry.mark_own(body.session_id, body.label)
+        return OwnResponse(marked=True)
 
     @app.post("/v1/inject", response_model=InjectResponse)
     async def inject(body: InjectBody) -> InjectResponse:

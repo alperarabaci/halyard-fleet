@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 
-from halyard.core.writes import FILE_TOOLS, allowed_by
+from halyard.core.writes import FILE_TOOLS, allowed_all, allowed_by
 
 
 @pytest.fixture
@@ -125,11 +125,100 @@ def test_an_empty_pattern_grants_nothing(project: Path) -> None:
     assert allowed_by(str(project / "src" / "main.py"), str(project), ("", "   ", "/")) is None
 
 
+# --- the gate's own files ----------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        ".claude/settings.local.json",
+        ".claude/settings.json",
+        ".claude/hooks/format.sh",
+        ".codex/hooks.json",
+        ".codex/config.toml",
+        ".opencode/plugins/halyard.ts",
+        ".opencode/plugins/another.ts",
+        "opencode.json",
+        "opencode.jsonc",
+        ".zcode/config.json",
+        ".agents/hooks.json",
+        ".git/hooks/pre-commit",
+        ".git/config",
+    ],
+)
+def test_the_widest_pattern_does_not_reach_the_gates_own_files(project: Path, path: str) -> None:
+    """`**` is a reasonable thing to write for a scratch project, and without
+    this it would let an agent rewrite the gate it is asked through."""
+    assert allowed_by(str(project / path), str(project), ("**",)) is None
+    assert allowed_by(path, str(project), ("*/**", "*", ".*/**")) is None
+
+
+def test_every_runtimes_hooks_file_is_guarded(project: Path) -> None:
+    """A runtime added later cannot forget: whatever file it reads its gate
+    from, a `writes:` grant does not reach it."""
+    from halyard.agents import registry
+
+    for spec in registry.discover().values():
+        for path in (spec.hooks.settings, *spec.hooks.also):
+            assert allowed_by(path, str(project), ("**",)) is None, f"{spec.name}: {path}"
+
+
+def test_a_capital_letter_is_not_a_way_round(project: Path) -> None:
+    """On a Mac the disk ignores case, so `.Claude/` is the same directory."""
+    assert allowed_by(".Claude/settings.local.json", str(project), ("**",)) is None
+    assert allowed_by(".GIT/hooks/pre-commit", str(project), ("**",)) is None
+
+
+def test_a_nested_one_is_guarded_too(project: Path) -> None:
+    """A project inside another, or a session measured from a subdirectory,
+    has hooks of its own."""
+    assert allowed_by("packages/app/.claude/settings.json", str(project), ("**",)) is None
+    assert allowed_by("vendor/lib/.git/hooks/pre-commit", str(project), ("**",)) is None
+
+
+def test_the_rest_of_the_project_is_still_granted(project: Path) -> None:
+    """Only the names themselves: `.github` and `.gitignore` are not `.git`."""
+    for path in ("NOTES/a.md", "src/main.py", ".github/workflows/ci.yml", ".gitignore"):
+        assert allowed_by(path, str(project), ("**",)) == "**", path
+
+
+def test_the_log_says_why_a_matching_write_was_asked(
+    project: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The person who wrote `**` is about to get a card they thought it covered."""
+    with caplog.at_level("INFO", logger="halyard.core.writes"):
+        allowed_by(".git/config", str(project), ("**",))
+
+    assert "'**'" in caplog.text and ".git" in caplog.text
+
+
+# --- a change to several files -----------------------------------------------
+
+
+def test_several_files_are_granted_when_every_one_is(project: Path) -> None:
+    granted = allowed_all(("NOTES/a.md", "docs/b.md"), str(project), ("NOTES/**", "docs/**"))
+
+    assert granted == ("NOTES/**", "docs/**")
+
+
+def test_one_file_outside_the_grant_asks_for_all_of_them(project: Path) -> None:
+    """One question at the runtime covers them all, so a grant covering four
+    of five would answer the fifth for somebody who never saw it."""
+    assert allowed_all(("NOTES/a.md", "src/main.py"), str(project), ("NOTES/**",)) is None
+    assert allowed_all(("NOTES/a.md", ".opencode/plugins/x.ts"), str(project), ("**",)) is None
+
+
+def test_no_files_is_no_grant(project: Path) -> None:
+    assert allowed_all((), str(project), ("**",)) is None
+
+
 # --- the shape of the thing --------------------------------------------------
 
 
 def test_the_file_tools_are_the_ones_that_take_a_path() -> None:
     assert "Write" in FILE_TOOLS and "Edit" in FILE_TOOLS
+    # opencode asks about every file change as `edit`.
+    assert "edit" in FILE_TOOLS
     # Bash is gated too, but it is not a file tool and is never pre-authorized
     # by a path — its whole argument is a command, not a destination.
     assert "Bash" not in FILE_TOOLS

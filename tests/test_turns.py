@@ -111,6 +111,38 @@ async def test_a_message_refused_at_startup_is_still_reported_as_refused(monkeyp
     assert "No conversation found" in (turning.last_error("s-1") or "")
 
 
+def an_open_thread(reason: str) -> bool:
+    return "active writer" in reason
+
+
+async def test_a_refusal_the_caller_has_a_way_round_is_not_logged_as_a_failure(
+    monkeypatch, caplog
+) -> None:
+    """A thread held open by its app is refused here and reached another way a
+    second later. Logged as a failure, three reviews that each got an answer
+    read as three that never reached the reviewer."""
+    starting(
+        monkeypatch, FakeProcess(returncode=1, stderr=b"thread abc already has an active writer")
+    )
+    turning = turns()
+
+    with caplog.at_level("DEBUG", logger="halyard.agents.turns"):
+        refused = await turning.start("s-1", ["cli", "resume"], expected=an_open_thread)
+
+    assert refused is False
+    assert "active writer" in (turning.last_error("s-1") or "")
+    assert not [record for record in caplog.records if record.levelname == "ERROR"]
+
+
+async def test_any_other_refusal_is_still_logged_as_a_failure(monkeypatch, caplog) -> None:
+    starting(monkeypatch, FakeProcess(returncode=1, stdout=b"Not logged in"))
+
+    with caplog.at_level("ERROR", logger="halyard.agents.turns"):
+        await turns().start("s-1", ["cli", "resume"], expected=an_open_thread)
+
+    assert any("failed (exit 1)" in record.getMessage() for record in caplog.records)
+
+
 async def test_a_turn_that_finishes_inside_the_window_is_delivered(monkeypatch) -> None:
     starting(monkeypatch, FakeProcess(returncode=0))
 

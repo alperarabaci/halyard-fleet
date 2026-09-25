@@ -106,8 +106,8 @@ async def test_the_label_is_runtime_and_role_with_one_colon() -> None:
     """One colon: GitLab's paid tiers read `::` as a scoped label, where one
     runtime's two roles on a task would replace each other. And one label per
     seat, whatever the session happens to be called on this machine."""
-    assert label_for("claude", Role.NAVIGATOR) == "claude:navigator"
-    assert label_for("codex", Role.REVIEWER) == "codex:reviewer"
+    assert label_for("claude", Role.NAVIGATOR) == "navigator:claude"
+    assert label_for("codex", Role.REVIEWER) == "reviewer:codex"
     assert label_for("claude", None) == "claude"
 
 
@@ -118,12 +118,12 @@ async def test_a_seat_that_starts_work_labels_the_task_its_branch_is_for(monkeyp
     await work(registry, repo / "src")
     await settled(labeller)
 
-    assert forge.added == [(347, "claude:navigator")]
+    assert forge.added == [(347, "navigator:claude")]
 
 
 async def test_a_label_already_on_the_task_is_not_written_again(monkeypatch, repo) -> None:
     """Read first, and never rely on what the tracker does with a duplicate."""
-    forge = FakeForge(labels=["postmortem", "claude:navigator"])
+    forge = FakeForge(labels=["postmortem", "navigator:claude"])
     registry, labeller = wired(monkeypatch, repo, forge)
 
     await work(registry, repo)
@@ -142,7 +142,7 @@ async def test_a_seat_heard_from_again_does_not_ask_the_tracker_again(monkeypatc
         await settled(labeller)
 
     assert forge.asked == 1
-    assert forge.added == [(347, "claude:navigator")]
+    assert forge.added == [(347, "navigator:claude")]
 
 
 async def test_each_seat_adds_its_own_label(monkeypatch, repo) -> None:
@@ -155,7 +155,7 @@ async def test_each_seat_adds_its_own_label(monkeypatch, repo) -> None:
     await work(registry, repo, session="s-rev", runtime="codex", role=Role.REVIEWER)
     await settled(labeller)
 
-    assert sorted(forge.added) == [(347, "claude:navigator"), (347, "codex:reviewer")]
+    assert sorted(forge.added) == [(347, "navigator:claude"), (347, "reviewer:codex")]
 
 
 async def test_without_roles_the_runtime_is_the_label(monkeypatch, repo) -> None:
@@ -260,7 +260,7 @@ async def test_being_heard_from_never_waits_for_the_tracker(monkeypatch, repo) -
 
     forge.release.set()
     await settled(labeller)
-    assert forge.added == [(347, "claude:navigator")]
+    assert forge.added == [(347, "navigator:claude")]
 
 
 async def test_a_seat_that_names_its_own_label_is_labelled_with_it(monkeypatch, repo) -> None:
@@ -271,14 +271,14 @@ async def test_a_seat_that_names_its_own_label_is_labelled_with_it(monkeypatch, 
         repo,
         forge,
         seats=[
-            Seat("nav", "claude-code", "a-nav", None, Role.NAVIGATOR, task_label="agent:navigator")
+            Seat("nav", "claude-code", "a-nav", None, Role.NAVIGATOR, task_label="navigator:agent")
         ],
     )
 
     await work(registry, repo)
     await settled(labeller)
 
-    assert forge.added == [(347, "agent:navigator")]
+    assert forge.added == [(347, "navigator:agent")]
 
 
 async def test_another_seat_s_label_is_not_borrowed(monkeypatch, repo) -> None:
@@ -295,7 +295,7 @@ async def test_another_seat_s_label_is_not_borrowed(monkeypatch, repo) -> None:
     await work(registry, repo)
     await settled(labeller)
 
-    assert forge.added == [(347, "claude:navigator")]
+    assert forge.added == [(347, "navigator:claude")]
 
 
 def seat(label: str, runtime: str, session: str, role: Role) -> Seat:
@@ -322,7 +322,7 @@ async def test_a_seat_is_found_by_its_session_name_without_declaring_a_role(
     await work(registry, repo, session="c0ffee", role=None, name="alpha-engine-driver")
     await settled(labeller)
 
-    assert forge.added == [(347, "claude:driver")]
+    assert forge.added == [(347, "driver:claude")]
 
 
 async def test_a_session_with_no_name_to_go_by_is_found_by_its_project(monkeypatch, repo) -> None:
@@ -336,7 +336,7 @@ async def test_a_session_with_no_name_to_go_by_is_found_by_its_project(monkeypat
     )
     await settled(labeller)
 
-    assert forge.added == [(347, "opencode:driver")]
+    assert forge.added == [(347, "driver:opencode")]
 
 
 async def test_a_session_that_is_no_seat_is_said_once_and_not_labelled(
@@ -354,4 +354,4 @@ async def test_a_session_that_is_no_seat_is_said_once_and_not_labelled(
         await settled(labeller)
 
     assert forge.asked == 0
-    assert sum("matches no seat" in record.getMessage() for record in caplog.records) == 1
+    assert sum("matches no agent" in record.getMessage() for record in caplog.records) == 1

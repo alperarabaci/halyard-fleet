@@ -103,6 +103,12 @@ class Hooks:
     #: Antigravity's `"enabled": false` leaves a file that reads as wired and
     #: runs none of it.
     disableable: bool = False
+    #: Names in a project that decide whether this gate runs: the directory
+    #: its hooks live in, and any file outside it that says what the runtime
+    #: may do without asking. No `writes:` pattern grants a path through one
+    #: of these, however wide — `**` would otherwise let an agent rewrite the
+    #: gate it is being asked through, with no card.
+    guarded: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -225,7 +231,7 @@ class RuntimeSpec:
     #: not all `drv1`. Matches what people were already writing by hand:
     #: `nav`/`drv`, `xnav`/`xdrv`, `gnav`/`gdrv`.
     prefix: str = ""
-    #: The short name a task is labelled with — `claude` in `claude:navigator`.
+    #: The short name a task is labelled with — `claude` in `navigator:claude`.
     #: Empty means the runtime's own name, which is already short for the rest.
     tag: str = ""
     #: Whether this runtime is on the machine, when a PATH lookup is not the

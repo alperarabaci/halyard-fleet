@@ -8,7 +8,7 @@ Getting the control plane running, and putting the gate on a project.
 ## Running it
 
 ```bash
-cp halyard.simple.yaml.example halyard.yaml    # one project, one seat, one chat; then fill it in
+cp halyard.simple.yaml.example halyard.yaml    # one project, one agent, one chat; then fill it in
 uv sync --extra dev
 uv run halyard
 ```
@@ -43,7 +43,7 @@ make unwire           # take it back off
 ```
 
 **The configuration decides which runtimes a project is gated for**, not what
-happens to be installed on the machine. A project whose seats are all Claude
+happens to be installed on the machine. A project whose agents are all Claude
 Code gets Claude Code's hooks and nothing else — asking the machine instead
 once wrote Antigravity's hooks into such a project and skipped Claude Code's,
 because one publishes a command and the other hides its binary inside an app
@@ -216,15 +216,15 @@ settings:
   TELEGRAM_AUTHORIZED_USER_IDS: "11111111"
 ```
 
-Seats go underneath the project they work in. A flat list stops being readable
-at about four, and cannot say which codebase a seat belongs to:
+Agents go underneath the project they work in. A flat list stops being readable
+at about four, and cannot say which codebase an agent belongs to:
 
 ```yaml
 projects:
   alpha-engine:
     path: ~/code/alpha-engine
     label_work: true
-    seats:
+    agents:
       nav:
         runtime: claude-code
         session: alpha-navigator
@@ -243,7 +243,7 @@ projects:
 
   hermes:
     path: ~/code/hermes
-    seats:
+    agents:
       hnav:
         runtime: codex
         session: hermes-nav
@@ -251,45 +251,45 @@ projects:
         role: navigator
 ```
 
-A seat's `role:` is `navigator`, `driver` or `reviewer`, and it is optional. None
-of them is special to routing: a card goes to the seat it came from and says
+An agent's `role:` is `navigator`, `driver` or `reviewer`, and it is optional. None
+of them is special to routing: a card goes to the agent it came from and says
 which role that is.
 
-**`label_work: true`** puts each seat's label on the task its branch is for —
-`claude:navigator`, `codex:reviewer` — the first time that seat works on it.
+**`label_work: true`** puts each agent's label on the task its branch is for —
+`navigator:claude`, `reviewer:codex` — the first time that agent works on it.
 The task comes from the branch name (`347-power-gen-fixes` is task 347), and a
 label already on the task is never written again. It needs a forge token that
 may label issues, and it is off unless a project asks, because it writes to an
-issue tracker on its own. A seat without a role is labelled with its runtime
+issue tracker on its own. An agent without a role is labelled with its runtime
 alone, `claude`; in a project that does give roles, a session without one is
 not labelled, since it could be any of them.
 
-A seat can choose its own label with `task_label:` — `agent:navigator`, to
+An agent can choose its own label with `task_label:` — `navigator:agent`, to
 match labels the tracker already uses. It is written as given, so leave the
-model out of it: a seat keeps its runtime and its role, but its model is chosen
+model out of it: an agent keeps its runtime and its role, but its model is chosen
 at the desk and changes under it, and a label naming one would go on naming it
-afterwards. Seats are told apart by runtime and role, so two seats in one
+afterwards. Agents are told apart by runtime and role, so two agents in one
 project that share both must ask for the same label. One colon by default, because GitLab's paid tiers read `::`
-as a scoped label, where `claude::driver` would take `claude::navigator` off a
-task both worked on.
+as a scoped label, where `driver::codex` would take `driver::claude` off a task
+both drivers worked on.
 
-Copy `halyard.simple.yaml.example` for one project with one seat, or
+Copy `halyard.simple.yaml.example` for one project with one agent, or
 `halyard.yaml.example` for all of it, and edit the copy. It is gitignored — along with every
 backup Halyard takes of it — because the bot token is in it, and the chat ids
 and session names belong to one machine.
 
-**There is no second file.** Settings lived in `.env` and seats here for a
+**There is no second file.** Settings lived in `.env` and agents here for a
 while, which meant two files describing one machine and nothing written down
 about which of them won. A real environment variable still overrides the file,
 so a container can pass a token in without writing it to disk; that is an
-override, not another place to look. `halyard doctor` prints where the seats
+override, not another place to look. `halyard doctor` prints where the agents
 came from.
 
 Quote chat ids. `-1001` unquoted is a number to YAML and a string everywhere
-else, and the mismatch does not fail — the seat simply routes nowhere.
+else, and the mismatch does not fail — the agent simply routes nowhere.
 
 Labels have to be unique across every project, because a label is also how
-`doctor` names a seat and how one is looked up.
+`doctor` names an agent and how one is looked up.
 
 Once a project has a `path`, wiring takes its name:
 
@@ -305,7 +305,7 @@ looks like success until a command runs somewhere nobody was watching.
 
 ---
 
-Next: [set up the Telegram side](telegram.md) — the bot, and where each seat's
+Next: [set up the Telegram side](telegram.md) — the bot, and where each agent's
 traffic lands.
 
 [← Back to the README](../README.md)

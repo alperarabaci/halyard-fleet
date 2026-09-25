@@ -2,8 +2,10 @@
 
 **Version:** ZCode 3.11.2 (`/Applications/ZCode.app`), macOS · **Measured:** 2026-09-15 ·
 **Calls captured:** 15, from a probe workspace whose hooks wrote down every one ·
-**Status:** the gate (`PreToolUse`) and the reply relay (`Stop`) are wired; putting a
-message into a session is not.
+**Status:** the gate (`PreToolUse`) and the reply relay (`Stop`) are wired, a session's
+title is read from ZCode's own database, and a message goes into a session over the
+engine's own protocol — see [Delivery](#delivery-measured-2026-09-19-and-2026-09-20-engine-0165),
+measured on engine 0.16.5.
 
 Each section says whether it was **measured** here or only **documented** by ZCode's
 own guide — the built-in `zcode-guide` plugin's `diagnosing-hooks` and
@@ -20,7 +22,10 @@ it is the one that decides whether anything runs.
   do not. They do.
 - A `PreToolUse` `allow` replaces ZCode's own approval prompt; a `deny` blocks and the
   reason reaches the agent.
-- Sessions have no names.
+- A call carries no session name, but ZCode keeps every session's title in its own
+  database, under the same `session_id`.
+- A message can be delivered from outside, by starting the engine as the application
+  does and answering what it asks — including every permission, which is the gate.
 
 ## Where hooks are read (documented, then measured)
 
@@ -94,7 +99,7 @@ Every event: `session_id` (`sess_<uuid>`, new with every task), `cwd`,
 | `Stop` | the whole reply in `last_assistant_message` |
 
 Tools seen: `Bash` with `{command, description}`, and `Write` with
-`{file_path, content}`. No session name appears anywhere.
+`{file_path, content}`. No session name appears in a call — see *Session titles*.
 
 Two things to handle rather than trust:
 
@@ -114,6 +119,28 @@ The bridge's own output, returned by a probe:
 
 So an approval from the phone takes the place of the one at the desk, and silence is
 "no opinion", which is what `hook.sh` turns a pause into.
+
+## Session titles (found by ZCode, schema read here)
+
+Not in any call, but not nowhere. Asked where the title a session shows in its list
+comes from, ZCode found it in its own database, and the schema was read here the same
+day (2026-09-16):
+
+- `~/.zcode/cli/db/db.sqlite`, table `session`. `id` is the call's `session_id`
+  (`sess_<uuid>`).
+- `title`, and `title_source` saying where it came from: `first_input` — the first
+  thing somebody typed, shown until there is a title — then `generated`, or `custom`
+  when a person set it.
+- `parent_id` ties a subagent's session to the one that started it, `directory` is
+  where it works, and `time_archived` is set once it is put away.
+
+The bridge reads the title for every call, read-only, so a card carries the session's
+name and a seat's `session:` finds it; a subagent's calls go by the topmost session's
+title. `doctor` finds a seat's session the same way and then checks the gate in its
+directory. A `first_input` title is never taken: it is a prompt, not a name, and not
+for a card. The database is the application's and its schema is no contract, so
+anything that goes wrong reading it means no name — and a seat without one is found by
+its project, as it was before.
 
 ## What Halyard writes
 
@@ -143,9 +170,92 @@ the temporary transcript reads as Claude Code's, and the camelCase copies read a
 Antigravity's. Then `wire` asks ZCode whether it trusts the result, and prints the
 `grant` command for Halyard's hooks when it does not.
 
+## Delivery (measured, 2026-09-19 and 2026-09-20, engine 0.16.5)
+
+ZCode listens on no port and has no send command, but the engine it ships runs
+as `app-server --stdio` and speaks the protocol the application drives it with.
+Whoever starts it is the *host*, and the host answers three questions — which
+is how Halyard both delivers and keeps its gate. See `halyard.agents.zcode`.
+
+| The engine asks | Halyard answers |
+|---|---|
+| `session/requestRuntimePreferences` | the four preferences the desktop sends; a session materialises for nobody without them |
+| `interaction/requestProviderRuntimeHeaders` | `{"headersApplied": true, "requestAuth": {"apiKey": …}}` — the `ZCODE_TOKEN` from `halyard.yaml`, which the anthropic adapter sends as `x-api-key`. `requestAuth.headers` is refused |
+| `interaction/requestPermission` | the gate: `{"decision": "allow"\|"deny", "reason"}` for every side-effect tool |
+
+Sending is `provider/updateAccountConfig` → `session/resume {sessionId,
+workspace}` → `session/setMode` → `session/subscribe` → `session/send
+{content, modelSelection {providerId, modelId, options {reasoningLevel}}}`, and
+each of those is there for a reason measured the hard way:
+
+- **The account snapshot or no models.** Every provider in the application's own
+  `~/.zcode/v2/runtime/provider/**/zcode-builtin.json`, each entitled, one
+  marked `current`, under `basedOnZCodeBuiltinRevision` of
+  `zcode-builtin:<revision>:<sha256 of the catalog's resolved path>` — the hash
+  is of the path string, not of the file. A wrong one is answered "received"
+  and then materialises nothing at all. `access` must say `zhipu-account`: the
+  schema refuses `zhipu-coding-plan-api-key`, and a plan key travels in the
+  auth answer instead, which the provider accepts.
+- **`resume` wants the workspace**, which `session/list` carries beside each
+  session's `title` and `titleSource`.
+- **`resume` answers with the whole session, on one line.** Every message of it:
+  megabytes for a seat a fortnight old. A reader with the usual 64 KiB line
+  limit stops in the middle of that answer and, having no way to find the end of
+  the line, never reads anything the engine says again — the turn then hangs on
+  a call that was answered. It cost a day to see, because it looks exactly like
+  an engine that went quiet: the process is alive, its standard error is empty,
+  and its own log says `session.resume_completed`. `session/list` fits under the
+  limit, which is why the failure only began at the seat.
+- **The mode has to be set after opening, every time.** `build` is "Ask before
+  changes", `edit` is "Edit automatically", and a session whose stored mode is
+  already `build` still runs a `Write` unasked until `session/setMode` is
+  called again on the resumed session.
+- **Reasoning is mandatory** in the model selection.
+
+What the gate does, measured live on fresh sessions: `allow` runs the tool;
+`deny` stops it and the reason reaches the model in its own words ("denied by
+the operator's permission gate"); an unanswered request is repeated every few
+seconds and the turn never ends — so an expired card must be answered `deny`,
+and repeats of one `requestId` are one question.
+
+**A turn Halyard ran lands in the seat the person is looking at**, measured
+2026-09-20 on a session the desktop had open: the message, the reply and the
+gate all belong to that session, and the desktop shows them once its view is
+refreshed — it does not follow along live while another host drives it.
+
+**A captcha is where a host without a window runs out.** The provider demands one
+with its own code `3007`, and the engine then asks the host for headers a second
+time with `reason: "captcha-retry"` — wanting `x-aliyun-captcha-verify-param`,
+the token a solved captcha produces. Only the application can get it: the captcha
+script and its window live in `app.asar`, which is also where the timeout the
+person sees comes from ("Captcha verification request timed out. Please send your
+message again."). The engine's own automatic retry applies to `start-plan`
+accounts only. Halyard answers `{headersApplied: false, errorMessage}` instead of
+sending the same key again, so the turn ends with what happened rather than
+sitting on the engine's timeout.
+
+**Why a turn failed is inside `error`, not beside it.** `turn.failed` carries
+`{error: {type, message, stack?, code?, underlyingErrorMessage?, …}, turnPhase}`
+and `turn.completed` carries `{response, tokenCount, toolCallCount, duration,
+resultType}` — where `resultType` can itself be `error_max_turns` and the like.
+
+Headless (`--prompt`) is not a way round any of this: workspace hooks are
+`feature_disabled` there, user-scope hooks fire but decide nothing, `--mode
+build` refuses every side-effect tool with "No permission client configured",
+and no flag or environment variable attaches one.
+
+**Making the engine talk about itself.** `ZCODE_DEBUG=1 ZCODE_LOG_CONSOLE=1` puts
+its own log on the engine's standard error, event by event
+(`zcode_protocol.session.resume_started`, `…resume_completed`, `mcp.server.connected`,
+`config.project_hooks.pending_trust`). Without it the engine says nothing at all
+about what it is doing. The desktop's own log is `~/.zcode/v2/logs/<date>.log`,
+and an `app-server` Halyard starts does not write there.
+
 ## Still to measure
 
 - The answer a `PermissionRequest` hook accepts. Not needed while `PreToolUse` gates.
 - Whether a hook that times out or fails blocks the call or lets it through.
-- Any way to put a message into a session from outside the application.
+- Whether a trusted workspace `PreToolUse` hook decides before the permission
+  client in `app-server` mode, or both fire — which decides whether a tool can
+  raise two cards.
 - What MCP tools are called.

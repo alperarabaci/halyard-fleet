@@ -11,11 +11,13 @@ from __future__ import annotations
 
 import asyncio
 import json
+import sqlite3
+from contextlib import closing
 from pathlib import Path
 
 from halyard import wiring as core_wiring
 from halyard.agents import registry
-from halyard.agents.zcode import trust, wiring
+from halyard.agents.zcode import sessions, trust, wiring
 from halyard.agents.zcode.runner import ZCodeRunner
 
 BRIDGES = trust.BRIDGE_DIR
@@ -238,10 +240,126 @@ def test_the_runner_says_it_cannot_deliver() -> None:
     assert asyncio.run(ZCodeRunner().send("sess_1", "hello")) is False
 
 
-def test_a_zcode_seat_has_no_session_to_find() -> None:
-    """ZCode names no sessions; its seat is found by the project instead."""
-    assert ZCODE.find_session("alpha-engine-driver") is None
-    assert ZCODE.list_sessions() == []
+# --- sessions, by the titles ZCode keeps in its own database -------------------
+
+#: Milliseconds, as ZCode keeps them.
+EARLIER = 1_757_950_000_000
+LATER = EARLIER + 60_000
+
+
+def zcode_sessions(home: Path, *rows: tuple) -> None:
+    """ZCode's own database, with the columns `sessions` reads."""
+    database = home / sessions.DATABASE
+    database.parent.mkdir(parents=True)
+    with closing(sqlite3.connect(database)) as db:
+        db.execute(
+            "CREATE TABLE session (id TEXT PRIMARY KEY, parent_id TEXT, "
+            "directory TEXT NOT NULL, title TEXT NOT NULL, title_source TEXT NOT NULL, "
+            "time_created INTEGER NOT NULL, time_updated INTEGER NOT NULL, "
+            "time_archived INTEGER)"
+        )
+        db.executemany("INSERT INTO session VALUES (?, ?, ?, ?, ?, ?, ?, ?)", rows)
+        db.commit()
+
+
+def session(sid: str, title: str, source: str = "custom", **more) -> tuple:
+    """One row: a top-level session in /repo, updated at `LATER` unless told."""
+    return (
+        sid,
+        more.get("parent"),
+        "/repo",
+        title,
+        source,
+        EARLIER,
+        more.get("updated", LATER),
+        more.get("archived"),
+    )
+
+
+def test_the_runtime_finds_its_sessions_in_zcodes_database() -> None:
+    assert ZCODE.find_session is sessions.find_session
+    assert ZCODE.list_sessions is sessions.list_sessions
+
+
+def test_a_session_is_found_by_the_title_somebody_gave_it(tmp_path: Path) -> None:
+    zcode_sessions(tmp_path, session("sess_1", "alpha-engine-zdriver"))
+
+    found = sessions.find_session("Alpha-Engine-ZDriver", home=tmp_path)
+
+    assert found is not None
+    assert (found.session_id, found.cwd, found.named_by_a_person) == ("sess_1", "/repo", True)
+
+
+def test_a_generated_title_is_found_and_said_to_be_generated(tmp_path: Path) -> None:
+    """`doctor` warns about it, as for Claude Code: a generated title moves."""
+    zcode_sessions(tmp_path, session("sess_1", "zcode hooks and opencode", "generated"))
+
+    found = sessions.find_session("zcode hooks and opencode", home=tmp_path)
+
+    assert found is not None
+    assert found.named_by_a_person is False
+
+
+def test_a_first_prompt_is_not_a_name(tmp_path: Path) -> None:
+    zcode_sessions(tmp_path, session("sess_1", "delete the old reports", "first_input"))
+
+    assert sessions.find_session("delete the old reports", home=tmp_path) is None
+    assert sessions.list_sessions(home=tmp_path) == []
+
+
+def test_subagents_and_archived_sessions_are_not_seats(tmp_path: Path) -> None:
+    zcode_sessions(
+        tmp_path,
+        session("sess_1", "alpha-engine-zdriver"),
+        session("sess_2", "Explore the loader", "generated", parent="sess_1"),
+        session("sess_3", "old-driver", archived=LATER),
+    )
+
+    assert [ref.name for ref in sessions.list_sessions(home=tmp_path)] == ["alpha-engine-zdriver"]
+    assert sessions.find_session("Explore the loader", home=tmp_path) is None
+    assert sessions.find_session("old-driver", home=tmp_path) is None
+
+
+def test_a_title_set_by_hand_wins_over_a_newer_generated_one(tmp_path: Path) -> None:
+    zcode_sessions(
+        tmp_path,
+        session("sess_1", "driver", updated=EARLIER),
+        session("sess_2", "driver", "generated"),
+    )
+
+    found = sessions.find_session("driver", home=tmp_path)
+
+    assert found is not None
+    assert found.session_id == "sess_1"
+
+
+def test_sessions_are_listed_newest_first_and_found_by_id_too(tmp_path: Path) -> None:
+    zcode_sessions(
+        tmp_path,
+        session("sess_1", "older", updated=EARLIER),
+        session("sess_2", "newer"),
+    )
+
+    listed = sessions.list_sessions(home=tmp_path)
+
+    assert [ref.name for ref in listed] == ["newer", "older"]
+    assert listed[0].last_active is not None and listed[1].last_active is not None
+    assert listed[0].last_active > listed[1].last_active
+    found = sessions.find_session("sess_1", home=tmp_path)
+    assert found is not None and found.name == "older"
+
+
+def test_without_zcodes_database_there_is_nothing_to_find(tmp_path: Path) -> None:
+    assert sessions.find_session("alpha-engine-zdriver", home=tmp_path) is None
+    assert sessions.list_sessions(home=tmp_path) == []
+
+
+def test_a_file_that_is_not_a_database_is_nothing_rather_than_an_error(tmp_path: Path) -> None:
+    database = tmp_path / sessions.DATABASE
+    database.parent.mkdir(parents=True)
+    database.write_text("not a database")
+
+    assert sessions.find_session("alpha-engine-zdriver", home=tmp_path) is None
 
 
 def test_without_the_application_it_says_where_it_looked() -> None:

@@ -385,11 +385,30 @@ async def test_a_check_turn_stands_in_the_project_under_the_id_it_was_given(
     assert arguments[-1] == "check this"
 
 
+async def test_a_turn_that_needs_only_its_text_carries_nothing_else(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A commit message: its own short system prompt, no tools, no MCP server,
+    and no session left behind — Claude Code's prompt and tools were most of
+    what it cost."""
+    calls = spying_on_the_turn(monkeypatch)
+
+    await runner().ask("write a subject line", model="sonnet", system="You write messages.")
+
+    [(arguments, _)] = calls
+    assert "--tools=" in arguments, "with its `=`: a bare empty value would swallow the text"
+    assert "--strict-mcp-config" in arguments
+    assert arguments[arguments.index("--system-prompt") + 1] == "You write messages."
+    assert "--no-session-persistence" in arguments
+    assert arguments[-1] == "write a subject line"
+
+
 async def test_an_ordinary_one_shot_turn_is_left_as_it_was(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A commit message or a compaction record: nowhere in particular to stand,
-    every tool it always had, and no id chosen for it."""
+    """A compaction record: nowhere in particular to stand, every tool it always
+    had, and no id chosen for it — its instructions are the project's, and may
+    ask it to read something."""
     calls = spying_on_the_turn(monkeypatch)
 
     await runner().ask("write a subject line", model="sonnet")
@@ -399,6 +418,47 @@ async def test_an_ordinary_one_shot_turn_is_left_as_it_was(
     assert not any(argument.startswith("--tools") for argument in arguments)
     assert "--session-id" not in arguments
     assert "--no-session-persistence" not in arguments
+    assert "--effort" not in arguments, "left to the CLI, whose default is per model"
+
+
+async def test_whoever_started_a_turn_hears_its_session_before_it_begins(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """So it can be marked as Halyard's own before anything it does is heard."""
+    calls = spying_on_the_turn(monkeypatch)
+    heard: list[tuple[str, int]] = []
+
+    await runner().ask(
+        "check this", session_id="the-id", started=lambda ident: heard.append((ident, len(calls)))
+    )
+
+    assert heard == [("the-id", 0)], "told before the process started"
+
+
+async def test_a_one_shot_turn_thinks_as_hard_as_it_is_asked(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = spying_on_the_turn(monkeypatch)
+
+    await runner().ask("check this", model="sonnet", effort="max")
+
+    [(arguments, _)] = calls
+    assert arguments[arguments.index("--effort") + 1] == "max"
+    assert arguments[-1] == "check this"
+
+
+async def test_an_effort_the_cli_does_not_take_is_left_out_not_failed(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The CLI would refuse it, and an inspection that does not run is worse
+    than one at the model's own effort. The log says why."""
+    calls = spying_on_the_turn(monkeypatch)
+
+    await runner().ask("check this", model="sonnet", effort="mx")
+
+    [(arguments, _)] = calls
+    assert "--effort" not in arguments
+    assert "'mx' is not an effort" in caplog.text
 
 
 class StillRunning:

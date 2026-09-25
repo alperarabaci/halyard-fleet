@@ -85,6 +85,16 @@ def names() -> tuple[str, ...]:
     return tuple(discover())
 
 
+def guarded() -> tuple[str, ...]:
+    """Every name a runtime's gate lives under, for `writes:` to stay out of.
+
+    Every runtime this build knows, not only the ones on this machine: a
+    project can carry another machine's `.codex/`, and staying out of a
+    directory nobody uses here costs nothing.
+    """
+    return tuple(sorted({name for spec in discover().values() for name in spec.hooks.guarded}))
+
+
 def installed() -> tuple[RuntimeSpec, ...]:
     """The runtimes actually on this machine.
 

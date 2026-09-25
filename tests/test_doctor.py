@@ -464,3 +464,52 @@ def test_a_project_whose_seats_have_no_path_is_a_warning() -> None:
     # Described before anybody decided where its code lives, and no seat in it
     # yet: nothing asks it for a path.
     assert doctor._without_a_path({"gamma": None}, [nav]) == []
+
+
+def test_a_name_from_before_a_rename_is_a_warning_that_says_what_to_rename() -> None:
+    """`checks:` became `inspections:` on 2026-09-23, and `handoffs:` became
+    `transitions:` the day after. They still work, so doctor only says what to
+    rename — never a problem that fails the check."""
+    from halyard.core.config_file import projects_from_yaml
+
+    [project] = projects_from_yaml(
+        "projects:\n  alpha-engine:\n    checks:\n      proof: NOTES/proof.md\n"
+        "    handoffs:\n      close: {checks: [proof]}\n"
+    )
+
+    lines = doctor._older_spellings([project])
+
+    assert lines == [
+        f"{doctor.WARN}alpha-engine — the project: `checks:` is now `inspections:`; "
+        "the old name still works",
+        f"{doctor.WARN}alpha-engine — the project: `handoffs:` is now `transitions:`; "
+        "the old name still works",
+        f"{doctor.WARN}alpha-engine — transition 'close': `checks:` is now `inspect:`; "
+        "the old name still works",
+    ]
+    assert doctor._older_spellings(projects_from_yaml("projects:\n  a:\n    path: /x\n")) == []
+
+
+def test_an_effort_the_runtime_does_not_take_is_named_where_it_was_written() -> None:
+    """Such an inspection still runs, at the model's own effort, and says so in
+    a log nobody reads. The doctor is where somebody looks."""
+    from types import SimpleNamespace
+
+    from halyard.core.config_file import projects_from_yaml
+
+    [project] = projects_from_yaml(
+        "projects:\n  alpha-engine:\n    inspections:\n"
+        "      proof: NOTES/proof.md\n"
+        "      bounded-context: {file: NOTES/bc.md, model: opus, effort: hihg}\n"
+    )
+
+    lines = doctor._inspection_efforts(
+        SimpleNamespace(inspection_effort="Max", claude_models=None, claude_binary=None,
+                        claude_default_model=None, claude_oauth_token=None,
+                        db_path=Path("halyard.db")),
+        [project],
+    )  # fmt: skip
+
+    [warning] = lines
+    assert "alpha-engine's inspection bounded-context asks for effort 'hihg'" in warning
+    assert "max" in warning

@@ -17,6 +17,7 @@ Three pieces, each testable without the other two:
 from halyard.commits import confirmation
 from halyard.commits.proposals import Proposal, Proposals
 from halyard.commits.repository import (
+    SYSTEM,
     Change,
     GitError,
     Uncommitted,
@@ -32,6 +33,7 @@ from halyard.commits.repository import (
 from halyard.commits.validation import Checked, check, mentions_task
 
 __all__ = [
+    "SYSTEM",
     "Change",
     "Checked",
     "GitError",

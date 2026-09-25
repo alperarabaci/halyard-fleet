@@ -8,24 +8,26 @@ workspace that wrote down every call. See `docs/zcode-payload-notes.md`.
   `hooks.events`, and none of them run unless `hooks.enabled` is true.
 - **Trust.** A workspace's hooks wait until somebody trusts them in ZCode, one
   declaration at a time, and a changed declaration waits again. See `trust`.
-- **Names.** A session is a `sess_<uuid>`, new with every task, and has no name
-  anywhere, so a seat is found by its project, the way opencode's is.
+- **Names.** A call carries only a `sess_<uuid>`, new with every task. The title
+  a session shows in ZCode is in the application's own database, where the
+  bridge and `sessions` read it, so a seat names its session as it would on any
+  other runtime; a seat without a name is found by its project, as opencode's is.
 
 The payload itself is Claude Code's, with camelCase copies of every field beside
 the snake_case ones. Nothing in a call says which runtime made it — its
 transcript is a temporary copy in no runtime's home — so the hooks this package
 writes say it for themselves. See `wiring`.
 
-Delivery is not here yet. Nothing outside the application is known to put a
-message into a ZCode session, so a seat on this runtime gets its approvals and
-its replies on the phone and takes new instructions at the desk.
+Delivery is Halyard driving the engine the way the application does — see
+`runner` and `protocol`. It is the one runtime whose gate Halyard answers
+directly rather than through a hook: the engine asks its host about every
+side-effect tool, and here the host is the control plane.
 """
 
 from __future__ import annotations
 
-from halyard.agents.base import SessionRef
 from halyard.agents.spec import Hooks, RuntimeSpec
-from halyard.agents.zcode import trust, wiring
+from halyard.agents.zcode import gate, sessions, trust, wiring
 from halyard.agents.zcode.runner import ZCodeRunner
 
 
@@ -35,16 +37,21 @@ def _present() -> bool:
 
 
 def _runner(settings=None) -> ZCodeRunner:
-    return ZCodeRunner()
+    """Built from settings when there are any.
 
-
-def find_session(name: str) -> SessionRef | None:
-    """Nothing, always: ZCode gives a session no name to find it by."""
-    return None
-
-
-def list_sessions() -> list[SessionRef]:
-    return []
+    The token and the model are this runtime's; the gate is the control plane's
+    own, reached the way every bridge reaches it — see `gate`.
+    """
+    if settings is None:
+        return ZCodeRunner()
+    return ZCodeRunner(
+        token=settings.zcode_token,
+        model=settings.zcode_model,
+        reasoning=settings.zcode_reasoning,
+        asking=gate.through(
+            f"http://{settings.bind}", timeout=float(settings.bridge_timeout_seconds)
+        ),
+    )
 
 
 def check_available(**_context) -> list[tuple[str, str]]:
@@ -62,13 +69,18 @@ RUNTIME = RuntimeSpec(
     # `present` is what answers whether it is here.
     binary="zcode",
     prefix="z",
-    hooks=Hooks(settings=str(wiring.CONFIG), matcher=wiring.MATCHER, dialect="events"),
+    hooks=Hooks(
+        settings=str(wiring.CONFIG),
+        matcher=wiring.MATCHER,
+        dialect="events",
+        guarded=(wiring.CONFIG.parts[0],),
+    ),
     runner=_runner,
-    find_session=find_session,
-    list_sessions=list_sessions,
+    find_session=sessions.find_session,
+    list_sessions=sessions.list_sessions,
     sessions_hint=(
-        "nothing: ZCode names no sessions, so leave `session:` unset and the seat "
-        "is found by its project"
+        "the titles in ZCode's own session list: rename the session there to match, "
+        "since a title set by hand stays and one ZCode generated moves"
     ),
     present=_present,
     check_available=check_available,

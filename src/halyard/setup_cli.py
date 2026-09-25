@@ -126,7 +126,7 @@ def assemble_yaml(
 
     lines += ["", "projects:", f"  {project_name or 'a-project'}:"]
     if seats:
-        lines.append("    seats:")
+        lines.append("    agents:")
         for seat in seats:
             lines.append(f"      {seat.label}:")
             lines.append(f"        runtime: {seat.runtime}")
@@ -137,7 +137,7 @@ def assemble_yaml(
             if seat.role:
                 lines.append(f"        role: {seat.role.value}")
     else:
-        lines.append("    seats: {}")
+        lines.append("    agents: {}")
 
     return "\n".join(lines) + "\n"
 
@@ -223,9 +223,9 @@ def _collect_seats(path: Path, ask: Ask, say: Say) -> list[Seat]:
                 say(f"  · {name}")
             if len(available) > _SESSION_LIST_LIMIT:
                 say(f"  … and {len(available) - _SESSION_LIST_LIMIT} more")
-        count = _to_int(ask(f"\nHow many {human} seats?", str(len(current))))
+        count = _to_int(ask(f"\nHow many {human} agents?", str(len(current))))
         for index in range(count):
-            say(f"\n  {human} seat {index + 1}:")
+            say(f"\n  {human} agent {index + 1}:")
             # What this seat already is, if it already is anything. Falling back
             # to a session the machine can see only when there is nothing to
             # keep — an existing seat's own values always win over a guess.
@@ -330,7 +330,7 @@ def run(
     path.write_text(content, encoding="utf-8")
     say(f"\nWrote {path}" + (f" (previous kept at {backup})" if backup else ""))
     # Never the token — the whole point of getpass is that it does not surface.
-    say(f"  {len(seats)} seat(s): " + ", ".join(f"{s.label}/{s.runtime}" for s in seats))
+    say(f"  {len(seats)} agent(s): " + ", ".join(f"{s.label}/{s.runtime}" for s in seats))
 
     _offer_wire(ask, say)
     _offer_doctor(ask, say)

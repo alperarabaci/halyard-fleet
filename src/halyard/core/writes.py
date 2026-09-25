@@ -29,23 +29,40 @@ hands an agent write access somebody did not intend:
 - `*` stops at a directory separator and `**` crosses them, which is what people
   already mean by those. A `*` that quietly spanned directories would grant a
   subtree somebody thought they had excluded.
+- The gate's own files are never granted, whatever the pattern says. `**` is a
+  reasonable thing to write for a scratch project and it covers `.git/hooks`
+  and the directory the runtime reads its hooks from — so an agent could take
+  the gate off, or put a script where git will run it, without a single card.
+  Those always ask. Each runtime names its own (`Hooks.guarded`), and `.git`
+  is here because it is nobody's runtime and everybody's.
 - Every grant is written to the audit log with the pattern that allowed it, so
   "why did that run without asking" always has an answer.
 """
 
 from __future__ import annotations
 
+import logging
 import re
 from pathlib import Path, PurePosixPath
 from typing import Any
 
 import yaml
 
+logger = logging.getLogger(__name__)
+
 #: The tools this applies to: the ones that take a `file_path` and change it.
 #: Kept here rather than in the gate's matcher because these two answer
 #: different questions — the matcher decides what Halyard is *shown*, this
 #: decides what it may let through without a person.
-FILE_TOOLS = frozenset({"Write", "Edit", "MultiEdit", "NotebookEdit"})
+#:
+#: `edit` is opencode's one category for every file change — its edit, write
+#: and patch tools all ask as `edit` — and its bridge sends every file the
+#: change touches, as `file_paths`.
+FILE_TOOLS = frozenset({"Write", "Edit", "MultiEdit", "NotebookEdit", "edit"})
+
+#: Git runs what is in `.git/hooks` and does what `.git/config` says, and
+#: nothing written there shows up in a diff anybody reviews.
+GIT = ".git"
 
 
 def _to_regex(pattern: str) -> re.Pattern[str]:
@@ -104,25 +121,25 @@ def _inside(path: Path, project: Path) -> PurePosixPath | None:
         return None
 
 
-def allowed_by(
-    file_path: str | None, project_dir: str | None, patterns: tuple[str, ...]
-) -> str | None:
-    """The pattern that pre-authorizes this write, or None to go and ask.
+def _gates_own(relative: PurePosixPath) -> str | None:
+    """The guarded name this path runs through, or None.
 
-    None is the answer to everything uncertain: no path, no project to measure
-    it against, a path outside that project, or simply nothing matching. The
-    caller turns None into a card on somebody's phone, which is the behaviour
-    this whole system is built around — so being wrong here costs a question,
-    never a silent grant.
+    Any part of the path, not only the first: a session measured from a
+    subdirectory, or a project inside another, has hooks of its own. Compared
+    without case, because the disk usually is — on a Mac `.Claude/` is
+    `.claude/`, and a check that missed the capital would be the way round it.
     """
-    if not file_path or not project_dir or not patterns:
-        return None
+    from halyard.agents import registry
 
-    relative = _inside(Path(file_path), Path(project_dir))
-    if relative is None:
-        return None
+    names = {name.casefold(): name for name in (GIT, *registry.guarded())}
+    for part in relative.parts:
+        found = names.get(part.casefold())
+        if found is not None:
+            return found
+    return None
 
-    text = relative.as_posix()
+
+def _matching(text: str, patterns: tuple[str, ...]) -> str | None:
     for pattern in patterns:
         cleaned = pattern.strip().strip("/")
         if not cleaned:
@@ -134,6 +151,57 @@ def allowed_by(
         if not any(char in cleaned for char in "*?") and text.startswith(f"{cleaned}/"):
             return pattern
     return None
+
+
+def allowed_by(
+    file_path: str | None, project_dir: str | None, patterns: tuple[str, ...]
+) -> str | None:
+    """The pattern that pre-authorizes this write, or None to go and ask.
+
+    None is the answer to everything uncertain: no path, no project to measure
+    it against, a path outside that project, the gate's own files, or simply
+    nothing matching. The caller turns None into a card on somebody's phone,
+    which is the behaviour this whole system is built around — so being wrong
+    here costs a question, never a silent grant.
+    """
+    if not file_path or not project_dir or not patterns:
+        return None
+
+    relative = _inside(Path(file_path), Path(project_dir))
+    if relative is None:
+        return None
+
+    pattern = _matching(relative.as_posix(), patterns)
+    if pattern is None:
+        return None
+    guarded = _gates_own(relative)
+    if guarded is not None:
+        # Said in the log because the person who wrote the pattern is about to
+        # get a card they may have thought it covered.
+        logger.info(
+            "Asking about %s although %r under `writes:` matches it: nothing under %s "
+            "is granted without a person.",
+            relative,
+            pattern,
+            guarded,
+        )
+        return None
+    return pattern
+
+
+def allowed_all(
+    file_paths: tuple[str, ...], project_dir: str | None, patterns: tuple[str, ...]
+) -> tuple[str, ...] | None:
+    """The pattern for each of these writes, or None when any one must ask.
+
+    All or nothing: a change to several files is one question at the runtime,
+    and a grant covering four of five would answer the fifth for somebody who
+    never saw it.
+    """
+    found = [allowed_by(path, project_dir, patterns) for path in file_paths]
+    if not found or None in found:
+        return None
+    return tuple(pattern for pattern in found if pattern is not None)
 
 
 def from_yaml(text: str) -> tuple[str, ...]:

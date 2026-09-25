@@ -29,11 +29,17 @@ import logging
 import os
 import re
 import shutil
-import signal
 import subprocess
+from collections.abc import Callable
 from pathlib import Path
 
-from halyard.agents.turns import WEDGED_AFTER_SECONDS, LateFailure, Turns
+from halyard.agents.turns import (
+    WEDGED_AFTER_SECONDS,
+    LateFailure,
+    Turns,
+    end_group,
+    say_started,
+)
 from halyard.core import usage
 
 logger = logging.getLogger(__name__)
@@ -255,19 +261,8 @@ def turns_used(
     ]
 
 
-def _end(process) -> None:
-    """End a one-shot turn and everything it started.
-
-    A check's turn runs commands — a test suite, say — as processes of its own,
-    and killing the CLI alone would leave them running for a check nobody is
-    waiting on. So the turn starts as a group of its own, and the group is what
-    is ended.
-    """
-    try:
-        os.killpg(process.pid, signal.SIGKILL)
-    except OSError:
-        with contextlib.suppress(ProcessLookupError):
-            process.kill()
+#: Ends a one-shot turn and everything it started — see `agents.turns`.
+_end = end_group
 
 
 class ClaudeCodeRunner:
@@ -451,6 +446,9 @@ class ClaudeCodeRunner:
         session_id: str | None = None,
         purpose: str | None = None,
         project: str | None = None,
+        system: str | None = None,
+        effort: str | None = None,
+        started: Callable[[str], object] | None = None,
     ) -> str | None:
         """Run one prompt in a session of its own and return what came back.
 
@@ -467,6 +465,17 @@ class ClaudeCodeRunner:
         sessions somebody does come back to. `edits=False` leaves it
         `READING_TOOLS`. `session_id` is the id it runs under, chosen by the
         caller so that what the turn asks for can be recognised as it arrives.
+        `effort` is `--effort`; without it the CLI uses its default for the
+        model, which is not the same for every model. `started` is told the id
+        the session runs under before the turn begins, so whoever started it can
+        say the session is theirs before anything it does is heard from.
+
+        `system` is for a turn that needs nothing but the text it is given: it
+        replaces Claude Code's own system prompt, and the turn runs with no
+        tools, no MCP server and nothing left in any session history. Claude
+        Code's prompt and its tool definitions are most of what a one-shot turn
+        costs — measured on 2026-09-23, a commit message carried 62,331 tokens
+        of context as it was and 11,676 like this, for the same message.
 
         The answer is asked for as JSON, which carries what the turn used beside
         what it said. `purpose` and `project` go on the row that records it —
@@ -483,13 +492,25 @@ class ClaudeCodeRunner:
         arguments = [binary, "-p", "--output-format", "json"]
         if chosen := model or self._default_model:
             arguments += ["--model", chosen]
-        if not edits:
+        if effort in EFFORT_LEVELS:
+            arguments += ["--effort", effort]
+        elif effort:
+            # Left out rather than failing the turn: the CLI would refuse it,
+            # and an inspection that does not run is worse than one at the
+            # model's own effort. `halyard doctor` names it.
+            logger.warning("%r is not an effort the claude CLI takes; running without it", effort)
+        if system is not None:
+            # `--tools=` with its `=`: the flag takes several values, and a
+            # bare `--tools ""` would take the next argument as a tool as well.
+            arguments += ["--tools=", "--strict-mcp-config", "--system-prompt", system]
+        elif not edits:
             arguments.append(f"--tools={READING_TOOLS}")
         if session_id:
             arguments += ["--session-id", session_id]
-        if cwd is not None:
+        if cwd is not None or system is not None:
             arguments.append("--no-session-persistence")
         arguments.append(text)
+        await say_started(started, session_id)
         try:
             process = await asyncio.create_subprocess_exec(
                 *arguments,

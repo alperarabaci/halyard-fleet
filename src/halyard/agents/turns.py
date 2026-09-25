@@ -55,7 +55,10 @@ caller may hand in `when_done`, called only when an accepted turn ends badly.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
+import os
+import signal
 from collections import defaultdict
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 
@@ -127,12 +130,20 @@ class Turns:
         cwd: str | None = None,
         env: Mapping[str, str] | None = None,
         when_done: LateFailure | None = None,
+        expected: Callable[[str], bool] | None = None,
     ) -> bool:
-        """Run `arguments` as a turn, returning once the message is accepted."""
+        """Run `arguments` as a turn, returning once the message is accepted.
+
+        `expected` names the refusals the caller has another way round, which
+        are not failures and are not logged as them. A Codex thread held open by
+        its app is refused here and reached by queueing a second later; logged
+        as a failure, three reviews that each got an answer within two minutes
+        read as three that never reached the reviewer.
+        """
         loop = asyncio.get_running_loop()
         accepted: asyncio.Future[bool] = loop.create_future()
         turn = loop.create_task(
-            self._turn(session_id, list(arguments), cwd, env, accepted, when_done),
+            self._turn(session_id, list(arguments), cwd, env, accepted, when_done, expected),
             name=f"{self._runtime}-turn-{session_id}",
         )
         self._running.add(turn)
@@ -147,10 +158,11 @@ class Turns:
         env: Mapping[str, str] | None,
         accepted: asyncio.Future[bool],
         when_done: LateFailure | None,
+        expected: Callable[[str], bool] | None = None,
     ) -> None:
         try:
             async with self._locks[session_id]:
-                await self._run(session_id, arguments, cwd, env, accepted, when_done)
+                await self._run(session_id, arguments, cwd, env, accepted, when_done, expected)
         except Exception:
             logger.exception("A turn in %s ended badly", session_id)
         finally:
@@ -168,6 +180,7 @@ class Turns:
         env: Mapping[str, str] | None,
         accepted: asyncio.Future[bool],
         when_done: LateFailure | None,
+        expected: Callable[[str], bool] | None = None,
     ) -> None:
         try:
             process = await asyncio.create_subprocess_exec(
@@ -205,12 +218,17 @@ class Turns:
             accepted.set_result(reason is None)
             if reason is not None:
                 self._last_error[session_id] = reason
-                logger.error(
-                    "Delivering a message to %s failed (exit %s): %s",
-                    session_id,
-                    process.returncode,
-                    reason,
-                )
+                if expected is not None and expected(reason):
+                    logger.debug(
+                        "%s refused the message, as its caller expected: %s", session_id, reason
+                    )
+                else:
+                    logger.error(
+                        "Delivering a message to %s failed (exit %s): %s",
+                        session_id,
+                        process.returncode,
+                        reason,
+                    )
             return
 
         try:
@@ -260,3 +278,32 @@ class Turns:
             )
             or "no output"
         )
+
+
+async def say_started(started: Callable[[str], object] | None, session_id: str | None) -> None:
+    """Tell whoever started a turn of its own the id it runs under, before the
+    turn begins. Awaited when it answers with something to wait for; never
+    raises, because a turn that cannot be marked is still worth taking."""
+    if started is None or not session_id:
+        return
+    try:
+        told = started(session_id)
+        if isinstance(told, Awaitable):
+            await told
+    except Exception:
+        logger.warning("Could not say which session %s is", session_id, exc_info=True)
+
+
+def end_group(process) -> None:
+    """End a one-shot turn and everything it started.
+
+    A turn runs commands — a test suite, say — as processes of its own, and
+    killing the CLI alone would leave them running for a turn nobody is waiting
+    on. So a one-shot turn starts as a group of its own, and the group is what
+    is ended.
+    """
+    try:
+        os.killpg(process.pid, signal.SIGKILL)
+    except OSError:
+        with contextlib.suppress(ProcessLookupError):
+            process.kill()

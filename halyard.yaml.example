@@ -6,12 +6,12 @@
 #
 # `halyard init` writes this file for you and can wire a project afterwards.
 # Editing it by hand is the same thing more slowly. For the smallest file that
-# works — one project, one seat, one chat — start from
+# works — one project, one agent, one chat — start from
 # `halyard.simple.yaml.example`; this one describes everything.
 #
 # A real environment variable still wins over anything below — that is how a
 # container passes a token in without writing it to disk. There is no second
-# file: `.env` used to hold the settings while this held the seats, which meant
+# file: `.env` used to hold the settings while this held the agents, which meant
 # two files describing one machine and no rule for which of them won.
 
 settings:
@@ -42,6 +42,17 @@ settings:
   # Note: ANTHROPIC_API_KEY, if it is set anywhere in the environment, outranks
   # the token and bills the API instead of your plan. `halyard doctor` says so.
 
+  # What a ZCode agent's turns pay with, and which model they run. ZCode's engine
+  # keeps no credential when something else drives it: it asks Halyard for the
+  # model call's header, and this is the answer. A coding-plan key from Z.AI's
+  # console is the long-lived kind; the application's own login is short-lived,
+  # and refreshing it from here would log the desk out. Without these two a
+  # ZCode agent still approves and replies, but takes its messages at the desk.
+  #
+  # ZCODE_TOKEN: "replace-me"
+  # ZCODE_MODEL: account:zai-individual-coding-plan/GLM-5.3-Flash
+  # ZCODE_REASONING: max
+
   # What a card calls this codebase.
   CLAUDE_PROJECT_NAME: alpha-engine
 
@@ -60,6 +71,19 @@ settings:
   # that sleeps denies every command on the machine and says nothing.
   # HALYARD_KEEP_AWAKE: false
 
+  # Keep every inspection run in the database — what the model was given, word
+  # for word, and what it said — to compare models on the same input later.
+  # Off unless set, because it is the one place Halyard keeps text: the input
+  # holds the reply that was inspected. See docs/transitions.md.
+  # HALYARD_KEEP_INSPECTIONS: true
+
+  # The model every inspection runs on, and how hard it thinks: low, medium,
+  # high, xhigh or max. Sonnet unless set, at the runtime's own effort for the
+  # model — which is not the same for every model. An inspection can name its
+  # own under the project's `inspections:`.
+  # HALYARD_INSPECTION_MODEL: sonnet
+  # HALYARD_INSPECTION_EFFORT: max
+
   # How much the log says. INFO unless set; DEBUG says more. A level that does
   # not exist refuses to start rather than quietly logging at INFO.
   # HALYARD_LOG_LEVEL: DEBUG
@@ -69,7 +93,8 @@ settings:
 # The gate covers `Write` and `Edit`, so a write to anywhere else puts a card
 # on your phone rather than failing — which is what a turn started from the
 # phone used to do, silently, because a headless session cannot open Claude
-# Code's own permission dialog.
+# Code's own permission dialog. opencode's edits are matched the same way; a
+# change to several files at once goes through only if every one of them may.
 #
 # This is the one thing Halyard permits without a person, so it is empty by
 # default and every grant is written to the audit log with the pattern that
@@ -81,6 +106,11 @@ settings:
 #   NOTES/**        everything under NOTES, at any depth
 #   NOTES           the same thing, written shorter
 #   NOTES/*.md      Markdown directly in NOTES, and no deeper
+#
+# The gate's own files ask whatever the pattern says: `.git/`, and where the
+# runtimes read their hooks from — `.claude/`, `.codex/`, `.opencode/` with
+# `opencode.json`, `.zcode/`, `.agents/` — in any case, at any depth. So even
+# `**` cannot let an agent switch the gate off without a card.
 #
 # writes:
 #   - NOTES/**
@@ -122,7 +152,7 @@ prompts:
     NOTES/development-prompts, in whichever place fits, and reply with the
     path and nothing else.
 
-# Seats, arranged by the project they work in.
+# Agents, arranged by the project they work in.
 #
 # Once a project has a `path`, wiring takes its name rather than a directory:
 #     halyard wire alpha-engine
@@ -132,54 +162,88 @@ projects:
   alpha-engine:
     # Where `halyard wire` puts the gate.
     path: ~/code/alpha-engine
-    # Put each seat's label on the task its branch is for — `claude:navigator`,
-    # `codex:reviewer` — the first time that seat works on it. Needs a forge
+    # Put each agent's label on the task its branch is for — `navigator:claude`,
+    # `reviewer:codex` — the first time that agent works on it. Needs a forge
     # token that may label issues; off unless set. See docs/setup.md.
     # label_work: true
-    # What `/command` offers, by name. `validate:` and a handoff's `commands:`
+    # What `/command` offers, by name. `validate:` and a transition's `commands:`
     # name entries from here rather than a command line of their own.
     # commands:
     #   test-fast: make test-fast
+    #   e2e: make test-e2e SCOPE={label_groups.area}   # the task's `area` label; asked for if missing
+    #   cleanup: make cleanup
+    #   pull-branch: make pull-branch TASK={input.task}   # typed when /command runs it
+    #   next-task: [cleanup, pull-branch]              # a list: one after another, stops at a failure
     # validate: test-fast             # run first by /review_and_commit
-    # Checks `/checks` offers over a chat's last reply, and handoffs `/handoff`
-    # offers — each the project's own file, read relative to `path`. A handoff
-    # carries the last reply, puts its prompt in front, runs its commands and then
-    # the checks it names, and goes to the seat or role in `to:` (every seat is
-    # offered if unset). All of it is described in docs/handoffs.md.
-    # checks:
-    #   proof: NOTES/halyard/checks/proof.md
-    #   destructive: NOTES/halyard/checks/destructive.md
-    # handoffs:
+    # Inspections `/inspect` offers over a chat's last reply, and transitions
+    # `/transition` offers — each the project's own file, read relative to `path`. A
+    # transition carries the last reply, puts its prompt in front, runs its commands
+    # and then the inspections it names under `inspect:`, and goes to the agent or
+    # role in `to:` (every agent is offered if unset). All of it is described in
+    # docs/transitions.md. Written `checks:` before 2026-09-23 and `handoffs:`
+    # before 2026-09-24, which still work.
+    # inspections:
+    #   proof: NOTES/halyard/inspections/proof.md
+    #   destructive: NOTES/halyard/inspections/destructive.md
+    #   bounded-context:                 # one that runs on a model of its own
+    #     file: NOTES/halyard/inspections/bounded-context.md
+    #     model: opus                    # effort: too; what it leaves out is the machine's
+    # transitions:
+    #   reviewed: {to: navigator}        # the reply alone, with no prompt of its own
     #   review:
-    #     prompt: NOTES/halyard/handoffs/review.md
+    #     prompt: NOTES/halyard/transitions/review.md
+    #     followup_prompt: NOTES/halyard/transitions/review-followup.md   # a workflow step's round 2 on
     #     to: reviewer
+    #   driver_discover: {prompt: NOTES/halyard/transitions/forward.md, to: driver}
+    #   driver_develop: {prompt: NOTES/halyard/transitions/forward.md, to: driver}
     #   discover_completed:
-    #     prompt: NOTES/halyard/handoffs/discovery.md
-    #     checks: [proof, destructive]
+    #     prompt: NOTES/halyard/transitions/discovery.md
+    #     inspect: [proof, destructive]
     #     to: navigator
     #   close:
-    #     prompt: NOTES/halyard/handoffs/close.md
-    #     commands: [test-fast]          # from `commands:`, run before the checks
-    #     checks: [proof, destructive]
+    #     prompt: NOTES/halyard/transitions/close.md
+    #     commands: [test-fast]          # from `commands:`, run before the inspections
+    #     inspect: [proof, destructive]
     #     to: navigator
+    # Workflows take those transitions in an order, each step to an agent, and go on by
+    # the last line of each reply: forward, back or wait. A step goes once unless
+    # `rounds:` says more. A list inside a workflow is its phases: the steps a plan
+    # in parts goes through once per part, whose last step says `next` for another
+    # phase — or `next develop` to start it further on — and `forward` to leave
+    # them. See docs/workflows.md.
+    # workflows:
+    #   decisions: {forward: forward, back: back, wait: wait, next: next}   # the defaults
+    #   phases: 3                        # how many phases go before it stops and asks
+    #   steps:
+    #     review: {agent: reviewer, rounds: 2}
+    #     reviewed: {agent: navigator, decided_by: review, rounds: 2}
+    #     discover: {transition: driver_discover, agent: driver, rounds: 2}
+    #     discovered: {transition: discover_completed, agent: navigator, rounds: 2}
+    #     develop: {transition: driver_develop, agent: driver}
+    #     verified: {transition: reviewed, agent: navigator}
+    #     close: {agent: navigator}
+    #   level3: [review, reviewed, [discover, discovered, develop, verified], close]
     # Groups of task labels. The first one the task carries from each group
-    # goes on the envelope checks and handoffs are given, as `level: level::3`.
+    # goes on the envelope inspections and transitions are given, as `level: level::3`.
     # Nothing is required or refused: a task with none of them adds nothing.
     # label_groups:
     #   level: [level::1, level::2, level::3]
-    # What the checks' answers say when they found something, in the project's
-    # own words — quoted, since a phrase with a colon is otherwise a mapping. An
-    # answer saying one of them puts `halyard:<check>` on the task. This writes
+    #   area: [area:api, area:web, area:all]   # a command can take one: {label_groups.area}
+    # What the inspections' answers say when they found something, in the
+    # project's own words — quoted, since a phrase with a colon is otherwise a
+    # mapping. An answer saying one of them puts `halyard:<inspection>` on the task. This writes
     # to the tracker, so nothing is written unless it is set.
     # label_findings:
     #   - "status: candidate"
     #   - "status: evidence missing"
-    seats:
+    # Written `seats:` before 2026-09-24, and a step's `agent:` was `seat:`;
+    # both still work.
+    agents:
       # A label is what you type on a phone. It has to be unique across every
-      # project, because it is also how `doctor` names a seat.
+      # project, because it is also how `doctor` names an agent.
       nav:
         runtime: claude-code
-        # What survives a compaction, for the seats where it matters. A
+        # What survives a compaction, for the agents where it matters. A
         # navigator holding a plan across a day needs this; a driver running
         # one command does not, and is left alone by leaving these out.
         #
@@ -222,13 +286,13 @@ projects:
         # A forum topic inside a group is "-1001:12".
         chat: "-1001234567890"
         # Optional. It colours the card and matches a hook that declares one.
-        # Two seats may share a role; that is the point of having four.
+        # Two agents may share a role; that is the point of having four.
         role: navigator
-        # Optional. The label this seat puts on a task when `label_work` is on —
-        # runtime and role unless set, `claude:navigator`, or `claude` alone for a
-        # seat with no role. Set it to match labels your tracker already uses.
-        # Leave the model out: that changes under a seat, and this never does.
-        # task_label: agent:navigator
+        # Optional. The label this agent puts on a task when `label_work` is on —
+        # role and runtime unless set, `navigator:claude`, or `claude` alone for a
+        # agent with no role. Set it to match labels your tracker already uses.
+        # Leave the model out: that changes under an agent, and this never does.
+        # task_label: navigator:agent
 
       drv:
         runtime: claude-code
@@ -248,19 +312,19 @@ projects:
         chat: "-1004234567890"
         role: driver
 
-      # A reviewer is a seat like the others. Hand it work with `/forward`
-      # from the seat that wrote it; its cards go to its own chat.
+      # A reviewer is an agent like the others. Hand it work with `/forward`
+      # from the agent that wrote it; its cards go to its own chat.
       xrev:
         runtime: codex
         session: alpha-engine-xreviewer
         chat: "-1005234567890"
         role: reviewer
 
-  # A second project is a second block. A seat with no `chat` is reachable by
+  # A second project is a second block. An agent with no `chat` is reachable by
   # name and has nowhere of its own to speak, which is enough to hand it work.
   # hermes:
   #   path: ~/code/hermes
-  #   seats:
+  #   agents:
   #     hnav:
   #       runtime: codex
   #       session: hermes-navigator

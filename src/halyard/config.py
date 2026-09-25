@@ -196,6 +196,24 @@ class Settings(BaseSettings):
     #: Idle sleep only. A person can still close the lid or choose Sleep.
     keep_awake: bool = Field(default=True, validation_alias="HALYARD_KEEP_AWAKE")
 
+    #: Whether every inspection run is kept whole in the database — what the
+    #: model was given, word for word, and what it said — so it can be compared
+    #: and run again later. See `halyard.inspections.record`.
+    #:
+    #: Off unless asked for, because it is the one place Halyard would keep text:
+    #: the input holds the reply that was inspected. Turned on, it never holds
+    #: anything up — the row is written off to one side, after the answer.
+    keep_inspections: bool = Field(default=False, validation_alias="HALYARD_KEEP_INSPECTIONS")
+    #: The model every inspection runs on — unless its own entry under a
+    #: project's `inspections:` names another. Unset, the channel's own choice.
+    inspection_model: str | None = Field(default=None, validation_alias="HALYARD_INSPECTION_MODEL")
+    #: How hard it thinks — `max`. Unset, the runtime's default for the model,
+    #: which is not the same for every model: in the catalog Claude Code 2.1.280
+    #: ships, `high` for Sonnet 5 and `medium` for Opus 5.5.
+    inspection_effort: str | None = Field(
+        default=None, validation_alias="HALYARD_INSPECTION_EFFORT"
+    )
+
     log_level: str = Field(default="INFO", validation_alias="HALYARD_LOG_LEVEL")
     #: A ceiling on one week, so an always-on service cannot fill a disk before
     #: the next Monday. Reaching it rolls early and keeps both halves.
@@ -292,6 +310,23 @@ class Settings(BaseSettings):
     claude_oauth_token: str | None = Field(
         default=None, validation_alias="HALYARD_CLAUDE_OAUTH_TOKEN"
     )
+    #: What a ZCode turn Halyard starts pays with. Its engine keeps no
+    #: credential of its own when something else drives it: it asks its host
+    #: for the model call's header, and Halyard answers with this and nothing
+    #: else. A coding-plan key from Z.AI's console is the long-lived kind; the
+    #: application's own login is short-lived, and refreshing it from here
+    #: would log the desk out — which is the failure this whole setting exists
+    #: to avoid. Without it a ZCode seat takes its messages at the desk.
+    #:
+    #: Secret, like the bot token, and lives in the same gitignored file.
+    zcode_token: str | None = Field(default=None, validation_alias="ZCODE_TOKEN")
+    #: Which model those turns run on, written the way ZCode writes it:
+    #: `account:zai-individual-coding-plan/GLM-5.3-Flash`. The engine refuses a
+    #: send without one, and it has no default of its own to fall back on.
+    zcode_model: str | None = Field(default=None, validation_alias="ZCODE_MODEL")
+    #: How hard those turns think — ZCode refuses a send that carries no
+    #: reasoning level at all.
+    zcode_reasoning: str = Field(default="max", validation_alias="ZCODE_REASONING")
     #: For reaching an issue tracker — today only to add a label to the task a
     #: branch is for. Named for the idea rather than for GitLab, because the
     #: provider is chosen by the repository's remote and a second one is a

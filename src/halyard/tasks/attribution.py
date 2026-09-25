@@ -6,9 +6,10 @@ hand, one label at a time, and a hand-kept record is the one that lapses on a
 busy day. Here the seat is already known: every hook says which session it came
 from, and the configuration says which runtime and role that session is. So the
 first time a seat is heard from on a branch named for a task, the task gets that
-seat's label — `claude:navigator`, `codex:reviewer`.
+seat's label — `navigator:claude`, `reviewer:codex`. The role comes first: it is
+what a task's history is read for, and which runtime held it is the detail.
 
-**One label per seat.** By default, runtime and role and nothing else. Not the
+**One label per seat.** By default, role and runtime and nothing else. Not the
 session name — the same seat is `alpha-engine-navigator` on one machine and
 `macmini-navigator` on another, and the record would split one seat in two. Not
 the model — a seat keeps its runtime and its role, but its model is chosen at the
@@ -37,8 +38,8 @@ seats in one project that share both and ask for different labels are refused
 when the configuration loads, since nothing here could tell them apart.
 
 **One colon.** GitLab reserves `::` for scoped labels on its paid tiers, where two
-labels in one scope replace each other — `claude::driver` would take
-`claude::navigator` off a task both worked on. A default that behaved differently
+labels in one scope replace each other — `driver::codex` would take
+`driver::claude` off a task both drivers worked on. A default that behaved differently
 depending on the tracker's plan would be a bug waiting for an upgrade. A
 `task_label:` may use `::` anyway: that is a choice about somebody's own tracker,
 made by them.
@@ -78,9 +79,9 @@ logger = logging.getLogger(__name__)
 
 
 def label_for(tag: str, role: Role | None) -> str:
-    """What a seat puts on a task unless it names its own: `claude:navigator`,
+    """What a seat puts on a task unless it names its own: `navigator:claude`,
     or `claude` alone for a seat given no role."""
-    return f"{tag}:{role.value}" if role is not None else tag
+    return f"{role.value}:{tag}" if role is not None else tag
 
 
 class Attribution:
@@ -129,7 +130,7 @@ class Attribution:
 
     def _label_for(self, project: str, settings: object, session: SessionInfo) -> str | None:
         """The label of the seat this session is: the seat's own `task_label:`
-        if it named one, else runtime and role.
+        if it named one, else its role and runtime.
 
         The seat is found the way a card finds its chat: by the name the runtime
         knows the session by, or its id, always together with the runtime; then,
@@ -179,7 +180,7 @@ class Attribution:
             return
         self._said_no_seat.add(session.session_id)
         logger.info(
-            "Not labelling for %s session %s in %s: it matches no seat",
+            "Not labelling for %s session %s in %s: it matches no agent",
             session.agent_id,
             session.session_name or session.session_id,
             project,

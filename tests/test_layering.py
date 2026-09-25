@@ -1,9 +1,10 @@
-"""A tripwire: checks and handoffs stay apart from what uses them.
+"""A tripwire: inspections and transitions stay apart from what uses them.
 
-Two pieces, one direction between them. A handoff may run checks; a check never
-hands anything on. Neither knows a chat or a runtime: they reach a model
-through `checks.Asker` and a seat through `handoffs.Delivery`, and the Telegram
-channel is only the one adapter that answers both today.
+Two pieces, one direction between them. A transition may run inspections; an
+inspection never hands anything on. Neither knows a chat or a runtime: they
+reach a model through `inspections.Asker` and a seat through
+`transitions.Delivery`, and the Telegram channel is only the one adapter that
+answers both today.
 
 That holds only while nothing imports across it, and it goes quietly when it
 goes — one convenient import from the channel, and the next channel has to be
@@ -43,23 +44,30 @@ def _crossings(files: list[Path], forbidden: tuple[str, ...]) -> list[str]:
     ]
 
 
-def test_checks_and_handoffs_know_no_chat_and_no_runtime() -> None:
+def test_inspections_and_transitions_know_no_chat_and_no_runtime() -> None:
     """A model through `Asker`, a seat through `Delivery`, and nothing else."""
-    files = [*_package("checks"), *_package("handoffs"), SOURCE / "frame.py"]
-    assert len(files) > 3, "the packages were not found, so this check proves nothing"
+    packages = ("inspections", "transitions", "workflows")
+    # Each package, not their sum. When `checks` became `inspections`, this
+    # went on reading a folder that was gone, and the other two kept it passing.
+    missing = [name for name in packages if not _package(name)]
+    assert not missing, f"{missing} not found, so this proves nothing about them"
+    files = [*(path for name in packages for path in _package(name)), SOURCE / "frame.py"]
 
     crossings = _crossings(files, ("halyard.channels", "halyard.agents"))
 
     assert not crossings, (
-        "A check or a handoff reaches past its ports:\n  "
+        "An inspection or a transition reaches past its ports:\n  "
         + "\n  ".join(crossings)
-        + "\n\nAsk for what is needed through `checks.Asker` or `handoffs.Delivery`, "
+        + "\n\nAsk for what is needed through `inspections.Asker` or `transitions.Delivery`, "
         "and let the channel answer it."
     )
 
 
-def test_a_check_never_hands_anything_on() -> None:
-    """The one direction: handoffs use checks, never the other way round."""
-    crossings = _crossings([*_package("checks"), SOURCE / "frame.py"], ("halyard.handoffs",))
+def test_an_inspection_never_hands_anything_on() -> None:
+    """The one direction: transitions use inspections, never the other way round."""
+    files = [*_package("inspections"), SOURCE / "frame.py"]
+    assert len(files) > 1, "inspections not found, so this proves nothing"
 
-    assert not crossings, "A check imports a handoff:\n  " + "\n  ".join(crossings)
+    crossings = _crossings(files, ("halyard.transitions",))
+
+    assert not crossings, "An inspection imports a transition:\n  " + "\n  ".join(crossings)

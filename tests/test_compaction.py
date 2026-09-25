@@ -337,6 +337,39 @@ async def test_a_runtime_that_cannot_run_one_shot_turns_is_skipped(tmp_path: Pat
     )
 
 
+async def test_a_seat_on_a_runtime_that_can_take_a_turn_is_still_left_alone(
+    tmp_path: Path,
+) -> None:
+    """opencode and Codex can take a turn of their own now. The record's model
+    is the default runtime's word — `sonnet` — which one of them reads as no
+    model and the other refuses, so their seats stay as they were."""
+    instructions = tmp_path / "pre.md"
+    instructions.write_text("record", encoding="utf-8")
+    # Where Codex files a rollout, so the transcript is found and only the
+    # runtime can be the reason nothing is written.
+    rollouts = tmp_path / "sessions" / "2026" / "09" / "24"
+    rollouts.mkdir(parents=True)
+    transcript(
+        rollouts / "rollout-2026-09-24T21-00-00-9f1c2b3a-0000-0000-0000-000000000000.jsonl",
+        ("assistant", "done"),
+    )
+    codex = FakeRunner()
+    recorder = Recorder(
+        roots=(tmp_path,),
+        seats=[seat(runtime="codex", before_compaction=str(instructions))],
+        runners={"codex": codex},
+    )
+
+    written = await recorder.write(
+        session_id="9f1c2b3a-0000-0000-0000-000000000000",
+        agent_id="codex",
+        session_name="alpha-navigator",
+    )
+
+    assert written is False
+    assert codex.asked == []
+
+
 async def test_a_turn_that_fails_lets_the_compaction_go_ahead(tmp_path: Path) -> None:
     """The compaction is waiting on this. Every failure has to end in the
     summary simply proceeding."""

@@ -51,10 +51,11 @@ TIMEOUT = 10.0
 
 
 def _runner(settings=None):
-    """Takes nothing from settings; the argument is the shared shape."""
+    """Takes only where a turn of Halyard's own records what it used; the rest
+    of this runtime's settings are read where they are needed."""
     from halyard.agents.opencode.runner import OpencodeRunner
 
-    return OpencodeRunner()
+    return OpencodeRunner(usage_path=getattr(settings, "db_path", None))
 
 
 def _binary() -> str | None:
@@ -85,22 +86,35 @@ def _available_binary() -> list[tuple[str, str]]:
     return lines
 
 
-def check_wired(hooks_file: Path, project_dir: Path, **_context) -> list[tuple[str, str]]:
+def check_wired(
+    hooks_file: Path, project_dir: Path, *, bridges: Path = wiring.BRIDGE_DIR, **_context
+) -> list[tuple[str, str]]:
     """Whether this project's gate is present *and* switched on.
 
     Two questions, and the second is the one worth asking. A plugin sitting in
     the right directory proves nothing on its own: the runtime asks about
     nothing unless its own configuration tells it to, so a project can be
     wired, loaded and silent. That was measured before any of this was written.
+
+    And whether it is the current one. The plugin is copied into the project,
+    not linked, so a Halyard whose bridge changed leaves every project on the
+    old copy until it is wired again — and opencode reads it only at startup.
     """
     lines: list[tuple[str, str]] = []
 
+    plugin = wiring.PLUGINS / wiring.PLUGIN
     if not hooks_file.is_file():
         return [
-            ("fail", f"no {wiring.PLUGINS / wiring.PLUGIN} — nothing is gating this project"),
+            ("fail", f"no {plugin} — nothing is gating this project"),
             ("", f"halyard wire {project_dir}"),
         ]
-    lines.append(("ok", f"{wiring.PLUGINS / wiring.PLUGIN} is in place"))
+    if wiring.current(hooks_file, bridges) is False:
+        # Warned, not failed: an older copy still gates. What it lacks is
+        # whatever changed since, which the phone never shows.
+        lines.append(("warn", f"{plugin} is not the current copy of this Halyard's bridge"))
+        lines.append(("", f"halyard wire {project_dir}, then restart opencode"))
+    else:
+        lines.append(("ok", f"{plugin} is in place"))
 
     config = project_dir / wiring.CONFIG
     try:
@@ -329,14 +343,14 @@ def check_available(**_context) -> list[tuple[str, str]]:
         return lines + models_said
 
     # A failure, not a warning, and the reason is what happens next. Everything
-    # after this asks opencode something — which session a seat means, whether
+    # after this asks opencode something — which session an agent means, whether
     # it is where it says it is — and with nobody answering, every one of those
     # comes back empty. Reported as a warning once, and the line underneath it
     # read "no session named alpha-engine-opencode-driver", which sent somebody
     # looking for a session that was there the whole time behind a server that
     # was not running.
     lines.append(("fail", f"nothing is answering on port {port} ({said})"))
-    lines.append(("", "so nothing here can be asked which session a seat means"))
+    lines.append(("", "so nothing here can be asked which session an agent means"))
     lines.append(("", f"start it with `opencode --port {port}`, or leave a headless one"))
     lines.append(("", f"running with `opencode serve --port {port}` and attach to that"))
     lines.append(("", f"from a terminal with `opencode attach http://127.0.0.1:{port}`"))
@@ -466,6 +480,10 @@ RUNTIME = RuntimeSpec(
         settings=str(wiring.PLUGINS / wiring.PLUGIN),
         matcher="|".join(sorted(wiring.ASK)),
         dialect="plugin",
+        # Every plugin is code opencode loads, and the project's config holds
+        # the `permission` block without which it never asks anything — in
+        # either of the two files it reads.
+        guarded=(wiring.PLUGINS.parts[0], wiring.CONFIG, "opencode.jsonc"),
     ),
     runner=_runner,
     find_session=find_session,

@@ -67,13 +67,24 @@ class FakeRunner:
         self.says = says
         self.asked: list[str] = []
         self.models: list[str | None] = []
+        #: The system prompt each turn asked for in place of Claude Code's own.
+        self.systems: list[str | None] = []
+        #: How hard each one-shot turn was asked to think.
+        self.efforts: list[str | None] = []
+        #: The id each one-shot turn ran under — what its tokens are recorded by.
+        self.session_ids: list[str | None] = []
         self.sent: list[tuple[str, str]] = []
         #: Session names this runtime claims to know, as the real one would.
         self.sessions: dict[str, object] = {}
+        #: Whether a session takes what is sent to it, as `send` answers.
+        self.accepting = True
 
     async def ask(self, text: str, *, model: str | None = None, **kwargs) -> str | None:
         self.asked.append(text)
         self.models.append(model)
+        self.efforts.append(kwargs.get("effort"))
+        self.systems.append(kwargs.get("system"))
+        self.session_ids.append(kwargs.get("session_id"))
         if self.says is None:
             raise RuntimeError("no model today")
         return self.says
@@ -97,7 +108,7 @@ class FakeRunner:
     ) -> bool:
         """What reaches a session, as against what reaches the chat."""
         self.sent.append((session_id, text))
-        return True
+        return self.accepting
 
 
 def git(repo: Path, *args: str) -> str:
@@ -252,6 +263,35 @@ async def test_the_model_is_asked_with_the_house_style_and_the_cheap_model(wired
     assert "alpha-engine#279 p2" in runner.asked[0]
 
 
+async def test_another_agent_s_chat_keeps_the_reference_alone(wired) -> None:
+    """As it was while only the default runtime could take a turn of its own:
+    `sonnet` is that runtime's word, and opencode would have read it as no
+    model and written the message on its own default."""
+    channel, _, runner, repo = wired
+    other = FakeRunner()
+    channel._runners["opencode"] = other
+    channel._seats = [replace(seat, runtime="opencode") for seat in channel._seats]
+    wrote(repo, "loader.py", "x = 1\n")
+
+    await deliver(channel, typed("/commit"))
+
+    assert other.asked == []
+    assert runner.asked == []
+
+
+async def test_the_message_is_written_with_nothing_but_the_diff(wired) -> None:
+    """Claude Code's own prompt and tools were five sixths of what a message
+    cost, and the diff in front of it is all it needs."""
+    from halyard import commits
+
+    channel, _, runner, repo = wired
+    wrote(repo, "loader.py", "x = 1\n")
+
+    await deliver(channel, typed("/commit"))
+
+    assert runner.systems == [commits.SYSTEM]
+
+
 async def test_what_an_agent_wrote_without_staging_is_offered(wired) -> None:
     """The case the first version got wrong: nobody staged anything, and there
     is still an afternoon of work to commit."""
@@ -291,7 +331,7 @@ async def test_a_chat_with_no_repository_says_so(tmp_path: Path) -> None:
         await deliver(channel, typed("/commit"))
         said = api.sent[-1]["text"]
         assert "do not know which repository" in said
-        assert f"no seat has it. Give a seat <code>chat: {CHAT}</code>" in said
+        assert f"no agent has it. Give an agent <code>chat: {CHAT}</code>" in said
     finally:
         await audit.close()
 
@@ -303,7 +343,7 @@ async def test_a_chat_whose_project_has_no_path_says_whose_chat_it_is(wired) -> 
     # A project written without a `path:` never reaches the channel.
     channel._repositories.clear()
 
-    await deliver(channel, typed("/handoff"))
+    await deliver(channel, typed("/transition"))
 
     assert (
         "it is <b>nav</b>'s, and nav's project <b>alpha-engine</b> has no <code>path:</code>"
@@ -317,7 +357,7 @@ async def test_a_chat_whose_seat_is_in_no_project_says_so(wired) -> None:
     # With a single project every chat is about it, so there is none here.
     channel._repositories.clear()
 
-    await deliver(channel, typed("/checks"))
+    await deliver(channel, typed("/inspect"))
 
     assert "it is <b>nav</b>'s, and nav is under no project" in api.sent[-1]["text"]
 
@@ -502,14 +542,14 @@ def test_commit_is_registered_so_it_appears_when_you_type_a_slash() -> None:
 # --- saying it happened, and pushing ----------------------------------------
 
 
-# --- /checks: a project's own checks over the last reply ----------------------
+# --- /inspect: a project's own inspections over the last reply ---------------
 #
 # Here because it runs on the same two things `/commit` does: the project's
 # repository, and a one-shot model turn.
 
 
-def checks_in(channel: TelegramChannel, repo: Path, tmp_path: Path, **texts: str) -> None:
-    """Give the project checks on disk, and a reply in the chat to check."""
+def inspections_in(channel: TelegramChannel, repo: Path, tmp_path: Path, **texts: str) -> None:
+    """Give the project inspections on disk, and a reply in the chat to inspect."""
     from halyard.channels.telegram.adapter import SAID_FILE
     from halyard.core import last_said
 
@@ -518,20 +558,20 @@ def checks_in(channel: TelegramChannel, repo: Path, tmp_path: Path, **texts: str
         (repo / "NOTES" / f"{name}.md").write_text(text)
     found = channel._repositories["alpha-engine"]
     channel._repositories["alpha-engine"] = replace(
-        found, checks={name: Path(f"NOTES/{name}.md") for name in texts}
+        found, inspections={name: Path(f"NOTES/{name}.md") for name in texts}
     )
     channel._said_path = tmp_path / "last-said.json"
     last_said.remember(channel._kept(CHAT, SAID_FILE), chat_id=CHAT, text="All 42 tests passed.")
 
 
-def pressed_check(name: str) -> dict:
-    """The button a check is offered on, pressed by somebody allowed to."""
+def pressed_inspection(name: str, what: str = "inspect") -> dict:
+    """The button an inspection is offered on, pressed by somebody allowed to."""
     from halyard.channels.telegram import cards
 
     return {
         "id": "cb1",
         "from": {"id": int(APPROVER)},
-        "data": cards.choice_data("check", name),
+        "data": cards.choice_data(what, name),
         "message": {"message_id": 5, "chat": {"id": CHAT}},
     }
 
@@ -542,9 +582,9 @@ async def test_a_bare_checks_offers_each_check_as_a_button(tmp_path: Path, wired
     from halyard.channels.telegram import cards
 
     channel, api, runner, repo = wired
-    checks_in(channel, repo, tmp_path, proof="# proof", claims="# claims")
+    inspections_in(channel, repo, tmp_path, proof="# proof", claims="# claims")
 
-    await channel._run_checks("", CHAT, None)
+    await channel._run_inspection("", CHAT, None)
 
     rows = api.sent[-1]["reply_markup"]["inline_keyboard"]
     assert [key["text"] for key in rows[0]] == ["proof", "claims"]
@@ -558,7 +598,7 @@ async def test_cancelling_a_choice_card_takes_its_buttons_away(tmp_path: Path, w
     from halyard.channels.telegram import cards
 
     channel, api, runner, repo = wired
-    checks_in(channel, repo, tmp_path, proof="# proof")
+    inspections_in(channel, repo, tmp_path, proof="# proof")
 
     await channel._handle_callback(
         {
@@ -583,16 +623,18 @@ async def test_a_check_is_logged_as_what_it_was_given_and_what_it_said(
     import logging
 
     channel, _, runner, repo = wired
-    checks_in(channel, repo, tmp_path, proof="# proof")
+    inspections_in(channel, repo, tmp_path, proof="# proof")
     caplog.set_level(logging.INFO)
 
-    await channel._run_checks("proof delivery", CHAT, None)
+    await channel._run_inspection("proof delivery", CHAT, None)
 
-    asked = next(r.getMessage() for r in caplog.records if "Check proof asked" in r.getMessage())
+    asked = next(
+        r.getMessage() for r in caplog.records if "Inspection proof asked" in r.getMessage()
+    )
     assert "alpha-engine#281" in asked
     assert "NOTES/proof.md @ uncommitted" in asked
     assert "'delivery'" in asked
-    assert "Check proof answered" in caplog.text
+    assert "Inspection proof answered" in caplog.text
     assert runner.says in caplog.text
 
 
@@ -608,7 +650,7 @@ async def test_the_reply_is_timed_by_this_machines_clock(
     from halyard.core import last_said
 
     channel, api, _, repo = wired
-    checks_in(channel, repo, tmp_path, proof="# proof")
+    inspections_in(channel, repo, tmp_path, proof="# proof")
     last_said.remember(
         channel._kept(CHAT, SAID_FILE),
         chat_id=CHAT,
@@ -618,7 +660,7 @@ async def test_the_reply_is_timed_by_this_machines_clock(
     monkeypatch.setenv("TZ", "Europe/Istanbul")
     time.tzset()
     try:
-        await channel._run_checks("", CHAT, None)
+        await channel._run_inspection("", CHAT, None)
     finally:
         monkeypatch.undo()
         time.tzset()
@@ -643,9 +685,9 @@ async def test_the_answer_carries_a_button_per_seat(tmp_path: Path, wired) -> No
     from halyard.channels.telegram import cards
 
     channel, api, _, repo = wired
-    checks_in(channel, repo, tmp_path, proof="# proof")
+    inspections_in(channel, repo, tmp_path, proof="# proof")
 
-    await channel._run_checks("proof", CHAT, None)
+    await channel._run_inspection("proof", CHAT, None)
 
     rows = api.sent[-1]["reply_markup"]["inline_keyboard"]
     assert rows[0][0]["text"] == "→ nav"
@@ -658,8 +700,8 @@ async def test_a_seats_button_hands_it_the_whole_answer_and_what_it_is(
     """With the line that says what it is, so the session can tell a finding
     from an instruction."""
     channel, _, runner, repo = wired
-    checks_in(channel, repo, tmp_path, proof="# proof")
-    await channel._run_checks("proof", CHAT, None)
+    inspections_in(channel, repo, tmp_path, proof="# proof")
+    await channel._run_inspection("proof", CHAT, None)
 
     await channel._handle_callback(pressed_result("proof>nav"))
     await settled(channel)
@@ -667,7 +709,7 @@ async def test_a_seats_button_hands_it_the_whole_answer_and_what_it_is(
     [(session, text)] = runner.sent
     assert session == "id-nav"
     assert "To nav (navigator), from Halyard." in text
-    assert "Check: proof — NOTES/proof.md @ uncommitted" in text
+    assert "Inspection: proof — NOTES/proof.md @ uncommitted" in text
     assert "alpha-engine#281" in text
     # The findings, then the reply they are about: a finding about a report the
     # reader does not have is a finding nobody can weigh.
@@ -677,11 +719,11 @@ async def test_a_seats_button_hands_it_the_whole_answer_and_what_it_is(
 async def test_the_button_under_one_check_sends_that_checks_answer(tmp_path: Path, wired) -> None:
     """A chat holds several checks' answers; the one under `proof` sends proof's."""
     channel, _, runner, repo = wired
-    checks_in(channel, repo, tmp_path, proof="# proof", claims="# claims")
+    inspections_in(channel, repo, tmp_path, proof="# proof", claims="# claims")
     runner.says = "proof found this"
-    await channel._run_checks("proof", CHAT, None)
+    await channel._run_inspection("proof", CHAT, None)
     runner.says = "claims found that"
-    await channel._run_checks("claims", CHAT, None)
+    await channel._run_inspection("claims", CHAT, None)
 
     await channel._handle_callback(pressed_result("proof>nav"))
     await settled(channel)
@@ -693,7 +735,7 @@ async def test_the_button_under_one_check_sends_that_checks_answer(tmp_path: Pat
 
 async def test_an_answer_no_longer_kept_says_so(tmp_path: Path, wired) -> None:
     channel, api, runner, repo = wired
-    checks_in(channel, repo, tmp_path, proof="# proof")
+    inspections_in(channel, repo, tmp_path, proof="# proof")
 
     await channel._handle_callback(pressed_result("proof>nav"))
     await settled(channel)
@@ -740,14 +782,14 @@ async def test_a_project_name_cannot_climb_out_of_where_state_is_kept(
     assert kept.parent.parent == tmp_path / "projects"
 
 
-# --- /handoff: a reply handed on the way the project defines it ---------------
+# --- /transition: a reply handed on the way the project defines it ---------------
 
 
-def handoffs_in(channel, repo: Path, tmp_path: Path, runner, **specs: dict) -> None:
-    """A reviewer seat, a check, the handoffs asked for, and a reply to hand on."""
+def transitions_in(channel, repo: Path, tmp_path: Path, runner, **specs: dict) -> None:
+    """A reviewer seat, a check, the transitions asked for, and a reply to hand on."""
     from halyard.channels.telegram.adapter import SAID_FILE
     from halyard.core import last_said
-    from halyard.core.config_file import Handoff
+    from halyard.core.config_file import Transition
 
     (repo / "NOTES").mkdir(exist_ok=True)
     (repo / "NOTES" / "review.md").write_text("You did not write this prompt; try to break it.")
@@ -769,14 +811,14 @@ def handoffs_in(channel, repo: Path, tmp_path: Path, runner, **specs: dict) -> N
     found = channel._repositories["alpha-engine"]
     channel._repositories["alpha-engine"] = replace(
         found,
-        checks={"proof": Path("NOTES/proof.md")},
-        handoffs={name: Handoff(name=name, **spec) for name, spec in specs.items()},
+        inspections={"proof": Path("NOTES/proof.md")},
+        transitions={name: Transition(name=name, **spec) for name, spec in specs.items()},
     )
     channel._said_path = tmp_path / "last-said.json"
     last_said.remember(channel._kept(CHAT, SAID_FILE), chat_id=CHAT, text="The prompt for #355.")
 
 
-def pressed_handoff(what: str, value: str) -> dict:
+def pressed_transition(what: str, value: str) -> dict:
     from halyard.channels.telegram import cards
 
     return {
@@ -787,15 +829,15 @@ def pressed_handoff(what: str, value: str) -> dict:
     }
 
 
-async def test_a_bare_handoff_offers_each_handoff_as_a_button(tmp_path: Path, wired) -> None:
+async def test_a_bare_transition_offers_each_transition_as_a_button(tmp_path: Path, wired) -> None:
     """The shape `/checks` has: pick one, and it goes — or cancel."""
     from halyard.channels.telegram import cards
 
     channel, api, runner, repo = wired
     review = {"prompt": Path("NOTES/review.md"), "to": "reviewer"}
-    handoffs_in(channel, repo, tmp_path, runner, review=review, back={})
+    transitions_in(channel, repo, tmp_path, runner, review=review, back={})
 
-    await channel._run_handoff("", CHAT, None, f"tg:{APPROVER}")
+    await channel._run_transition("", CHAT, None, f"tg:{APPROVER}")
 
     rows = api.sent[-1]["reply_markup"]["inline_keyboard"]
     assert [key["text"] for key in rows[0]] == ["review", "back"]
@@ -809,24 +851,42 @@ async def test_review_reaches_the_reviewer_with_the_projects_text_in_front(
     first, then the prompt itself — and no check, because none is named."""
     channel, _, runner, repo = wired
     review = {"prompt": Path("NOTES/review.md"), "to": "reviewer"}
-    handoffs_in(channel, repo, tmp_path, runner, review=review)
+    transitions_in(channel, repo, tmp_path, runner, review=review)
 
-    await channel._handle_callback(pressed_handoff("handoff", "review"))
+    await channel._handle_callback(pressed_transition("handoff", "review"))
     await settled(channel)
 
     [(session, text)] = runner.sent
     assert session == "id-rev"
-    assert "To xrev (reviewer), from Halyard — handoff: review." in text
+    assert "To xrev (reviewer), from Halyard — transition: review." in text
     assert text.index("try to break it") < text.index("The prompt for #355.")
     assert "From: nav (navigator)" in text
     assert runner.asked == []
 
 
-async def test_a_handoff_without_a_to_offers_every_seat(tmp_path: Path, wired) -> None:
-    channel, api, runner, repo = wired
-    handoffs_in(channel, repo, tmp_path, runner, back={})
+@pytest.mark.parametrize("command", ["/transition review", "/handoff review"])
+async def test_a_transition_named_after_the_command_goes_and_the_old_name_still_answers(
+    tmp_path: Path, wired, command: str
+) -> None:
+    """`/handoff` is what `/transition` was called until 2026-09-24: typed, it
+    still does what it did."""
+    channel, _, runner, repo = wired
+    review = {"prompt": Path("NOTES/review.md"), "to": "reviewer"}
+    transitions_in(channel, repo, tmp_path, runner, review=review)
 
-    await channel._run_handoff("back", CHAT, None, f"tg:{APPROVER}")
+    await channel._handle_message(typed(command))
+    await settled(channel)
+
+    [(session, text)] = runner.sent
+    assert session == "id-rev"
+    assert "To xrev (reviewer), from Halyard — transition: review." in text
+
+
+async def test_a_transition_without_a_to_offers_every_seat(tmp_path: Path, wired) -> None:
+    channel, api, runner, repo = wired
+    transitions_in(channel, repo, tmp_path, runner, back={})
+
+    await channel._run_transition("back", CHAT, None, f"tg:{APPROVER}")
 
     keys = [key["text"] for key in api.sent[-1]["reply_markup"]["inline_keyboard"][0]]
     assert keys == ["→ nav", "→ xrev"]
@@ -835,27 +895,740 @@ async def test_a_handoff_without_a_to_offers_every_seat(tmp_path: Path, wired) -
 
 async def test_pressing_a_seat_hands_it_on_there(tmp_path: Path, wired) -> None:
     channel, _, runner, repo = wired
-    handoffs_in(channel, repo, tmp_path, runner, back={})
+    transitions_in(channel, repo, tmp_path, runner, back={})
 
-    await channel._handle_callback(pressed_handoff("handto", "back>xrev"))
+    await channel._handle_callback(pressed_transition("handto", "back>xrev"))
     await settled(channel)
 
     [(session, _)] = runner.sent
     assert session == "id-rev"
 
 
-async def test_a_handoff_runs_its_checks_before_it_goes(tmp_path: Path, wired) -> None:
+#: A review transition to the reviewer, with nothing else asked of it.
+TO_THE_REVIEWER = {"prompt": Path("NOTES/review.md"), "to": "reviewer"}
+
+
+async def reviewed(channel) -> None:
+    """Press the review transition and wait for it to land, as a person would."""
+    await channel._run_transition("review", CHAT, None, f"tg:{APPROVER}")
+    await settled(channel)
+
+
+async def test_a_transition_pressed_by_hand_counts_no_rounds(tmp_path: Path, wired) -> None:
+    """Rounds are a workflow's. Pressed twice by hand, a transition sends its own
+    prompt twice and says no round: a `1/2` where there is no second step would
+    be a workflow's word where there is no workflow."""
+    channel, api, runner, repo = wired
+    review = {
+        "prompt": Path("NOTES/review.md"),
+        "followup_prompt": Path("NOTES/review-followup.md"),
+        "to": "reviewer",
+    }
+    transitions_in(channel, repo, tmp_path, runner, review=review)
+    (repo / "NOTES" / "review-followup.md").write_text("Only the earlier BLOCKERs.")
+
+    await reviewed(channel)
+    await reviewed(channel)
+
+    first, second = (text for _, text in runner.sent)
+    assert "try to break it" in first and "try to break it" in second
+    assert "Only the earlier BLOCKERs." not in second
+    assert not any("Round:" in text for _, text in runner.sent)
+    assert not any("(round" in sent["text"] for sent in api.sent)
+
+
+# --- /workflow: the transitions taken in the order the project wrote them down ---
+
+
+def flow_in(
+    channel,
+    repo: Path,
+    tmp_path: Path,
+    runner,
+    *,
+    flows: dict,
+    steps: dict,
+    decisions: dict | None = None,
+    stretches: dict | None = None,
+    phases: int = 3,
+) -> None:
+    """Two transitions, the steps a flow takes them in, and any words and phases
+    of its own."""
+    from halyard.core.config_file import Decisions, Step, Workflows
+
+    transitions_in(
+        channel,
+        repo,
+        tmp_path,
+        runner,
+        review={"prompt": Path("NOTES/review.md"), "to": "reviewer"},
+        to_nav={"prompt": Path("NOTES/review.md"), "to": "navigator"},
+    )
+    found = channel._repositories["alpha-engine"]
+    channel._repositories["alpha-engine"] = replace(
+        found,
+        workflows=Workflows(
+            steps={name: Step(name=name, **spec) for name, spec in steps.items()},
+            decisions=Decisions(**(decisions or {})),
+            flows={name: tuple(order) for name, order in flows.items()},
+            stretches=stretches or {},
+            phases=phases,
+        ),
+    )
+
+
+#: A flow of two steps: the reviewer, which the work may come back to once, then
+#: the navigator.
+TWO_STEPS = {
+    "flows": {"level3": ["review", "to_nav"]},
+    "steps": {
+        "review": {"transition": "review", "seat": "xrev", "rounds": 2},
+        "to_nav": {"transition": "to_nav", "seat": "nav"},
+    },
+}
+
+SESSIONS = {
+    "xrev": ("id-rev", "alpha-engine-xreview"),
+    "nav": ("id-nav", "alpha-engine-navigator"),
+}
+
+
+async def started(channel, at: int = 0) -> None:
+    """Press the workflow and a step of it, and wait for that step to land."""
+    await channel._run_workflow("level3", CHAT, None, f"tg:{APPROVER}", start=at)
+    await settled(channel)
+
+
+async def answered(channel, seat: str, text: str) -> None:
+    """A seat's reply arriving the way the relay brings it."""
+    session_id, name = SESSIONS[seat]
+    await channel.send_message(
+        session_id,
+        text,
+        agent_id="claude-code",
+        session_name=name,
+        project="alpha-engine",
+    )
+    await settled(channel)
+
+
+async def test_a_bare_workflow_offers_each_one(tmp_path: Path, wired) -> None:
+    channel, api, runner, repo = wired
+    flow_in(channel, repo, tmp_path, runner, **TWO_STEPS)
+
+    await channel._run_workflow("", CHAT, None, f"tg:{APPROVER}")
+
+    rows = api.sent[-1]["reply_markup"]["inline_keyboard"]
+    assert [key["text"] for key in rows[0]] == ["level3"]
+
+
+async def test_a_workflow_pressed_asks_which_step_to_start_at(tmp_path: Path, wired) -> None:
+    """The work is often past the first step already."""
+    channel, api, runner, repo = wired
+    flow_in(channel, repo, tmp_path, runner, **TWO_STEPS)
+
+    await channel._handle_callback(pressed_transition("flow", "level3"))
+    await settled(channel)
+
+    assert runner.sent == []
+    rows = api.sent[-1]["reply_markup"]["inline_keyboard"]
+    assert [key["text"] for key in rows[0]] == ["1 · review", "2 · to_nav"]
+
+
+async def test_a_step_pressed_starts_the_workflow_there_with_the_chat_s_last_reply(
+    tmp_path: Path, wired
+) -> None:
+    channel, _, runner, repo = wired
+    flow_in(channel, repo, tmp_path, runner, **TWO_STEPS)
+
+    await channel._handle_callback(pressed_transition("flowat", "level3>1"))
+    await settled(channel)
+
+    [(session, text)] = runner.sent
+    assert session == "id-nav"
+    assert "- Workflow: level3 · step 2 of 2 · to_nav" in text
+    assert "The prompt for #355." in text
+
+
+async def test_a_step_can_be_named_when_the_command_is_typed(tmp_path: Path, wired) -> None:
+    channel, api, runner, repo = wired
+    flow_in(channel, repo, tmp_path, runner, **TWO_STEPS)
+
+    await channel._run_workflow("level3 gone", CHAT, None, f"tg:{APPROVER}")
+    offered = api.sent[-1]
+    await channel._run_workflow("level3 to_nav", CHAT, None, f"tg:{APPROVER}")
+    await settled(channel)
+
+    assert any("no step called <b>gone</b>" in sent["text"] for sent in api.sent)
+    assert offered["reply_markup"]["inline_keyboard"][0][0]["text"] == "1 · review"
+    assert [session for session, _ in runner.sent] == ["id-nav"]
+
+
+async def test_a_workflow_starts_at_its_first_step(tmp_path: Path, wired) -> None:
+    channel, api, runner, repo = wired
+    flow_in(channel, repo, tmp_path, runner, **TWO_STEPS)
+
+    await started(channel)
+
+    [(session, text)] = runner.sent
+    assert session == "id-rev"
+    assert "- Workflow: level3 · step 1 of 2 · review" in text
+    assert (
+        "- Decide on your last line: forward (→ to_nav, nav) · back (→ the operator) "
+        "· wait (→ the operator)"
+    ) in text
+    assert any("level3</b> 1/2" in sent["text"] for sent in api.sent)
+
+
+async def test_a_project_s_own_words_move_the_run_and_are_the_ones_it_is_told(
+    tmp_path: Path, wired
+) -> None:
+    channel, _, runner, repo = wired
+    flow_in(channel, repo, tmp_path, runner, **TWO_STEPS, decisions={"forward": "go"})
+    await started(channel)
+
+    assert "- Decide on your last line: go (→ to_nav, nav)" in runner.sent[0][1]
+
+    await answered(channel, "xrev", "Nothing blocking.\nRESULT: go")
+
+    assert runner.sent[-1][0] == "id-nav"
+
+
+async def test_a_transition_pressed_by_hand_says_nothing_of_a_workflow(
+    tmp_path: Path, wired
+) -> None:
+    """The lines are the workflow's, and a transition pressed by hand has none."""
+    channel, _, runner, repo = wired
+    flow_in(channel, repo, tmp_path, runner, **TWO_STEPS)
+
+    await channel._run_transition("review", CHAT, None, f"tg:{APPROVER}")
+    await settled(channel)
+
+    [(_, text)] = runner.sent
+    assert "Workflow:" not in text
+    assert "Decide on your last line" not in text
+
+
+async def test_the_word_for_forward_takes_the_next_step_with_the_reply(
+    tmp_path: Path, wired
+) -> None:
+    channel, _, runner, repo = wired
+    flow_in(channel, repo, tmp_path, runner, **TWO_STEPS)
+    await started(channel)
+
+    await answered(channel, "xrev", "Nothing blocking.\nDECISION: forward")
+
+    session, text = runner.sent[-1]
+    assert session == "id-nav"
+    assert "Nothing blocking." in text
+    assert "- Workflow: level3 · step 2 of 2 · to_nav" in text
+
+
+async def test_back_returns_to_the_step_before_and_says_who_sent_it(tmp_path: Path, wired) -> None:
+    channel, _, runner, repo = wired
+    flow_in(channel, repo, tmp_path, runner, **TWO_STEPS)
+    await started(channel)
+    await answered(channel, "xrev", "DECISION: forward")
+
+    await answered(channel, "nav", "The loader skips a row.\nDECISION: back")
+
+    session, text = runner.sent[-1]
+    assert session == "id-rev"
+    assert "Sent back by: nav (navigator)" in text
+    assert "- Round: 2/2" in text, "the step before goes round again"
+
+
+async def test_a_reply_that_decides_nothing_carries_on_and_says_so(tmp_path: Path, wired) -> None:
+    channel, api, runner, repo = wired
+    flow_in(channel, repo, tmp_path, runner, **TWO_STEPS)
+    await started(channel)
+
+    await answered(channel, "xrev", "All 42 tests pass.")
+
+    assert runner.sent[-1][0] == "id-nav"
+    assert any("no decision line" in sent["text"] for sent in api.sent)
+
+
+async def test_the_last_step_finishes_the_run(tmp_path: Path, wired) -> None:
+    channel, api, runner, repo = wired
+    flow_in(channel, repo, tmp_path, runner, **TWO_STEPS)
+    await started(channel)
+    await answered(channel, "xrev", "DECISION: forward")
+
+    await answered(channel, "nav", "Done.\nDECISION: forward")
+
+    assert any("<b>level3</b> is done" in sent["text"] for sent in api.sent)
+    assert len(runner.sent) == 2
+
+
+async def test_a_finished_run_reports_what_it_did_and_is_kept(tmp_path: Path, wired) -> None:
+    """When it started and finished, how long, and the steps it took with their
+    rounds — in the chat, and in the database beside the tokens."""
+    import sqlite3
+
+    channel, api, runner, repo = wired
+    channel._database = tmp_path / "halyard.db"
+    both_twice = {
+        "review": {"transition": "review", "seat": "xrev", "rounds": 2},
+        "to_nav": {"transition": "to_nav", "seat": "nav", "rounds": 2},
+    }
+    flow_in(channel, repo, tmp_path, runner, flows=TWO_STEPS["flows"], steps=both_twice)
+    await started(channel)
+    await answered(channel, "xrev", "DECISION: forward")
+    await answered(channel, "nav", "Look again.\nDECISION: back")
+    await answered(channel, "xrev", "DECISION: forward")
+
+    await answered(channel, "nav", "Done.\nDECISION: forward")
+
+    [report] = [sent["text"] for sent in api.sent if "is done" in sent["text"]]
+    heading, when, steps = report.split("\n")
+    assert heading == "📋 <b>level3</b> is done — alpha-engine#281"
+    assert " → " in when and "min" in when
+    assert steps == "review x2 · to_nav x2"
+    with sqlite3.connect(channel._database) as db:
+        assert db.execute("SELECT workflow, outcome, deliveries FROM workflow_runs").fetchall() == [
+            ("level3", "done", 4)
+        ]
+        assert db.execute(
+            "SELECT step, round, decision, decided_by FROM workflow_steps ORDER BY at"
+        ).fetchall() == [
+            ("review", 1, "forward", "review"),
+            ("to_nav", 1, "back", "to_nav"),
+            ("review", 2, "forward", "review"),
+            ("to_nav", 2, "forward", "to_nav"),
+        ]
+
+
+async def test_a_stopped_run_is_kept_without_a_report(tmp_path: Path, wired) -> None:
+    import sqlite3
+
+    channel, api, runner, repo = wired
+    channel._database = tmp_path / "halyard.db"
+    flow_in(channel, repo, tmp_path, runner, **TWO_STEPS)
+    await started(channel)
+
+    await channel._handle_callback(pressed_transition("flowstop", "level3"))
+    await settled(channel)
+
+    assert not any("is done" in sent["text"] for sent in api.sent)
+    with sqlite3.connect(channel._database) as db:
+        assert db.execute("SELECT outcome, deliveries FROM workflow_runs").fetchall() == [
+            ("stopped", 1)
+        ]
+
+
+def capped() -> dict:
+    """The same flow, with a reviewer that may go once."""
+    return {
+        "flows": TWO_STEPS["flows"],
+        "steps": {
+            "review": {"transition": "review", "seat": "xrev", "rounds": 1},
+            "to_nav": {"transition": "to_nav", "seat": "nav"},
+        },
+    }
+
+
+async def test_a_step_past_its_rounds_is_offered_rather_than_taken(tmp_path: Path, wired) -> None:
+    """The lesson of alpha-engine#361, as a button: the round after the last
+    one is the operator's to send."""
+    channel, api, runner, repo = wired
+    flow_in(channel, repo, tmp_path, runner, **capped())
+    await started(channel)
+    await answered(channel, "xrev", "DECISION: forward")
+
+    await answered(channel, "nav", "DECISION: back")
+
+    assert len(runner.sent) == 2, "the round past the cap did not go"
+    stopped = api.sent[-1]
+    assert "round 2 of 1" in stopped["text"]
+    keys = [key["text"] for key in stopped["reply_markup"]["inline_keyboard"][0]]
+    assert any(key.startswith("▶️") for key in keys)
+
+
+async def test_the_operator_can_send_the_step_it_stopped_before(tmp_path: Path, wired) -> None:
+    channel, _, runner, repo = wired
+    flow_in(channel, repo, tmp_path, runner, **capped())
+    await started(channel)
+    await answered(channel, "xrev", "DECISION: forward")
+    await answered(channel, "nav", "DECISION: back")
+
+    await channel._handle_callback(pressed_transition("flowgo", "level3"))
+    await settled(channel)
+
+    assert runner.sent[-1][0] == "id-rev"
+    assert "- Round: 2/1" in runner.sent[-1][1]
+
+
+async def test_stopping_a_run_forgets_it(tmp_path: Path, wired) -> None:
+    channel, api, runner, repo = wired
+    flow_in(channel, repo, tmp_path, runner, **TWO_STEPS)
+    await started(channel)
+
+    await channel._handle_callback(pressed_transition("flowstop", "level3"))
+    await settled(channel)
+    await channel._run_workflow("", CHAT, None, f"tg:{APPROVER}")
+
+    assert any("stopped at step" in sent["text"] for sent in api.sent)
+    rows = api.sent[-1]["reply_markup"]["inline_keyboard"]
+    assert [key["text"] for key in rows[0]] == ["level3"], "it offers the list again"
+
+
+async def test_a_run_that_is_going_says_where_it_is_rather_than_starting_again(
+    tmp_path: Path, wired
+) -> None:
+    channel, api, runner, repo = wired
+    flow_in(channel, repo, tmp_path, runner, **TWO_STEPS)
+    await started(channel)
+
+    await started(channel)
+
+    assert len(runner.sent) == 1
+    assert "waiting for <b>xrev</b>" in api.sent[-1]["text"]
+
+
+#: Level 3's review: the reviewer's decision is the navigator's to act on.
+REVIEWED = {
+    "flows": {"level3": ["review", "reviewed"]},
+    "steps": {
+        "review": {"transition": "review", "seat": "xrev", "rounds": 2},
+        "reviewed": {"transition": "to_nav", "seat": "nav", "rounds": 2, "decided_by": "review"},
+    },
+}
+
+
+async def test_a_review_s_back_reaches_the_navigator_and_its_reply_goes_back(
+    tmp_path: Path, wired
+) -> None:
+    """The navigator holds the context: the review goes to it first, and its
+    reply — with no decision line of its own — goes where the review said."""
+    channel, api, runner, repo = wired
+    flow_in(channel, repo, tmp_path, runner, **REVIEWED)
+    await started(channel)
+
+    await answered(channel, "xrev", "The loader skips a row.\nDECISION: back")
+
+    session, text = runner.sent[-1]
+    assert session == "id-nav"
+    assert "- Already decided by review (xrev): back (→ review, xrev, round 2 of 2)" in text
+
+    await answered(channel, "nav", "Fixed the loader; the row is read now.")
+
+    session, text = runner.sent[-1]
+    assert session == "id-rev"
+    assert "Sent back by: nav (navigator)" in text
+    assert "- Round: 2/2" in text
+    assert any("<b>review</b>'s <b>back</b> stands" in sent["text"] for sent in api.sent)
+
+
+async def test_a_decision_the_navigator_acted_on_is_kept_as_the_review_s(
+    tmp_path: Path, wired
+) -> None:
+    """Read back later, a run says on whose word it moved: the navigator's
+    replies here carry no decision, and the reviewer's stand."""
+    import sqlite3
+
+    channel, _, runner, repo = wired
+    channel._database = tmp_path / "halyard.db"
+    flow_in(channel, repo, tmp_path, runner, **REVIEWED)
+    await started(channel)
+    await answered(channel, "xrev", "The loader skips a row.\nDECISION: back")
+    await answered(channel, "nav", "Fixed the loader; the row is read now.")
+    await answered(channel, "xrev", "DECISION: forward")
+
+    await answered(channel, "nav", "Done.")
+
+    with sqlite3.connect(channel._database) as db:
+        assert db.execute(
+            "SELECT step, round, decision, decided_by FROM workflow_steps ORDER BY at"
+        ).fetchall() == [
+            ("review", 1, "back", "review"),
+            ("reviewed", 1, "back", "review"),
+            ("review", 2, "forward", "review"),
+            ("reviewed", 2, "forward", "review"),
+        ]
+
+
+async def test_the_navigator_s_own_decision_overrules_the_review(tmp_path: Path, wired) -> None:
+    channel, api, runner, repo = wired
+    flow_in(channel, repo, tmp_path, runner, **REVIEWED)
+    await started(channel)
+    await answered(channel, "xrev", "DECISION: back")
+
+    await answered(channel, "nav", "That row is out of scope.\nDECISION: forward")
+
+    assert len(runner.sent) == 2
+    assert any("<b>level3</b> is done" in sent["text"] for sent in api.sent)
+
+
+async def test_a_review_that_says_wait_stops_before_the_navigator(tmp_path: Path, wired) -> None:
+    """A wait is for the operator. Sent on anyway, the navigator decides for
+    itself: the wait was the review's decision, and it is spent."""
+    channel, api, runner, repo = wired
+    flow_in(channel, repo, tmp_path, runner, **REVIEWED)
+    await started(channel)
+
+    await answered(channel, "xrev", "The scope needs a decision.\nDECISION: wait")
+
+    assert len(runner.sent) == 1
+    keys = [key["text"] for key in api.sent[-1]["reply_markup"]["inline_keyboard"][0]]
+    assert any(key.startswith("▶️") for key in keys)
+
+    await channel._handle_callback(pressed_transition("flowgo", "level3"))
+    await settled(channel)
+
+    session, text = runner.sent[-1]
+    assert session == "id-nav"
+    assert "The scope needs a decision." in text, "it carries the reviewer's reply"
+    assert "Already decided" not in text
+    assert "- Decide on your last line: forward" in text
+
+
+async def test_a_step_sent_back_carries_its_seat_s_answer_to_the_round_before(
+    tmp_path: Path, wired
+) -> None:
+    """The lesson of alpha-engine#361: a reviewer asked again is shown what it
+    said, rather than finding something new every time."""
+    channel, _, runner, repo = wired
+    flow_in(channel, repo, tmp_path, runner, **TWO_STEPS)
+    await started(channel)
+    await answered(channel, "xrev", "BLOCKER: the loader skips a row.\nDECISION: forward")
+
+    await answered(channel, "nav", "Look at it again.\nDECISION: back")
+
+    session, text = runner.sent[-1]
+    assert session == "id-rev"
+    assert "- Round: 2/2" in text
+    assert "answer to round 1:" in text
+    assert "BLOCKER: the loader skips a row." in text
+
+
+async def test_a_step_that_reached_nobody_counts_no_round(tmp_path: Path, wired) -> None:
+    """Sending it again is the same round, not the next — otherwise a followup
+    goes to a seat that never saw the first."""
+    from halyard import workflows as flowing
+    from halyard.channels.telegram.adapter import WORKFLOW_FILE
+
+    channel, _, runner, repo = wired
+    flow_in(channel, repo, tmp_path, runner, **TWO_STEPS)
+    runner.accepting = False
+
+    await started(channel)
+
+    work = await channel._work_item(channel._repositories["alpha-engine"])
+    run = flowing.current(channel._kept_for("alpha-engine", WORKFLOW_FILE), work)
+    assert run is not None
+    assert run.taken() == {}
+
+
+async def test_a_stopped_run_is_steered_from_a_picked_step_with_its_rounds_kept(
+    tmp_path: Path, wired
+) -> None:
+    """Picking the step keeps the work in the run: a loop it stopped in is not
+    reset by a tap."""
+    channel, api, runner, repo = wired
+    flow_in(channel, repo, tmp_path, runner, **capped())
+    await started(channel)
+    await answered(channel, "xrev", "DECISION: forward")
+    await answered(channel, "nav", "DECISION: back")
+    keys = [key["text"] for row in api.sent[-1]["reply_markup"]["inline_keyboard"] for key in row]
+    assert "🧭 Pick a step" in keys
+
+    await channel._handle_callback(pressed_transition("flowpick", "level3"))
+    await settled(channel)
+    offered = api.sent[-1]["reply_markup"]["inline_keyboard"][0]
+    assert [key["text"] for key in offered] == ["1 · review", "2 · to_nav"]
+    await channel._handle_callback(pressed_transition("flowat", "level3>0"))
+    await settled(channel)
+
+    session, text = runner.sent[-1]
+    assert session == "id-rev"
+    assert "- Round: 2/1" in text, "the round it was stopped before, not a fresh first"
+
+
+#: The same two seats as one phase: the reviewer, then the navigator deciding
+#: whether another part of the plan comes next.
+PHASED = {
+    "flows": {"level3": ["review", "to_nav"]},
+    "steps": {
+        "review": {"transition": "review", "seat": "xrev", "rounds": 2},
+        "to_nav": {"transition": "to_nav", "seat": "nav"},
+    },
+    "stretches": {"level3": (0, 1)},
+}
+
+
+async def test_next_starts_the_next_phase_and_says_so(tmp_path: Path, wired) -> None:
+    channel, api, runner, repo = wired
+    flow_in(channel, repo, tmp_path, runner, **PHASED)
+    await started(channel)
+    await answered(channel, "xrev", "DECISION: forward")
+
+    await answered(channel, "nav", "Part one is in.\nDECISION: next")
+
+    session, text = runner.sent[-1]
+    assert session == "id-rev"
+    assert "- Phase: 2" in text
+    assert "- Round: 1/2" in text, "the second phase's review is its first round"
+    assert "Part one is in." in text
+    assert any("phase 2 starts at <b>review</b>" in sent["text"] for sent in api.sent)
+
+
+async def test_next_naming_a_step_further_on_is_marked_in_the_chat(tmp_path: Path, wired) -> None:
+    """Leaving the usual path is something whoever reads the chat should see."""
+    channel, api, runner, repo = wired
+    flow_in(channel, repo, tmp_path, runner, **PHASED)
+    await started(channel)
+    await answered(channel, "xrev", "DECISION: forward")
+
+    await answered(channel, "nav", "Only a proposal this time.\nDECISION: next to_nav")
+
+    assert runner.sent[-1][0] == "id-nav"
+    assert "- Phase: 2" in runner.sent[-1][1]
+    marked = [sent["text"] for sent in api.sent if sent["text"].startswith("↪️")]
+    assert marked and "skipping review" in marked[0]
+
+
+async def test_a_phase_that_ends_undecided_offers_the_next_one_or_the_way_out(
+    tmp_path: Path, wired
+) -> None:
+    channel, api, runner, repo = wired
+    flow_in(channel, repo, tmp_path, runner, **PHASED)
+    await started(channel)
+    await answered(channel, "xrev", "DECISION: forward")
+
+    await answered(channel, "nav", "Part one is in.")
+
+    assert len(runner.sent) == 2, "nothing went while nobody decided"
+    stopped = api.sent[-1]
+    assert "phase 1 ended with no decision" in stopped["text"]
+    keys = [key["text"] for row in stopped["reply_markup"]["inline_keyboard"] for key in row]
+    assert keys == [
+        "↻ Phase 2 at review",
+        "⏭ On to the end",
+        "🧭 Pick a step",
+        "⏹ Stop the workflow",
+    ]
+
+    await channel._handle_callback(pressed_transition("flowgo", "level3"))
+    await settled(channel)
+
+    assert runner.sent[-1][0] == "id-rev"
+    assert "- Phase: 2" in runner.sent[-1][1]
+
+
+async def test_a_wait_at_the_end_of_a_phase_offers_the_next_one_or_the_way_out(
+    tmp_path: Path, wired
+) -> None:
+    """The operator applies the part just made, then picks what follows."""
+    channel, api, runner, repo = wired
+    flow_in(channel, repo, tmp_path, runner, **PHASED)
+    await started(channel)
+    await answered(channel, "xrev", "DECISION: forward")
+
+    await answered(channel, "nav", "Accepted; publish it first.\nDECISION: wait")
+
+    assert len(runner.sent) == 2
+    keys = [key["text"] for row in api.sent[-1]["reply_markup"]["inline_keyboard"] for key in row]
+    assert keys == [
+        "↻ Phase 2 at review",
+        "⏭ On to the end",
+        "🧭 Pick a step",
+        "⏹ Stop the workflow",
+    ]
+
+
+async def test_leaving_the_phases_from_the_card_goes_on_past_them(tmp_path: Path, wired) -> None:
+    channel, api, runner, repo = wired
+    flow_in(channel, repo, tmp_path, runner, **PHASED)
+    await started(channel)
+    await answered(channel, "xrev", "DECISION: forward")
+    await answered(channel, "nav", "Part one is in.")
+
+    await channel._handle_callback(pressed_transition("flowon", "level3"))
+    await settled(channel)
+
+    assert len(runner.sent) == 2
+    assert any("<b>level3</b> is done" in sent["text"] for sent in api.sent)
+
+
+async def test_leaving_from_an_old_card_moves_nothing_once_the_run_went_on(
+    tmp_path: Path, wired
+) -> None:
+    """Telegram keeps every button pressable. The way out of a phase belongs to
+    the stop that offered it, not to whatever the run is doing by then."""
+    channel, api, runner, repo = wired
+    flow_in(channel, repo, tmp_path, runner, **PHASED)
+    await started(channel)
+    await answered(channel, "xrev", "DECISION: forward")
+    await answered(channel, "nav", "Part one is in.")
+    await channel._handle_callback(pressed_transition("flowgo", "level3"))
+    await settled(channel)
+    await answered(channel, "xrev", "The scope needs a decision.\nDECISION: wait")
+    sent = len(runner.sent)
+
+    await channel._handle_callback(pressed_transition("flowon", "level3"))
+    await settled(channel)
+
+    assert len(runner.sent) == sent
+    assert not any("is done" in message["text"] for message in api.sent)
+    assert "to_nav · phase 2 — it was asked to wait" in api.sent[-1]["text"]
+
+
+async def test_the_phases_stop_past_their_count_and_can_be_sent_anyway(
+    tmp_path: Path, wired
+) -> None:
+    channel, api, runner, repo = wired
+    flow_in(channel, repo, tmp_path, runner, **PHASED, phases=1)
+    await started(channel)
+    await answered(channel, "xrev", "DECISION: forward")
+
+    await answered(channel, "nav", "DECISION: next")
+
+    assert len(runner.sent) == 2
+    keys = [key["text"] for key in api.sent[-1]["reply_markup"]["inline_keyboard"][0]]
+    assert keys == ["↻ Phase 2 at review anyway", "⏭ On to the end"]
+
+
+async def test_a_step_of_the_phases_can_be_started_in_the_phase_it_names(
+    tmp_path: Path, wired
+) -> None:
+    """Work that went through its first phase by hand joins the run where it is."""
+    channel, _, runner, repo = wired
+    flow_in(channel, repo, tmp_path, runner, **PHASED)
+
+    await channel._run_workflow("level3 to_nav phase 2", CHAT, None, f"tg:{APPROVER}")
+    await settled(channel)
+
+    session, text = runner.sent[-1]
+    assert session == "id-nav"
+    assert "- Phase: 2" in text
+
+
+async def test_a_step_outside_the_phases_has_no_phase_to_start_in(tmp_path: Path, wired) -> None:
+    channel, api, runner, repo = wired
+    flow_in(channel, repo, tmp_path, runner, **{**PHASED, "stretches": {"level3": (1, 1)}})
+
+    await channel._run_workflow("level3 review phase 2", CHAT, None, f"tg:{APPROVER}")
+    await settled(channel)
+
+    assert runner.sent == []
+    assert "no phase to start in" in api.sent[-1]["text"]
+
+
+async def test_a_transition_runs_its_checks_before_it_goes(tmp_path: Path, wired) -> None:
     """The reply and what the checks made of it arrive together, and the chat
     it was sent from is told which checks answered."""
     channel, api, runner, repo = wired
-    handoffs_in(channel, repo, tmp_path, runner, discovery={"checks": ("proof",), "to": "xrev"})
+    transitions_in(
+        channel, repo, tmp_path, runner, discovery={"inspections": ("proof",), "to": "xrev"}
+    )
 
-    await channel._run_handoff("discovery delivery", CHAT, None, f"tg:{APPROVER}")
+    await channel._run_transition("discovery delivery", CHAT, None, f"tg:{APPROVER}")
     await settled(channel)
 
     assert len(runner.asked) == 1
     [(_, text)] = runner.sent
-    assert "Check proof — NOTES/proof.md" in text
+    assert "Inspection proof — NOTES/proof.md" in text
     assert runner.says in text
     assert "Said by whoever asked: delivery" in text
     assert any("<b>proof</b>: answered" in sent["text"] for sent in api.sent)
@@ -911,17 +1684,19 @@ def stopping(request) -> dict:
     }
 
 
-async def test_a_command_a_check_asks_for_reaches_where_the_handoff_goes(
+async def test_a_command_a_check_asks_for_reaches_where_the_transition_goes(
     tmp_path: Path, wired
 ) -> None:
     """The check's turn is nobody's seat. Its command is a card in the chat of
-    the seat the handoff is for, saying which check and which handoff want it
+    the seat the transition is for, saying which check and which transition want it
     — and the turn stands in the project, with nothing that edits."""
     channel, api, runner, repo = wired
-    handoffs_in(channel, repo, tmp_path, runner, discovery={"checks": ("proof",), "to": "xrev"})
+    transitions_in(
+        channel, repo, tmp_path, runner, discovery={"inspections": ("proof",), "to": "xrev"}
+    )
     check = CheckAsking(channel, runner)
 
-    await channel._run_handoff("discovery", CHAT, None, f"tg:{APPROVER}")
+    await channel._run_transition("discovery", CHAT, None, f"tg:{APPROVER}")
     await settled(channel)
 
     [how] = check.started
@@ -929,25 +1704,25 @@ async def test_a_command_a_check_asks_for_reaches_where_the_handoff_goes(
     assert how["edits"] is False
     [card] = [sent for sent in api.sent if "PERMISSION REQUEST" in sent["text"]]
     assert card["chat_id"] == "-100888"
-    assert card["text"].startswith("<b>[CHECKER — PERMISSION REQUEST]</b>")
-    assert "Check: <b>proof · handoff discovery</b>" in card["text"]
+    assert card["text"].startswith("<b>[INSPECTION — PERMISSION REQUEST]</b>")
+    assert "Inspection: <b>proof · transition discovery</b>" in card["text"]
     keys = [key["text"] for row in card["reply_markup"]["inline_keyboard"] for key in row]
-    assert keys[-1] == "⏹ Stop the check"
-    assert channel._checking == {}
+    assert keys[-1] == "⏹ Stop the inspection"
+    assert channel._inspecting == {}
 
 
 async def test_a_command_a_check_asks_for_here_is_carded_here(tmp_path: Path, wired) -> None:
     """`/checks` hands nothing on: the card says which check, in the chat that asked."""
     channel, api, runner, repo = wired
-    checks_in(channel, repo, tmp_path, proof="# proof")
+    inspections_in(channel, repo, tmp_path, proof="# proof")
     CheckAsking(channel, runner)
 
-    await channel._handle_callback(pressed_check("proof"))
+    await channel._handle_callback(pressed_inspection("proof"))
     await settled(channel)
 
     [card] = [sent for sent in api.sent if "PERMISSION REQUEST" in sent["text"]]
     assert card["chat_id"] == CHAT
-    assert "Check: <b>proof</b>" in card["text"]
+    assert "Inspection: <b>proof</b>" in card["text"]
 
 
 async def test_stop_on_a_checks_card_ends_the_check_and_says_who(tmp_path: Path, wired) -> None:
@@ -959,10 +1734,10 @@ async def test_stop_on_a_checks_card_ends_the_check_and_says_who(tmp_path: Path,
     from halyard.core.approvals import Decision
 
     channel, api, runner, repo = wired
-    checks_in(channel, repo, tmp_path, proof="# proof")
+    inspections_in(channel, repo, tmp_path, proof="# proof")
     check = CheckAsking(channel, runner, waits=True)
 
-    await channel._handle_callback(pressed_check("proof"))
+    await channel._handle_callback(pressed_inspection("proof"))
     await check.until_asked()
     [request] = check.asked
     await channel._handle_callback(stopping(request))
@@ -973,17 +1748,21 @@ async def test_stop_on_a_checks_card_ends_the_check_and_says_who(tmp_path: Path,
     assert any(edit["text"].startswith(f"<b>⏹ STOPPED</b> by tg:{APPROVER}") for edit in api.edits)
     said = [sent["text"] for sent in api.sent]
     assert f"<b>proof</b> · unmeasured — stopped by tg:{APPROVER}" in said
-    assert channel._checking == {}
+    assert channel._inspecting == {}
 
 
-async def test_a_handoff_goes_on_without_a_check_somebody_stopped(tmp_path: Path, wired) -> None:
-    """Stop ends that check, not the handoff: the seat still gets the reply,
+async def test_a_transition_goes_on_without_a_check_somebody_stopped(tmp_path: Path, wired) -> None:
+    """Stop ends that check, not the transition: the seat still gets the reply,
     with the stopped check said to be unmeasured and why."""
     channel, _, runner, repo = wired
-    handoffs_in(channel, repo, tmp_path, runner, discovery={"checks": ("proof",), "to": "xrev"})
+    transitions_in(
+        channel, repo, tmp_path, runner, discovery={"inspections": ("proof",), "to": "xrev"}
+    )
     check = CheckAsking(channel, runner, waits=True)
 
-    handing = asyncio.ensure_future(channel._run_handoff("discovery", CHAT, None, f"tg:{APPROVER}"))
+    handing = asyncio.ensure_future(
+        channel._run_transition("discovery", CHAT, None, f"tg:{APPROVER}")
+    )
     await check.until_asked()
     await channel._handle_callback(stopping(check.asked[0]))
     await handing
@@ -1005,7 +1784,7 @@ async def test_a_check_is_told_whether_the_files_moved_since_the_reply(
 
     caplog.set_level("INFO")
     channel, _, runner, repo = wired
-    checks_in(channel, repo, tmp_path, proof="# proof")
+    inspections_in(channel, repo, tmp_path, proof="# proof")
     await channel.send_message(
         "id-nav",
         "All 42 tests passed.",
@@ -1016,7 +1795,7 @@ async def test_a_check_is_told_whether_the_files_moved_since_the_reply(
     said = last_said.last(channel._kept(CHAT, SAID_FILE), CHAT)
     (repo / "seed.txt").write_text("changed after the report\n")
 
-    await channel._handle_callback(pressed_check("proof"))
+    await channel._handle_callback(pressed_inspection("proof"))
     await settled(channel)
 
     assert said is not None and said.content
@@ -1082,11 +1861,11 @@ async def test_the_tasks_level_goes_on_the_envelope(tmp_path: Path, wired, monke
     """Read from the tracker, one label from each of the project's groups, and
     put under the work item it belongs to."""
     channel, _, runner, repo = wired
-    checks_in(channel, repo, tmp_path, proof="# proof")
+    inspections_in(channel, repo, tmp_path, proof="# proof")
     levels(channel)
     tracker = behind_a_tracker(channel, monkeypatch, Tracker(labels=("backend", "level::3")))
 
-    await channel._handle_callback(pressed_check("proof"))
+    await channel._handle_callback(pressed_inspection("proof"))
     await settled(channel)
 
     [asked] = runner.asked
@@ -1102,11 +1881,11 @@ async def test_a_tracker_that_cannot_be_read_leaves_the_envelope_as_it_was(
     from halyard.tasks.spec import ForgeError
 
     channel, _, runner, repo = wired
-    checks_in(channel, repo, tmp_path, proof="# proof")
+    inspections_in(channel, repo, tmp_path, proof="# proof")
     levels(channel)
     behind_a_tracker(channel, monkeypatch, Tracker(refuse=ForgeError("GitLab says 401")))
 
-    await channel._handle_callback(pressed_check("proof"))
+    await channel._handle_callback(pressed_inspection("proof"))
     await settled(channel)
 
     [asked] = runner.asked
@@ -1119,10 +1898,10 @@ async def test_a_project_without_label_groups_never_asks_the_tracker(
 ) -> None:
     """Not everybody needs this, and whoever does not never pays for it."""
     channel, _, runner, repo = wired
-    checks_in(channel, repo, tmp_path, proof="# proof")
+    inspections_in(channel, repo, tmp_path, proof="# proof")
     tracker = behind_a_tracker(channel, monkeypatch, Tracker(labels=("level::3",)))
 
-    await channel._handle_callback(pressed_check("proof"))
+    await channel._handle_callback(pressed_inspection("proof"))
     await settled(channel)
 
     assert tracker.asked == []
@@ -1142,12 +1921,12 @@ async def test_a_check_that_finds_something_labels_its_task(
     """Off to one side: the answer arrives as it always did, and the task gets
     the check's label."""
     channel, api, runner, repo = wired
-    checks_in(channel, repo, tmp_path, proof="# proof")
+    inspections_in(channel, repo, tmp_path, proof="# proof")
     findings_in(channel)
     tracker = behind_a_tracker(channel, monkeypatch, Tracker(labels=("backend",)))
     runner.says = "proof · alpha-engine#281 · status: candidate"
 
-    await channel._handle_callback(pressed_check("proof"))
+    await channel._handle_callback(pressed_inspection("proof"))
     await settled(channel)
 
     assert tracker.added == [(281, "halyard:proof")]
@@ -1158,12 +1937,12 @@ async def test_a_findings_label_already_on_the_task_is_not_written_again(
     tmp_path: Path, wired, monkeypatch
 ) -> None:
     channel, _, runner, repo = wired
-    checks_in(channel, repo, tmp_path, proof="# proof")
+    inspections_in(channel, repo, tmp_path, proof="# proof")
     findings_in(channel)
     tracker = behind_a_tracker(channel, monkeypatch, Tracker(labels=("halyard:proof",)))
     runner.says = "proof · status: candidate"
 
-    await channel._handle_callback(pressed_check("proof"))
+    await channel._handle_callback(pressed_inspection("proof"))
     await settled(channel)
 
     assert tracker.added == []
@@ -1186,16 +1965,18 @@ def a_suite(channel: TelegramChannel, monkeypatch, *, output: str = "1420 passed
     return ran
 
 
-async def test_a_handoff_runs_its_commands_and_says_how_they_went(
+async def test_a_transition_runs_its_commands_and_says_how_they_went(
     tmp_path: Path, wired, monkeypatch
 ) -> None:
     """Where the project is, one after another, and before the checks — then
     the seat gets what they did, and the chat is told."""
     channel, api, runner, repo = wired
-    handoffs_in(channel, repo, tmp_path, runner, close={"commands": ("test-fast",), "to": "xrev"})
+    transitions_in(
+        channel, repo, tmp_path, runner, close={"commands": ("test-fast",), "to": "xrev"}
+    )
     ran = a_suite(channel, monkeypatch)
 
-    await channel._run_handoff("close", CHAT, None, f"tg:{APPROVER}")
+    await channel._run_transition("close", CHAT, None, f"tg:{APPROVER}")
     await settled(channel)
 
     assert ran == [("make test-fast", repo, 600.0)]
@@ -1205,17 +1986,19 @@ async def test_a_handoff_runs_its_commands_and_says_how_they_went(
     assert channel._working == {}
 
 
-async def test_a_handoff_with_commands_does_not_go_while_another_runs(
+async def test_a_transition_with_commands_does_not_go_while_another_runs(
     tmp_path: Path, wired, monkeypatch
 ) -> None:
     """Two `make` runs in one directory fight over the same outputs. Nothing
     is handed on, and it can be pressed again."""
     channel, api, runner, repo = wired
-    handoffs_in(channel, repo, tmp_path, runner, close={"commands": ("test-fast",), "to": "xrev"})
+    transitions_in(
+        channel, repo, tmp_path, runner, close={"commands": ("test-fast",), "to": "xrev"}
+    )
     ran = a_suite(channel, monkeypatch)
     channel._working["alpha-engine"] = "test-all"
 
-    await channel._run_handoff("close", CHAT, None, f"tg:{APPROVER}")
+    await channel._run_transition("close", CHAT, None, f"tg:{APPROVER}")
     await settled(channel)
 
     assert ran == []
@@ -1224,46 +2007,275 @@ async def test_a_handoff_with_commands_does_not_go_while_another_runs(
     assert channel._working == {"alpha-engine": "test-all"}
 
 
-async def test_a_handoff_labels_like_a_check_run_by_hand(
+async def test_a_transition_labels_like_a_check_run_by_hand(
     tmp_path: Path, wired, monkeypatch
 ) -> None:
-    """The same check, so the same label — handoffs are no exception."""
+    """The same check, so the same label — transitions are no exception."""
     channel, _, runner, repo = wired
-    handoffs_in(channel, repo, tmp_path, runner, discovery={"checks": ("proof",), "to": "xrev"})
+    transitions_in(
+        channel, repo, tmp_path, runner, discovery={"inspections": ("proof",), "to": "xrev"}
+    )
     findings_in(channel)
     tracker = behind_a_tracker(channel, monkeypatch, Tracker())
     runner.says = "proof · status: candidate"
 
-    await channel._run_handoff("discovery", CHAT, None, f"tg:{APPROVER}")
+    await channel._run_transition("discovery", CHAT, None, f"tg:{APPROVER}")
     await settled(channel)
 
     assert tracker.added == [(281, "halyard:proof")]
 
 
-async def test_pressing_a_check_runs_that_one_over_the_last_reply(tmp_path: Path, wired) -> None:
-    """Its own instructions, the whole reply, and what Halyard can see."""
-    from halyard.channels.telegram.adapter import CHECK_MODEL
+def scoped(channel: TelegramChannel, monkeypatch) -> list:
+    """An end-to-end suite taking its scope from the task's `ddd-scope` label,
+    and a run of it that answers at once."""
+    from halyard.channels.telegram import adapter as under_test
+    from halyard.commands import Result
+
+    found = channel._repositories["alpha-engine"]
+    channel._repositories["alpha-engine"] = replace(
+        found,
+        commands={"e2e-scope": "make test-e2e-scope SCOPE={label_groups.ddd-scope}"},
+        label_groups={"ddd-scope": ("ddd:capstone", "ddd:refining", "ddd:all")},
+    )
+    ran: list = []
+
+    def running(line, path, *, timeout=None, on_progress=None):
+        ran.append(line)
+        return Result(ok=True, output="12 passed", seconds=3.0, exit_code=0)
+
+    monkeypatch.setattr(under_test.commands_running, "run", running)
+    return ran
+
+
+def picked(value: str) -> dict:
+    return pressed_transition("pick", value)
+
+
+async def test_a_command_takes_its_value_from_the_tasks_labels(
+    tmp_path: Path, wired, monkeypatch
+) -> None:
+    """Every label of the group the task carries, in the group's order."""
+    channel, _, runner, repo = wired
+    transitions_in(
+        channel, repo, tmp_path, runner, close={"commands": ("e2e-scope",), "to": "xrev"}
+    )
+    ran = scoped(channel, monkeypatch)
+    behind_a_tracker(channel, monkeypatch, Tracker(labels=("ddd:refining", "ddd:capstone")))
+
+    await channel._run_transition("close", CHAT, None, f"tg:{APPROVER}")
+    await settled(channel)
+
+    assert ran == ["make test-e2e-scope SCOPE=capstone,refining"]
+    [(_, text)] = runner.sent
+    assert "Ran e2e-scope: make test-e2e-scope SCOPE=capstone,refining · exit 0" in text
+
+
+async def test_a_task_without_the_label_is_asked_for_one_and_it_goes_on_the_task(
+    tmp_path: Path, wired, monkeypatch
+) -> None:
+    channel, api, runner, repo = wired
+    transitions_in(
+        channel, repo, tmp_path, runner, close={"commands": ("e2e-scope",), "to": "xrev"}
+    )
+    ran = scoped(channel, monkeypatch)
+    tracker = behind_a_tracker(channel, monkeypatch, Tracker(labels=("backend",)))
+
+    await channel._run_transition("close", CHAT, None, f"tg:{APPROVER}")
+    await settled(channel)
+
+    assert (ran, runner.sent) == ([], []), "nothing runs with the braces still in the line"
+    asking = api.sent[-1]
+    assert "takes the task's <b>ddd-scope</b> label" in asking["text"]
+    keys = [key["text"] for key in asking["reply_markup"]["inline_keyboard"][0]]
+    assert keys == ["ddd:capstone", "ddd:refining", "ddd:all"]
+
+    await channel._handle_callback(picked("hclose>0>1"))
+    await settled(channel)
+
+    assert tracker.added == [(281, "ddd:refining")]
+    assert ran == ["make test-e2e-scope SCOPE=refining"]
+    assert len(runner.sent) == 1
+
+
+async def test_a_branch_naming_no_task_keeps_the_pick_for_this_work(
+    tmp_path: Path, wired, monkeypatch
+) -> None:
+    """Nothing to put the label on, so it is used for this work until Halyard
+    restarts — the second press is not asked again."""
+    channel, api, runner, repo = wired
+    transitions_in(
+        channel, repo, tmp_path, runner, close={"commands": ("e2e-scope",), "to": "xrev"}
+    )
+    ran = scoped(channel, monkeypatch)
+
+    await channel._run_transition("close", CHAT, None, f"tg:{APPROVER}")
+    await settled(channel)
+    assert "names no task" in api.sent[-1]["text"]
+
+    await channel._handle_callback(picked("hclose>0>2"))
+    await settled(channel)
+    await channel._run_transition("close", CHAT, None, f"tg:{APPROVER}")
+    await settled(channel)
+
+    assert ran == ["make test-e2e-scope SCOPE=all", "make test-e2e-scope SCOPE=all"]
+
+
+async def test_command_fills_the_label_in_as_a_transition_does(
+    tmp_path: Path, wired, monkeypatch
+) -> None:
+    channel, api, _, _ = wired
+    ran = scoped(channel, monkeypatch)
+    behind_a_tracker(channel, monkeypatch, Tracker(labels=("ddd:all",)))
+    channel._said_path = tmp_path / "last-said.json"
+
+    await channel._run_command("e2e-scope", CHAT, None)
+    await settled(channel)
+
+    assert ran == ["make test-e2e-scope SCOPE=all"]
+    assert any("Running <code>make test-e2e-scope SCOPE=all</code>" in s["text"] for s in api.sent)
+
+
+async def test_a_workflow_step_waits_for_the_label_and_the_pick_sends_it(
+    tmp_path: Path, wired, monkeypatch
+) -> None:
+    """A label is somebody's to pick, so the run stops there — and the tap
+    puts it on the task and sends the step."""
+    from halyard.core.config_file import Step, Workflows
 
     channel, api, runner, repo = wired
-    checks_in(channel, repo, tmp_path, proof="# proof: find the evidence", claims="# claims")
+    transitions_in(
+        channel, repo, tmp_path, runner, close={"commands": ("e2e-scope",), "to": "xrev"}
+    )
+    ran = scoped(channel, monkeypatch)
+    tracker = behind_a_tracker(channel, monkeypatch, Tracker())
+    found = channel._repositories["alpha-engine"]
+    channel._repositories["alpha-engine"] = replace(
+        found,
+        workflows=Workflows(
+            steps={"close": Step(name="close", transition="close", seat="xrev")},
+            flows={"level3": ("close",)},
+        ),
+    )
 
-    await channel._handle_callback(pressed_check("proof"))
+    await channel._run_workflow("level3", CHAT, None, f"tg:{APPROVER}", start=0)
+    await settled(channel)
+
+    assert runner.sent == []
+    asking = api.sent[-1]
+    assert asking["text"].startswith("⏸ <b>level3</b> 1/1 · close — ")
+    keys = [key["text"] for row in asking["reply_markup"]["inline_keyboard"] for key in row]
+    assert "ddd:capstone" in keys and "⏹ Stop the workflow" in keys
+
+    await channel._handle_callback(picked("wlevel3>0>0"))
+    await settled(channel)
+
+    assert tracker.added == [(281, "ddd:capstone")]
+    assert ran == ["make test-e2e-scope SCOPE=capstone"]
+    [(session, text)] = runner.sent
+    assert session == "id-rev"
+    assert "- Workflow: level3 · step 1 of 1 · close" in text
+
+
+async def test_an_inspection_runs_on_the_default_runtime_whichever_chat_asks(
+    tmp_path: Path, wired
+) -> None:
+    """Asked from an opencode agent's chat, it still runs where its model and
+    effort mean what they say. Choosing by the chat meant the default only while
+    nothing else could take a turn of its own."""
+    channel, _, runner, repo = wired
+    other = FakeRunner()
+    channel._runners["opencode"] = other
+    channel._seats = [replace(seat, runtime="opencode") for seat in channel._seats]
+    inspections_in(channel, repo, tmp_path, proof="# proof")
+
+    await channel._handle_callback(pressed_inspection("proof"))
+    await settled(channel)
+
+    assert other.asked == []
+    assert len(runner.asked) == 1
+
+
+async def test_an_inspection_s_session_is_marked_as_halyard_s_own(tmp_path: Path, wired) -> None:
+    """Before its turn begins, so its reply is not relayed as a stranger's and
+    it is never taken for a seat at work."""
+    channel, _, runner, repo = wired
+    inspections_in(channel, repo, tmp_path, proof="# proof")
+
+    await channel._handle_callback(pressed_inspection("proof"))
+    await settled(channel)
+
+    [session] = runner.session_ids
+    assert channel._registry.own(session) == "proof"
+
+
+async def test_pressing_a_check_runs_that_one_over_the_last_reply(tmp_path: Path, wired) -> None:
+    """Its own instructions, the whole reply, and what Halyard can see."""
+    from halyard.channels.telegram.adapter import INSPECTION_MODEL
+
+    channel, api, runner, repo = wired
+    inspections_in(channel, repo, tmp_path, proof="# proof: find the evidence", claims="# claims")
+
+    await channel._handle_callback(pressed_inspection("proof"))
     await settled(channel)
 
     [asked] = runner.asked
     assert asked.startswith("# proof: find the evidence")
     assert "All 42 tests passed." in asked
     assert "alpha-engine#281" in asked
-    assert runner.models == [CHECK_MODEL]
+    assert runner.models == [INSPECTION_MODEL]
     assert api.sent[-1]["text"].startswith("<b>proof</b>")
 
 
-async def test_a_check_named_after_the_command_runs_with_the_note(tmp_path: Path, wired) -> None:
-    """`/checks proof delivery` — the note says which stage the reply belongs to."""
-    channel, _, runner, repo = wired
-    checks_in(channel, repo, tmp_path, proof="# proof")
+async def test_an_inspection_runs_on_its_own_model_and_the_rest_on_the_machine_s(
+    tmp_path: Path, wired
+) -> None:
+    """`HALYARD_INSPECTION_EFFORT: max` for every inspection, and one that says
+    `model: opus` where it is described — the effort it leaves unsaid is the
+    machine's still."""
+    from halyard.core.config_file import ModelChoice
 
-    await channel._handle_message(typed("/checks proof delivery"))
+    channel, _, runner, repo = wired
+    inspections_in(channel, repo, tmp_path, proof="# proof", bounded="# bounded context")
+    found = channel._repositories["alpha-engine"]
+    channel._repositories["alpha-engine"] = replace(
+        found, inspection_models={"bounded": ModelChoice(model="opus")}
+    )
+    channel._inspection_model = ModelChoice("sonnet", "max")
+
+    await channel._handle_callback(pressed_inspection("proof"))
+    await settled(channel)
+    await channel._handle_callback(pressed_inspection("bounded"))
+    await settled(channel)
+
+    assert list(zip(runner.models, runner.efforts, strict=True)) == [
+        ("sonnet", "max"),
+        ("opus", "max"),
+    ]
+
+
+def test_what_the_machine_leaves_unsaid_is_the_channel_s_own_model() -> None:
+    """Only an effort set, as `HALYARD_INSPECTION_EFFORT: max` alone would."""
+    from halyard.channels.telegram.adapter import INSPECTION_MODEL
+    from halyard.core.config_file import ModelChoice
+
+    channel = TelegramChannel(
+        api=FakeApi(),
+        store=ApprovalStore(ttl=timedelta(minutes=5)),
+        audit=AuditLog([]),
+        chat_id=CHAT,
+        authorized_user_ids=frozenset({APPROVER}),
+        inspection_model=ModelChoice(effort="max"),
+    )
+
+    assert channel._inspection_model == ModelChoice(INSPECTION_MODEL, "max")
+
+
+async def test_a_check_named_after_the_command_runs_with_the_note(tmp_path: Path, wired) -> None:
+    """`/inspect proof delivery` — the note says which stage the reply belongs to."""
+    channel, _, runner, repo = wired
+    inspections_in(channel, repo, tmp_path, proof="# proof")
+
+    await channel._handle_message(typed("/inspect proof delivery"))
     await settled(channel)
 
     [asked] = runner.asked
@@ -1272,11 +2284,11 @@ async def test_a_check_named_after_the_command_runs_with_the_note(tmp_path: Path
 
 async def test_a_check_nobody_defined_is_said_and_the_rest_offered(tmp_path: Path, wired) -> None:
     channel, api, runner, repo = wired
-    checks_in(channel, repo, tmp_path, proof="# proof")
+    inspections_in(channel, repo, tmp_path, proof="# proof")
 
-    await channel._run_checks("nope", CHAT, None)
+    await channel._run_inspection("nope", CHAT, None)
 
-    assert "no check called <b>nope</b>" in api.sent[-2]["text"]
+    assert "no inspection called <b>nope</b>" in api.sent[-2]["text"]
     assert api.sent[-1]["reply_markup"]["inline_keyboard"]
     assert runner.asked == []
 
@@ -1287,9 +2299,9 @@ async def test_a_check_the_model_could_not_answer_is_said_not_skipped(
     """A missing answer reads exactly like a clean one."""
     channel, api, runner, repo = wired
     runner.says = None
-    checks_in(channel, repo, tmp_path, proof="# proof")
+    inspections_in(channel, repo, tmp_path, proof="# proof")
 
-    await channel._run_checks("proof", CHAT, None)
+    await channel._run_inspection("proof", CHAT, None)
 
     assert "unmeasured" in api.sent[-1]["text"]
 
@@ -1297,32 +2309,187 @@ async def test_a_check_the_model_could_not_answer_is_said_not_skipped(
 async def test_a_project_without_checks_says_so(wired) -> None:
     channel, api, runner, _ = wired
 
-    await channel._run_checks("", CHAT, None)
+    await channel._run_inspection("", CHAT, None)
 
-    assert "no <code>checks:</code>" in api.sent[-1]["text"]
+    assert "no <code>inspections:</code>" in api.sent[-1]["text"]
     assert runner.asked == []
 
 
 async def test_nothing_is_checked_before_anything_was_said(tmp_path: Path, wired) -> None:
     channel, api, runner, repo = wired
-    checks_in(channel, repo, tmp_path, proof="# proof")
+    inspections_in(channel, repo, tmp_path, proof="# proof")
     channel._said_path = tmp_path / "elsewhere" / "last-said.json"
 
-    await channel._run_checks("", CHAT, None)
+    await channel._run_inspection("", CHAT, None)
 
-    assert "nothing to check" in api.sent[-1]["text"]
+    assert "nothing to inspect" in api.sent[-1]["text"]
     assert runner.asked == []
 
 
-async def test_checks_answers_from_a_phone(tmp_path: Path, wired) -> None:
+async def test_inspect_answers_from_a_phone(tmp_path: Path, wired) -> None:
     channel, api, runner, repo = wired
-    checks_in(channel, repo, tmp_path, proof="# proof")
+    inspections_in(channel, repo, tmp_path, proof="# proof")
 
-    await channel._handle_message(typed("/checks"))
+    await channel._handle_message(typed("/inspect"))
     await settled(channel)
 
     assert api.sent[-1]["reply_markup"]["inline_keyboard"]
     assert runner.asked == []
+
+
+async def test_an_inspection_run_by_hand_is_kept_under_its_tokens_id(tmp_path: Path, wired) -> None:
+    """What it was given and what it said, in the database beside the tokens,
+    under the id the turn ran under."""
+    import sqlite3
+
+    channel, _, runner, repo = wired
+    channel._database = tmp_path / "halyard.db"
+    channel._keep_inspections = True
+    inspections_in(channel, repo, tmp_path, proof="# proof: find the evidence")
+
+    await channel._run_inspection("proof delivery", CHAT, None)
+    await settled(channel)
+
+    with sqlite3.connect(channel._database) as db:
+        [row] = db.execute(
+            "SELECT id, project, work, inspection, transition, runtime, model, note, input, "
+            "answer, outcome, step FROM inspection_runs"
+        ).fetchall()
+    (
+        ident,
+        project,
+        work,
+        inspection,
+        transition,
+        runtime,
+        model,
+        note,
+        asked,
+        answer,
+        outcome,
+        step,
+    ) = row
+    assert ident == runner.session_ids[0]
+    assert (project, work, inspection, transition) == (
+        "alpha-engine",
+        "alpha-engine#281",
+        "proof",
+        None,
+    )
+    assert (runtime, model, note) == ("claude-code", "sonnet", "delivery")
+    assert asked == runner.asked[0]
+    assert "All 42 tests passed." in asked
+    assert (answer, outcome, step) == ("loader stub and seed tweak", "answered", None)
+
+
+async def test_an_inspection_a_workflow_step_ran_is_kept_against_that_step(
+    tmp_path: Path, wired
+) -> None:
+    """So it joins `workflow_steps`: the run, the step, its phase and round."""
+    import sqlite3
+
+    channel, _, runner, repo = wired
+    channel._database = tmp_path / "halyard.db"
+    channel._keep_inspections = True
+    flow_in(channel, repo, tmp_path, runner, **TWO_STEPS)
+    (repo / "NOTES" / "proof.md").write_text("# proof")
+    found = channel._repositories["alpha-engine"]
+    channel._repositories["alpha-engine"] = replace(
+        found,
+        inspections={"proof": Path("NOTES/proof.md")},
+        transitions={
+            **found.transitions,
+            "review": replace(found.transitions["review"], inspections=("proof",)),
+        },
+    )
+
+    await started(channel)
+
+    with sqlite3.connect(channel._database) as db:
+        [row] = db.execute(
+            "SELECT inspection, transition, workflow_run, step, phase, round FROM inspection_runs"
+        ).fetchall()
+    inspection, transition, workflow_run, step, phase, number = row
+    assert (inspection, transition, step, phase, number) == ("proof", "review", "review", None, 1)
+    assert workflow_run.startswith("alpha-engine#281 ")
+
+
+async def test_inspections_are_not_kept_unless_asked_for(tmp_path: Path, wired) -> None:
+    """The one place Halyard would keep text, so it waits to be turned on."""
+    channel, _, _, repo = wired
+    channel._database = tmp_path / "halyard.db"
+    inspections_in(channel, repo, tmp_path, proof="# proof")
+
+    await channel._run_inspection("proof", CHAT, None)
+    await settled(channel)
+
+    assert not channel._database.exists()
+
+
+async def test_keeping_an_inspection_holds_nobody_up(tmp_path: Path, wired, monkeypatch) -> None:
+    """The row is written off to one side: a database busy with the audit log
+    must not keep an answer from reaching anybody."""
+    import threading
+
+    from halyard import inspections
+    from halyard.channels.telegram.adapter import _Keeping
+
+    channel, _, _, _ = wired
+    channel._database = tmp_path / "halyard.db"
+    released = threading.Event()
+    written: list[str] = []
+
+    def slow_keep(path, kept, **_) -> None:
+        released.wait(5)
+        written.append(kept.name)
+
+    monkeypatch.setattr(inspections.record, "keep", slow_keep)
+    keeper = _Keeping(channel, project="alpha-engine", work="alpha-engine#281", runtime="x")
+
+    await asyncio.wait_for(keeper.keep(a_kept_inspection()), timeout=1)
+
+    assert written == [], "it returned before the write finished"
+    released.set()
+    await settled(channel)
+    assert written == ["proof"]
+
+
+def a_kept_inspection():
+    from datetime import UTC, datetime
+
+    from halyard import inspections
+
+    return inspections.Kept(
+        session="sess-1",
+        at=datetime(2026, 9, 23, 18, 0, tzinfo=UTC),
+        name="proof",
+        path=Path("NOTES/proof.md"),
+        version="3e8c847",
+        transition="",
+        model="sonnet",
+        asked="# proof",
+        context=(),
+        note="",
+        answer="proof · no finding",
+        why="",
+        finding=None,
+        took=1.0,
+    )
+
+
+async def test_the_names_inspections_had_before_still_work(tmp_path: Path, wired) -> None:
+    """`/checks` and the buttons it left in chats, until 2026-09-23."""
+    channel, api, runner, repo = wired
+    inspections_in(channel, repo, tmp_path, proof="# proof")
+
+    await channel._handle_message(typed("/checks"))
+    await settled(channel)
+    offered = api.sent[-1]["reply_markup"]["inline_keyboard"]
+    await channel._handle_callback(pressed_inspection("proof", what="check"))
+    await settled(channel)
+
+    assert offered
+    assert len(runner.asked) == 1
 
 
 def a_bare_remote(tmp_path: Path, repo: Path) -> Path:

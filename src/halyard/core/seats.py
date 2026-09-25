@@ -1,5 +1,13 @@
 """Seats: the things a message can be sent to.
 
+**Agents, to everybody but this code.** `halyard.yaml`, every message and every
+document call a seat an agent — `agents:`, a step's `agent:` — and called it a
+seat until 2026-09-24. The code keeps the old word because `agent` already
+means something else in it: a runtime — `agent_id` is `claude-code`,
+`halyard.agents` holds the runtimes, and both reach the bridges' payloads.
+Read `Seat` as the configured agent: a runtime's session doing a role, in a
+chat.
+
 A seat is a label, a runtime, a session name, and somewhere its traffic goes.
 Four of those can be live at once — a Claude navigator, a Claude driver, a Codex
 navigator, a Codex driver — and which one you use is decided when you send the
@@ -62,7 +70,8 @@ def known_runtimes() -> tuple[str, ...]:
 
 @dataclass(frozen=True)
 class Seat:
-    """One addressable place to send a message."""
+    """One addressable place to send a message — an agent, in every word
+    anybody reads; see the module's first paragraph."""
 
     #: What you type to reach it. Short, because it is typed on a phone.
     label: str
@@ -92,8 +101,8 @@ class Seat:
     #: reading the transcript, and handed back afterwards with the file above.
     before_compaction: str | None = None
     #: The label this seat puts on the task its branch is for, when the tracker
-    #: already has its own — `agent:navigator`. Unset means runtime and role,
-    #: `claude:navigator`. Never a model, which changes under a seat while this
+    #: already has its own — `navigator:agent`. Unset means role and runtime,
+    #: `navigator:claude`. Never a model, which changes under a seat while this
     #: stays as written. See `tasks.attribution`.
     task_label: str | None = None
 
@@ -101,7 +110,7 @@ class Seat:
         allowed = known_runtimes()
         if self.runtime not in allowed:
             raise ValueError(
-                f"Seat {self.label!r} has runtime {self.runtime!r}. "
+                f"Agent {self.label!r} has runtime {self.runtime!r}. "
                 f"Use one of: {', '.join(allowed)}."
             )
 
@@ -118,7 +127,7 @@ def _parse_seat(label: str, spec: str) -> Seat:
         key, _, value = part.partition("=")
         if not value:
             raise ValueError(
-                f"Seat {label!r}: {part!r} is not `key=value`. "
+                f"Agent {label!r}: {part!r} is not `key=value`. "
                 "Expected something like `runtime=codex session=my-thread chat=-100123`."
             )
         fields[key.strip().lower()] = value.strip()
@@ -127,7 +136,7 @@ def _parse_seat(label: str, spec: str) -> Seat:
     if unknown:
         # Silently ignoring a typo would leave a seat missing the setting you
         # thought you gave it, with nothing anywhere saying so.
-        raise ValueError(f"Seat {label!r}: unknown field(s) {', '.join(sorted(unknown))}")
+        raise ValueError(f"Agent {label!r}: unknown field(s) {', '.join(sorted(unknown))}")
 
     role = fields.get("role")
     return Seat(

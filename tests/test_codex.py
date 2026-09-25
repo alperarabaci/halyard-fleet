@@ -450,6 +450,21 @@ async def test_a_thread_open_elsewhere_is_reached_by_queueing(monkeypatch) -> No
     assert seen[1][1:] == ["queue", "--thread", "abc", "--message", "carry on"]
 
 
+async def test_a_thread_open_elsewhere_is_logged_as_queued_not_as_lost(monkeypatch, caplog) -> None:
+    """Measured on alpha-engine#361: three reviews that each got an answer
+    within two minutes read, in the log, as three that never reached the
+    reviewer — an ERROR line for the refusal, and the queueing below it."""
+    answering(monkeypatch, Refusing(), FakeProcess())
+
+    with caplog.at_level("DEBUG"):
+        assert await runner_with_catalog().send("abc", "carry on", cwd="/repo") is True
+
+    assert not [record for record in caplog.records if record.levelname == "ERROR"]
+    assert any(
+        "queueing" in record.getMessage() for record in caplog.records if record.levelname == "INFO"
+    )
+
+
 async def test_a_failure_of_any_other_kind_is_not_queued(monkeypatch) -> None:
     """The guard that makes the fallback safe. A message queued for a session
     that cannot log in is a delivery reported and never made — which is the
@@ -487,3 +502,150 @@ async def test_the_phrase_that_means_someone_else_holds_it() -> None:
     assert held_by_another(CONFLICT.decode())
     assert not held_by_another("Not logged in")
     assert not held_by_another(None)
+
+
+# --- a turn of Halyard's own ----------------------------------------------------
+
+
+class _Lines:
+    """A process's stdout, one JSON event to a line."""
+
+    def __init__(self, events: list[dict]) -> None:
+        self._lines = [json.dumps(event).encode() + b"\n" for event in events]
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self) -> bytes:
+        if not self._lines:
+            raise StopAsyncIteration
+        return self._lines.pop(0)
+
+
+class _Quiet:
+    async def read(self) -> bytes:
+        return b""
+
+
+class _Exec:
+    """`codex exec --json` as it answered when this was measured, on 0.153.4."""
+
+    pid = 4242
+
+    def __init__(self, events: list[dict]) -> None:
+        self.stdout = _Lines(events)
+        self.stderr = _Quiet()
+        self.returncode = 0
+
+    async def wait(self) -> int:
+        return 0
+
+
+RAN_DATE = [
+    {"type": "thread.started", "thread_id": "01a0d555-b8d8"},
+    {"type": "turn.started"},
+    {
+        "type": "item.completed",
+        "item": {"type": "command_execution", "command": "/bin/zsh -lc 'date +%s'"},
+    },
+    {"type": "item.completed", "item": {"type": "agent_message", "text": "1790285566"}},
+    {
+        "type": "turn.completed",
+        "usage": {
+            "input_tokens": 25856,
+            "cached_input_tokens": 22016,
+            "cache_write_input_tokens": 0,
+            "output_tokens": 126,
+            "reasoning_output_tokens": 54,
+        },
+    },
+]
+
+
+def _executing(monkeypatch, events: list[dict]) -> list[tuple[list[str], dict]]:
+    started: list[tuple[list[str], dict]] = []
+
+    async def fake_exec(*arguments, **kwargs):
+        started.append((list(arguments), kwargs))
+        return _Exec(events)
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec)
+    monkeypatch.setattr("halyard.agents.codex.runner.find_codex_binary", lambda *_: "codex")
+    return started
+
+
+async def test_a_turn_of_its_own_is_an_exec_that_keeps_nothing(monkeypatch, tmp_path) -> None:
+    """Where the project is — its hooks, the gate, are read from there — with a
+    sandbox that only reads, and no thread left on disk."""
+    started = _executing(monkeypatch, RAN_DATE)
+
+    said = await CodexRunner().ask(
+        "run date +%s", model="gpt-5.6-luna", effort="medium", cwd=tmp_path, edits=False
+    )
+
+    assert said == "1790285566"
+    [(arguments, kwargs)] = started
+    assert arguments[:4] == ["codex", "exec", "--json", "--ephemeral"]
+    assert arguments[arguments.index("-s") + 1] == "read-only"
+    assert 'approval_policy="never"' in arguments
+    assert arguments[arguments.index("-m") + 1] == "gpt-5.6-luna"
+    assert 'model_reasoning_effort="medium"' in arguments
+    assert arguments[arguments.index("-C") + 1] == str(tmp_path)
+    assert arguments[-1] == "run date +%s"
+    assert kwargs["cwd"] == tmp_path
+    assert kwargs["stdin"] == asyncio.subprocess.DEVNULL, "stdin would be read as more prompt"
+    assert kwargs["start_new_session"] is True
+
+
+async def test_whoever_started_it_hears_the_thread_before_anything_runs(monkeypatch) -> None:
+    _executing(monkeypatch, RAN_DATE)
+    heard: list[str] = []
+
+    await CodexRunner().ask("look", started=heard.append)
+
+    assert heard == ["01a0d555-b8d8"]
+
+
+async def test_what_it_used_is_one_row_with_the_cache_apart(monkeypatch, tmp_path) -> None:
+    """Codex counts cached input inside `input_tokens`, and reasoning inside
+    `output_tokens`; the row says them the way the other runtimes' rows do."""
+    import sqlite3
+
+    _executing(monkeypatch, RAN_DATE)
+    database = tmp_path / "halyard.db"
+
+    await CodexRunner(usage_path=database).ask(
+        "look", session_id="the-callers-id", model="gpt-5.6-luna", purpose="inspect proof · repeat"
+    )
+
+    with sqlite3.connect(database) as db:
+        [row] = db.execute(
+            "SELECT runtime, session_id, model, purpose, input_tokens, output_tokens, "
+            "cache_read_tokens FROM turn_usage"
+        ).fetchall()
+    assert row == (
+        "codex",
+        "the-callers-id",
+        "gpt-5.6-luna",
+        "inspect proof · repeat",
+        3840,
+        126,
+        22016,
+    )
+
+
+async def test_a_turn_that_failed_is_no_answer(monkeypatch) -> None:
+    """Measured: a model the account cannot use fails the turn, not the process."""
+    _executing(
+        monkeypatch,
+        [
+            {"type": "thread.started", "thread_id": "01a0d554"},
+            {"type": "turn.started"},
+            {
+                "type": "turn.failed",
+                "error": {"message": "The 'gpt-5.4-mini' model is not supported"},
+            },
+        ],
+    )
+
+    assert await CodexRunner().ask("look", model="gpt-5.4-mini") is None
