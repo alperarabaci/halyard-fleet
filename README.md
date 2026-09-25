@@ -15,9 +15,10 @@ usage limit hit mid-run — that reaches you too, instead of the session just go
 It runs on your own machine. No open ports, no exposed API, nothing to log into.
 
 Nothing is approved by accident: every failure — a crash, a timeout, an unreachable
-control plane — denies. Two things go through without a person, both empty until you
-fill them in: writes to paths you named, and tools you named. Every one is written to
-the audit log with the pattern that allowed it.
+control plane — denies. Three things can go through without a person, all off until you
+turn them on: writes to paths you named, tools you named, and shell commands that are
+reads the gate understands whole, inside the project. Every one is written to the audit
+log with what allowed it, and one the log cannot take is not let through.
 
 **Runtimes:** Claude Code, Codex, opencode, ZCode &nbsp;·&nbsp; **Channel:** Telegram &nbsp;·&nbsp; **Tested on:** macOS
 
