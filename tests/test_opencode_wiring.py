@@ -72,7 +72,7 @@ def test_a_plugin_without_the_asking_is_reported_as_no_gate(project: Path, bridg
     (project / wiring.CONFIG).write_text(json.dumps({"permission": {"bash": "allow"}}))
 
     said = opencode.check_wired(
-        hooks_file=project / wiring.PLUGINS / wiring.PLUGIN, project_dir=project
+        hooks_file=project / wiring.PLUGINS / wiring.PLUGIN, project_dir=project, bridges=bridges
     )
 
     assert "fail" in levels(said)
@@ -83,7 +83,7 @@ def test_a_project_wired_both_ways_passes(project: Path, bridges: Path) -> None:
     wiring.install(project, bridges)
 
     said = opencode.check_wired(
-        hooks_file=project / wiring.PLUGINS / wiring.PLUGIN, project_dir=project
+        hooks_file=project / wiring.PLUGINS / wiring.PLUGIN, project_dir=project, bridges=bridges
     )
 
     assert "fail" not in levels(said)
@@ -96,6 +96,33 @@ def test_a_missing_plugin_says_what_to_run(project: Path) -> None:
 
     assert "fail" in levels(said)
     assert any("halyard wire" in text for _, text in said)
+
+
+def test_a_copy_behind_this_halyard_s_bridge_says_to_wire_again(
+    project: Path, bridges: Path
+) -> None:
+    """The plugin is a copy, so a Halyard whose bridge changed leaves the
+    project on the old one: still gating, and missing whatever changed."""
+    plugin = project / wiring.PLUGINS / wiring.PLUGIN
+    wiring.install(project, bridges)
+    (bridges / wiring.SOURCE).write_text("export const HalyardGate = async () => ({ ok: 1 })\n")
+
+    said = opencode.check_wired(hooks_file=plugin, project_dir=project, bridges=bridges)
+
+    assert "warn" in levels(said) and "fail" not in levels(said)
+    assert ("", f"halyard wire {project}, then restart opencode") in said
+
+    wiring.install(project, bridges)
+
+    said = opencode.check_wired(hooks_file=plugin, project_dir=project, bridges=bridges)
+    assert ("ok", ".opencode/plugins/halyard.ts is in place") in said
+    assert not any("current copy" in text for _, text in said)
+
+
+def test_the_copy_is_held_up_against_this_checkout_s_own_bridge() -> None:
+    """Where `doctor` looks by default. A path that went wrong would make every
+    copy read as out of date, or none of them."""
+    assert (wiring.BRIDGE_DIR / wiring.SOURCE).is_file()
 
 
 # --- somebody else's file ----------------------------------------------------
@@ -147,7 +174,7 @@ def test_a_category_that_asks_by_pattern_is_gated(project: Path, bridges: Path) 
     (project / wiring.CONFIG).write_text(json.dumps(asking_except("grep *", "ls *")))
 
     said = opencode.check_wired(
-        hooks_file=project / wiring.PLUGINS / wiring.PLUGIN, project_dir=project
+        hooks_file=project / wiring.PLUGINS / wiring.PLUGIN, project_dir=project, bridges=bridges
     )
 
     assert "fail" not in levels(said)
@@ -160,7 +187,7 @@ def test_the_patterns_it_answers_alone_are_named(project: Path, bridges: Path) -
     (project / wiring.CONFIG).write_text(json.dumps(asking_except("grep *", "ls *")))
 
     said = opencode.check_wired(
-        hooks_file=project / wiring.PLUGINS / wiring.PLUGIN, project_dir=project
+        hooks_file=project / wiring.PLUGINS / wiring.PLUGIN, project_dir=project, bridges=bridges
     )
 
     assert "warn" in levels(said)
@@ -179,7 +206,7 @@ def test_a_pattern_object_that_allows_everything_is_still_ungated(
     )
 
     said = opencode.check_wired(
-        hooks_file=project / wiring.PLUGINS / wiring.PLUGIN, project_dir=project
+        hooks_file=project / wiring.PLUGINS / wiring.PLUGIN, project_dir=project, bridges=bridges
     )
 
     assert "fail" in levels(said)

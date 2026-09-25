@@ -86,22 +86,35 @@ def _available_binary() -> list[tuple[str, str]]:
     return lines
 
 
-def check_wired(hooks_file: Path, project_dir: Path, **_context) -> list[tuple[str, str]]:
+def check_wired(
+    hooks_file: Path, project_dir: Path, *, bridges: Path = wiring.BRIDGE_DIR, **_context
+) -> list[tuple[str, str]]:
     """Whether this project's gate is present *and* switched on.
 
     Two questions, and the second is the one worth asking. A plugin sitting in
     the right directory proves nothing on its own: the runtime asks about
     nothing unless its own configuration tells it to, so a project can be
     wired, loaded and silent. That was measured before any of this was written.
+
+    And whether it is the current one. The plugin is copied into the project,
+    not linked, so a Halyard whose bridge changed leaves every project on the
+    old copy until it is wired again — and opencode reads it only at startup.
     """
     lines: list[tuple[str, str]] = []
 
+    plugin = wiring.PLUGINS / wiring.PLUGIN
     if not hooks_file.is_file():
         return [
-            ("fail", f"no {wiring.PLUGINS / wiring.PLUGIN} — nothing is gating this project"),
+            ("fail", f"no {plugin} — nothing is gating this project"),
             ("", f"halyard wire {project_dir}"),
         ]
-    lines.append(("ok", f"{wiring.PLUGINS / wiring.PLUGIN} is in place"))
+    if wiring.current(hooks_file, bridges) is False:
+        # Warned, not failed: an older copy still gates. What it lacks is
+        # whatever changed since, which the phone never shows.
+        lines.append(("warn", f"{plugin} is not the current copy of this Halyard's bridge"))
+        lines.append(("", f"halyard wire {project_dir}, then restart opencode"))
+    else:
+        lines.append(("ok", f"{plugin} is in place"))
 
     config = project_dir / wiring.CONFIG
     try:
