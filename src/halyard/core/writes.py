@@ -54,7 +54,11 @@ logger = logging.getLogger(__name__)
 #: Kept here rather than in the gate's matcher because these two answer
 #: different questions — the matcher decides what Halyard is *shown*, this
 #: decides what it may let through without a person.
-FILE_TOOLS = frozenset({"Write", "Edit", "MultiEdit", "NotebookEdit"})
+#:
+#: `edit` is opencode's one category for every file change — its edit, write
+#: and patch tools all ask as `edit` — and its bridge sends every file the
+#: change touches, as `file_paths`.
+FILE_TOOLS = frozenset({"Write", "Edit", "MultiEdit", "NotebookEdit", "edit"})
 
 #: Git runs what is in `.git/hooks` and does what `.git/config` says, and
 #: nothing written there shows up in a diff anybody reviews.
@@ -183,6 +187,21 @@ def allowed_by(
         )
         return None
     return pattern
+
+
+def allowed_all(
+    file_paths: tuple[str, ...], project_dir: str | None, patterns: tuple[str, ...]
+) -> tuple[str, ...] | None:
+    """The pattern for each of these writes, or None when any one must ask.
+
+    All or nothing: a change to several files is one question at the runtime,
+    and a grant covering four of five would answer the fifth for somebody who
+    never saw it.
+    """
+    found = [allowed_by(path, project_dir, patterns) for path in file_paths]
+    if not found or None in found:
+        return None
+    return tuple(pattern for pattern in found if pattern is not None)
 
 
 def from_yaml(text: str) -> tuple[str, ...]:

@@ -93,7 +93,8 @@ settings:
 # The gate covers `Write` and `Edit`, so a write to anywhere else puts a card
 # on your phone rather than failing — which is what a turn started from the
 # phone used to do, silently, because a headless session cannot open Claude
-# Code's own permission dialog.
+# Code's own permission dialog. opencode's edits are matched the same way; a
+# change to several files at once goes through only if every one of them may.
 #
 # This is the one thing Halyard permits without a person, so it is empty by
 # default and every grant is written to the audit log with the pattern that
