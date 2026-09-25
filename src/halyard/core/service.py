@@ -15,6 +15,8 @@ exception escaping this method would eventually become an approval.
 from __future__ import annotations
 
 import logging
+import os
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from enum import StrEnum
 
@@ -455,8 +457,20 @@ class ApprovalService:
         allowed_tools: tuple[str, ...] = (),
         refuse_agent_commits: bool = False,
         allow_risk_at_or_below: RiskLevel | None = None,
+        runs_by_project: Mapping[str, Sequence[str]] | None = None,
     ) -> None:
         self._seats = seats or {}
+        # Each project's `runs:`, by where the project is. An entry that no
+        # longer reads is dropped here too; the configuration already said so.
+        self._runs: dict[str, tuple[reads.Run, ...]] = {}
+        for path, texts in (runs_by_project or {}).items():
+            entries = []
+            for text in texts:
+                try:
+                    entries.append(reads.run_entry(text))
+                except ValueError:
+                    logger.warning("Ignoring `runs:` entry %r for %s", text, path)
+            self._runs[os.path.realpath(os.path.expanduser(path))] = tuple(entries)
         self._store = store
         self._gate = gate or Gate()
         self._policy = policy
@@ -476,6 +490,15 @@ class ApprovalService:
         self._registry = registry
         self._channel = channel
         self._project = project
+
+    def _runs_for(self, root: str | None) -> tuple[reads.Run, ...]:
+        """The `runs:` of the configured project this directory is in — the
+        innermost, when one project sits inside another."""
+        if not root or not self._runs:
+            return ()
+        here = os.path.realpath(os.path.expanduser(root))
+        inside = [path for path in self._runs if os.path.commonpath([here, path]) == path]
+        return self._runs[max(inside, key=len)] if inside else ()
 
     async def request(
         self,
@@ -659,17 +682,19 @@ class ApprovalService:
                 risk=classification.risk,
             )
 
-        # A shell command that is a read, understood whole and inside the
-        # project — see `reads.py`. Only a shell command: judged as text, a
-        # `Write` to `pytest/report.txt` once read as a test run. The risk
-        # label does not decide it; it is what the card shows, and a high one
-        # is still a question however plain the command looks.
+        # A shell command understood whole inside the project: reads, and the
+        # commands the project named under `runs:` — see `reads.py`. Only a
+        # shell command: judged as text, a `Write` to `pytest/report.txt` once
+        # read as a test run. The risk label does not decide it; it is what the
+        # card shows, and a high one is still a question however plain the
+        # command looks.
         if (
             self._allow_at_or_below
             and tool in reads.SHELL_TOOLS
             and classification.risk is not RiskLevel.HIGH
         ):
-            verdict = reads.judge(command, cwd=cwd, project=project_dir or cwd)
+            root = project_dir or cwd
+            verdict = reads.judge(command, cwd=cwd, project=root, runs=self._runs_for(root))
             if verdict.allowed and await self._try_to_record(
                 risk_preauthorized(
                     session_id=session_id,

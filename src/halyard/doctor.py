@@ -261,6 +261,28 @@ def _older_spellings(projects) -> list[str]:
     ]
 
 
+def _runs(settings, projects) -> list[str]:
+    """Each project's `runs:`: what goes through without asking, what was
+    refused, and whether any of it can apply at all — it only does with
+    `HALYARD_ALLOW_RISK_AT_OR_BELOW` on, and a list nobody switched on is a
+    list somebody believes is working."""
+    switched = bool(getattr(settings, "allow_risk_at_or_below", None))
+    lines = []
+    for project in projects:
+        for _, why in project.runs_refused:
+            lines.append(f"{WARN}{project.name} — a `runs:` entry is ignored and asks: {why}")
+        if not project.runs:
+            continue
+        if switched:
+            lines.append(f"{OK}{project.name} runs without asking: {', '.join(project.runs)}")
+        else:
+            lines.append(
+                f"{WARN}{project.name} has `runs:`, but HALYARD_ALLOW_RISK_AT_OR_BELOW "
+                "is not set, so they still ask"
+            )
+    return lines
+
+
 def _inspection_efforts(settings, projects) -> list[str]:
     """Each effort asked for inspections that the runtime they run on would
     not take.
@@ -726,6 +748,8 @@ def run() -> int:
     for line in _older_spellings(described):
         print(line)
     for line in _inspection_efforts(settings, described) if settings_ok else []:
+        print(line)
+    for line in _runs(settings if settings_ok else None, described):
         print(line)
     if seats:
         print()

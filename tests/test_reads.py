@@ -346,3 +346,130 @@ def test_set_may_change_how_errors_stop_but_not_print_everything(project: Path) 
 def test_a_program_named_by_its_path_is_not_a_read(project: Path) -> None:
     assert not allowed("./cat src/x.py", project)
     assert not allowed("/bin/cat src/x.py", project)
+
+
+# --- a project's own commands ----------------------------------------------------
+
+
+def runs(*texts: str):
+    from halyard.core.reads import run_entry
+
+    return tuple(run_entry(text) for text in texts)
+
+
+def ran(command: str, project: Path, *entries: str) -> bool:
+    return judge(command, cwd=str(project), project=str(project), runs=runs(*entries)).allowed
+
+
+def test_a_test_run_is_not_a_read() -> None:
+    """It runs the project's code, and a test the agent just wrote with it."""
+    assert not judge("uv run pytest -q", cwd="/", project="/").allowed
+
+
+def test_an_entry_runs_as_written(project: Path) -> None:
+    assert ran("make test-fast", project, "make test-fast")
+    assert not ran("make test-fast", project, "make lint-be")
+
+
+def test_a_run_and_a_read_are_one_command(project: Path) -> None:
+    """How an agent actually types it."""
+    assert ran("make test-fast 2>&1 | tail -20", project, "make test-fast")
+    assert ran(f"cd {project} && make test-fast", project, "make test-fast")
+    assert not ran("make test-fast > /tmp/log", project, "make test-fast")
+    assert not ran("make test-fast; rm -rf x", project, "make test-fast")
+
+
+def test_more_arguments_only_where_the_entry_takes_them(project: Path) -> None:
+    """`make test-fast clean` runs another target."""
+    assert not ran("make test-fast clean", project, "make test-fast")
+    assert ran("uv run pytest -q src -k name", project, "uv run pytest *")
+
+
+def test_more_arguments_stay_inside_the_project(project: Path) -> None:
+    assert not ran("uv run pytest /etc", project, "uv run pytest *")
+    assert not ran("uv run pytest ../outside", project, "uv run pytest *")
+    assert not ran("uv run pytest --rootdir=/", project, "uv run pytest *")
+    assert not ran("uv run pytest .env", project, "uv run pytest *")
+
+
+def test_a_setting_only_where_the_entry_names_it(project: Path) -> None:
+    """Measured: 659 cards set `UV_CACHE_DIR` in front of the command."""
+    entry = "UV_CACHE_DIR=* uv run pytest *"
+    assert ran("UV_CACHE_DIR=/tmp/uv uv run pytest -q", project, entry)
+    assert ran("uv run pytest -q", project, entry)
+    assert not ran("PYTHONPATH=/tmp uv run pytest -q", project, entry)
+
+
+def test_a_word_in_the_middle(project: Path) -> None:
+    """Measured: 301 cards named a workspace package with `--package`."""
+    entry = "uv run --package * pytest *"
+    assert ran("uv run --package api pytest -q src", project, entry)
+    assert not ran("uv run --package api python x.py", project, entry)
+
+
+def test_the_reason_says_it_was_the_projects_own(project: Path) -> None:
+    verdict = judge(
+        "make test-fast 2>&1 | tail -5",
+        cwd=str(project),
+        project=str(project),
+        runs=runs("make test-fast"),
+    )
+
+    assert verdict.why == "the project's own `runs:` and reads inside it: make test-fast, tail"
+
+
+@pytest.mark.parametrize(
+    "entry",
+    [
+        "make test-fast",
+        "make lint-be",
+        "uv run pytest *",
+        "uv run --no-sync pytest *",
+        "uv run --package * pytest *",
+        "UV_CACHE_DIR=* uv run pytest *",
+        "npx vitest run *",
+        "npm run test",
+        "uv run ruff check *",
+        "uv run python -m pytest *",
+        "pnpm exec vitest *",
+        ".venv/bin/python -m pytest *",
+        "git fetch",
+    ],
+)
+def test_a_projects_own_command_is_taken(entry: str) -> None:
+    from halyard.core.reads import run_entry
+
+    assert run_entry(entry).text == entry
+
+
+@pytest.mark.parametrize(
+    "entry",
+    [
+        "bash *",
+        "/bin/bash x",
+        "sudo make test",
+        "env *",
+        "ssh host *",
+        "docker exec db psql *",
+        "python -c *",
+        ".venv/bin/python -c *",
+        "node -e *",
+        "uv run python *",
+        "uv run *",
+        "uv run --no-sync *",
+        "uv run * *",
+        "npx *",
+        "make *",
+        "make",
+        "cargo run *",
+        "* *",
+        "make test | tee out",
+        "make test > out",
+    ],
+)
+def test_an_entry_that_could_run_anything_is_refused(entry: str) -> None:
+    """A list that says `bash *` switches the gate off and reads like a list."""
+    from halyard.core.reads import run_entry
+
+    with pytest.raises(ValueError):
+        run_entry(entry)

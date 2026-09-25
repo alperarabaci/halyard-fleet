@@ -74,6 +74,7 @@ _PROJECT_FIELDS = {
     # The name `transitions:` had until 2026-09-24, still read.
     "handoffs",
     "workflows",
+    "runs",
 }
 _SEAT_FIELDS = {
     "runtime",
@@ -299,6 +300,40 @@ class Project:
     #: The flows this project takes its transitions in, and the steps they share
     #: — see `Workflows`. Empty unless configured.
     workflows: Workflows = field(default_factory=Workflows)
+    #: Commands this project trusts to run without a card — its test and lint
+    #: targets — written as they are typed: `make test-fast`, `uv run pytest *`.
+    #: They run the project's code, so they are never taken for reads; this is
+    #: somebody saying so for these. Only with `HALYARD_ALLOW_RISK_AT_OR_BELOW`
+    #: on. See `reads.run_entry` for how they are written and which are refused.
+    runs: tuple[str, ...] = ()
+    #: Entries under `runs:` that were refused, with why. Refused rather than
+    #: fatal: a mistake in a grant makes that grant ask, and never takes the
+    #: gate down with it. `doctor` and the service's log both say so.
+    runs_refused: tuple[tuple[str, str], ...] = ()
+
+
+def _runs_from(project: str, value: Any) -> tuple[tuple[str, ...], tuple[tuple[str, str], ...]]:
+    """`runs:` as the entries that stand, and those refused with why."""
+    from halyard.core.reads import run_entry
+
+    if value is None:
+        return (), ()
+    if not isinstance(value, list):
+        return (), ((str(value), "`runs:` must be a list of commands, one per line"),)
+    kept: list[str] = []
+    refused: list[tuple[str, str]] = []
+    for entry in value:
+        text = entry.strip() if isinstance(entry, str) else ""
+        if not text:
+            refused.append((str(entry), f"`{entry}` is not a command"))
+            continue
+        try:
+            run_entry(text)
+        except ValueError as why:
+            refused.append((text, str(why)))
+            continue
+        kept.append(text)
+    return tuple(kept), tuple(refused)
 
 
 def _confirmation_from(project: str, value: Any) -> Confirmation | None:
@@ -1054,6 +1089,7 @@ def projects_from_yaml(text: str) -> list[Project]:
         _placeholders_checked(
             project, commands, label_groups, validate=validate, transitions=transitions
         )
+        runs, runs_refused = _runs_from(project, body.get("runs"))
         projects.append(
             Project(
                 name=project,
@@ -1081,6 +1117,8 @@ def projects_from_yaml(text: str) -> list[Project]:
                 ),
                 # After `workflows=`, which adds to it: arguments go in order.
                 older=tuple(older),
+                runs=runs,
+                runs_refused=runs_refused,
             )
         )
     return projects

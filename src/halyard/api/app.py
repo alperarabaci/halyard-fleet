@@ -460,6 +460,22 @@ def create_app(settings: Settings, *, channel=None) -> FastAPI:
     if allowed_tools:
         logger.info("Tools %s run without asking", ", ".join(repr(p) for p in allowed_tools))
 
+    # Each project's own commands, by where it is. An entry that was refused
+    # asks, and is said once here, loudly, rather than taking the gate down.
+    runs_by_project: dict[str, tuple[str, ...]] = {}
+    for found in configured_projects().values():
+        for _, why in found.runs_refused:
+            logger.error(
+                "Project %s: ignoring a `runs:` entry, so it will ask: %s", found.name, why
+            )
+        if found.runs and found.path is not None:
+            runs_by_project[str(found.path)] = found.runs
+            logger.info(
+                "Project %s runs without asking: %s",
+                found.name,
+                ", ".join(repr(run) for run in found.runs),
+            )
+
     service = ApprovalService(
         store=store,
         policy=Policy(),
@@ -476,6 +492,7 @@ def create_app(settings: Settings, *, channel=None) -> FastAPI:
         allow_risk_at_or_below=(
             RiskLevel(settings.allow_risk_at_or_below) if settings.allow_risk_at_or_below else None
         ),
+        runs_by_project=runs_by_project,
     )
     questions = QuestionService(
         store=question_store,

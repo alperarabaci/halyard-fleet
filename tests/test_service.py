@@ -108,6 +108,7 @@ def build_service(
     gate: Gate | None = None,
     refuse_agent_commits: bool = False,
     allow_risk_at_or_below=None,
+    runs_by_project=None,
 ) -> tuple[ApprovalService, ApprovalStore, JsonlAuditSink]:
     store = store or ApprovalStore(ttl=ttl)
     sink = JsonlAuditSink(tmp_path / "audit.jsonl")
@@ -123,6 +124,7 @@ def build_service(
         **({"gate": gate} if gate is not None else {}),
         refuse_agent_commits=refuse_agent_commits,
         allow_risk_at_or_below=allow_risk_at_or_below,
+        runs_by_project=runs_by_project,
     )
     return service, store, sink
 
@@ -918,7 +920,9 @@ async def test_what_let_it_through_is_written_down_whole(tmp_path: Path) -> None
     assert granted.detail["command"] == "git status && git log -3"
     assert granted.detail["cwd"] == str(project)
     assert granted.detail["why"] == "a read inside the project: git status, git log"
-    assert granted.detail["rules"] == "reads/1"
+    from halyard.core.reads import VERSION
+
+    assert granted.detail["rules"] == VERSION
 
 
 @pytest.mark.parametrize(
@@ -1140,3 +1144,43 @@ async def test_an_answer_at_the_desk_is_never_handed_back_as_an_approval(tmp_pat
     assert outcome.decision is BridgeDecision.DEFER
     assert channel.closed == [(channel.last_request.request_id, "allow", "opencode, at the desk")]
     assert nothing_left is False
+
+
+# --- a project's own commands --------------------------------------------------
+
+
+async def test_a_projects_own_command_goes_through_in_that_project_only(tmp_path: Path) -> None:
+    """`runs:` belongs to the project it is written under. The same command
+    from another project is a card."""
+    project = a_project(tmp_path)
+    other = tmp_path / "other"
+    (other / ".git").mkdir(parents=True)
+    service, channel, sink = asking_nobody(
+        tmp_path, runs_by_project={str(project): ("make test-fast",)}
+    )
+    await sink.open()
+
+    here = await ask(service, "make test-fast 2>&1 | tail -5", project_dir=str(project))
+    there = await ask(service, "make test-fast", project_dir=str(other))
+
+    assert here.decision is BridgeDecision.ALLOW
+    assert "`runs:`" in here.reason
+    assert there.decision is BridgeDecision.ALLOW, "the stub channel answered its card"
+    assert channel.asked == 1
+
+
+async def test_the_innermost_project_decides(tmp_path: Path) -> None:
+    """One project inside another: the one the session is in is the one whose
+    list applies."""
+    outer = a_project(tmp_path)
+    inner = outer / "src"
+    service, channel, sink = asking_nobody(
+        tmp_path,
+        runs_by_project={str(outer): ("make lint",), str(inner): ("make test",)},
+    )
+    await sink.open()
+
+    await ask(service, "make test", project_dir=str(inner))
+    await ask(service, "make lint", project_dir=str(inner))
+
+    assert channel.asked == 1
