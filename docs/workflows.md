@@ -68,7 +68,8 @@ When the agent a step went to replies, Halyard reads the last line of that reply
 - `forward` takes the next step, carrying the reply to it;
 - `back` sends the work to the step before — the one that produced what was just judged
   — as that step's next round;
-- `wait` stops the run until somebody sends it on;
+- `wait` stops the run until the agent that asked to wait decides again, or somebody
+  sends it on — see [Stopping](#stopping-steering-and-asking-where-it-is);
 - `next` starts another phase, and only means something at the end of one — see
   [Phases](#phases-the-steps-that-go-round-going-forward);
 - anything else carries on to the next step, and the chat says there was no decision
@@ -112,10 +113,11 @@ agent meant, and so does a phase that ends with **no decision at all**: carrying
 leave the phases with nobody having said the work was done. The stop offers the next
 phase and the way out of them as buttons, so the work stays in the run whichever it is.
 
-A `wait` at the end of a phase stops with the same two buttons. That is the operator's
-moment between parts — accepting on screen, publishing, bringing the stack up with what
-was just made — and what follows it is the next part or the end of them, not whichever
-step happens to come next in the list.
+A `wait` at the end of a phase stops with the same two buttons, and the agent's own `next`
+or `forward` afterwards does what they do. That is the operator's moment between parts —
+accepting on screen, publishing, bringing the stack up with what was just made — and what
+follows it is the next part or the end of them, not whichever step happens to come next in
+the list.
 
 `phases:` under `workflows:` says how many phases go before the run stops and asks —
 three unless a project writes another number. Past it, the next phase is the
@@ -205,6 +207,16 @@ run:
   run's rounds and phase kept — a loop it stopped in is not reset by a tap. Typing
   `/workflow level3 develop` does the same for a stopped run;
 - **⏹ Stop the workflow** clears it. Starting it again after that starts afresh.
+
+**A wait goes on with the agent that asked for it.** What an agent waits for is usually
+an answer from you, given in its own chat.
+
+- Its replies until then decide nothing, and another `wait` is the same one.
+- The first reply that ends in `forward`, `back` or `next` is its decision at the step it
+  waited at. The run goes on from there, carrying that reply.
+- **▶️** still sends the run on without that decision. Once the run has been sent on or
+  steered, the agent's later decisions move nothing.
+- Read back later, the round keeps its `wait`.
 
 ## When a run ends
 

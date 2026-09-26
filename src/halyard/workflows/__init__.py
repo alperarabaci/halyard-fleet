@@ -22,6 +22,9 @@ it replaced. It stops when a step would go round more often than its project
 allowed it to, when the phases would, when a phase ends undecided, when a seat
 says to wait, and when a message reached nobody — and each of those is said in
 the chat it was started from, with the run kept so it can go on afterwards.
+A wait is the one stop a seat can lift: what it waited for is usually the
+operator's answer, given in its chat, and its own decision after that takes
+the run on.
 
 **What a run did outlives it.** When it ends — finished or stopped — its steps
 are kept in the database beside the tokens, each with what its answer decided

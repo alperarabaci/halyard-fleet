@@ -640,6 +640,43 @@ def test_where_a_phase_end_would_leave_to_is_kept_only_until_the_run_moves(tmp_p
     assert stopped.held("it was asked to wait").leaving == -1
 
 
+def test_the_step_that_asked_to_wait_is_kept_only_until_the_run_moves(tmp_path: Path) -> None:
+    """So a seat deciding long after cannot move a run that has gone on since."""
+    kept = tmp_path / "workflow-runs.json"
+    stopped = a_run(2).held("it was asked to wait", waited=1)
+
+    save(kept, "alpha-engine#400", stopped)
+
+    assert current(kept, "alpha-engine#400").waited == 1
+    assert stopped.at(3).waited == -1
+    assert stopped.waiting_on("xdrv").waited == -1
+    assert stopped.held("develop would go for round 2 of 1").waited == -1
+
+
+def test_before_the_wait_the_run_is_on_that_seat_s_step_awaiting_it() -> None:
+    stopped = a_run(2, entered=0).held("it was asked to wait", waited=1)
+
+    before = stopped.before_the_wait(first=1)
+
+    assert (before.step, before.phase, before.entered) == (1, 1, 0)
+    assert (before.waiting, before.waiting_for, before.stopped, before.waited) == (
+        True,
+        "xreview",
+        "",
+        -1,
+    )
+
+
+def test_a_wait_where_a_phase_ended_is_taken_back_to_that_phase() -> None:
+    """Parked at the next phase, ready for the button; the seat decides in the
+    phase it waited in."""
+    stopped = a_run(1, phase=3, entered=1).held("it was asked to wait", leaving=5, waited=4)
+
+    before = stopped.before_the_wait(first=1)
+
+    assert (before.step, before.phase, before.entered, before.leaving) == (4, 2, 1, -1)
+
+
 def test_a_round_is_counted_into_the_run_as_it_is_now(tmp_path: Path) -> None:
     """The seat can take the message after the run was saved again, so the
     round goes into what is on disk, not into the run it was sent from."""
