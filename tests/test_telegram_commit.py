@@ -1383,6 +1383,79 @@ async def test_a_review_that_says_wait_stops_before_the_navigator(tmp_path: Path
     assert "- Decide on your last line: forward" in text
 
 
+async def test_the_agent_that_asked_to_wait_takes_the_run_on_when_it_decides(
+    tmp_path: Path, wired
+) -> None:
+    """What an agent waits for is usually the operator's answer, given in its
+    chat. The replies in between and another wait leave the run where it
+    stopped; the decision after them takes it on, carrying that reply."""
+    channel, api, runner, repo = wired
+    flow_in(channel, repo, tmp_path, runner, **TWO_STEPS)
+    await started(channel)
+    await answered(channel, "xrev", "Which of the two files is in scope?\nDECISION: wait")
+
+    await answered(channel, "xrev", "Then the second one needs a look as well.")
+    await answered(channel, "xrev", "One more thing to settle first.\nDECISION: wait")
+
+    assert len(runner.sent) == 1, "nothing went while it was being talked over"
+    assert not any("no decision line" in sent["text"] for sent in api.sent)
+
+    await answered(channel, "xrev", "Both files, then.\nDECISION: forward")
+
+    session, text = runner.sent[-1]
+    assert session == "id-nav"
+    assert "Both files, then." in text
+
+
+async def test_a_round_that_waited_is_kept_as_a_wait(tmp_path: Path, wired) -> None:
+    """Read back later, the run says it waited there: the decision after the
+    wait answered the operator, not the round."""
+    import sqlite3
+
+    channel, _, runner, repo = wired
+    channel._database = tmp_path / "halyard.db"
+    flow_in(channel, repo, tmp_path, runner, **TWO_STEPS)
+    await started(channel)
+    await answered(channel, "xrev", "Which file is in scope?\nDECISION: wait")
+    await answered(channel, "xrev", "The first one.\nDECISION: forward")
+
+    await answered(channel, "nav", "DECISION: forward")
+
+    with sqlite3.connect(channel._database) as db:
+        assert db.execute(
+            "SELECT step, round, decision, decided_by FROM workflow_steps ORDER BY at"
+        ).fetchall() == [("review", 1, "wait", "review"), ("to_nav", 1, "forward", "to_nav")]
+
+
+async def test_a_wait_the_operator_sent_on_is_not_taken_on_again(tmp_path: Path, wired) -> None:
+    channel, _, runner, repo = wired
+    flow_in(channel, repo, tmp_path, runner, **TWO_STEPS)
+    await started(channel)
+    await answered(channel, "xrev", "Which file is in scope?\nDECISION: wait")
+    await channel._handle_callback(pressed_transition("flowgo", "level3"))
+    await settled(channel)
+    assert runner.sent[-1][0] == "id-nav"
+
+    await answered(channel, "xrev", "The first one.\nDECISION: forward")
+
+    assert len(runner.sent) == 2, "the navigator has it once"
+
+
+async def test_back_after_a_wait_sends_the_work_to_the_step_before(tmp_path: Path, wired) -> None:
+    channel, _, runner, repo = wired
+    flow_in(channel, repo, tmp_path, runner, **TWO_STEPS)
+    await started(channel)
+    await answered(channel, "xrev", "DECISION: forward")
+    await answered(channel, "nav", "Is the second file in scope?\nDECISION: wait")
+
+    await answered(channel, "nav", "It is, and the review missed it.\nDECISION: back")
+
+    session, text = runner.sent[-1]
+    assert session == "id-rev"
+    assert "Sent back by: nav (navigator)" in text
+    assert "- Round: 2/2" in text
+
+
 async def test_a_step_sent_back_carries_its_seat_s_answer_to_the_round_before(
     tmp_path: Path, wired
 ) -> None:
@@ -1535,6 +1608,40 @@ async def test_a_wait_at_the_end_of_a_phase_offers_the_next_one_or_the_way_out(
         "🧭 Pick a step",
         "⏹ Stop the workflow",
     ]
+
+
+async def test_after_a_wait_where_a_phase_ended_the_agent_s_next_starts_the_next_phase(
+    tmp_path: Path, wired
+) -> None:
+    """Decided in the phase it waited in: the next one is phase 2, not 3."""
+    channel, _, runner, repo = wired
+    flow_in(channel, repo, tmp_path, runner, **PHASED)
+    await started(channel)
+    await answered(channel, "xrev", "DECISION: forward")
+    await answered(channel, "nav", "Accepted; publish it first.\nDECISION: wait")
+
+    await answered(channel, "nav", "Published. On to part two.\nDECISION: next")
+
+    session, text = runner.sent[-1]
+    assert session == "id-rev"
+    assert "- Phase: 2" in text
+    assert "- Round: 1/2" in text
+    assert "Published. On to part two." in text
+
+
+async def test_after_a_wait_where_a_phase_ended_the_agent_s_forward_leaves_the_phases(
+    tmp_path: Path, wired
+) -> None:
+    channel, api, runner, repo = wired
+    flow_in(channel, repo, tmp_path, runner, **PHASED)
+    await started(channel)
+    await answered(channel, "xrev", "DECISION: forward")
+    await answered(channel, "nav", "Accepted; publish it first.\nDECISION: wait")
+
+    await answered(channel, "nav", "Published, and that was the last part.\nDECISION: forward")
+
+    assert len(runner.sent) == 2
+    assert any("<b>level3</b> is done" in sent["text"] for sent in api.sent)
 
 
 async def test_leaving_the_phases_from_the_card_goes_on_past_them(tmp_path: Path, wired) -> None:

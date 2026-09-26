@@ -3711,7 +3711,8 @@ class TelegramChannel:
         )
 
     async def _advance_workflow(self, answered: Seat, text: str) -> None:
-        """Take the next step, now that the seat a run was waiting for replied.
+        """Take the next step, now that the seat a run was waiting for replied
+        — or the seat whose wait stopped it decided again.
 
         Most replies are not a step: a seat nobody is waiting for costs a file
         read and nothing else. The decision is the reply's own last line, in
@@ -3727,12 +3728,22 @@ class TelegramChannel:
         if kept is None or work is None:
             return
         run = await asyncio.to_thread(flowing.current, kept, work)
-        if run is None or not run.waiting or run.waiting_for != answered.label:
+        if run is None or run.waiting_for != answered.label:
+            return
+        if not run.waiting and run.waited < 0:
             return
 
         flow = found.workflows.flows.get(run.workflow) or ()
         stretch = found.workflows.stretches.get(run.workflow)
         decision, named = flowing.decided(text, found.workflows.decisions)
+        after_waiting = not run.waiting
+        if after_waiting:
+            # The seat that asked to wait, heard from again. Only a decision
+            # takes the run on: the replies in between are the conversation
+            # the wait was for, and another wait is the same one.
+            if decision is None or decision is flowing.Decision.WAIT:
+                return
+            run = run.before_the_wait(stretch[0] if stretch is not None else -1)
         moving = flowing.after(
             decision,
             run=run,
@@ -3744,18 +3755,20 @@ class TelegramChannel:
             named=named,
         )
         logger.info(
-            "Workflow %s for %s: %s decided %s%s, acting on %s",
+            "Workflow %s for %s: %s decided %s%s%s, acting on %s",
             run.workflow,
             work,
             answered.label,
             decision or "nothing",
             f" {named}" if named else "",
+            " after waiting" if after_waiting else "",
             moving.decided or "nothing",
         )
         here = found.workflows.steps.get(flow[run.step]) if run.step < len(flow) else None
-        if here is not None:
+        if here is not None and not after_waiting:
             # Kept on the round this answers, so a run read back later says how
-            # it moved and on whose word, not only where it went.
+            # it moved and on whose word, not only where it went. A round that
+            # waited keeps its wait: what came after it answered the operator.
             whose = ""
             if moving.decided is not None:
                 whose = here.name if decision is not None else here.decided_by
@@ -3814,7 +3827,9 @@ class TelegramChannel:
                 found,
                 work,
                 parked.held(
-                    moving.stop, leaving=moving.leaving if moving.leaving is not None else -1
+                    moving.stop,
+                    leaving=moving.leaving if moving.leaving is not None else -1,
+                    waited=run.step if waiting else -1,
                 ),
                 go=target is not None,
                 go_text=go_text,

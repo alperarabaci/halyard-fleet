@@ -92,18 +92,48 @@ class Run:
     #: stop, and gone as soon as the run moves — a button left on an old card
     #: then finds nothing to leave.
     leaving: int = -1
+    #: For a run stopped because its seat asked to wait: the step that seat was
+    #: on. What the wait was for is usually a question to the operator, answered
+    #: in that seat's chat, so its own decision afterwards takes the run on from
+    #: there. -1 for any other stop, and gone as soon as the run moves.
+    waited: int = -1
 
-    def held(self, why: str, *, leaving: int = -1) -> Run:
-        """The same run, stopped for this reason.
+    def held(self, why: str, *, leaving: int = -1, waited: int = -1) -> Run:
+        """The same run, stopped for this reason — `waited` is the step whose
+        seat asked to wait, when that is the reason.
 
         The seat it last dealt with is kept: what it carries on with, if
         somebody sends the step it stopped before, is that seat's reply.
         """
-        return replace(self, waiting=False, stopped=why, leaving=leaving)
+        return replace(self, waiting=False, stopped=why, leaving=leaving, waited=waited)
+
+    def before_the_wait(self, first: int) -> Run:
+        """The run as it stood when its seat asked to wait: on that seat's
+        step, awaiting its reply — the one that decides now.
+
+        A wait where a phase ends is parked at the next phase, ready for the
+        button, so the phase it was said in is the one before; where that
+        phase started is not kept, and `first`, where phases start, is taken.
+        """
+        parked_ahead = self.leaving >= 0
+        return replace(
+            self,
+            step=self.waited,
+            waiting=True,
+            stopped="",
+            back=False,
+            carried="",
+            phase=max(self.phase - 1, 1) if parked_ahead else self.phase,
+            entered=first if parked_ahead else self.entered,
+            leaving=-1,
+            waited=-1,
+        )
 
     def waiting_on(self, label: str) -> Run:
         """The same run, its step delivered and that seat's reply awaited."""
-        return replace(self, waiting=True, waiting_for=label, stopped="", back=False, leaving=-1)
+        return replace(
+            self, waiting=True, waiting_for=label, stopped="", back=False, leaving=-1, waited=-1
+        )
 
     def at(
         self,
@@ -129,6 +159,7 @@ class Run:
             phase=self.phase if phase is None else phase,
             entered=self.entered if entered is None else entered,
             leaving=-1,
+            waited=-1,
         )
 
     def taken(self) -> dict[str, int]:
@@ -194,6 +225,7 @@ def current(where: Path, work: str) -> Run | None:
     phase = entry.get("phase")
     entered = entry.get("entered")
     leaving = entry.get("leaving")
+    waited = entry.get("waited")
     return Run(
         workflow=workflow,
         step=int(entry.get("step") or 0),
@@ -210,6 +242,7 @@ def current(where: Path, work: str) -> Run | None:
         entered=entered if isinstance(entered, int) else -1,
         rounds=_rounds_from(entry.get("rounds")),
         leaving=leaving if isinstance(leaving, int) else -1,
+        waited=waited if isinstance(waited, int) else -1,
     )
 
 
@@ -231,6 +264,7 @@ def save(where: Path, work: str, run: Run) -> None:
         "phase": run.phase,
         "entered": run.entered,
         "leaving": run.leaving,
+        "waited": run.waited,
         "rounds": {
             key: [
                 {
