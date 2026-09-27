@@ -44,7 +44,7 @@ class Round:
     at: datetime
     #: The seat's label. The answer to this round is what that seat says next.
     to: str
-    #: What the run did on that answer — `forward`, `back`, `wait`, `next` —
+    #: What the run did on that answer — `forward`, `back`, `wait`, `next`, `done` —
     #: and whose word it was: this step's own, or the one before it when this
     #: step acts on it (`decided_by:`). Empty until the answer comes, and for
     #: an answer that decided nothing.
@@ -92,30 +92,32 @@ class Run:
     #: stop, and gone as soon as the run moves — a button left on an old card
     #: then finds nothing to leave.
     leaving: int = -1
-    #: For a run stopped because its seat asked to wait: the step that seat was
-    #: on. What the wait was for is usually a question to the operator, answered
-    #: in that seat's chat, so its own decision afterwards takes the run on from
-    #: there. -1 for any other stop, and gone as soon as the run moves.
+    #: For a run its seat's own reply stopped — it asked to wait, or ended the
+    #: flow without `done` — the step that seat was on. What it stopped for is
+    #: usually a word with the operator, in that seat's chat, so its own
+    #: decision afterwards takes the run on from there. -1 for any other stop,
+    #: and gone as soon as the run moves.
     waited: int = -1
 
     def held(self, why: str, *, leaving: int = -1, waited: int = -1) -> Run:
         """The same run, stopped for this reason — `waited` is the step whose
-        seat asked to wait, when that is the reason.
+        seat's reply stopped it, when that seat can lift the stop.
 
         The seat it last dealt with is kept: what it carries on with, if
         somebody sends the step it stopped before, is that seat's reply.
         """
         return replace(self, waiting=False, stopped=why, leaving=leaving, waited=waited)
 
-    def before_the_wait(self, first: int) -> Run:
-        """The run as it stood when its seat asked to wait: on that seat's
-        step, awaiting its reply — the one that decides now.
+    def as_it_stood(self, stretch: tuple[int, int] | None) -> Run:
+        """The run as it stood when its seat's reply stopped it: on that
+        seat's step, awaiting its reply — the one that decides now.
 
-        A wait where a phase ends is parked at the next phase, ready for the
+        A stop where a phase ends is parked at the next phase, ready for the
         button, so the phase it was said in is the one before; where that
-        phase started is not kept, and `first`, where phases start, is taken.
+        phase started is not kept, and where the phases start is taken.
+        `stretch` is the flow's phases, if it has any.
         """
-        parked_ahead = self.leaving >= 0
+        parked_ahead = stretch is not None and self.leaving >= 0 and self.waited == stretch[1]
         return replace(
             self,
             step=self.waited,
@@ -124,7 +126,7 @@ class Run:
             back=False,
             carried="",
             phase=max(self.phase - 1, 1) if parked_ahead else self.phase,
-            entered=first if parked_ahead else self.entered,
+            entered=stretch[0] if stretch is not None and parked_ahead else self.entered,
             leaving=-1,
             waited=-1,
         )

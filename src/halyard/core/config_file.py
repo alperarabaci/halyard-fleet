@@ -177,15 +177,17 @@ class Decisions:
     """The words a reply's last line decides in.
 
     Each is its own name unless a project says otherwise — `forward`, `back`,
-    `wait`, `next` — so a project whose prompts ask for those writes nothing,
-    and one whose prompts ask for other words names them: `decisions: {forward:
-    go}`. `next` only means something at the end of a flow's phases.
+    `wait`, `next`, `done` — so a project whose prompts ask for those writes
+    nothing, and one whose prompts ask for other words names them: `decisions:
+    {forward: go}`. `next` only means something at the end of a flow's phases,
+    and `done` only at a flow's last step.
     """
 
     forward: str = "forward"
     back: str = "back"
     wait: str = "wait"
     next: str = "next"
+    done: str = "done"
 
 
 #: How many phases a flow may go through before a run stops and asks. Past it
@@ -541,7 +543,7 @@ _STEP_FIELDS = {
     "rounds",
     "decided_by",
 }
-_DECISION_FIELDS = ("forward", "back", "wait", "next")
+_DECISION_FIELDS = ("forward", "back", "wait", "next", "done")
 _NOT_A_FLOW = ("steps", "decisions", "phases")
 
 
@@ -638,8 +640,8 @@ def _phases_from(project: str, value: Any) -> int:
 
 
 def _decisions_from(project: str, value: Any) -> Decisions:
-    """`workflows: decisions:` — the words to read instead of `forward`, `back`
-    and `wait`. Any left out keep their own name."""
+    """`workflows: decisions:` — the words to read instead of `forward`,
+    `back`, `wait`, `next` and `done`. Any left out keep their own name."""
     if value is None:
         return Decisions()
     where = f"Project {project!r}: `workflows: decisions:`"

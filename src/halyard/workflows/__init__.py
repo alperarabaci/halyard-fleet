@@ -7,8 +7,9 @@ is one of the project's transitions going to one of its seats, and the reply's o
 last line says whether the work goes on, comes back a step, or waits for a
 person.
 
-**The words that decide are `forward`, `back`, `wait` and `next`** unless a
-project names its own — see `decisions`. Each step's envelope says where each
+**The words that decide are `forward`, `back`, `wait`, `next` and `done`**
+unless a project names its own — see `decisions`. Only `done` ends a workflow,
+and only at its last step — see `flow`. Each step's envelope says where each
 of them goes, in lines the workflow adds itself (`envelope`), so a transition
 pressed by hand is the same transition with none of them.
 
@@ -22,9 +23,9 @@ it replaced. It stops when a step would go round more often than its project
 allowed it to, when the phases would, when a phase ends undecided, when a seat
 says to wait, and when a message reached nobody — and each of those is said in
 the chat it was started from, with the run kept so it can go on afterwards.
-A wait is the one stop a seat can lift: what it waited for is usually the
-operator's answer, given in its chat, and its own decision after that takes
-the run on.
+A wait, and a last step that ended without `done`, are stops a seat can lift:
+what it stopped for is usually a word with the operator, given in its chat,
+and its own decision after that takes the run on.
 
 **What a run did outlives it.** When it ends — finished or stopped — its steps
 are kept in the database beside the tokens, each with what its answer decided
@@ -40,7 +41,7 @@ keeps it that way.
 from halyard.workflows import journal
 from halyard.workflows.decisions import Decision, decided, read, word_for
 from halyard.workflows.envelope import lines_for
-from halyard.workflows.flow import PHASES, Next, after
+from halyard.workflows.flow import PHASES, Next, after, taken_as
 from halyard.workflows.runs import (
     Round,
     Run,
@@ -69,5 +70,6 @@ __all__ = [
     "read",
     "record",
     "save",
+    "taken_as",
     "word_for",
 ]

@@ -883,6 +883,22 @@ def test_decisions_are_their_own_names_unless_a_project_renames_them(tmp_path) -
     assert set(project.workflows.flows) == {"level3"}, "`decisions` is not a workflow"
 
 
+def test_the_word_that_ends_a_workflow_can_be_renamed_too(tmp_path) -> None:
+    from halyard.core.config_file import Decisions
+
+    [project] = with_workflows(
+        tmp_path, "  decisions: {done: closed}", "  steps:", "    review: {}", "  l2: [review]"
+    )
+
+    assert project.workflows.decisions == Decisions(done="closed")
+
+
+def test_done_cannot_share_a_word_with_forward(tmp_path) -> None:
+    """A last step saying it could mean it ended the workflow or did not."""
+    with pytest.raises(ValueError, match="cannot share a word"):
+        with_workflows(tmp_path, "  decisions: {done: forward}")
+
+
 def test_an_unknown_decision_is_refused(tmp_path) -> None:
     with pytest.raises(ValueError, match="unknown field"):
         with_workflows(tmp_path, "  decisions: {forward: go, sideways: nope}")

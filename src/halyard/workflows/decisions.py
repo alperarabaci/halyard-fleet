@@ -6,9 +6,9 @@ the answer before the reasoning. A workflow reads that line and nothing else:
 the same word in the middle of a paragraph is prose, and a flow that moved on
 prose would move on a sentence about what somebody was thinking of doing.
 
-**The words are `forward`, `back`, `wait` and `next` unless a project says
-otherwise** under `workflows: decisions:` — the ones its prompts ask for, in
-whatever language those are written in. The label is the project's own too:
+**The words are `forward`, `back`, `wait`, `next` and `done` unless a project
+says otherwise** under `workflows: decisions:` — the ones its prompts ask for,
+in whatever language those are written in. The label is the project's own too:
 whatever comes before the last colon is not read, so `DECISION: forward`,
 `RESULT: forward` and a line that is only `forward` all say the same.
 
@@ -16,6 +16,10 @@ whatever comes before the last colon is not read, so `DECISION: forward`,
 because not every phase needs every step: one that is only a proposal has
 nothing to discover. The name is read, not trusted: the flow checks it is one
 of its phase's steps, and a run that is told to skip says so in the chat.
+
+**`done` is how a workflow ends.** Leaving the last step says the work is
+finished, which is a claim, so it has a word of its own rather than the
+`forward` a seat writes at every other step out of habit — see `flow`.
 
 **A reply that decides nothing carries on.** Not every transition asks for a
 decision, and a flow that stopped whenever a seat answered in prose would stop
@@ -39,6 +43,9 @@ class Decision(StrEnum):
     #: The phase is done and another one starts. Only at a flow's last step
     #: of its phases; anywhere else it stops the run rather than guess.
     NEXT = "next"
+    #: The work is finished and the run ends. Only at a flow's last step;
+    #: anywhere else it stops the run rather than guess.
+    DONE = "done"
 
 
 #: What a model wraps a line in when it wants it seen — `**DECISION: back**` —
