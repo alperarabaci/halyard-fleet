@@ -1149,16 +1149,82 @@ async def test_a_reply_that_decides_nothing_carries_on_and_says_so(tmp_path: Pat
     assert any("no decision line" in sent["text"] for sent in api.sent)
 
 
-async def test_the_last_step_finishes_the_run(tmp_path: Path, wired) -> None:
+async def test_done_at_the_last_step_finishes_the_run(tmp_path: Path, wired) -> None:
     channel, api, runner, repo = wired
     flow_in(channel, repo, tmp_path, runner, **TWO_STEPS)
     await started(channel)
     await answered(channel, "xrev", "DECISION: forward")
 
-    await answered(channel, "nav", "Done.\nDECISION: forward")
+    await answered(channel, "nav", "Accepted.\nDECISION: done")
 
     assert any("<b>level3</b> is done" in sent["text"] for sent in api.sent)
     assert len(runner.sent) == 2
+
+
+async def test_forward_at_the_last_step_stops_and_the_card_can_end_it(
+    tmp_path: Path, wired
+) -> None:
+    """Ending the workflow is a claim the work is finished; a habitual forward
+    leaves it to the operator."""
+    channel, api, runner, repo = wired
+    flow_in(channel, repo, tmp_path, runner, **TWO_STEPS)
+    await started(channel)
+    await answered(channel, "xrev", "DECISION: forward")
+
+    await answered(channel, "nav", "Looks right.\nDECISION: forward")
+
+    assert not any("is done" in sent["text"] for sent in api.sent)
+    stopped = api.sent[-1]
+    assert "to_nav ended on forward, and only done ends the workflow" in stopped["text"]
+    keys = [key["text"] for row in stopped["reply_markup"]["inline_keyboard"] for key in row]
+    assert keys == ["⏭ On to the end", "🧭 Pick a step", "⏹ Stop the workflow"]
+
+    await channel._handle_callback(pressed_transition("flowon", "level3"))
+    await settled(channel)
+
+    assert any("<b>level3</b> is done" in sent["text"] for sent in api.sent)
+
+
+async def test_the_agent_s_own_done_after_that_stop_ends_the_workflow(
+    tmp_path: Path, wired
+) -> None:
+    channel, api, runner, repo = wired
+    flow_in(channel, repo, tmp_path, runner, **TWO_STEPS)
+    await started(channel)
+    await answered(channel, "xrev", "DECISION: forward")
+    await answered(channel, "nav", "Looks right.\nDECISION: forward")
+
+    await answered(channel, "nav", "Checked it again with the operator.\nDECISION: done")
+
+    assert any("<b>level3</b> is done" in sent["text"] for sent in api.sent)
+    assert len(runner.sent) == 2
+
+
+async def test_a_last_step_that_decided_nothing_stops_rather_than_ending(
+    tmp_path: Path, wired
+) -> None:
+    channel, api, runner, repo = wired
+    flow_in(channel, repo, tmp_path, runner, **TWO_STEPS)
+    await started(channel)
+    await answered(channel, "xrev", "DECISION: forward")
+
+    await answered(channel, "nav", "All in.")
+
+    assert not any("is done" in sent["text"] for sent in api.sent)
+    assert not any("no decision line" in sent["text"] for sent in api.sent)
+    assert "to_nav ended with no decision, and only done ends" in api.sent[-1]["text"]
+
+
+async def test_done_in_the_middle_of_a_workflow_is_a_sentence(tmp_path: Path, wired) -> None:
+    """ "Done." ends many replies; before the last step it decides nothing."""
+    channel, api, runner, repo = wired
+    flow_in(channel, repo, tmp_path, runner, **TWO_STEPS)
+    await started(channel)
+
+    await answered(channel, "xrev", "Read all of it.\nDone.")
+
+    assert runner.sent[-1][0] == "id-nav"
+    assert any("no decision line" in sent["text"] for sent in api.sent)
 
 
 async def test_a_finished_run_reports_what_it_did_and_is_kept(tmp_path: Path, wired) -> None:
@@ -1178,7 +1244,7 @@ async def test_a_finished_run_reports_what_it_did_and_is_kept(tmp_path: Path, wi
     await answered(channel, "nav", "Look again.\nDECISION: back")
     await answered(channel, "xrev", "DECISION: forward")
 
-    await answered(channel, "nav", "Done.\nDECISION: forward")
+    await answered(channel, "nav", "Accepted.\nDECISION: done")
 
     [report] = [sent["text"] for sent in api.sent if "is done" in sent["text"]]
     heading, when, steps = report.split("\n")
@@ -1195,7 +1261,7 @@ async def test_a_finished_run_reports_what_it_did_and_is_kept(tmp_path: Path, wi
             ("review", 1, "forward", "review"),
             ("to_nav", 1, "back", "to_nav"),
             ("review", 2, "forward", "review"),
-            ("to_nav", 2, "forward", "to_nav"),
+            ("to_nav", 2, "done", "to_nav"),
         ]
 
 
@@ -1324,7 +1390,8 @@ async def test_a_decision_the_navigator_acted_on_is_kept_as_the_review_s(
     tmp_path: Path, wired
 ) -> None:
     """Read back later, a run says on whose word it moved: the navigator's
-    replies here carry no decision, and the reviewer's stand."""
+    replies here carry no decision, and the reviewer's stand. The last one is
+    not an end — only done is — so the operator ends it from the card."""
     import sqlite3
 
     channel, _, runner, repo = wired
@@ -1335,7 +1402,9 @@ async def test_a_decision_the_navigator_acted_on_is_kept_as_the_review_s(
     await answered(channel, "nav", "Fixed the loader; the row is read now.")
     await answered(channel, "xrev", "DECISION: forward")
 
-    await answered(channel, "nav", "Done.")
+    await answered(channel, "nav", "The loader reads every row.")
+    await channel._handle_callback(pressed_transition("flowon", "level3"))
+    await settled(channel)
 
     with sqlite3.connect(channel._database) as db:
         assert db.execute(
@@ -1354,7 +1423,7 @@ async def test_the_navigator_s_own_decision_overrules_the_review(tmp_path: Path,
     await started(channel)
     await answered(channel, "xrev", "DECISION: back")
 
-    await answered(channel, "nav", "That row is out of scope.\nDECISION: forward")
+    await answered(channel, "nav", "That row is out of scope.\nDECISION: done")
 
     assert len(runner.sent) == 2
     assert any("<b>level3</b> is done" in sent["text"] for sent in api.sent)
@@ -1380,7 +1449,7 @@ async def test_a_review_that_says_wait_stops_before_the_navigator(tmp_path: Path
     assert session == "id-nav"
     assert "The scope needs a decision." in text, "it carries the reviewer's reply"
     assert "Already decided" not in text
-    assert "- Decide on your last line: forward" in text
+    assert "- Decide on your last line: done" in text, "the navigator's is the last step"
 
 
 async def test_the_agent_that_asked_to_wait_takes_the_run_on_when_it_decides(
@@ -1419,12 +1488,12 @@ async def test_a_round_that_waited_is_kept_as_a_wait(tmp_path: Path, wired) -> N
     await answered(channel, "xrev", "Which file is in scope?\nDECISION: wait")
     await answered(channel, "xrev", "The first one.\nDECISION: forward")
 
-    await answered(channel, "nav", "DECISION: forward")
+    await answered(channel, "nav", "DECISION: done")
 
     with sqlite3.connect(channel._database) as db:
         assert db.execute(
             "SELECT step, round, decision, decided_by FROM workflow_steps ORDER BY at"
-        ).fetchall() == [("review", 1, "wait", "review"), ("to_nav", 1, "forward", "to_nav")]
+        ).fetchall() == [("review", 1, "wait", "review"), ("to_nav", 1, "done", "to_nav")]
 
 
 async def test_a_wait_the_operator_sent_on_is_not_taken_on_again(tmp_path: Path, wired) -> None:
@@ -1629,7 +1698,7 @@ async def test_after_a_wait_where_a_phase_ended_the_agent_s_next_starts_the_next
     assert "Published. On to part two." in text
 
 
-async def test_after_a_wait_where_a_phase_ended_the_agent_s_forward_leaves_the_phases(
+async def test_after_a_wait_where_the_phases_end_the_workflow_the_agent_s_done_ends_it(
     tmp_path: Path, wired
 ) -> None:
     channel, api, runner, repo = wired
@@ -1638,10 +1707,32 @@ async def test_after_a_wait_where_a_phase_ended_the_agent_s_forward_leaves_the_p
     await answered(channel, "xrev", "DECISION: forward")
     await answered(channel, "nav", "Accepted; publish it first.\nDECISION: wait")
 
-    await answered(channel, "nav", "Published, and that was the last part.\nDECISION: forward")
+    await answered(channel, "nav", "Published, and that was the last part.\nDECISION: done")
 
     assert len(runner.sent) == 2
     assert any("<b>level3</b> is done" in sent["text"] for sent in api.sent)
+
+
+async def test_where_the_phases_end_the_workflow_forward_offers_both_ways_on(
+    tmp_path: Path, wired
+) -> None:
+    channel, api, runner, repo = wired
+    flow_in(channel, repo, tmp_path, runner, **PHASED)
+    await started(channel)
+    await answered(channel, "xrev", "DECISION: forward")
+
+    await answered(channel, "nav", "Part one is in.\nDECISION: forward")
+
+    assert len(runner.sent) == 2
+    stopped = api.sent[-1]
+    assert "to_nav ended on forward, and only done ends the workflow" in stopped["text"]
+    keys = [key["text"] for row in stopped["reply_markup"]["inline_keyboard"] for key in row]
+    assert keys == [
+        "↻ Phase 2 at review",
+        "⏭ On to the end",
+        "🧭 Pick a step",
+        "⏹ Stop the workflow",
+    ]
 
 
 async def test_leaving_the_phases_from_the_card_goes_on_past_them(tmp_path: Path, wired) -> None:

@@ -6,8 +6,14 @@ should have gone round twice is the failure this exists to make testable.
 
 **Forward is the default.** A decision Halyard could not read carries the work
 to the next step rather than stopping — most transitions ask for no decision at
-all — and whoever drives this says so in the chat. The one exception is the end
-of a phase, below.
+all — and whoever drives this says so in the chat. The exceptions are the end
+of a phase and the end of the flow, below.
+
+**The end is `done`.** Leaving the last step says the work is finished, which
+is a claim, so only `done` makes it. A `forward` there, written out of habit,
+or a reply that decided nothing, stops the run with the way out offered, and
+the seat's own `done` afterwards ends it too. Anywhere else a reply that ends
+in "Done." is as often a sentence as a decision, and decides nothing.
 
 **Back is one step.** The step before is the one that produced what was just
 judged: a navigator's back lands on the driver whose report it read. It is that
@@ -83,9 +89,26 @@ class Next:
     entered: int | None = None
     #: The steps a `next` that named where to start went past.
     skipped: tuple[str, ...] = ()
-    #: For a stop at the end of a phase: where `forward` out of the phases goes
-    #: — the length of the flow when nothing comes after them.
+    #: For a stop that can be left rather than sent on — the end of a phase,
+    #: or the last step without `done` — where leaving goes: the length of the
+    #: flow when that is the end.
     leaving: int | None = None
+    #: The stop is the seat's to lift as well as the operator's: it asked to
+    #: wait, or ended the flow without `done`. Its own decision afterwards
+    #: takes the run on from where it stopped.
+    liftable: bool = False
+
+
+def taken_as(decision: Decision | None, *, step: int, flow: Sequence[str]) -> Decision | None:
+    """What a decision read off a reply counts as at this step of the flow.
+
+    Only `done` depends on where it is said: a reply that ends in "Done." is as
+    often a sentence as a decision, so anywhere but the flow's last step it
+    decides nothing, as any sentence does.
+    """
+    if decision is Decision.DONE and step != len(flow) - 1:
+        return None
+    return decision
 
 
 def after(
@@ -107,11 +130,14 @@ def after(
     may go through. `named` is the step a `next` named, if it named one.
     """
     here = steps.get(flow[run.step]) if 0 <= run.step < len(flow) else None
-    deciding = decision
+    deciding = taken_as(decision, step=run.step, flow=flow)
     if deciding is None and here is not None and here.decided_by:
         deciding = carried(run.carried)
     ending = stretch is not None and run.step == stretch[1]
+    last = run.step == len(flow) - 1
     lending = lends(run.step, flow=flow, steps=steps)
+    if deciding is Decision.DONE:
+        return Next(done=True, decided=deciding)
     if deciding is Decision.WAIT and ending and not lending:
         # A wait at the end of a phase is the operator's moment between parts —
         # applying what was made, before the next one starts on it — and what
@@ -119,9 +145,15 @@ def after(
         # that happens to follow in the list.
         ready = _next_phase(run, flow=flow, steps=steps, taken=taken, stretch=stretch, most=most)
         assert stretch is not None  # `ending` said so
-        return replace(ready, stop="it was asked to wait", decided=deciding, leaving=stretch[1] + 1)
+        return replace(
+            ready,
+            stop="it was asked to wait",
+            decided=deciding,
+            leaving=stretch[1] + 1,
+            liftable=True,
+        )
     if deciding is Decision.WAIT:
-        return Next(stop="it was asked to wait", decided=deciding)
+        return Next(stop="it was asked to wait", decided=deciding, liftable=True)
     if deciding is Decision.NEXT:
         return _next_phase(
             run, flow=flow, steps=steps, taken=taken, stretch=stretch, most=most, named=named
@@ -137,7 +169,20 @@ def after(
             stop=f"phase {run.phase} ended with no decision",
             decided=None,
             leaving=stretch[1] + 1,
+            liftable=last,
         )
+    if last and deciding in (None, Decision.FORWARD):
+        # Ending the workflow is a claim that the work is finished, made in
+        # `done`. A habitual forward, or no word at all, leaves the end to the
+        # operator — or to the seat's own `done`, once it has said it.
+        said = "with no decision" if deciding is None else f"on {deciding}"
+        why = f"{flow[run.step]} ended {said}, and only done ends the workflow"
+        if ending:
+            ready = _next_phase(
+                run, flow=flow, steps=steps, taken=taken, stretch=stretch, most=most
+            )
+            return replace(ready, stop=why, decided=deciding, leaving=len(flow), liftable=True)
+        return Next(stop=why, decided=deciding, leaving=len(flow), liftable=True)
 
     going_back = deciding is Decision.BACK and not lending
     phase, entered = run.phase, None

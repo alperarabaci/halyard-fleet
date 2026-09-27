@@ -72,23 +72,37 @@ When the agent a step went to replies, Halyard reads the last line of that reply
   sends it on — see [Stopping](#stopping-steering-and-asking-where-it-is);
 - `next` starts another phase, and only means something at the end of one — see
   [Phases](#phases-the-steps-that-go-round-going-forward);
+- `done` ends the workflow, and only at its last step — see
+  [The end is done](#the-end-is-done);
 - anything else carries on to the next step, and the chat says there was no decision
-  line — except at the end of a phase, where it stops.
+  line — except at the end of a phase or of the workflow, where it stops.
 
 The label before the word is the project's own: `DECISION: forward`, `RESULT: forward`
 and a line that is only `forward` read the same, and so does one a model put in bold. The
 same word in the middle of a paragraph decides nothing.
 
-Those four words are the defaults. A project whose prompts ask for other words names
+Those five words are the defaults. A project whose prompts ask for other words names
 them, and any it leaves out keep their own:
 
 ```yaml
     workflows:
-      decisions: {forward: go, wait: hold, next: sonraki}
+      decisions: {forward: go, wait: hold, next: sonraki, done: closed}
 ```
 
 A project's prompts only have to ask for the line: every step is told where each word
 goes.
+
+## The end is done
+
+Leaving the last step says the work is finished. That is a claim, so it has a word of
+its own: at the workflow's last step only `done` ends the run.
+
+- A `forward` there, written out of habit, or a reply with no decision, stops the run.
+  The card offers **⏭ On to the end**, which ends it.
+- The agent's own `done` afterwards ends it too, the way a wait goes on — see
+  [Stopping](#stopping-steering-and-asking-where-it-is).
+- Anywhere else "Done." is as often the end of a sentence as a decision, so it decides
+  nothing there, like any other sentence.
 
 ## Phases: the steps that go round going forward
 
@@ -106,7 +120,8 @@ The last step of the phases decides between two ways on:
   discover — the name has to be one of the phases' steps, and the chat marks the run
   leaving its usual path: `↪️ level3 phase 2 starts at develop, skipping discover,
   discovered — nav named where to start.`;
-- `forward` leaves the phases for whatever comes after them — `close` above.
+- `forward` leaves the phases for whatever comes after them — `close` above. Where
+  nothing comes after them, `done` ends the workflow instead.
 
 Only there. A `next` at any other step stops the run rather than guess which phase the
 agent meant, and so does a phase that ends with **no decision at all**: carrying on would
@@ -158,6 +173,13 @@ The last step of the phases is told what `next` does as well:
 - This step ends phase 1: next (→ discover, xdrv, phase 2) starts the next one, and next <step> starts it at another of discover, discovered, develop, verified; forward leaves the phases. wait, or a reply with no decision, stops for the operator, who starts the next phase or leaves them.
 ```
 
+The workflow's last step is told `done` in place of `forward`:
+
+```
+- Workflow: level3 · step 8 of 8 · close
+- Decide on your last line: done (→ the workflow ends) · back (→ verified, nav, round 2 of 1, which waits for the operator) · wait (→ the operator)
+```
+
 The review is told where its decision goes, and the navigator what was decided:
 
 ```
@@ -197,26 +219,29 @@ going says where it is — `level3 5/8 · develop · phase 2 — waiting for xdr
 offers the same button.
 
 A run stops, and says why, when a step would go past its rounds, when the phases would
-go past theirs, when a phase ends with no decision, when an agent decides to wait, and when
-a step's agent could be more than one agent. The card it stops with keeps the work in the
-run:
+go past theirs, when a phase ends with no decision, when an agent decides to wait, when the
+last step ends without `done`, and when a step's agent could be more than one agent. The
+card it stops with keeps the work in the run:
 
 - **▶️ Send it anyway** — or **↻ Phase 2 at discover** — sends what is ready;
-- **⏭ On to close** leaves the phases instead, where a phase just ended or waited;
+- **⏭ On to close** leaves the phases instead, where a phase just ended or waited, and
+  **⏭ On to the end** ends the workflow where its last step ended without `done`;
 - **🧭 Pick a step** offers the flow's steps, and the one pressed goes next, with the
   run's rounds and phase kept — a loop it stopped in is not reset by a tap. Typing
   `/workflow level3 develop` does the same for a stopped run;
 - **⏹ Stop the workflow** clears it. Starting it again after that starts afresh.
 
-**A wait goes on with the agent that asked for it.** What an agent waits for is usually
-an answer from you, given in its own chat.
+**A wait goes on with the agent that asked for it,** and so does a last step that ended
+without `done`. What the agent stopped for is usually a word with you, in its own chat.
 
 - Its replies until then decide nothing, and another `wait` is the same one.
-- The first reply that ends in `forward`, `back` or `next` is its decision at the step it
-  waited at. The run goes on from there, carrying that reply.
-- **▶️** still sends the run on without that decision. Once the run has been sent on or
-  steered, the agent's later decisions move nothing.
-- Read back later, the round keeps its `wait`.
+- The first reply that ends in a decision — `forward`, `back`, `next`, or `done` at the
+  last step — is its decision at the step it stopped at. The run goes on from there,
+  carrying that reply.
+- The card's buttons still move the run without that decision. Once the run has been
+  sent on or steered, the agent's later decisions move nothing.
+- Read back later, the round keeps what its reply said: `wait`, or the `forward` that
+  stopped the last step.
 
 ## When a run ends
 
@@ -235,8 +260,8 @@ use: one row per run in `workflow_runs` (`project`, `work`, `workflow`, `started
 `workflow_steps` (`at`, `step`, `phase`, `round`, `agent`, `decision`, `decided_by`). A run
 stopped with **⏹** is kept too, as `stopped`, without the report.
 
-`decision` is what the run did on that step's answer — `forward`, `back`, `wait` or `next`,
-whatever words the project's prompts use for them — and `decided_by` is whose word it was:
+`decision` is what the run did on that step's answer — `forward`, `back`, `wait`, `next` or
+`done`, whatever words the project's prompts use for them — and `decided_by` is whose word it was:
 the step itself, or the one before it for a step that acts on it (`decided_by:`). Both are
 empty for an answer that decided nothing or never came, and for steps kept before
 2026-09-25.

@@ -3712,7 +3712,7 @@ class TelegramChannel:
 
     async def _advance_workflow(self, answered: Seat, text: str) -> None:
         """Take the next step, now that the seat a run was waiting for replied
-        — or the seat whose wait stopped it decided again.
+        — or the seat whose reply stopped it decided again.
 
         Most replies are not a step: a seat nobody is waiting for costs a file
         read and nothing else. The decision is the reply's own last line, in
@@ -3736,14 +3736,15 @@ class TelegramChannel:
         flow = found.workflows.flows.get(run.workflow) or ()
         stretch = found.workflows.stretches.get(run.workflow)
         decision, named = flowing.decided(text, found.workflows.decisions)
-        after_waiting = not run.waiting
-        if after_waiting:
-            # The seat that asked to wait, heard from again. Only a decision
-            # takes the run on: the replies in between are the conversation
-            # the wait was for, and another wait is the same one.
-            if decision is None or decision is flowing.Decision.WAIT:
-                return
-            run = run.before_the_wait(stretch[0] if stretch is not None else -1)
+        lifting = not run.waiting
+        if lifting:
+            # The seat whose reply stopped the run, heard from again.
+            run = run.as_it_stood(stretch)
+        decision = flowing.taken_as(decision, step=run.step, flow=flow)
+        if lifting and decision in (None, flowing.Decision.WAIT):
+            # Only a decision takes it on: the replies in between are the word
+            # with the operator the stop was for, and another wait is the same one.
+            return
         moving = flowing.after(
             decision,
             run=run,
@@ -3761,14 +3762,15 @@ class TelegramChannel:
             answered.label,
             decision or "nothing",
             f" {named}" if named else "",
-            " after waiting" if after_waiting else "",
+            " after the stop" if lifting else "",
             moving.decided or "nothing",
         )
         here = found.workflows.steps.get(flow[run.step]) if run.step < len(flow) else None
-        if here is not None and not after_waiting:
+        if here is not None and not lifting:
             # Kept on the round this answers, so a run read back later says how
-            # it moved and on whose word, not only where it went. A round that
-            # waited keeps its wait: what came after it answered the operator.
+            # it moved and on whose word, not only where it went. A round whose
+            # reply stopped the run keeps what it said: what came after it
+            # answered the operator.
             whose = ""
             if moving.decided is not None:
                 whose = here.name if decision is not None else here.decided_by
@@ -3829,7 +3831,7 @@ class TelegramChannel:
                 parked.held(
                     moving.stop,
                     leaving=moving.leaving if moving.leaving is not None else -1,
-                    waited=run.step if waiting else -1,
+                    waited=run.step if moving.liftable else -1,
                 ),
                 go=target is not None,
                 go_text=go_text,
@@ -3914,16 +3916,20 @@ class TelegramChannel:
             )
             return
         if action == "on":
-            # Only from a stop at the end of a phase, which is the one that
-            # says where leaving goes. The run is parked at the next phase, so
-            # the phase it leaves in is the one before that. A button left on
-            # an older card finds nothing to leave: the run has moved since.
+            # Only from a stop that says where leaving goes: the end of a phase,
+            # or the last step ending without done, whose way out is the end. A
+            # run parked at the next phase leaves from the phase before it. A
+            # button left on an older card finds nothing to leave: the run has
+            # moved since.
             stretch = found.workflows.stretches.get(run.workflow)
-            if stretch is None or run.leaving < 0:
+            if run.leaving < 0:
                 await self._say(self._where_the_run_is(found, run), chat_id, thread_id)
                 return
             if run.leaving >= len(flow):
                 await self._finished(found, work, run, "done")
+                return
+            if stretch is None:
+                await self._say(self._where_the_run_is(found, run), chat_id, thread_id)
                 return
             run = run.at(run.leaving, phase=max(run.phase - 1, 1), entered=stretch[0])
         source = find(self._seats, run.waiting_for) if run.waiting_for else None
