@@ -4537,6 +4537,10 @@ class TelegramChannel:
             # were handoffs: the wire format, never shown, and in every chat.
             if what in ("handoff", "handto"):
                 name, _, label = value.partition(">")
+                # The card is spent once a transition is chosen on it: closed,
+                # saying which, so it cannot send the same thing again by mistake.
+                chosen = f"{name} → {label}" if label else name
+                await self._close_card(message, here, f"☑️ {html.escape(chosen)}")
                 self._detach(
                     self._run_transition(
                         name,
@@ -4713,8 +4717,11 @@ class TelegramChannel:
             # so a stale-looking card is untidy rather than dangerous.
             logger.warning("Could not update the card for %s", request.request_id, exc_info=True)
 
-    async def _close_card(self, message: dict, chat_id: str | None) -> None:
-        """Take the buttons off a choice card, and say it was cancelled.
+    async def _close_card(
+        self, message: dict, chat_id: str | None, outcome: str = "✖️ Cancelled"
+    ) -> None:
+        """Take the buttons off a choice card, and say what became of it — that
+        it was cancelled, or what was chosen on it. `outcome` is HTML.
 
         The text stays, so the chat still shows what was offered; the buttons
         go, so nothing on it can be pressed by mistake afterwards.
@@ -4725,7 +4732,7 @@ class TelegramChannel:
         shown = html.escape((message.get("text") or "").strip())
         try:
             await self._api.edit_message_text(
-                chat_id, message_id, f"{shown}\n\n✖️ Cancelled" if shown else "✖️ Cancelled"
+                chat_id, message_id, f"{shown}\n\n{outcome}" if shown else outcome
             )
         except Exception:
             logger.debug("Could not close a choice card", exc_info=True)

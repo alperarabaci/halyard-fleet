@@ -894,7 +894,7 @@ async def test_a_transition_without_a_to_offers_every_seat(tmp_path: Path, wired
 
 
 async def test_pressing_a_seat_hands_it_on_there(tmp_path: Path, wired) -> None:
-    channel, _, runner, repo = wired
+    channel, api, runner, repo = wired
     transitions_in(channel, repo, tmp_path, runner, back={})
 
     await channel._handle_callback(pressed_transition("handto", "back>xrev"))
@@ -902,6 +902,29 @@ async def test_pressing_a_seat_hands_it_on_there(tmp_path: Path, wired) -> None:
 
     [(session, _)] = runner.sent
     assert session == "id-rev"
+    assert {"message_id": 5, "text": "☑️ back → xrev"} in api.edits, "the card is closed"
+
+
+async def test_the_card_a_transition_is_chosen_on_closes(tmp_path: Path, wired) -> None:
+    """Spent once it is used: its text stays and says which was chosen, and its
+    buttons go, so the same transition cannot be sent from it again by mistake."""
+    channel, api, runner, repo = wired
+    transitions_in(
+        channel,
+        repo,
+        tmp_path,
+        runner,
+        review={"prompt": Path("NOTES/review.md"), "to": "reviewer"},
+    )
+    pressed = pressed_transition("handoff", "review")
+    pressed["message"]["text"] = "Hand the last reply here on how?"
+
+    await channel._handle_callback(pressed)
+    await settled(channel)
+
+    closed = {"message_id": 5, "text": "Hand the last reply here on how?\n\n☑️ review"}
+    assert closed in api.edits
+    assert runner.sent, "and the transition went"
 
 
 #: A review transition to the reviewer, with nothing else asked of it.
