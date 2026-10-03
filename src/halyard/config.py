@@ -213,6 +213,12 @@ class Settings(BaseSettings):
     inspection_effort: str | None = Field(
         default=None, validation_alias="HALYARD_INSPECTION_EFFORT"
     )
+    #: The model Halyard's own one-shot turns run on when nothing more
+    #: specific names one: the commit message, and the record carried across a
+    #: compaction. Unset, sonnet. Inspections have their own, above.
+    default_model: str | None = Field(default=None, validation_alias="HALYARD_DEFAULT_MODEL")
+    #: How hard those turns think. Unset, the runtime's own effort for the model.
+    default_effort: str | None = Field(default=None, validation_alias="HALYARD_DEFAULT_EFFORT")
 
     log_level: str = Field(default="INFO", validation_alias="HALYARD_LOG_LEVEL")
     #: A ceiling on one week, so an always-on service cannot fill a disk before
@@ -270,10 +276,11 @@ class Settings(BaseSettings):
     #: without waiting for a release, because models ship faster than this does.
     claude_models: str | None = Field(default=None, validation_alias="HALYARD_CLAUDE_MODELS")
 
-    #: Which model writes the record carried across a compaction. A distillation
-    #: of text somebody else already wrote — the reasoning happened in the
-    #: session, not here — so it does not need the expensive one.
-    compaction_model: str = Field(default="sonnet", validation_alias="HALYARD_COMPACTION_MODEL")
+    #: Which model writes the record carried across a compaction, when it should
+    #: not be `HALYARD_DEFAULT_MODEL`. A distillation of text somebody else
+    #: already wrote — the reasoning happened in the session, not here — so it
+    #: does not need the expensive one.
+    compaction_model: str | None = Field(default=None, validation_alias="HALYARD_COMPACTION_MODEL")
 
     #: How much of the compaction record may be carried into the fresh context.
     #: Measured in the field: the model fills very nearly whatever it is given,

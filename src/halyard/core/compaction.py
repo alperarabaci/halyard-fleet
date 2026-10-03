@@ -148,7 +148,8 @@ RECORD_LIMIT = 2_000
 
 #: Which model writes the record. It is a distillation of text somebody else
 #: already wrote — the reasoning was done in the session, not here — so this
-#: does not need the expensive one. Override with HALYARD_COMPACTION_MODEL.
+#: does not need the expensive one. Override with HALYARD_COMPACTION_MODEL, or
+#: with HALYARD_DEFAULT_MODEL for every one-shot turn Halyard starts.
 RECORD_MODEL = "sonnet"
 
 #: How long the record may take before the compaction goes ahead without it.
@@ -247,6 +248,7 @@ class Recorder:
         root: Path | None = None,
         projects: Mapping[str, Path] | None = None,
         model: str | None = RECORD_MODEL,
+        effort: str | None = None,
         limit: int = RECORD_LIMIT,
         clock=time.monotonic,
         roots: tuple[Path, ...] | None = None,
@@ -266,6 +268,8 @@ class Recorder:
         #: the codebase they describe rather than beside Halyard.
         self._projects = dict(projects or {})
         self._model = model or RECORD_MODEL
+        #: How hard the record's model thinks; None leaves it to the runtime.
+        self._effort = effort
         self._limit = limit or RECORD_LIMIT
         self._clock = clock
         # Which directories a transcript may live in. A parameter so a test can
@@ -345,6 +349,7 @@ class Recorder:
                 runner.ask(
                     self._prompt(instructions, conversation),
                     model=self._model,
+                    effort=self._effort,
                     purpose="compaction record",
                     project=seat.project,
                 ),

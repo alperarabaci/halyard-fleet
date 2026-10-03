@@ -178,9 +178,10 @@ WAIT_FOR_TEXT_SECONDS = 300
 ASK_FOR_MESSAGE = "Send the commit message for {handle}?"
 _ASKED_MESSAGE = re.compile(r"^Send the commit message for (\S+)\?")
 
-#: The one-shot model that writes the subject line. Named here rather than in
-#: `halyard.commits`, which is deliberately ignorant of runtimes: this is a
-#: Claude Code alias, and the channel is what holds the runners.
+#: The one-shot model that writes the subject line when `HALYARD_DEFAULT_MODEL`
+#: names none. Named here rather than in `halyard.commits`, which is
+#: deliberately ignorant of runtimes: this is a Claude Code alias, and the
+#: channel is what holds the runners.
 MESSAGE_MODEL = "sonnet"
 
 #: How long to wait for it. A commit message is one short line; anything slower
@@ -646,6 +647,10 @@ class TelegramChannel:
         #: project's own entry for an inspection says otherwise. What it leaves
         #: unsaid is `INSPECTION_MODEL`, at the runtime's own effort.
         inspection_model: ModelChoice | None = None,
+        #: The model Halyard's own one-shot turns run on — the commit message —
+        #: and how hard it thinks. What it leaves unsaid is `MESSAGE_MODEL`, at
+        #: the runtime's own effort.
+        default_model: ModelChoice | None = None,
         #: Each runtime's own availability-check context, by runtime name — see
         #: `RuntimeSpec.check_context`. Asked only when a seat's session cannot
         #: be found, to say *why*; each check is handed its own and nobody else's.
@@ -664,6 +669,7 @@ class TelegramChannel:
         self._inspection_model = (inspection_model or ModelChoice()).over(
             ModelChoice(INSPECTION_MODEL)
         )
+        self._default_model = (default_model or ModelChoice()).over(ModelChoice(MESSAGE_MODEL))
         # Two seats and a default. A role with nowhere of its own falls back to
         # the main chat, so an existing single-chat setup keeps working
         # untouched by any of this.
@@ -2125,7 +2131,7 @@ class TelegramChannel:
         """
         runner = self._message_runner(chat_id)
         # Written on the default runtime only, as it was while no other could
-        # take a turn of its own: `MESSAGE_MODEL` is that runtime's word, and a
+        # take a turn of its own: the model is that runtime's word, and a
         # runtime that read it as something else would write the message on a
         # model nobody chose. Another agent's chat keeps the reference alone.
         if runner is not self._runner:
@@ -2136,7 +2142,8 @@ class TelegramChannel:
                 said = await asyncio.wait_for(
                     runner.ask(
                         commits.prompt(work, inquiry),
-                        model=MESSAGE_MODEL,
+                        model=self._default_model.model,
+                        effort=self._default_model.effort,
                         purpose="commit message",
                         project=self._project_name_for(chat_id),
                         system=commits.SYSTEM,

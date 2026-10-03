@@ -36,10 +36,12 @@ class FakeRunner:
         self.delay = delay
         self.asked: list[str] = []
         self.models: list[str | None] = []
+        self.efforts: list[str | None] = []
 
-    async def ask(self, text: str, *, model: str | None = None, **_) -> str | None:
+    async def ask(self, text: str, *, model: str | None = None, **more) -> str | None:
         self.asked.append(text)
         self.models.append(model)
+        self.efforts.append(more.get("effort"))
         if self.delay:
             await asyncio.sleep(self.delay)
         return self.answer
@@ -231,6 +233,29 @@ async def test_the_record_is_written_by_the_cheap_model(tmp_path: Path) -> None:
     )
 
     assert runner.models == ["sonnet"]
+    assert runner.efforts == [None], "the runtime's own effort unless one is set"
+
+
+async def test_the_record_takes_the_model_and_effort_it_is_given(tmp_path: Path) -> None:
+    instructions = tmp_path / "pre.md"
+    instructions.write_text("record", encoding="utf-8")
+    transcript(tmp_path / "9f1c2b3a-0000-0000-0000-000000000000.jsonl", ("assistant", "done"))
+    runner = FakeRunner("x")
+    recorder = Recorder(
+        roots=(tmp_path,),
+        seats=[seat(before_compaction=str(instructions))],
+        runners={"claude-code": runner},
+        model="haiku",
+        effort="low",
+    )
+
+    await recorder.write(
+        session_id="9f1c2b3a-0000-0000-0000-000000000000",
+        agent_id="claude-code",
+        session_name="alpha-navigator",
+    )
+
+    assert (runner.models, runner.efforts) == (["haiku"], ["low"])
 
 
 async def test_a_long_record_is_trimmed_before_it_is_carried(tmp_path: Path) -> None:
