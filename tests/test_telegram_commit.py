@@ -263,6 +263,20 @@ async def test_the_model_is_asked_with_the_house_style_and_the_cheap_model(wired
     assert "alpha-engine#279 p2" in runner.asked[0]
 
 
+async def test_the_message_is_written_on_the_default_model_halyard_is_given(wired) -> None:
+    """`HALYARD_DEFAULT_MODEL` and `HALYARD_DEFAULT_EFFORT`, so the commit
+    message's model is a line in halyard.yaml rather than a constant."""
+    from halyard.core.config_file import ModelChoice
+
+    channel, _, runner, repo = wired
+    channel._default_model = ModelChoice("haiku", "low")
+    wrote(repo, "loader.py", "x = 1\n")
+
+    await deliver(channel, typed("/commit"))
+
+    assert (runner.models, runner.efforts) == (["haiku"], ["low"])
+
+
 async def test_another_agent_s_chat_keeps_the_reference_alone(wired) -> None:
     """As it was while only the default runtime could take a turn of its own:
     `sonnet` is that runtime's word, and opencode would have read it as no

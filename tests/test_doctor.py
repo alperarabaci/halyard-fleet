@@ -503,9 +503,9 @@ def test_an_effort_the_runtime_does_not_take_is_named_where_it_was_written() -> 
         "      bounded-context: {file: NOTES/bc.md, model: opus, effort: hihg}\n"
     )
 
-    lines = doctor._inspection_efforts(
-        SimpleNamespace(inspection_effort="Max", claude_models=None, claude_binary=None,
-                        claude_default_model=None, claude_oauth_token=None,
+    lines = doctor._one_shot_efforts(
+        SimpleNamespace(inspection_effort="Max", default_effort=None, claude_models=None,
+                        claude_binary=None, claude_default_model=None, claude_oauth_token=None,
                         db_path=Path("halyard.db")),
         [project],
     )  # fmt: skip
@@ -513,6 +513,21 @@ def test_an_effort_the_runtime_does_not_take_is_named_where_it_was_written() -> 
     [warning] = lines
     assert "alpha-engine's inspection bounded-context asks for effort 'hihg'" in warning
     assert "max" in warning
+
+
+def test_a_default_effort_the_runtime_does_not_take_is_named_too() -> None:
+    """The commit message and the compaction record run on it."""
+    from types import SimpleNamespace
+
+    lines = doctor._one_shot_efforts(
+        SimpleNamespace(inspection_effort=None, default_effort="ultra", claude_models=None,
+                        claude_binary=None, claude_default_model=None, claude_oauth_token=None,
+                        db_path=Path("halyard.db")),
+        [],
+    )  # fmt: skip
+
+    [warning] = lines
+    assert "HALYARD_DEFAULT_EFFORT asks for effort 'ultra'" in warning
 
 
 def test_a_projects_runs_are_named_and_what_was_refused_is_said() -> None:

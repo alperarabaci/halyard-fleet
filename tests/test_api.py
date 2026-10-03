@@ -51,6 +51,31 @@ async def test_configured_claude_binary_reaches_the_runtime_runner(tmp_path: Pat
     assert app.state.runner._binary == str(binary)
 
 
+def test_halyard_s_own_turns_take_the_default_model_from_halyard_yaml(tmp_path: Path) -> None:
+    """The commit message and the compaction record: sonnet until
+    `HALYARD_DEFAULT_MODEL` says otherwise, and `HALYARD_COMPACTION_MODEL`
+    still names the record's alone."""
+    from halyard.api.app import _compaction_model, _default_model
+    from halyard.core.config_file import ModelChoice
+
+    unset = make_settings(tmp_path, ChannelKind.STUB_ALLOW)
+    chosen = Settings(
+        HALYARD_CHANNEL=ChannelKind.STUB_ALLOW.value,
+        HALYARD_DB_PATH=str(tmp_path / "halyard.db"),
+        HALYARD_AUDIT_LOG=str(tmp_path / "audit.jsonl"),
+        CLAUDE_PROJECT_NAME="alpha-engine",
+        HALYARD_DEFAULT_MODEL="haiku",
+        HALYARD_DEFAULT_EFFORT="Low",
+        _env_file=None,
+    )
+    own = chosen.model_copy(update={"compaction_model": "opus"})
+
+    assert (_default_model(unset), _compaction_model(unset)) == (ModelChoice(), ModelChoice())
+    assert _default_model(chosen) == ModelChoice("haiku", "low")
+    assert _compaction_model(chosen) == ModelChoice("haiku", "low")
+    assert _compaction_model(own) == ModelChoice("opus", "low")
+
+
 @pytest.fixture
 async def allowing(tmp_path: Path):
     from halyard.api.app import create_app

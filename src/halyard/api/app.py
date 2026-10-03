@@ -378,7 +378,25 @@ def _build_channel(
             (settings.inspection_model or "").strip() or None,
             (settings.inspection_effort or "").strip().lower() or None,
         ),
+        default_model=_default_model(settings),
     )
+
+
+def _default_model(settings: Settings) -> ModelChoice:
+    """`HALYARD_DEFAULT_MODEL` and `HALYARD_DEFAULT_EFFORT`: what Halyard's own
+    one-shot turns run on when nothing more specific says."""
+    return ModelChoice(
+        (settings.default_model or "").strip() or None,
+        (settings.default_effort or "").strip().lower() or None,
+    )
+
+
+def _compaction_model(settings: Settings) -> ModelChoice:
+    """What the compaction record runs on: `HALYARD_COMPACTION_MODEL` when it
+    is set, the default otherwise — at the default's effort. What both leave
+    unsaid is the recorder's own."""
+    own = ModelChoice((settings.compaction_model or "").strip() or None)
+    return own.over(_default_model(settings))
 
 
 def create_app(settings: Settings, *, channel=None) -> FastAPI:
@@ -555,7 +573,8 @@ def create_app(settings: Settings, *, channel=None) -> FastAPI:
         seats=configured_seats,
         projects=project_paths,
         runners=by_runtime,
-        model=settings.compaction_model,
+        model=_compaction_model(settings).model,
+        effort=_compaction_model(settings).effort,
         limit=settings.compaction_record_limit,
         channel=resolved_channel,
         gate=gate,

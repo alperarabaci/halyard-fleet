@@ -289,13 +289,14 @@ def _runs(settings, projects) -> list[str]:
     return lines
 
 
-def _inspection_efforts(settings, projects) -> list[str]:
-    """Each effort asked for inspections that the runtime they run on would
-    not take.
+def _one_shot_efforts(settings, projects) -> list[str]:
+    """Each effort asked for Halyard's own turns — inspections, and the commit
+    message and compaction record `HALYARD_DEFAULT_EFFORT` sets — that the
+    runtime they run on would not take.
 
-    A warning, and not a refusal to start: such an inspection still runs, at
-    the model's own effort, and says so in a log nobody is reading. This is
-    where somebody looks. Which efforts there are is the runtime's to say.
+    A warning, and not a refusal to start: such a turn still runs, at the
+    model's own effort, and says so in a log nobody is reading. This is where
+    somebody looks. Which efforts there are is the runtime's to say.
     """
     from halyard.agents import registry
 
@@ -306,6 +307,7 @@ def _inspection_efforts(settings, projects) -> list[str]:
     if not enforced:
         return []
     asked = [
+        ("HALYARD_DEFAULT_EFFORT", settings.default_effort),
         ("HALYARD_INSPECTION_EFFORT", settings.inspection_effort),
         *(
             (f"{project.name}'s inspection {name}", chosen.effort)
@@ -753,7 +755,7 @@ def run() -> int:
         print(f"{OK}every file the configuration names is where it says")
     for line in _older_spellings(described):
         print(line)
-    for line in _inspection_efforts(settings, described) if settings_ok else []:
+    for line in _one_shot_efforts(settings, described) if settings_ok else []:
         print(line)
     for line in _runs(settings if settings_ok else None, described):
         print(line)
