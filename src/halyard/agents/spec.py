@@ -309,6 +309,17 @@ class RuntimeSpec:
     #: means it is not watched, which is honest for a runtime whose file shape
     #: nobody has measured yet.
     watching: Watching | None = None
+    #: Whether a model name is this runtime's own, for a one-shot turn Halyard
+    #: starts of its own — an inspection, a commit message, a compaction
+    #: record. Those name a model and nothing else, so the model says where
+    #: they run: `gpt-5.6-terra` is Codex's. A model no runtime claims runs on
+    #: the default one, as every model did before another could take a turn of
+    #: its own. See `registry.for_model`.
+    claims_model: Callable[[str], bool] | None = None
+    #: Whether this runtime can run a model one of those turns names, at the
+    #: effort it names — `(level, text)` lines, as `check_session` returns.
+    #: Called by `doctor` with the model and the effort.
+    check_model: Callable[..., list[tuple[str, str]]] | None = None
 
     def on_this_machine(self) -> bool:
         return self.present() if self.present else bool(shutil.which(self.binary))

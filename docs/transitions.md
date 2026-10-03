@@ -95,9 +95,24 @@ Without an effort, the runtime picks one, and not the same for every model: in
 the catalog Claude Code 2.1.280 ships, Sonnet 5 thinks at `high` unless told and
 Opus 5.5 at `medium`.
 
-Every inspection runs on the default runtime, Claude Code, whichever agent's
-chat it is asked from: the model and the effort are that runtime's words. Another
-runtime is for trying one on purpose — see below.
+The model also says where an inspection runs, whichever agent's chat it is
+asked from: a model's name is one runtime's word. A `gpt-…` model runs on Codex,
+at the efforts Codex takes for it; anything else runs on the default runtime,
+Claude Code.
+
+```yaml
+settings:
+  HALYARD_INSPECTION_MODEL: gpt-5.6-terra
+projects:
+  alpha-engine:
+    inspections:
+      thin-bff: {file: NOTES/halyard/checks/thin-bff.md, model: gpt-6.1-sol, effort: high}
+```
+
+`codex debug models --bundled` lists the models the Codex CLI on a machine can
+run, and `halyard doctor` fails a model it cannot — a CLI too old for it, or no
+CLI at all — since every turn on it would fail at once. Trying another runtime on
+a kept run is `halyard inspect repeat --runtime` — see below.
 
 An inspection that needs a stronger model says so where it is described,
 written as a mapping instead of a file alone. What it leaves out is the

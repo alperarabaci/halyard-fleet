@@ -493,8 +493,6 @@ def test_a_name_from_before_a_rename_is_a_warning_that_says_what_to_rename() -> 
 def test_an_effort_the_runtime_does_not_take_is_named_where_it_was_written() -> None:
     """Such an inspection still runs, at the model's own effort, and says so in
     a log nobody reads. The doctor is where somebody looks."""
-    from types import SimpleNamespace
-
     from halyard.core.config_file import projects_from_yaml
 
     [project] = projects_from_yaml(
@@ -503,28 +501,98 @@ def test_an_effort_the_runtime_does_not_take_is_named_where_it_was_written() -> 
         "      bounded-context: {file: NOTES/bc.md, model: opus, effort: hihg}\n"
     )
 
-    lines = doctor._one_shot_efforts(
-        SimpleNamespace(inspection_effort="Max", default_effort=None, claude_models=None,
-                        claude_binary=None, claude_default_model=None, claude_oauth_token=None,
-                        db_path=Path("halyard.db")),
-        [project],
-    )  # fmt: skip
+    lines = doctor._one_shot_efforts(one_shot_settings(inspection_effort="Max"), [project])
 
     [warning] = lines
     assert "alpha-engine's inspection bounded-context asks for effort 'hihg'" in warning
     assert "max" in warning
 
 
-def test_a_default_effort_the_runtime_does_not_take_is_named_too() -> None:
-    """The commit message and the compaction record run on it."""
+def one_shot_settings(**chosen):
+    """What the checks of Halyard's own turns read, with nothing chosen unless said."""
     from types import SimpleNamespace
 
+    unset = dict.fromkeys(
+        (
+            "default_model",
+            "default_effort",
+            "compaction_model",
+            "inspection_model",
+            "inspection_effort",
+            "claude_models",
+            "claude_binary",
+            "claude_default_model",
+            "claude_oauth_token",
+        )
+    )
+    return SimpleNamespace(**{**unset, "db_path": Path("halyard.db"), **chosen})
+
+
+def test_an_effort_for_a_model_another_runtime_claims_is_left_to_that_runtime() -> None:
+    """`ultra` is not Claude Code's word, and it is Codex's: a GPT model runs
+    there, and is checked there."""
     lines = doctor._one_shot_efforts(
-        SimpleNamespace(inspection_effort=None, default_effort="ultra", claude_models=None,
-                        claude_binary=None, claude_default_model=None, claude_oauth_token=None,
-                        db_path=Path("halyard.db")),
-        [],
-    )  # fmt: skip
+        one_shot_settings(default_model="gpt-5.6-terra", default_effort="ultra"), []
+    )
+
+    assert lines == []
+
+
+def codex_knows(monkeypatch, models: dict[str, tuple[str, ...]] | None, binary="/bin/codex"):
+    """What `codex debug models --bundled` would say here, without running it."""
+    import halyard.agents.codex as codex
+
+    monkeypatch.setattr(codex, "find_codex_binary", lambda *_: binary)
+    monkeypatch.setattr(codex, "read_catalog", lambda *_: models)
+
+
+def test_a_gpt_model_the_codex_cli_here_cannot_run_fails_the_check(monkeypatch) -> None:
+    """A turn on it would fail at once, every time, from the phone."""
+    codex_knows(monkeypatch, {"gpt-6-sol": ("high",), "gpt-5.6-terra": ("high",)})
+
+    lines, failed = doctor._one_shot_models(
+        one_shot_settings(default_model="gpt-6.1-sol", inspection_model="gpt-5.6-terra"), []
+    )
+
+    assert failed == 1
+    assert "HALYARD_DEFAULT_MODEL: the codex CLI here cannot run gpt-6.1-sol" in lines[0]
+    assert "gpt-6-sol" in lines[1], "and says which it can"
+
+
+def test_a_gpt_model_with_an_effort_it_does_not_take_is_warned(monkeypatch) -> None:
+    from halyard.core.config_file import projects_from_yaml
+
+    codex_knows(monkeypatch, {"gpt-6-sol": ("low", "high")})
+    [project] = projects_from_yaml(
+        "projects:\n  alpha-engine:\n    inspections:\n"
+        "      thin-bff: {file: NOTES/t.md, model: gpt-6-sol, effort: max}\n"
+    )
+
+    lines, failed = doctor._one_shot_models(one_shot_settings(), [project])
+
+    assert failed == 0
+    [warning] = lines
+    assert "alpha-engine's inspection thin-bff: gpt-6-sol takes effort low, high" in warning
+
+
+def test_a_gpt_model_with_no_codex_cli_here_fails_the_check(monkeypatch) -> None:
+    codex_knows(monkeypatch, None, binary=None)
+
+    lines, failed = doctor._one_shot_models(one_shot_settings(compaction_model="gpt-6-sol"), [])
+
+    assert failed == 1
+    assert "codex CLI is not on this machine" in lines[0]
+
+
+def test_models_the_default_runtime_runs_are_not_its_to_check(monkeypatch) -> None:
+    codex_knows(monkeypatch, {})
+
+    assert doctor._one_shot_models(one_shot_settings(default_model="haiku"), []) == ([], 0)
+
+
+def test_a_default_effort_the_runtime_does_not_take_is_named_too() -> None:
+    """The commit message and the compaction record run on it."""
+    lines = doctor._one_shot_efforts(one_shot_settings(default_effort="ultra"), [])
 
     [warning] = lines
     assert "HALYARD_DEFAULT_EFFORT asks for effort 'ultra'" in warning

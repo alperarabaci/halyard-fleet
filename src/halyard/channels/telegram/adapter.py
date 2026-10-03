@@ -434,12 +434,10 @@ class _Inspecting:
     def __init__(
         self,
         channel: TelegramChannel,
-        runner,
         destination: tuple[str, int | None],
         project: str | None = None,
     ) -> None:
         self._channel = channel
-        self._runner = runner
         self._destination = destination
         self._project = project
 
@@ -455,6 +453,14 @@ class _Inspecting:
         session_id: str | None = None,
         effort: str | None = None,
     ) -> str | None:
+        # On the runtime the inspection's model belongs to, asked per turn: one
+        # transition's inspections can each name a model of their own.
+        runner = self._channel._one_shot_for(model)
+        if runner is None:
+            logger.warning(
+                "Inspection %s did not run: nothing here can take a turn on %s", name, model
+            )
+            return None
         # The inspection's own id when it chose one, so its record and its
         # tokens are found by the same key.
         session = session_id or str(uuid.uuid4())
@@ -473,7 +479,7 @@ class _Inspecting:
             label,
             self._destination,
             asyncio.ensure_future(
-                self._runner.ask(
+                runner.ask(
                     text,
                     timeout=timeout,
                     model=model,
@@ -498,11 +504,6 @@ class _Inspecting:
         finally:
             self._channel._inspecting.pop(session, None)
 
-    @property
-    def runtime(self) -> str:
-        """Which runtime the turns run on — `claude-code`."""
-        return str(getattr(self._runner, "id", "") or "")
-
 
 class _Keeping:
     """The channel's side of `inspections.Keeper`: a finished inspection run into
@@ -516,19 +517,19 @@ class _Keeping:
         *,
         project: str,
         work: str | None,
-        runtime: str,
         counted: StepRounds | None = None,
     ) -> None:
         self._channel = channel
         self._project = project
         self._work = work
-        self._runtime = runtime
         self._counted = counted
 
     async def keep(self, kept: inspecting.Kept) -> None:
         """Written off to one side, as a label is: the answer is on its way to
         somebody, and a row in a database shares its file with the audit log,
         which may be writing. Nothing waits for it."""
+        from halyard.agents import registry
+
         database = self._channel._database
         if database is None:
             return
@@ -540,7 +541,9 @@ class _Keeping:
                 kept,
                 project=self._project,
                 work=self._work,
-                runtime=self._runtime or None,
+                # Each run's own: one transition's inspections can each name a
+                # model, and the model is what says which runtime ran it.
+                runtime=registry.for_model(kept.model),
                 workflow_run=step.run or None if step else None,
                 step=step.step or None if step else None,
                 phase=step.phase if step else None,
@@ -2104,18 +2107,6 @@ class TelegramChannel:
             "<code>halyard.yaml</code>."
         )
 
-    def _message_runner(self, chat_id: str):
-        """Whichever runtime this chat's seat uses, for the one-shot turn.
-
-        The only place the commit flow touches a runtime at all, and it stays
-        on this side of the boundary: `halyard.commits` is handed a finished
-        sentence, never a way to ask for one.
-        """
-        seat = for_chat(self._seats, chat_id) if chat_id else None
-        if seat and (found := self._runners.get(seat.runtime)):
-            return found
-        return self._runner
-
     async def _write_message(
         self, chat_id: str, work, inquiry: str = ""
     ) -> tuple[str | None, tuple[str, ...], str | None]:
@@ -2125,19 +2116,18 @@ class TelegramChannel:
         person deciding is away from the desk and has not seen this code, and a
         list of filenames says where an agent has been rather than what it did.
 
+        Written on the runtime `HALYARD_DEFAULT_MODEL` belongs to, whichever
+        chat asks — the only place the commit flow touches a runtime at all.
+        `halyard.commits` is handed a finished sentence, never a way to ask for
+        one.
+
         Fails soft, on purpose. A model that cannot be reached should not cost
         somebody the commit — the reference computed from the branch is a
         usable message on its own, and `Rewrite` is one tap away.
         """
-        runner = self._message_runner(chat_id)
-        # Written on the default runtime only, as it was while no other could
-        # take a turn of its own: the model is that runtime's word, and a
-        # runtime that read it as something else would write the message on a
-        # model nobody chose. Another agent's chat keeps the reference alone.
-        if runner is not self._runner:
-            runner = None
+        runner = self._one_shot_for(self._default_model.model)
         said = None
-        if runner is not None and hasattr(runner, "ask"):
+        if runner is not None:
             try:
                 said = await asyncio.wait_for(
                     runner.ask(
@@ -2622,10 +2612,15 @@ class TelegramChannel:
             await self._run_inspection("", chat_id, thread_id)
             return
 
-        asker = self._inspector(chat_id, (chat_id, thread_id))
-        if asker is None:
-            await self._say("No runtime here can take a one-shot turn.", chat_id, thread_id)
+        chosen = found.inspection_models.get(name, ModelChoice()).over(self._inspection_model)
+        if self._one_shot_for(chosen.model) is None:
+            await self._say(
+                f"No runtime here can take a turn on <b>{html.escape(str(chosen.model))}</b>.",
+                chat_id,
+                thread_id,
+            )
             return
+        asker = self._inspector(chat_id, (chat_id, thread_id))
 
         path = found.inspections[name]
         arrived = _local(said.at).strftime("%H:%M")
@@ -2647,7 +2642,6 @@ class TelegramChannel:
                 labels=labels,
             )
         )
-        chosen = found.inspection_models.get(name, ModelChoice()).over(self._inspection_model)
         answer = await inspecting.run(
             name,
             path,
@@ -2661,7 +2655,7 @@ class TelegramChannel:
             timeout=INSPECTION_TIMEOUT_SECONDS,
             findings=found.label_findings,
             labeller=_Labelling(self, found),
-            keeper=await self._keeper(found, asker.runtime),
+            keeper=await self._keeper(found),
             about=(
                 f"reply {arrived}, {len(said.text)} chars, "
                 f"from {said.agent_id or '?'} {said.session_id or '?'}"
@@ -2734,32 +2728,32 @@ class TelegramChannel:
         greeting = f"To {_seat_name(target) or label}, from Halyard."
         await self._forward_to_seat(f"{label} {greeting}\n\n{kept.text}", actor, chat_id, thread_id)
 
-    def _one_shot_runner(self, chat_id: str):
-        """The runtime an inspection takes its turn on, or None — the channel's
-        side of `inspections.Asker`.
+    def _one_shot_for(self, model: str | None):
+        """The runner a one-shot turn on `model` takes — an inspection, a
+        commit message — or None when nothing here can take one.
 
-        The default runtime, whatever this chat's own is, so a report from any
-        agent can be inspected. It was "this chat's own if it can", which meant
-        the default while no other runtime could take a turn of its own. Now
-        opencode and Codex can, and the inspection's model and effort are the
-        default runtime's words: opencode takes `sonnet` for no model at all and
-        answers on its own default, and Codex refuses it. Another runtime is
-        chosen on purpose — `halyard inspect repeat --runtime` — never by the
-        chat an inspection happens to be asked from.
+        Chosen by the model, never by the chat the turn is asked from. It was
+        the default runtime whatever the chat, because the models these turns
+        named were that runtime's words: opencode reads `sonnet` as no model at
+        all, and Codex refuses it. Now the model says which runtime it belongs
+        to — `gpt-5.6-terra` is Codex's — so a report from any agent is
+        inspected, and a message written, on the runtime that model runs on.
+        See `registry.for_model`.
         """
-        return self._runner if hasattr(self._runner, "ask") else None
+        from halyard.agents import registry
 
-    def _inspector(self, chat_id: str, destination: tuple[str, int | None]) -> _Inspecting | None:
-        """This chat's one-shot runtime, for an inspection whose answer goes to
-        `destination` — and so does anything the inspection asks to run."""
-        runner = self._one_shot_runner(chat_id)
-        if not runner:
-            return None
-        return _Inspecting(self, runner, destination, project=self._project_name_for(chat_id))
+        runtime = registry.for_model(model)
+        runner = self._runners.get(runtime) or (
+            self._runner if runtime == registry.DEFAULT else None
+        )
+        return runner if hasattr(runner, "ask") else None
 
-    async def _keeper(
-        self, found: Project, runtime: str, counted: StepRounds | None = None
-    ) -> _Keeping | None:
+    def _inspector(self, chat_id: str, destination: tuple[str, int | None]) -> _Inspecting:
+        """Inspections whose answers go to `destination` — and so does anything
+        an inspection asks to run. Each takes its turn on its model's runtime."""
+        return _Inspecting(self, destination, project=self._project_name_for(chat_id))
+
+    async def _keeper(self, found: Project, counted: StepRounds | None = None) -> _Keeping | None:
         """Where this project's inspection runs are kept, or None when they are
         not — `keep_inspections` off, or no database to keep them in."""
         if not self._keep_inspections or self._database is None:
@@ -2768,7 +2762,6 @@ class TelegramChannel:
             self,
             project=found.name,
             work=await self._work_item(found),
-            runtime=runtime,
             counted=counted,
         )
 
@@ -3299,11 +3292,7 @@ class TelegramChannel:
                 if transition.inspections
                 else None
             )
-            keeper = (
-                await self._keeper(found, inspector.runtime, counted)
-                if inspector is not None
-                else None
-            )
+            keeper = await self._keeper(found, counted) if inspector is not None else None
             handed = await transitioning.take(
                 transition,
                 project=found.path,

@@ -62,16 +62,33 @@ def _check_session(ref: SessionRef, **_) -> list[tuple[str, str]]:
     somebody to upgrade a CLI that is fine.
     """
     model = (ref.model or "").strip()
-    if not model:
+    return _check_model(model) if model else []
+
+
+def _claims_model(model: str) -> bool:
+    """`gpt-5.6-terra`, `codex-auto-review`: how Codex names its models, and
+    how no other runtime here names one."""
+    return model.strip().lower().startswith(("gpt-", "codex-"))
+
+
+def _check_model(model: str, effort: str | None = None, **_) -> list[tuple[str, str]]:
+    """Whether the CLI here can run `model`, at `effort` when one is named —
+    for a session, or for one of Halyard's own turns. See `_check_session`."""
+    found = find_codex_binary()
+    if found is None:
+        return [("fail", f"{model} runs on Codex, and the codex CLI is not on this machine")]
+    known = read_catalog(found)
+    if not known:
         return []
-    known = read_catalog(find_codex_binary())
-    if not known or model in known:
-        return []
-    return [
-        ("fail", f"the codex CLI here cannot run {model}, so a turn from here fails at once"),
-        ("", f"it knows: {', '.join(sorted(known))}"),
-        ("", _how_to_upgrade()),
-    ]
+    if model not in known:
+        return [
+            ("fail", f"the codex CLI here cannot run {model}, so a turn from here fails at once"),
+            ("", f"it knows: {', '.join(sorted(known))}"),
+            ("", _how_to_upgrade()),
+        ]
+    if effort and effort.strip().lower() not in known[model]:
+        return [("warn", f"{model} takes effort {', '.join(known[model])}, not {effort!r}")]
+    return []
 
 
 #: What the registry finds. See `halyard.agents.spec`.
@@ -104,6 +121,8 @@ RUNTIME = RuntimeSpec(
     sessions_hint="the Codex thread names on this machine",
     check_available=_check_available,
     check_session=_check_session,
+    claims_model=_claims_model,
+    check_model=_check_model,
     present=_present,
     check_wired=trust.check_wired,
     verify=Verification(

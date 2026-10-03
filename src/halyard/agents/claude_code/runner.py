@@ -495,7 +495,15 @@ class ClaudeCodeRunner:
         must not be held up, or changed, because that could not be produced.
         """
         binary = self._binary
-        if not binary or not text.strip():
+        if not binary:
+            # Said, because it was not: on a machine whose CLI had gone, every
+            # inspection came back "the model did not answer" in 0.0s for a
+            # day, and nothing anywhere said why.
+            logger.warning(
+                "No claude CLI here, so a one-shot turn did not run — `halyard doctor` says more"
+            )
+            return None
+        if not text.strip():
             return None
         arguments = [binary, "-p", "--output-format", "json"]
         if chosen := model or self._default_model:
