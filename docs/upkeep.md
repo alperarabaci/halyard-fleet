@@ -76,7 +76,9 @@ uv run halyard upkeep show 3f2a --evidence   # and what it was given
   runs-advice` in `halyard usage`.
 
 The turn needs a runtime that can promise it runs without tools. Claude Code
-can. Codex and opencode cannot, and are not asked instead.
+can. Codex and opencode cannot, and are not asked instead. So its model is a
+Claude Code one: a `gpt-…` model, which runs inspections on Codex, is not taken
+from `HALYARD_INSPECTION_MODEL` — sonnet is — and named here it is refused.
 
 ## Configuration
 

@@ -296,7 +296,9 @@ def _one_shot_efforts(settings, projects) -> list[str]:
 
     A warning, and not a refusal to start: such a turn still runs, at the
     model's own effort, and says so in a log nobody is reading. This is where
-    somebody looks. Which efforts there are is the runtime's to say.
+    somebody looks. Which efforts there are is the runtime's to say — here the
+    default runtime's, for the turns on its models; a model another runtime
+    claims is that runtime's to check, in `_one_shot_models`.
     """
     from halyard.agents import registry
 
@@ -307,10 +309,14 @@ def _one_shot_efforts(settings, projects) -> list[str]:
     if not enforced:
         return []
     asked = [
-        ("HALYARD_DEFAULT_EFFORT", settings.default_effort),
-        ("HALYARD_INSPECTION_EFFORT", settings.inspection_effort),
+        ("HALYARD_DEFAULT_EFFORT", settings.default_model, settings.default_effort),
+        ("HALYARD_INSPECTION_EFFORT", settings.inspection_model, settings.inspection_effort),
         *(
-            (f"{project.name}'s inspection {name}", chosen.effort)
+            (
+                f"{project.name}'s inspection {name}",
+                chosen.model or settings.inspection_model,
+                chosen.effort,
+            )
             for project in projects
             for name, chosen in project.inspection_models.items()
         ),
@@ -318,9 +324,51 @@ def _one_shot_efforts(settings, projects) -> list[str]:
     return [
         f"{WARN}{where} asks for effort {effort!r}, which is not one of "
         f"{', '.join(allowed)} — it runs at the model's own effort instead"
-        for where, effort in asked
-        if effort and effort.strip().lower() not in allowed
+        for where, model, effort in asked
+        if effort
+        and registry.for_model(model) == registry.DEFAULT
+        and effort.strip().lower() not in allowed
     ]
+
+
+def _one_shot_models(settings, projects) -> tuple[list[str], int]:
+    """Each model Halyard's own turns name that a runtime other than the
+    default claims, and whether that runtime can run it here, at the effort
+    asked — with how many of them cannot.
+
+    A model the CLI here is missing, or too old for, is a turn that fails at
+    once, every time it is asked from the phone. The runtime says which, as it
+    does for a seat's model.
+    """
+    from halyard.agents import registry
+
+    named = [
+        ("HALYARD_DEFAULT_MODEL", settings.default_model, settings.default_effort),
+        ("HALYARD_COMPACTION_MODEL", settings.compaction_model, settings.default_effort),
+        ("HALYARD_INSPECTION_MODEL", settings.inspection_model, settings.inspection_effort),
+        *(
+            (
+                f"{project.name}'s inspection {name}",
+                chosen.model,
+                chosen.effort or settings.inspection_effort,
+            )
+            for project in projects
+            for name, chosen in project.inspection_models.items()
+            if chosen.model
+        ),
+    ]
+    lines: list[str] = []
+    failed = 0
+    for where, model, effort in named:
+        model = (model or "").strip()
+        runtime = registry.for_model(model)
+        spec = registry.get(runtime) if model and runtime != registry.DEFAULT else None
+        if spec is None:
+            continue
+        said, fatal = _render(spec.check_model, where, model=model, effort=effort)
+        lines += said
+        failed += int(fatal)
+    return lines, failed
 
 
 def _check_seat(
@@ -757,6 +805,11 @@ def run() -> int:
         print(line)
     for line in _one_shot_efforts(settings, described) if settings_ok else []:
         print(line)
+    if settings_ok:
+        said, failed = _one_shot_models(settings, described)
+        problems += failed
+        for line in said:
+            print(line)
     for line in _runs(settings if settings_ok else None, described):
         print(line)
     if seats:

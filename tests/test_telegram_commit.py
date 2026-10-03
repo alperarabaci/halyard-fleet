@@ -277,10 +277,10 @@ async def test_the_message_is_written_on_the_default_model_halyard_is_given(wire
     assert (runner.models, runner.efforts) == (["haiku"], ["low"])
 
 
-async def test_another_agent_s_chat_keeps_the_reference_alone(wired) -> None:
-    """As it was while only the default runtime could take a turn of its own:
-    `sonnet` is that runtime's word, and opencode would have read it as no
-    model and written the message on its own default."""
+async def test_another_agent_s_chat_has_its_message_written_where_the_model_runs(wired) -> None:
+    """The model says the runtime, not the chat: `sonnet` is the default
+    runtime's word, so an opencode chat's message is written there — where it
+    used to keep the reference alone, rather than hand opencode `sonnet`."""
     channel, _, runner, repo = wired
     other = FakeRunner()
     channel._runners["opencode"] = other
@@ -290,6 +290,22 @@ async def test_another_agent_s_chat_keeps_the_reference_alone(wired) -> None:
     await deliver(channel, typed("/commit"))
 
     assert other.asked == []
+    assert runner.models == ["sonnet"]
+
+
+async def test_a_gpt_default_model_writes_the_message_on_codex(wired) -> None:
+    """`HALYARD_DEFAULT_MODEL: gpt-5.6-terra` is all it takes: no Claude turn."""
+    from halyard.core.config_file import ModelChoice
+
+    channel, _, runner, repo = wired
+    codex = FakeRunner()
+    channel._runners["codex"] = codex
+    channel._default_model = ModelChoice("gpt-5.6-terra", "high")
+    wrote(repo, "loader.py", "x = 1\n")
+
+    await deliver(channel, typed("/commit"))
+
+    assert (codex.models, codex.efforts) == (["gpt-5.6-terra"], ["high"])
     assert runner.asked == []
 
 
@@ -2488,6 +2504,46 @@ async def test_an_inspection_runs_on_its_own_model_and_the_rest_on_the_machine_s
     ]
 
 
+async def test_an_inspection_on_a_gpt_model_runs_on_codex_and_the_rest_where_they_did(
+    tmp_path: Path, wired
+) -> None:
+    """The model says the runtime: `gpt-6.1-sol` is Codex's, so that inspection
+    takes its turn there, and the one on the machine's `sonnet` stays put."""
+    from halyard.channels.telegram.adapter import INSPECTION_MODEL
+    from halyard.core.config_file import ModelChoice
+
+    channel, _, runner, repo = wired
+    codex = FakeRunner(says="durum: temiz")
+    channel._runners["codex"] = codex
+    inspections_in(channel, repo, tmp_path, proof="# proof", bounded="# bounded context")
+    found = channel._repositories["alpha-engine"]
+    channel._repositories["alpha-engine"] = replace(
+        found, inspection_models={"bounded": ModelChoice("gpt-6.1-sol", "high")}
+    )
+
+    await channel._handle_callback(pressed_inspection("proof"))
+    await settled(channel)
+    await channel._handle_callback(pressed_inspection("bounded"))
+    await settled(channel)
+
+    assert runner.models == [INSPECTION_MODEL]
+    assert (codex.models, codex.efforts) == (["gpt-6.1-sol"], ["high"])
+
+
+async def test_an_inspection_whose_model_nothing_here_runs_says_so(tmp_path: Path, wired) -> None:
+    from halyard.core.config_file import ModelChoice
+
+    channel, api, runner, repo = wired
+    inspections_in(channel, repo, tmp_path, proof="# proof")
+    channel._inspection_model = ModelChoice("gpt-5.6-terra")
+
+    await channel._handle_callback(pressed_inspection("proof"))
+    await settled(channel)
+
+    assert runner.asked == []
+    assert "No runtime here can take a turn on <b>gpt-5.6-terra</b>" in api.sent[-1]["text"]
+
+
 def test_what_the_machine_leaves_unsaid_is_the_channel_s_own_model() -> None:
     """Only an effort set, as `HALYARD_INSPECTION_EFFORT: max` alone would."""
     from halyard.channels.telegram.adapter import INSPECTION_MODEL
@@ -2679,7 +2735,7 @@ async def test_keeping_an_inspection_holds_nobody_up(tmp_path: Path, wired, monk
         written.append(kept.name)
 
     monkeypatch.setattr(inspections.record, "keep", slow_keep)
-    keeper = _Keeping(channel, project="alpha-engine", work="alpha-engine#281", runtime="x")
+    keeper = _Keeping(channel, project="alpha-engine", work="alpha-engine#281")
 
     await asyncio.wait_for(keeper.keep(a_kept_inspection()), timeout=1)
 

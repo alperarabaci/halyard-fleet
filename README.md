@@ -250,7 +250,8 @@ session is handed once the summary is done. Both are optional and per agent: a
 navigator holding a plan needs them, a driver running one command does not.
 The record is written on `HALYARD_DEFAULT_MODEL` at `HALYARD_DEFAULT_EFFORT` —
 sonnet at the runtime's own effort unless set, the same as the commit message
-`/commit` proposes — and `HALYARD_COMPACTION_MODEL` names its own model.
+`/commit` proposes — and `HALYARD_COMPACTION_MODEL` names its own model. A
+`gpt-…` model there runs on Codex.
 
 Measured before it was built: a hook cannot steer the summary itself — output
 from `PreCompact` is refused by the runtime as an injection attempt — and

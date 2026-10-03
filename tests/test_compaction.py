@@ -258,6 +258,30 @@ async def test_the_record_takes_the_model_and_effort_it_is_given(tmp_path: Path)
     assert (runner.models, runner.efforts) == (["haiku"], ["low"])
 
 
+async def test_a_record_on_a_gpt_model_is_written_on_codex(tmp_path: Path) -> None:
+    """For the default runtime's seat still, but on the runtime the model is
+    Codex's word for — no Claude turn at all."""
+    instructions = tmp_path / "pre.md"
+    instructions.write_text("record", encoding="utf-8")
+    transcript(tmp_path / "9f1c2b3a-0000-0000-0000-000000000000.jsonl", ("assistant", "done"))
+    claude, codex = FakeRunner("x"), FakeRunner("the record")
+    recorder = Recorder(
+        roots=(tmp_path,),
+        seats=[seat(before_compaction=str(instructions))],
+        runners={"claude-code": claude, "codex": codex},
+        model="gpt-5.6-terra",
+    )
+
+    await recorder.write(
+        session_id="9f1c2b3a-0000-0000-0000-000000000000",
+        agent_id="claude-code",
+        session_name="alpha-navigator",
+    )
+
+    assert codex.models == ["gpt-5.6-terra"]
+    assert claude.asked == []
+
+
 async def test_a_long_record_is_trimmed_before_it_is_carried(tmp_path: Path) -> None:
     """It goes into a context that was just emptied on purpose. Carrying a long
     one across would refill what the compaction had cleared."""

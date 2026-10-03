@@ -90,13 +90,17 @@ settings:
   # high, xhigh or max. Sonnet unless set, at the runtime's own effort for the
   # model — which is not the same for every model. An inspection can name its
   # own under the project's `inspections:`.
+  # The model also says where the turn runs: a `gpt-…` model runs on Codex,
+  # at Codex's efforts (`codex debug models --bundled` lists what the CLI here
+  # can run), and anything else on Claude Code.
   # HALYARD_INSPECTION_MODEL: sonnet
   # HALYARD_INSPECTION_EFFORT: max
 
   # The model Halyard's own turns run on — the commit message it proposes, and
   # the record carried across a compaction — and how hard it thinks. Sonnet
-  # unless set, at the runtime's own effort for the model.
-  # HALYARD_COMPACTION_MODEL still names the compaction record's alone.
+  # unless set, at the runtime's own effort for the model; `gpt-…` runs on
+  # Codex, as above. HALYARD_COMPACTION_MODEL still names the compaction
+  # record's alone.
   # HALYARD_DEFAULT_MODEL: sonnet
   # HALYARD_DEFAULT_EFFORT: medium
 

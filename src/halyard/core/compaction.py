@@ -321,12 +321,14 @@ class Recorder:
             return False
         from halyard.agents import registry
 
-        runner = self._runners.get(seat.runtime)
+        runner = self._runners.get(registry.for_model(self._model))
         if runner is None or not hasattr(runner, "ask") or seat.runtime != registry.DEFAULT:
-            # Written by the default runtime, for its own seats: the record's
-            # model is that runtime's word. opencode and Codex can take a turn
-            # of their own now, and a seat on either is left alone as it was —
-            # handed `sonnet`, one reads it as no model and the other refuses it.
+            # Made for the default runtime's own seats, the ones whose
+            # compaction Halyard hears of; a seat on another is left alone as it
+            # was. Written by whichever runtime the record's model belongs to —
+            # `gpt-5.6-terra` on Codex, `sonnet` on the default — because a
+            # model's name is one runtime's word, and another reads it as no
+            # model or refuses it.
             return False
         # Found by id under the runtimes' own directories, never taken from the
         # request: a path in a payload posted over HTTP is a path an attacker

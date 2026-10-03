@@ -382,6 +382,39 @@ def test_a_runtime_that_keeps_its_tools_is_not_asked(machine: Path, monkeypatch,
     assert "without tools" in capsys.readouterr().err
 
 
+def test_a_gpt_inspection_model_is_not_handed_to_this_job(machine: Path, monkeypatch) -> None:
+    """Inspections on `gpt-5.6-terra` run on Codex; this job needs a turn with
+    no tools, so it keeps to a Claude Code model — sonnet, when its own is unset."""
+    from halyard import upkeep_cli
+
+    logged(machine, {"command": "uv run pytest -q"})
+    upkeep_cli._settings().inspection_model = "gpt-5.6-terra"
+    upkeep_cli._settings().inspection_effort = "ultra"
+    monkeypatch.setattr(upkeep_cli.upkeep, "load", lambda name: upkeep.Job(name, timeout=5))
+    runner = Answering(None)
+    asking(monkeypatch, runner)
+
+    run()
+
+    [(_, given)] = runner.asked
+    assert (given["model"], given["effort"]) == ("sonnet", None)
+
+
+def test_a_gpt_model_named_for_this_job_is_refused(machine: Path, monkeypatch, capsys) -> None:
+    from halyard import upkeep_cli
+
+    logged(machine, {"command": "uv run pytest -q"})
+    monkeypatch.setattr(
+        upkeep_cli.upkeep, "load", lambda name: upkeep.Job(name, model="gpt-6-sol", timeout=5)
+    )
+    runner = Answering(None)
+    asking(monkeypatch, runner)
+
+    assert run() == 2
+    assert runner.asked == []
+    assert "gpt-6-sol runs on codex" in capsys.readouterr().err
+
+
 def test_no_answer_ends_the_command(machine: Path, monkeypatch, capsys) -> None:
     """A model that fails or runs out of time ends it — nothing waits."""
     logged(machine, {"command": "uv run pytest -q"})

@@ -113,8 +113,24 @@ def main(args: Sequence[str]) -> int:
             file=sys.stderr,
         )
         return 1
-    model = job.model or settings.inspection_model or "sonnet"
-    effort = job.effort or settings.inspection_effort
+    from halyard.agents import registry
+
+    # The inspection model is taken only when it is this runtime's word: a
+    # `gpt-…` one runs inspections on Codex, and handed here it would be a
+    # Claude Code turn on a model Claude Code does not have.
+    inherited = settings.inspection_model
+    if registry.for_model(inherited) != registry.DEFAULT:
+        inherited = None
+    model = job.model or inherited or "sonnet"
+    if registry.for_model(model) != registry.DEFAULT:
+        print(
+            f"halyard upkeep: {model} runs on {registry.for_model(model)}, and this job needs "
+            f"a turn without tools, which only {registry.DEFAULT} can promise — name one of "
+            "its models under `upkeep: runs-advice: model:`.",
+            file=sys.stderr,
+        )
+        return 2
+    effort = job.effort or (settings.inspection_effort if inherited else None)
     # A prompt of one's own that cannot be read is said, never swapped for the
     # one that ships: an answer would come back looking like it followed yours.
     source = job.prompt or runs_advice.PROMPT

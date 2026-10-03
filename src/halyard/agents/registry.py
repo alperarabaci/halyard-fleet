@@ -85,6 +85,22 @@ def names() -> tuple[str, ...]:
     return tuple(discover())
 
 
+def for_model(model: str | None) -> str:
+    """The runtime a one-shot turn on `model` runs on.
+
+    The one a runtime's `claims_model` says the name is its own — Codex for
+    `gpt-5.6-terra` — and the default for any model none claims, or none at
+    all. Asked of the model rather than of the chat a turn is asked from: a
+    model's name is one runtime's word, and handed to another it is read as no
+    model, or refused.
+    """
+    if model:
+        for name, spec in discover().items():
+            if name != DEFAULT and spec.claims_model is not None and spec.claims_model(model):
+                return name
+    return DEFAULT
+
+
 def guarded() -> tuple[str, ...]:
     """Every name a runtime's gate lives under, for `writes:` to stay out of.
 
