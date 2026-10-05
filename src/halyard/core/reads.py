@@ -874,6 +874,12 @@ class Run:
     environment: frozenset[str]
     #: A last `*`: further arguments allowed.
     open: bool
+    #: For an entry kept only because it is written out whole — one that
+    #: starts with a shell, hands an interpreter its code, or names no program
+    #: after a runner — the settings in front of it, word for word. Such an
+    #: entry lets through that one command and nothing else: the same settings,
+    #: the same words, nothing added. None for every other entry.
+    exactly: tuple[str, ...] | None = None
 
 
 #: Commands that run another command, whatever is named after them. An entry
@@ -954,10 +960,15 @@ def _program_after(words: Sequence[str], index: int) -> str:
 def run_entry(text: str) -> Run:
     """An entry under `runs:`, or `ValueError` saying why it cannot be one.
 
-    Refused when it could run anything: a shell, a wrapper or a remote runner
-    first (`bash`, `sudo`, `env`, `ssh`, `docker`), an interpreter handed code
-    (`python -c *`), or a runner with no named program after it (`uv run *`,
-    `make *`). Everything else is the project's to decide.
+    Refused when a pattern in it could let anything run: a shell, a wrapper or
+    a remote runner first (`bash *`, `sudo *`, `ssh host *`), an interpreter
+    handed code (`python -c *`), or a runner with no named program after it
+    (`uv run *`, `make *`). Everything else is the project's to decide.
+
+    Written out whole, with no pattern anywhere, the same kind of entry is one
+    command — `bash scripts/check-work-item-reference.sh --base main` — and
+    somebody deciding about exactly it. That is kept, and lets that command
+    through alone, word for word and setting for setting: see `Run.exactly`.
     """
     try:
         parts = _parse(text)
@@ -966,25 +977,24 @@ def run_entry(text: str) -> Run:
     if len(parts) != 1 or parts[0].inputs or not parts[0].words:
         raise ValueError(f"`{text}` must be one command, with no pipes, separators or redirects")
     words = [word.text for word in parts[0].words]
+    whole = not any(_wild(word) for word in words)
+    assigned: list[str] = []
     environment = set()
     while words and _ASSIGNMENT.match(words[0]):
+        assigned.append(words[0])
         environment.add(words.pop(0).split("=", 1)[0])
     if not words:
         raise ValueError(f"`{text}` names no command")
-    first = words[0]
-    if _wild(first) or os.path.basename(first) in RUNS_ANYTHING:
-        raise ValueError(f"`{text}` could run anything: `{first}` runs whatever follows it")
-    for index, word in enumerate(words):
-        following = words[index + 1] if index + 1 < len(words) else ""
-        called = os.path.basename(word)
-        if (called in INTERPRETERS or called.startswith("python3.")) and (
-            following in _CODE_FLAGS or not following
-        ):
-            raise ValueError(f"`{text}` could run anything: `{word}` given its code")
-        if _runner_at(words, index):
-            program = _program_after(words, index)
-            if not program or _wild(program):
-                raise ValueError(f"`{text}` could run anything: nothing named after `{word}`")
+    if why := _could_run_anything(words):
+        if not whole:
+            raise ValueError(f"`{text}` could run anything: {why}")
+        return Run(
+            text=text,
+            words=tuple(words),
+            environment=frozenset(environment),
+            open=False,
+            exactly=tuple(assigned),
+        )
     opened = words[-1] == "*"
     return Run(
         text=text,
@@ -994,9 +1004,48 @@ def run_entry(text: str) -> Run:
     )
 
 
-def _matches(run: Run, environment: set[str], words: Sequence[_Word], where: _Where) -> bool:
+def _could_run_anything(words: Sequence[str]) -> str:
+    """Why an entry with these words could run anything, given a pattern —
+    or nothing, when it could not."""
+    first = words[0]
+    if _wild(first) or os.path.basename(first) in RUNS_ANYTHING:
+        return f"`{first}` runs whatever follows it"
+    for index, word in enumerate(words):
+        following = words[index + 1] if index + 1 < len(words) else ""
+        called = os.path.basename(word)
+        if (called in INTERPRETERS or called.startswith("python3.")) and (
+            following in _CODE_FLAGS or not following
+        ):
+            return f"`{word}` given its code"
+        if _runner_at(words, index):
+            program = _program_after(words, index)
+            if not program or _wild(program):
+                return f"nothing named after `{word}`"
+    return ""
+
+
+def _matches(
+    run: Run,
+    environment: set[str],
+    words: Sequence[_Word],
+    where: _Where,
+    assigned: Sequence[str] = (),
+) -> bool:
     """Whether a part is this entry: its settings allowed, its words in place,
-    and anything past them — for an entry that takes more — inside the project."""
+    and anything past them — for an entry that takes more — inside the project.
+    `assigned` are the part's settings as written, for an entry that is only
+    one command."""
+    if run.exactly is not None:
+        # Kept only because it was written out whole, so only that, whole:
+        # the same settings, the same words, nothing added and no pattern.
+        return (
+            tuple(assigned) == run.exactly
+            and len(words) == len(run.words)
+            and all(
+                word.text == pattern and not word.globbed
+                for pattern, word in zip(run.words, words, strict=True)
+            )
+        )
     if not environment <= (run.environment | SAFE_ENVIRONMENT):
         return False
     if len(words) < len(run.words) or (not run.open and len(words) != len(run.words)):
@@ -1068,7 +1117,9 @@ def _judge_part(
         _check_path(given, where)
     words = list(part.words)
     environment: set[str] = set()
+    assigned: list[str] = []
     while words and _ASSIGNMENT.match(words[0].text):
+        assigned.append(words[0].text)
         environment.add(words.pop(0).text.split("=", 1)[0])
     if not words:
         if environment - SAFE_ENVIRONMENT:
@@ -1077,8 +1128,11 @@ def _judge_part(
     # The project's own, first: it is what somebody wrote down for exactly
     # this, and it may name a command no read covers — `git fetch`.
     for run in runs:
+        if run.exactly is not None and part.inputs:
+            # Only that command, whole: nothing added, not even what it reads.
+            continue
         try:
-            if _matches(run, environment, words, where):
+            if _matches(run, environment, words, where, assigned):
                 names.append(run.text)
                 ran.append(run.text)
                 return where

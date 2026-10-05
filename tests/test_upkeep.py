@@ -282,7 +282,7 @@ def test_what_the_person_reads_carries_a_line_halyard_quoted(tmp_path: Path, pro
     advice = runs_advice.advise(
         answered(
             {"entry": "uv run pytest *", "why": "tests"},
-            {"entry": "sudo x", "why": "x"},
+            {"entry": "sudo *", "why": "x"},
             keep=({"family": "uv run python", "why": "code"},),
         ),
         found,
@@ -292,7 +292,7 @@ def test_what_the_person_reads_carries_a_line_halyard_quoted(tmp_path: Path, pro
 
     assert "halyard rules add alpha-engine 'uv run pytest *'" in text
     assert "would have spared 1 of the cards" in text
-    assert "not an entry:" in text and "halyard rules add alpha-engine 'sudo x'" not in text
+    assert "not an entry:" in text and "halyard rules add alpha-engine 'sudo *'" not in text
     assert "uv run python — code" in text
 
 

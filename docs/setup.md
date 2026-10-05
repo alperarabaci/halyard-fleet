@@ -353,6 +353,11 @@ is a card. It needs `HALYARD_ALLOW_RISK_AT_OR_BELOW: low`. An entry that could r
 anything — `bash *`, `python -c *`, `uv run *`, `make *` — is ignored rather than
 trusted, and `halyard doctor` says which.
 
+Written out whole, with no `*` anywhere, such an entry is one command, and it is
+kept: `bash scripts/check-work-item-reference.sh --base main` lets exactly that
+through. Only exactly that: another argument, a setting in front of it, or a file
+fed to it is a card.
+
 The same list can be kept without editing the file, in Halyard's database:
 
 ```bash
