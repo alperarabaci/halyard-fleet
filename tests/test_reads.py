@@ -446,8 +446,9 @@ def test_a_projects_own_command_is_taken(entry: str) -> None:
     "entry",
     [
         "bash *",
-        "/bin/bash x",
-        "sudo make test",
+        "bash scripts/*.sh",
+        "bash -c *",
+        "/bin/bash x *",
         "env *",
         "ssh host *",
         "docker exec db psql *",
@@ -460,8 +461,8 @@ def test_a_projects_own_command_is_taken(entry: str) -> None:
         "uv run * *",
         "npx *",
         "make *",
-        "make",
         "cargo run *",
+        "SCRIPT=* bash run.sh",
         "* *",
         "make test | tee out",
         "make test > out",
@@ -473,3 +474,56 @@ def test_an_entry_that_could_run_anything_is_refused(entry: str) -> None:
 
     with pytest.raises(ValueError):
         run_entry(entry)
+
+
+@pytest.mark.parametrize(
+    "entry",
+    [
+        "bash scripts/check-work-item-reference.sh --base main",
+        "/bin/bash x",
+        "sudo make test",
+        "make",
+        "python -c 'print(1)'",
+    ],
+)
+def test_the_same_written_out_whole_is_that_one_command(entry: str) -> None:
+    """No pattern anywhere is somebody deciding about exactly this command."""
+    from halyard.core.reads import run_entry
+
+    assert run_entry(entry).exactly == ()
+
+
+ONE_SCRIPT = "bash scripts/check-work-item-reference.sh --base main"
+
+
+def test_a_command_written_out_whole_runs_as_written(project: Path) -> None:
+    """How an agent runs it, and only that."""
+    assert ran(ONE_SCRIPT, project, ONE_SCRIPT)
+    assert ran(f"{ONE_SCRIPT} 2>&1 | tail -5", project, ONE_SCRIPT), "a read after it"
+    assert ran(f"cd {project} && {ONE_SCRIPT}", project, ONE_SCRIPT)
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "bash scripts/check-work-item-reference.sh --base other",
+        "bash scripts/check-work-item-reference.sh --base main --fix",
+        "bash scripts/check-work-item-reference.sh",
+        "bash scripts/check-work-item-reference.sh --base mai*",
+        "CI=1 bash scripts/check-work-item-reference.sh --base main",
+        "BASH_ENV=x.sh bash scripts/check-work-item-reference.sh --base main",
+        "bash scripts/check-work-item-reference.sh --base main < README.md",
+        "bash -c 'bash scripts/check-work-item-reference.sh --base main'",
+        "bash scripts/check-work-item-reference.sh --base main; rm -rf x",
+    ],
+)
+def test_anything_but_that_command_asks(command: str, project: Path) -> None:
+    """Not another argument, a setting in front, what it reads, or a shell around it."""
+    assert not ran(command, project, ONE_SCRIPT)
+
+
+def test_a_whole_entry_with_a_setting_takes_that_setting_alone(project: Path) -> None:
+    entry = "LANG=C bash scripts/check.sh"
+    assert ran("LANG=C bash scripts/check.sh", project, entry)
+    assert not ran("LANG=tr_TR bash scripts/check.sh", project, entry)
+    assert not ran("bash scripts/check.sh", project, entry)
