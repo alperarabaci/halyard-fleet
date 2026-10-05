@@ -1207,3 +1207,34 @@ def test_runs_that_are_not_a_list_ask_rather_than_fail() -> None:
 
     assert project.runs == ()
     assert project.runs_refused
+
+
+def test_a_project_setting_at_the_top_of_the_file_is_named_and_placed(tmp_path) -> None:
+    """Found on a Mac mini: `runs:` written flush left, every command in it
+    still asking, and nothing said why."""
+    from halyard.core.config_file import stray_keys
+
+    (tmp_path / "halyard.yaml").write_text(
+        "projects:\n  alpha-engine:\n    path: /x\n"
+        "runs:\n  - bash scripts/check-work-item-reference.sh --base main\n"
+        "upkeep:\n  runs-advice: {days: 14}\n"
+        "upkep:\n  runs-advice: {days: 7}\n"
+    )
+
+    said = stray_keys(tmp_path)
+
+    assert [level for level, _ in said] == ["fail", "warn"]
+    assert "`runs:` is at the top of halyard.yaml" in said[0][1]
+    assert "beside its `path:`" in said[0][1]
+    assert "`upkep:` at the top of halyard.yaml is read by nothing" in said[1][1]
+
+
+def test_what_the_top_of_the_file_holds_says_nothing(tmp_path) -> None:
+    from halyard.core.config_file import stray_keys
+
+    (tmp_path / "halyard.yaml").write_text(
+        "settings: {}\nprojects: {}\nruntimes: {}\ntools: []\nwrites: []\nprompts: {}\nupkeep: {}\n"
+    )
+
+    assert stray_keys(tmp_path) == []
+    assert stray_keys(tmp_path / "nowhere") == []

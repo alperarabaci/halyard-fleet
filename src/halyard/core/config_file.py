@@ -1188,6 +1188,54 @@ def resolve_project(name: str, directory: Path | None = None) -> Path:
     raise ValueError(f"No project called {name!r}. The file describes: {known}")
 
 
+#: What `halyard.yaml` holds at its top level, each read by a module of its
+#: own. Anything else there is read by nothing — see `stray_keys`.
+TOP_LEVEL = frozenset({"settings", "projects", "runtimes", "tools", "writes", "prompts", "upkeep"})
+
+
+def stray_keys(directory: Path | None = None) -> list[tuple[str, str]]:
+    """Each key at the top of `halyard.yaml` that nothing reads, as a
+    `(level, text)` line for `doctor`.
+
+    A project's own setting written there is the likely one, and the worse:
+    `fail`, naming where it belongs. Found on a Mac mini: a `runs:` list flush
+    left left every command in it asking, and nothing anywhere said why — a
+    project's fields are checked strictly, and the top of the file not at all.
+    Any other key is a `warn`: read by nothing, whatever it was meant for.
+    """
+    path = find_config(directory)
+    if path is None:
+        return []
+    try:
+        loaded = yaml.safe_load(path.read_text(encoding="utf-8"))
+    except (OSError, yaml.YAMLError):
+        # Said where the file is read for real: the configuration will not load.
+        return []
+    if not isinstance(loaded, dict):
+        return []
+    said: list[tuple[str, str]] = []
+    for key in loaded:
+        name = str(key)
+        if name in TOP_LEVEL:
+            continue
+        if name in _PROJECT_FIELDS:
+            said.append(
+                (
+                    "fail",
+                    f"`{name}:` is at the top of {path.name}, where nothing reads it — it "
+                    "belongs under a project in `projects:`, beside its `path:`",
+                )
+            )
+        else:
+            said.append(
+                (
+                    "warn",
+                    f"`{name}:` at the top of {path.name} is read by nothing, so it is ignored",
+                )
+            )
+    return said
+
+
 def find_config(directory: Path | None = None) -> Path | None:
     """The YAML configuration, if there is one.
 
