@@ -789,7 +789,15 @@ def run() -> int:
     # files present, because a missing one produces a warning at the moment it
     # is needed — in a log nobody is reading — and then a compaction that
     # quietly carries nothing.
-    from halyard.core.config_file import missing_files
+    from halyard.core.config_file import missing_files, stray_keys
+
+    # Keys at the top of the file that nothing reads. A project's fields are
+    # checked strictly when the file is read; the top of it was not, and a
+    # `runs:` written flush left was ignored without a word.
+    for level, line in stray_keys():
+        if level == "fail":
+            problems += 1
+        print(f"{FAIL if level == 'fail' else WARN}{line}")
 
     try:
         described = described_projects()
