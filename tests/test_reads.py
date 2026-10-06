@@ -448,7 +448,10 @@ def test_a_projects_own_command_is_taken(entry: str) -> None:
         "bash *",
         "bash scripts/*.sh",
         "bash -c *",
-        "/bin/bash x *",
+        "/bin/bash -x *",
+        "BASH_ENV=* bash scripts/check.sh *",
+        "LANG=C bash scripts/check.sh *",
+        "bash scripts/check.sh python -c *",
         "env *",
         "ssh host *",
         "docker exec db psql *",
@@ -527,3 +530,43 @@ def test_a_whole_entry_with_a_setting_takes_that_setting_alone(project: Path) ->
     assert ran("LANG=C bash scripts/check.sh", project, entry)
     assert not ran("LANG=tr_TR bash scripts/check.sh", project, entry)
     assert not ran("bash scripts/check.sh", project, entry)
+
+
+ANY_BASE = "bash scripts/check-work-item-reference.sh --base *"
+
+
+def test_a_shell_handed_a_script_takes_a_pattern_in_its_arguments() -> None:
+    """What runs is still that one file, as `make test` runs the Makefile's."""
+    from halyard.core.reads import run_entry
+
+    kept = run_entry(ANY_BASE)
+
+    assert (kept.exactly, kept.script, kept.open) == (None, True, False)
+    assert kept.words == ("bash", "scripts/check-work-item-reference.sh", "--base", "*")
+
+
+@pytest.mark.parametrize("base", ["main", "HEAD", "origin/main"])
+def test_the_script_runs_with_any_base_inside_the_project(base: str, project: Path) -> None:
+    assert ran(f"bash scripts/check-work-item-reference.sh --base {base}", project, ANY_BASE)
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "bash scripts/check-work-item-reference.sh --base main -v",
+        "bash scripts/check-work-item-reference.sh --base main --fix",
+        "bash scripts/check-work-item-reference.sh --base -v",
+        "bash scripts/check-work-item-reference.sh --base ma*",
+        "bash scripts/check-work-item-reference.sh --base /etc/passwd",
+        "bash scripts/check-work-item-reference.sh --base ../elsewhere",
+        "bash scripts/check-work-item-reference.sh",
+        "bash scripts/other.sh --base main",
+        "BASH_ENV=x.sh bash scripts/check-work-item-reference.sh --base main",
+        "bash -c 'bash scripts/check-work-item-reference.sh --base main'",
+    ],
+)
+def test_after_a_script_each_star_is_one_word_and_nothing_more(command: str, project: Path) -> None:
+    """No word added, no option where a value goes, nothing the shell would
+    expand, nothing outside the project, no other script, no setting in front,
+    and no shell around it. A script's arguments are its own language."""
+    assert not ran(command, project, ANY_BASE)
