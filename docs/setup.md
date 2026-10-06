@@ -358,6 +358,14 @@ kept: `bash scripts/check-work-item-reference.sh --base main` lets exactly that
 through. Only exactly that: another argument, a setting in front of it, or a file
 fed to it is a card.
 
+A shell handed a script it names may take a `*` after the script, in the script's
+arguments: `bash scripts/check-work-item-reference.sh --base *` runs that one file
+with `--base main`, `--base origin/main`, or any other base inside the project.
+There each `*` is one word, never an option, and a last one takes nothing more —
+a script's arguments are its own, and nothing here can tell which of them write.
+Not for the script itself (`bash scripts/*.sh`), after an option (`bash -c *`), or
+with a setting in front: `BASH_ENV=` alone makes a shell run another file.
+
 The same list can be kept without editing the file, in Halyard's database:
 
 ```bash

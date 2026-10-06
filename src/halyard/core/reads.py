@@ -880,6 +880,11 @@ class Run:
     #: entry lets through that one command and nothing else: the same settings,
     #: the same words, nothing added. None for every other entry.
     exactly: tuple[str, ...] | None = None
+    #: A shell handed a script by name, with patterns in the script's
+    #: arguments. A script's arguments are its own language — nothing here can
+    #: tell its options from its values — so each pattern is one word, never an
+    #: option and never one the shell would expand, and a last `*` takes no more.
+    script: bool = False
 
 
 #: Commands that run another command, whatever is named after them. An entry
@@ -912,6 +917,10 @@ RUNS_ANYTHING = frozenset(
         "kubectl",
     }
 )
+
+#: The shells among those: handed a script file by name, one runs that file —
+#: the one named, whatever its arguments — as `make test` runs the Makefile's.
+SHELLS = frozenset({"bash", "sh", "zsh", "dash", "fish", "ksh"})
 
 #: Interpreters, which run code given them as an argument.
 INTERPRETERS = frozenset(
@@ -969,6 +978,12 @@ def run_entry(text: str) -> Run:
     command — `bash scripts/check-work-item-reference.sh --base main` — and
     somebody deciding about exactly it. That is kept, and lets that command
     through alone, word for word and setting for setting: see `Run.exactly`.
+
+    A shell handed a script it names may take patterns after it — the script's
+    arguments, `bash scripts/check-work-item-reference.sh --base *` — because
+    what runs is still that one file. Each is one word there: see `Run.script`.
+    Never a pattern for the script itself, an option before it (`bash -c *`),
+    or a setting in front: `BASH_ENV=` alone makes a shell run another file.
     """
     try:
         parts = _parse(text)
@@ -986,14 +1001,30 @@ def run_entry(text: str) -> Run:
     if not words:
         raise ValueError(f"`{text}` names no command")
     if why := _could_run_anything(words):
-        if not whole:
+        if whole:
+            return Run(
+                text=text,
+                words=tuple(words),
+                environment=frozenset(environment),
+                open=False,
+                exactly=tuple(assigned),
+            )
+        if not _a_script(words):
+            raise ValueError(f"`{text}` could run anything: {why}")
+        if assigned:
+            raise ValueError(
+                f"`{text}` could run anything: a setting in front of `{words[0]}` can make "
+                "it run another file — write it out whole, with no `*`"
+            )
+        # What runs is the script, so its arguments are judged as any program's.
+        if why := _could_run_anything(words[1:]):
             raise ValueError(f"`{text}` could run anything: {why}")
         return Run(
             text=text,
             words=tuple(words),
             environment=frozenset(environment),
             open=False,
-            exactly=tuple(assigned),
+            script=True,
         )
     opened = words[-1] == "*"
     return Run(
@@ -1001,6 +1032,17 @@ def run_entry(text: str) -> Run:
         words=tuple(words[:-1] if opened else words),
         environment=frozenset(environment),
         open=opened,
+    )
+
+
+def _a_script(words: Sequence[str]) -> bool:
+    """A shell handed a script file by name, with no option before it:
+    `bash scripts/check.sh`, never `bash -c` or `bash *`."""
+    return (
+        os.path.basename(words[0]) in SHELLS
+        and len(words) > 1
+        and not words[1].startswith("-")
+        and not _wild(words[1])
     )
 
 
@@ -1053,6 +1095,10 @@ def _matches(
     for pattern, word in zip(run.words, words, strict=False):
         if any(c in pattern for c in "*?["):
             if not fnmatch.fnmatchcase(word.text, pattern):
+                return False
+            if run.script and (word.globbed or word.text.startswith("-")):
+                # One word, and a value: not an option the script would take
+                # as one, and not a pattern the shell would make several of.
                 return False
             _check_path(word, where)
         elif word.text != pattern or word.globbed:
