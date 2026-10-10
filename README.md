@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/halyard-fleet-banner.png" alt="Halyard Fleet: Raise the sails. Ship the code." width="100%">
+</p>
+
 # Halyard Fleet
 
 [![CI](https://github.com/alperarabaci/halyard-fleet/actions/workflows/ci.yml/badge.svg)](https://github.com/alperarabaci/halyard-fleet/actions/workflows/ci.yml)
@@ -127,7 +131,7 @@ turn stops at a captcha — see [Known limitations](#known-limitations).
 | `/label` | put a label on the task this branch is for |
 | `/open` | start an agent that is not running — `claude`, `codex`, `gemini` |
 | `/status` | what each agent is, what is running, and how full its limits are |
-| `/stop` | end the turn sent from this chat into its agent's session, and close the cards it left open (Claude Code and Codex) |
+| `/stop` | end the turn running in this chat's agent session, and close the cards it left open — for Claude Code and Codex, a turn sent from Halyard |
 | `/doctor` | the same check as `halyard doctor`, read from a phone |
 | `/pause`, `/resume` | step out of the way, and come back |
 

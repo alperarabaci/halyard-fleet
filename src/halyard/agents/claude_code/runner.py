@@ -397,7 +397,7 @@ class ClaudeCodeRunner:
         """
         return self._turns.busy(session_id)
 
-    def stop(self, session_id: str) -> bool:
+    def stop(self, session_id: str, cwd: str | None = None) -> bool:
         """End the turn sent from here into that session. Whether there was one."""
         return self._turns.stop(session_id)
 

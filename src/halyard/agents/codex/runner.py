@@ -274,7 +274,7 @@ class CodexRunner:
     def busy(self, session_id: str) -> bool:
         return self._turns.busy(session_id)
 
-    def stop(self, session_id: str) -> bool:
+    def stop(self, session_id: str, cwd: str | None = None) -> bool:
         """End the turn sent from here into that session. Not one queued into a
         thread open in its app: that runs inside the app, and is stopped there."""
         return self._turns.stop(session_id)

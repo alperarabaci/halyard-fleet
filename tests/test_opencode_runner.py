@@ -387,3 +387,48 @@ async def test_an_opencode_that_is_not_there_is_no_answer(monkeypatch) -> None:
     monkeypatch.setattr("halyard.agents.opencode._port", lambda: 4096)
 
     assert await OpencodeRunner().ask("look") is None
+
+
+# --- stopping a session's turn ---------------------------------------------------
+
+
+def statuses(monkeypatch, listed: dict | None) -> list[tuple[str, str]]:
+    """opencode answering `/session/status` with `listed`, and every call made."""
+    called: list[tuple[str, str]] = []
+
+    def call(method: str, where: str, body, timeout):
+        called.append((method, where))
+        if where.split("?")[0].endswith("/session/status"):
+            return listed
+        return True
+
+    monkeypatch.setattr(OpencodeRunner, "_call", staticmethod(call))
+    monkeypatch.setattr("halyard.agents.opencode._port", lambda: 4096)
+    return called
+
+
+async def test_stop_aborts_a_session_that_is_working(monkeypatch) -> None:
+    """Waiting on a question nobody answered counts: that is the stuck turn
+    somebody wants to stop."""
+    called = statuses(monkeypatch, {"ses_1": {"type": "busy"}})
+
+    assert await OpencodeRunner().stop("ses_1", cwd="/repo") is True
+    assert called == [
+        ("GET", "http://127.0.0.1:4096/session/status?directory=%2Frepo"),
+        ("POST", "http://127.0.0.1:4096/session/ses_1/abort?directory=%2Frepo"),
+    ]
+
+
+async def test_stop_leaves_an_idle_session_alone(monkeypatch) -> None:
+    called = statuses(monkeypatch, {"ses_2": {"type": "busy"}, "ses_3": {"type": "idle"}})
+
+    assert await OpencodeRunner().stop("ses_1") is False
+    assert await OpencodeRunner().stop("ses_3") is False
+    assert [method for method, _ in called] == ["GET", "GET"]
+
+
+async def test_stop_with_opencode_unreachable_stops_nothing(monkeypatch) -> None:
+    called = statuses(monkeypatch, None)
+
+    assert await OpencodeRunner().stop("ses_1") is False
+    assert [method for method, _ in called] == ["GET"]

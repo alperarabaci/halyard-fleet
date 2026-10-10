@@ -926,7 +926,7 @@ class FakeRunner:
     def busy(self, session_id: str) -> bool:
         return session_id in self.working
 
-    def stop(self, session_id: str) -> bool:
+    def stop(self, session_id: str, cwd: str | None = None) -> bool:
         if session_id not in self.working:
             return False
         self.working.discard(session_id)
@@ -1047,7 +1047,7 @@ async def test_stop_with_nothing_running_says_so(tmp_path: Path) -> None:
     await channel._handle_message(typed_in("/stop", NAV_CHAT))
 
     assert runner.stops == []
-    assert "Nothing sent from here is running" in api.sent[-1]["text"]
+    assert "Nothing that can be stopped from here is running" in api.sent[-1]["text"]
 
 
 async def test_stop_says_when_a_runtime_cannot_be_stopped_yet(tmp_path: Path) -> None:
@@ -1058,6 +1058,24 @@ async def test_stop_says_when_a_runtime_cannot_be_stopped_yet(tmp_path: Path) ->
     await channel._handle_message(typed_in("/stop", NAV_CHAT))
 
     assert "cannot be stopped from here yet" in api.sent[-1]["text"]
+
+
+async def test_stop_waits_for_a_runtime_that_has_to_ask(tmp_path: Path) -> None:
+    """opencode's stop is a call to opencode, and it gets the session's
+    directory, which is how opencode tells one project's sessions from another's."""
+    channel, api, runner, _ = await wired(tmp_path)
+    asked: list[tuple[str, str | None]] = []
+
+    async def stop(session_id: str, cwd: str | None = None) -> bool:
+        asked.append((session_id, cwd))
+        return True
+
+    runner.stop = stop
+
+    await channel._handle_message(typed_in("/stop", NAV_CHAT))
+
+    assert [session for session, _ in asked] == ["session-nav"]
+    assert "Stopped." in api.sent[-1]["text"]
 
 
 async def test_each_seat_reaches_its_own_session(tmp_path: Path) -> None:
