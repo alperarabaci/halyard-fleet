@@ -43,8 +43,9 @@ from halyard.core.audit import (
 from halyard.core.config_file import ModelChoice, missing_files
 from halyard.core.events import RiskLevel, Role
 from halyard.core.gate import Gate
+from halyard.core.left_questions import LeftQuestions
 from halyard.core.policy import Policy
-from halyard.core.questions import Choice, QuestionStore
+from halyard.core.questions import Choice, QuestionRequest, QuestionStore
 from halyard.core.redaction import Redactor
 from halyard.core.registry import SessionRegistry
 from halyard.core.seats import configured
@@ -543,10 +544,27 @@ def create_app(settings: Settings, *, channel=None) -> FastAPI:
         gate=gate,
         seats=seats,
     )
+
     # Notices a turn that died where no hook fires — an API error mid-turn does
     # not fire `Stop`, so the reply relay never runs. Entirely off the approval
     # path: fed session paths as a side effect of requests it does not touch.
-    watcher = TranscriptWatcher(channel=resolved_channel, gate=gate)
+    async def deliver_answer(request: QuestionRequest, answer: str) -> bool:
+        """Hand an answer from the phone to the runtime whose question it was."""
+        answering = getattr(by_runtime.get(request.agent_id), "answer_question", None)
+        if answering is None or not request.tool_use_id:
+            return False
+        return await answering(request.session_id, request.tool_use_id, request.question, answer)
+
+    left_questions = LeftQuestions(
+        store=question_store,
+        audit=audit,
+        registry=registry,
+        channel=resolved_channel,
+        deliver=deliver_answer,
+        project=settings.project_name,
+        gate=gate,
+    )
+    watcher = TranscriptWatcher(channel=resolved_channel, gate=gate, questions=left_questions)
     # Writes the record a compaction is about to make unrecoverable, in a turn
     # of its own so the session it is about is never resumed or forked.
     known_projects = configured_projects()

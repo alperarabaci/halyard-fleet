@@ -2517,6 +2517,58 @@ async def test_a_typed_answer_is_not_forwarded_as_a_message(tmp_path: Path) -> N
     assert forwarded == []
 
 
+async def a_question_with_no_deadline(tmp_path: Path):
+    """Codex's, left waiting at the desk: free text, and no expiry."""
+    channel, api, qstore, request = await with_a_question(
+        tmp_path, agent_id="codex", question="Which branch?", options=[], expires=False
+    )
+    [(_, (_, card, _))] = channel._open_questions.items()
+    return channel, api, qstore, request, card
+
+
+async def test_a_card_with_no_deadline_says_it_waits_and_how_to_answer(tmp_path: Path) -> None:
+    _channel, api, _qstore, _request, _card = await a_question_with_no_deadline(tmp_path)
+
+    text = api.sent[-1]["text"]
+    assert "Open until it is answered, here or at the desk." in text
+    assert "Reply with your answer." in text
+
+
+async def test_a_question_with_no_deadline_takes_only_a_reply_to_its_card(
+    tmp_path: Path,
+) -> None:
+    """It may wait for hours. Any message typed into the chat meanwhile is a
+    new instruction, not its answer — only a reply to its card is that."""
+    channel, _api, qstore, request, card = await a_question_with_no_deadline(tmp_path)
+    forwarded = []
+
+    async def forward(*args, **kwargs) -> None:
+        forwarded.append(args[0])
+
+    channel._forward_to_session = forward  # type: ignore[assignment]
+
+    await channel._handle_message(typed_in("run the tests", CHAT))
+    still_open = [r.request_id for r in await qstore.list_open()]
+    await channel._handle_message(
+        {**typed_in("main", CHAT), "reply_to_message": {"message_id": card}}
+    )
+
+    assert forwarded == ["run the tests"]
+    assert still_open == [request.request_id]
+    assert (await qstore.wait_for(request.request_id)).answer == "main"
+
+
+async def test_a_question_answered_at_the_desk_closes_its_card(tmp_path: Path) -> None:
+    channel, api, _qstore, request, card = await a_question_with_no_deadline(tmp_path)
+
+    await channel.close_question(request, answer="main", by="at the desk")
+
+    assert api.edits[-1]["message_id"] == card
+    assert "main" in api.edits[-1]["text"]
+    assert "at the desk" in api.edits[-1]["text"]
+    assert channel._open_questions == {}
+
+
 async def test_a_stranger_cannot_answer_a_question(tmp_path: Path) -> None:
     channel, _api, qstore, request = await with_a_question(tmp_path)
 

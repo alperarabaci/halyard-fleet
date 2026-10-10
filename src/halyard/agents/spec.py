@@ -165,6 +165,24 @@ class Watching:
     #: interrupting for; this is asked, repeatedly, by somebody who wants a
     #: number and is not being interrupted by anything.
     usage: Callable[[list[str]], tuple[str, ...]] | None = None
+    #: The questions asked and the answers given in lines just appended: a
+    #: question the agent put to the person and left waiting, which no hook
+    #: reports. `None` for a runtime whose questions come another way — Claude
+    #: Code's block on a hook, and arrive through it.
+    questions: Callable[[list[str]], tuple[list[AskedQuestion], dict[str, str]]] | None = None
+
+
+@dataclass(frozen=True)
+class AskedQuestion:
+    """A question an agent asked a person and left waiting in its chat.
+
+    `id` is the runtime's own name for it — the one its answer has to carry —
+    and `options` is empty for a question that takes free text.
+    """
+
+    id: str
+    title: str
+    options: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
