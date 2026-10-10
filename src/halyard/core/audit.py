@@ -140,6 +140,10 @@ def approval_requested(request: ApprovalRequest, *, now: datetime | None = None)
             # did I approve" has the answer the screen had, not only its occasion.
             # Absent otherwise, so every other record keeps exactly its shape.
             **({"asks": request.asks, "patterns": list(request.patterns)} if request.asks else {}),
+            # The chat's own approval setting and the hook that asked, when the
+            # bridge said: what the agent itself would have asked is countable.
+            **({"permission_mode": request.permission_mode} if request.permission_mode else {}),
+            **({"hook_event": request.hook_event} if request.hook_event else {}),
         },
     )
 

@@ -290,7 +290,19 @@ def build_body(payload: dict) -> dict:
         # bounded: a bare command on a phone is a thing to approve with the
         # intent guessed from the shell.
         "reason": _context(tool_input, transcript),
+        # The approval setting the chat itself is in, and which hook asked:
+        # `PreToolUse` is Halyard's own gate, `PermissionRequest` is the agent
+        # asking because its own setting says to. Kept beside the card, so
+        # how many cards the chat's own setting would have asked for can be
+        # counted rather than guessed.
+        "permission_mode": _text(payload.get("permission_mode")),
+        "hook_event": _text(payload.get("hook_event_name")),
     }
+
+
+def _text(value: object) -> str | None:
+    """A short string from the payload, or None. Bounded: it is a label."""
+    return value[:64] if isinstance(value, str) and value else None
 
 
 def ask(url: str, body: dict, timeout: float, endpoint: str = "/v1/approvals") -> dict:

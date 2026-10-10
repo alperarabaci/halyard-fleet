@@ -124,6 +124,12 @@ class ApprovalRequestBody(BaseModel):
     #: the command itself. See `ApprovalRequest.asks`.
     asks: str | None = None
     patterns: list[str] | None = None
+    #: The approval setting the agent's own chat is in (`permission_mode` in
+    #: its hook payload), and the hook that asked. Recorded with the card.
+    #: Not bounded here: a value refused by validation would be a denial, and
+    #: these decide nothing. The service cuts them short.
+    permission_mode: str | None = None
+    hook_event: str | None = None
 
 
 class AnsweredBody(BaseModel):
@@ -728,6 +734,8 @@ def create_app(settings: Settings, *, channel=None) -> FastAPI:
             asks=body.asks,
             patterns=body.patterns,
             file_paths=body.file_paths,
+            permission_mode=body.permission_mode,
+            hook_event=body.hook_event,
         )
         return ApprovalResponse(
             decision=outcome.decision,
