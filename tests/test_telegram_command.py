@@ -38,6 +38,7 @@ COMMANDS = {
 class FakeApi:
     def __init__(self) -> None:
         self.sent: list[dict] = []
+        self.edits: list[dict] = []
 
     async def open(self) -> None: ...
     async def close(self) -> None: ...
@@ -48,6 +49,7 @@ class FakeApi:
         return {"message_id": len(self.sent) + 100}
 
     async def edit_message_text(self, chat_id, message_id, text, **kwargs):
+        self.edits.append({"message_id": message_id, "text": text})
         return {"message_id": message_id}
 
     async def answer_callback_query(self, callback_query_id, *, text=None): ...
@@ -86,7 +88,7 @@ def pressed(name: str, *, user: str = APPROVER) -> dict:
         "id": "cb1",
         "from": {"id": int(user)},
         "data": cards.choice_data("run", name),
-        "message": {"message_id": 5, "chat": {"id": CHAT}},
+        "message": {"message_id": 5, "chat": {"id": CHAT}, "text": "Which command?"},
     }
 
 
@@ -220,6 +222,19 @@ async def test_pressing_a_button_runs_that_command(wired) -> None:
     await finished(channel)
 
     assert "pressed" in api.sent[-1]["text"]
+
+
+async def test_the_card_is_spent_once_a_command_is_chosen(wired) -> None:
+    """Closed, saying which, so the same command cannot be started again by a
+    second press on a card still showing its buttons."""
+    channel, api, _ = wired
+    teach(channel, greet="echo pressed")
+
+    await tap(channel, pressed("greet"))
+    await finished(channel)
+
+    [closed] = [edit for edit in api.edits if edit["message_id"] == 5]
+    assert closed["text"] == "Which command?\n\n☑️ greet"
 
 
 async def test_somebody_else_pressing_it_runs_nothing(wired) -> None:
