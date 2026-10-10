@@ -83,7 +83,9 @@ class QuestionRequest(BaseModel):
     #: A short label for the question, when the tool gave one ("Format").
     header: str | None = None
     options: list[Choice]
-    expires_at: datetime
+    #: `None` for a question that waits until somebody answers it, because the
+    #: agent's own does: Codex Desktop leaves its question on the screen.
+    expires_at: datetime | None
     created_at: datetime
     #: Recognises a retried hook call as the same question rather than a second
     #: one, exactly as the approval store uses it.
@@ -174,6 +176,7 @@ class QuestionStore:
         tool_use_id: str | None = None,
         role: Role | None = None,
         session_name: str | None = None,
+        expires: bool = True,
     ) -> QuestionRequest:
         """Open a new question, or return the one already open for this call.
 
@@ -203,7 +206,7 @@ class QuestionStore:
                 role=role,
                 session_name=session_name,
                 created_at=now,
-                expires_at=now + self._ttl,
+                expires_at=now + self._ttl if expires else None,
             )
             loop = asyncio.get_running_loop()
             self._pending[request.request_id] = _Pending(
@@ -225,10 +228,14 @@ class QuestionStore:
             if pending.resolution is not None:
                 return pending.resolution
             future = pending.future
-            remaining = (pending.request.expires_at - self._clock()).total_seconds()
+            expires_at = pending.request.expires_at
+            if expires_at is None:
+                remaining = None
+            else:
+                remaining = max((expires_at - self._clock()).total_seconds(), 0.0)
 
         try:
-            return await asyncio.wait_for(asyncio.shield(future), timeout=max(remaining, 0.0))
+            return await asyncio.wait_for(asyncio.shield(future), timeout=remaining)
         except TimeoutError:
             return await self.give_up(
                 request_id,
@@ -260,7 +267,7 @@ class QuestionStore:
                 raise InvalidNonceError(request_id)
 
             now = self._clock()
-            if now >= pending.request.expires_at:
+            if _expired(pending.request, now):
                 # Close it out as unanswered so a late press cannot be followed
                 # by a second, luckier one — the same guard the approval store
                 # keeps, with the fail-open terminal state instead of a denial.
@@ -335,7 +342,7 @@ class QuestionStore:
             if (
                 pending.request.tool_use_id == tool_use_id
                 and pending.resolution is None
-                and now < pending.request.expires_at
+                and not _expired(pending.request, now)
             ):
                 return pending
         return None
@@ -349,3 +356,8 @@ class QuestionStore:
         ]
         for request_id in stale:
             del self._pending[request_id]
+
+
+def _expired(request: QuestionRequest, now: datetime) -> bool:
+    """Whether its deadline has passed. One with no deadline never expires."""
+    return request.expires_at is not None and now >= request.expires_at

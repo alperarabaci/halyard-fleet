@@ -267,8 +267,12 @@ def render_question(request: QuestionRequest, *, now: datetime) -> str:
         lines.append(f"<b>{index}.</b> {html.escape(option.label)}{tail}")
     lines += [
         "",
-        "<i>Tap an option, or reply with your own answer.</i>",
-        f"Expires in {format_remaining(request.expires_at, now)}",
+        "<i>Tap an option, or reply with your own answer.</i>"
+        if request.options
+        else "<i>Reply with your answer.</i>",
+        f"Expires in {format_remaining(request.expires_at, now)}"
+        if request.expires_at is not None
+        else "Open until it is answered, here or at the desk.",
     ]
     return _fit(lines)
 

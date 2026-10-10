@@ -1163,7 +1163,8 @@ class TelegramChannel:
             # "Other" path. The session is blocked waiting on it, so this is what
             # the words are for; a normal forward could not run anyway. Checked
             # before anything else for that reason.
-            if here and await self._answer_open_question_with_text(here, text, user_id):
+            replied_to = (message.get("reply_to_message") or {}).get("message_id")
+            if here and await self._answer_open_question_with_text(here, text, user_id, replied_to):
                 return
             # A value a command asked for takes the next message in its chat,
             # before a seat could: it was asked for a moment ago, right here.
@@ -4836,7 +4837,9 @@ class TelegramChannel:
             request, message_id, chat_id, nonce, answer, f"tg:{user_id}", handle, query_id
         )
 
-    async def _answer_open_question_with_text(self, here: str, text: str, user_id: str) -> bool:
+    async def _answer_open_question_with_text(
+        self, here: str, text: str, user_id: str, replied_to: int | None = None
+    ) -> bool:
         """Answer the question open in this chat with a typed reply.
 
         The "Other" path the tool always offers, and the reason a question card
@@ -4847,7 +4850,7 @@ class TelegramChannel:
         Returns whether a question was answered, so the caller knows not to treat
         the message as ordinary chat.
         """
-        entry = self._oldest_open_question_in(here)
+        entry = self._question_replied_to(here, replied_to) or self._oldest_open_question_in(here)
         if entry is None:
             return False
         handle, (request, message_id, chat_id) = entry
@@ -4900,6 +4903,16 @@ class TelegramChannel:
         await self._settle_question_card(request, message_id, chat_id, answer, actor)
         await self._dismiss(query_id, "Answered.")
 
+    async def close_question(self, request: QuestionRequest, *, answer: str, by: str) -> None:
+        """Take the buttons off a question answered somewhere else, saying what
+        was answered there, so the phone stops asking a settled question."""
+        handle = cards.question_handle_of(request)
+        entry = self._open_questions.pop(handle, None)
+        if entry is None:
+            return
+        _, message_id, chat_id = entry
+        await self._settle_question_card(request, message_id, chat_id, answer, by)
+
     async def _settle_question_card(
         self,
         request: QuestionRequest,
@@ -4923,18 +4936,41 @@ class TelegramChannel:
     def _oldest_open_question_in(
         self, chat_id: str
     ) -> tuple[str, tuple[QuestionRequest, int, str]] | None:
-        """The longest-waiting question routed to this chat, if any."""
+        """The longest-waiting question routed to this chat, if any.
+
+        Only one with a deadline. A question with none — Codex's, waiting at
+        the desk for as long as it takes — would otherwise take every message
+        typed into the chat from then on as its answer, so it is answered by
+        replying to its card instead. See `_question_replied_to`.
+        """
         self._forget_expired_questions()
         candidates = [
-            (handle, entry) for handle, entry in self._open_questions.items() if entry[2] == chat_id
+            (handle, entry)
+            for handle, entry in self._open_questions.items()
+            if entry[2] == chat_id and entry[0].expires_at is not None
         ]
         if not candidates:
             return None
         return min(candidates, key=lambda item: item[1][0].created_at)
 
+    def _question_replied_to(
+        self, chat_id: str, replied_to: int | None
+    ) -> tuple[str, tuple[QuestionRequest, int, str]] | None:
+        """The open question whose card this message replies to, if any."""
+        if replied_to is None:
+            return None
+        for handle, entry in self._open_questions.items():
+            if entry[2] == chat_id and entry[1] == replied_to:
+                return handle, entry
+        return None
+
     def _forget_expired_questions(self) -> None:
         now = self._clock()
-        for handle in [h for h, (r, _, _) in self._open_questions.items() if now >= r.expires_at]:
+        for handle in [
+            h
+            for h, (r, _, _) in self._open_questions.items()
+            if r.expires_at is not None and now >= r.expires_at
+        ]:
             del self._open_questions[handle]
 
     def _forget_expired(self) -> None:

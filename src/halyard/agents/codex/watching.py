@@ -25,6 +25,7 @@ from collections.abc import Iterable
 from datetime import datetime
 from pathlib import Path
 
+from halyard.agents.codex import questions
 from halyard.agents.spec import Alert, Watching
 
 #: Where a window is worth mentioning, and where it is worth an alarm. Two
@@ -54,20 +55,29 @@ def home() -> Path:
 
 
 def transcript(session_id: str, root: Path) -> Path | None:
-    """This session's rollout, by id.
+    """The rollout this session is being written to now, by id.
 
     Codex files its rollouts by date and names them
     `rollout-<timestamp>-<session_id>.jsonl`, so the id is a suffix rather than
     the whole name — which is why this is the runtime's own business and not
     something core could have guessed.
+
+    And the Desktop app moves a thread on to a new file every so often, named
+    `rollout-<timestamp>-<session_id>_<another id>.jsonl`. Measured on one
+    thread: five of them in a week, each starting fresh rather than repeating
+    the last — so the one being written is the newest, and reading the first
+    one found was reading a file nothing had touched for days.
     """
     try:
-        for found in root.glob(f"sessions/**/rollout-*-{session_id}.jsonl"):
-            if found.is_file():
-                return found
+        found = [
+            path
+            for pattern in (f"rollout-*-{session_id}.jsonl", f"rollout-*-{session_id}_*.jsonl")
+            for path in root.glob(f"sessions/**/{pattern}")
+            if path.is_file()
+        ]
+        return max(found, key=lambda path: path.stat().st_mtime) if found else None
     except OSError:
         return None
-    return None
 
 
 def _has_reset(resets_at: object, now: float) -> bool:
@@ -270,4 +280,6 @@ def usage(lines: Iterable[str]) -> tuple[str, ...]:
     return tuple(said)
 
 
-WATCHING = Watching(home=home(), transcript=transcript, alerts=alerts, usage=usage)
+WATCHING = Watching(
+    home=home(), transcript=transcript, alerts=alerts, usage=usage, questions=questions.read
+)

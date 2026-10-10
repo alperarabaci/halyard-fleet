@@ -377,6 +377,47 @@ class CodexRunner:
             env=os.environ.copy(),
         )
 
+    async def answer_question(
+        self, session_id: str, question: str, title: str, answer: str
+    ) -> bool:
+        """Answer a question the thread asked and left waiting. Whether Codex took it.
+
+        Queued into the thread, the way the Desktop app sends its own answers —
+        never resumed: the question is open in the app, and an answer is not a
+        turn of Halyard's. No model and no settings, for the same reason. See
+        `codex.questions` for the envelope.
+        """
+        if not self._binary:
+            return False
+        from halyard.agents.codex import questions
+
+        arguments = [self._binary, "queue", "--thread", session_id]
+        arguments += ["--message", questions.envelope(question, title, answer)]
+        try:
+            process = await asyncio.create_subprocess_exec(
+                *arguments,
+                stdin=asyncio.subprocess.DEVNULL,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+        except OSError:
+            logger.exception("Could not start codex to answer %s", session_id)
+            return False
+        try:
+            _, stderr = await asyncio.wait_for(process.communicate(), timeout=30)
+        except TimeoutError:
+            process.kill()
+            logger.error("Codex did not take an answer for %s within 30s", session_id)
+            return False
+        if process.returncode != 0:
+            logger.error(
+                "Codex refused an answer for %s: %s",
+                session_id,
+                (stderr or b"").decode("utf-8", "replace").strip()[-300:],
+            )
+            return False
+        return True
+
     def _queueing(self, session_id: str, text: str) -> list[str]:
         """The command that hands a message to a session somebody else is running.
 

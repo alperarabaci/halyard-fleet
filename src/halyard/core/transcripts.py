@@ -146,8 +146,12 @@ class TranscriptWatcher:
         poll_seconds: float = DEFAULT_POLL_SECONDS,
         idle_ttl: timedelta = DEFAULT_IDLE_TTL,
         roots: tuple[Path, ...] | None = None,
+        questions=None,
     ) -> None:
         self._channel = channel
+        # Where a question found in a transcript goes: `LeftQuestions`, or
+        # nothing, in which case questions are not read at all.
+        self._questions = questions
         self._gate = gate or Gate()
         self._clock = clock
         self._poll_seconds = poll_seconds
@@ -164,8 +168,14 @@ class TranscriptWatcher:
         agent_id: str | None,
         role: Role | None = None,
         session_name: str | None = None,
+        refresh: bool = False,
     ) -> None:
         """Record that a session is active, so its transcript is watched.
+
+        `refresh` looks for the file again, for a session already watched: a
+        Codex Desktop thread moves on to a new rollout every so often, and the
+        old one simply stops growing. Asked on the slow adoption timer, not on
+        every approval, because it is a directory walk.
 
         Best-effort and total: any bad input is ignored rather than raised on,
         because this is called from inside the approval endpoint and must not be
@@ -186,6 +196,14 @@ class TranscriptWatcher:
                 existing.role = role
                 existing.session_name = session_name
                 existing.last_noted = now
+                if refresh:
+                    moved = find_transcript(session_id, watching, self._roots)
+                    if moved is not None and moved != existing.transcript:
+                        # From its start: a new rollout begins afresh rather
+                        # than repeating the last, so all of it is news.
+                        logger.info("%s moved on to %s", session_id, moved.name)
+                        existing.transcript = moved
+                        existing.offset = 0
                 return
             # New session: start from the end of the file, so history is not
             # replayed and the first read is not a scan of the whole transcript.
@@ -278,6 +296,7 @@ class TranscriptWatcher:
                     agent_id=seat.runtime,
                     role=seat.role,
                     session_name=seat.session,
+                    refresh=True,
                 )
             except Exception:
                 logger.debug("Could not adopt the session for agent %s", seat.label, exc_info=True)
@@ -329,6 +348,21 @@ class TranscriptWatcher:
         for alert in watching.alerts(lines, watched.seen):
             watched.seen.add(alert.key)
             await self._relay(session_id, watched, alert.text)
+        if watching.questions is not None and self._questions is not None:
+            asked, answered = watching.questions(lines)
+            for question in asked:
+                if question.id in answered:
+                    # Asked and answered at the desk between two polls.
+                    continue
+                await self._questions.asked(
+                    session_id=session_id,
+                    agent_id=watched.agent_id,
+                    question=question,
+                    role=watched.role,
+                    session_name=watched.session_name,
+                )
+            for question, answer in answered.items():
+                await self._questions.answered(question, answer)
         # Bound the memory a long-lived session's seen-set can take.
         if len(watched.seen) > MAX_SEEN:
             watched.seen = set(list(watched.seen)[-MAX_SEEN:])
