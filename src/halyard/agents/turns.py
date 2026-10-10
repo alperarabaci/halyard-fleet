@@ -112,6 +112,12 @@ class Turns:
         # Strong references. A task held only by the event loop can be
         # collected mid-turn, which is a turn that stops for no reason.
         self._running: set[asyncio.Task] = set()
+        # The process each session's turn is running in, so it can be stopped.
+        self._processes: dict[str, asyncio.subprocess.Process] = {}
+        # How many times each session was stopped. A turn remembers the count
+        # it was sent under, so one queued behind a stopped turn sees the
+        # count has moved and never starts.
+        self._stops: dict[str, int] = defaultdict(int)
 
     def busy(self, session_id: str) -> bool:
         """Whether a turn this runner started is still going in that session."""
@@ -121,6 +127,23 @@ class Turns:
     def last_error(self, session_id: str) -> str | None:
         """Why the last delivery to this session failed, if one did."""
         return self._last_error.get(session_id)
+
+    def stop(self, session_id: str) -> bool:
+        """End the turn this runner has going in that session, and drop any
+        message waiting behind it. Whether there was anything to stop.
+
+        The whole process group, as for a one-shot turn: a turn runs commands
+        of its own, and ending the CLI alone would leave them running for a
+        turn nobody is waiting on. What it already did stays done.
+        """
+        if not self.busy(session_id):
+            return False
+        self._stops[session_id] += 1
+        process = self._processes.get(session_id)
+        if process is not None and process.returncode is None:
+            end_group(process)
+        logger.info("The %s turn in %s was stopped", self._runtime, session_id)
+        return True
 
     async def start(
         self,
@@ -142,8 +165,11 @@ class Turns:
         """
         loop = asyncio.get_running_loop()
         accepted: asyncio.Future[bool] = loop.create_future()
+        sent_under = self._stops[session_id]
         turn = loop.create_task(
-            self._turn(session_id, list(arguments), cwd, env, accepted, when_done, expected),
+            self._turn(
+                session_id, list(arguments), cwd, env, accepted, when_done, expected, sent_under
+            ),
             name=f"{self._runtime}-turn-{session_id}",
         )
         self._running.add(turn)
@@ -159,10 +185,18 @@ class Turns:
         accepted: asyncio.Future[bool],
         when_done: LateFailure | None,
         expected: Callable[[str], bool] | None = None,
+        sent_under: int = 0,
     ) -> None:
         try:
             async with self._locks[session_id]:
-                await self._run(session_id, arguments, cwd, env, accepted, when_done, expected)
+                if self._stops[session_id] != sent_under:
+                    # Waiting behind a turn somebody stopped: they wanted the
+                    # session quiet, not the next message started.
+                    logger.info("A message for %s was dropped: the session was stopped", session_id)
+                    return
+                await self._run(
+                    session_id, arguments, cwd, env, accepted, when_done, expected, sent_under
+                )
         except Exception:
             logger.exception("A turn in %s ended badly", session_id)
         finally:
@@ -181,6 +215,7 @@ class Turns:
         accepted: asyncio.Future[bool],
         when_done: LateFailure | None,
         expected: Callable[[str], bool] | None = None,
+        sent_under: int = 0,
     ) -> None:
         try:
             process = await asyncio.create_subprocess_exec(
@@ -193,11 +228,32 @@ class Turns:
                 stderr=asyncio.subprocess.PIPE,
                 cwd=cwd,
                 env=dict(env) if env is not None else None,
+                # A group of its own, so `stop` can end what the turn started.
+                start_new_session=True,
             )
         except OSError:
             logger.exception("Could not start the %s CLI", self._runtime)
             accepted.set_result(False)
             return
+        self._processes[session_id] = process
+        try:
+            await self._follow(session_id, process, accepted, when_done, expected, sent_under)
+        finally:
+            if self._processes.get(session_id) is process:
+                del self._processes[session_id]
+
+    async def _follow(
+        self,
+        session_id: str,
+        process: asyncio.subprocess.Process,
+        accepted: asyncio.Future[bool],
+        when_done: LateFailure | None,
+        expected: Callable[[str], bool] | None,
+        sent_under: int,
+    ) -> None:
+        if self._stops[session_id] != sent_under:
+            # Stopped in the moment between the lock and the process.
+            end_group(process)
 
         # `communicate` rather than `wait`, and started now rather than after
         # the window: these CLIs print steadily, and a pipe nobody is draining
@@ -214,6 +270,10 @@ class Turns:
             # that is draining the pipes.
             accepted.set_result(True)
         else:
+            if self._stops[session_id] != sent_under:
+                # It reached the session; somebody stopped it soon after.
+                accepted.set_result(True)
+                return
             reason = self._why(process.returncode, stdout, stderr)
             accepted.set_result(reason is None)
             if reason is not None:
@@ -242,6 +302,9 @@ class Turns:
                 "A turn in %s ran past %.0fs; giving up on it", session_id, self._wedged_after
             )
         else:
+            if self._stops[session_id] != sent_under:
+                # Stopped on purpose, and whoever stopped it has been told.
+                return
             reason = self._why(process.returncode, stdout, stderr)
             if reason is not None:
                 logger.error(

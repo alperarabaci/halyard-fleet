@@ -909,6 +909,7 @@ class FakeRunner:
         self.working: set[str] = set()
         self.models: dict[str, str] = {}
         self.efforts: dict[str, str] = {}
+        self.stops: list[str] = []
         self._works = works
 
     def options(self, session_id: str | None = None) -> dict[str, tuple[tuple[str, ...], bool]]:
@@ -924,6 +925,13 @@ class FakeRunner:
 
     def busy(self, session_id: str) -> bool:
         return session_id in self.working
+
+    def stop(self, session_id: str) -> bool:
+        if session_id not in self.working:
+            return False
+        self.working.discard(session_id)
+        self.stops.append(session_id)
+        return True
 
     def preferences(self, session_id: str) -> tuple[str | None, str | None]:
         return self.models.get(session_id) or self.default_model, self.efforts.get(session_id)
@@ -1014,6 +1022,42 @@ async def test_typing_in_a_seat_reaches_that_seat_s_session(tmp_path: Path) -> N
     # The message lands in the session itself, not a side conversation, so it
     # is in the history when that session is opened at a desk later.
     assert runner.sent == [("session-nav", "run the tests")]
+
+
+async def test_stop_ends_the_turn_sent_from_here_and_closes_its_cards(tmp_path: Path) -> None:
+    """Sent to the wrong agent: the turn is ended, and a card it left open is
+    closed rather than asking about a command nobody is waiting on."""
+    channel, api, runner, _ = await wired(tmp_path)
+    runner.working.add("session-nav")
+    request = await an_approval(channel._store, session_id="session-nav", role=Role.NAVIGATOR)
+    await channel.send_approval_request(request)
+
+    await channel._handle_message(typed_in("/stop", NAV_CHAT))
+
+    assert runner.stops == ["session-nav"]
+    assert (await channel._store.resolution_of(request.request_id)).decision is Decision.DENY
+    assert "⏹ STOPPED" in api.edits[-1]["text"]
+    assert "Stopped." in api.sent[-1]["text"]
+    assert "1 open card closed" in api.sent[-1]["text"]
+
+
+async def test_stop_with_nothing_running_says_so(tmp_path: Path) -> None:
+    channel, api, runner, _ = await wired(tmp_path)
+
+    await channel._handle_message(typed_in("/stop", NAV_CHAT))
+
+    assert runner.stops == []
+    assert "Nothing sent from here is running" in api.sent[-1]["text"]
+
+
+async def test_stop_says_when_a_runtime_cannot_be_stopped_yet(tmp_path: Path) -> None:
+    channel, api, runner, _ = await wired(tmp_path)
+    runner.stop = None
+    runner.working.add("session-nav")
+
+    await channel._handle_message(typed_in("/stop", NAV_CHAT))
+
+    assert "cannot be stopped from here yet" in api.sent[-1]["text"]
 
 
 async def test_each_seat_reaches_its_own_session(tmp_path: Path) -> None:

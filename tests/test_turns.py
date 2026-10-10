@@ -311,3 +311,92 @@ async def test_two_sessions_do_not_wait_for_each_other(monkeypatch) -> None:
 
     working.set()
     await settles()
+
+
+# --- stopping a turn from the phone -------------------------------------------
+
+
+def ending(monkeypatch, until: asyncio.Event) -> list:
+    """`end_group`, without a real process group: what it was handed, and the
+    turn ends as a killed one would."""
+    import halyard.agents.turns as running
+
+    ended: list = []
+
+    def end_group(process) -> None:
+        ended.append(process)
+        until.set()
+
+    monkeypatch.setattr(running, "end_group", end_group)
+    return ended
+
+
+async def test_a_stopped_turn_ends_and_is_not_reported_as_a_failure(monkeypatch) -> None:
+    """Sent to the wrong agent, say. Stopped on purpose is not a turn that
+    failed, and saying so on the phone would be a second wrong message."""
+    working = asyncio.Event()
+    process = FakeProcess(returncode=-9, until=working)
+    starting(monkeypatch, process)
+    ended = ending(monkeypatch, working)
+    failures: list[str] = []
+
+    async def told(reason: str) -> None:
+        failures.append(reason)
+
+    turning = turns()
+    await turning.start("s-1", ["codex", "exec", "resume"], when_done=told)
+    stopped = turning.stop("s-1")
+    await settles()
+
+    assert stopped is True
+    assert ended == [process]
+    assert turning.busy("s-1") is False
+    assert failures == []
+    assert turning.last_error("s-1") is None
+
+
+async def test_a_turn_stopped_before_it_was_accepted_still_reached(monkeypatch) -> None:
+    working = asyncio.Event()
+    starting(monkeypatch, FakeProcess(returncode=-9, until=working))
+    ending(monkeypatch, working)
+    turning = turns()
+
+    sending = asyncio.ensure_future(turning.start("s-1", ["claude", "-p"]))
+    await settles()
+    turning.stop("s-1")
+
+    assert await asyncio.wait_for(sending, timeout=1) is True
+
+
+async def test_a_message_waiting_behind_a_stopped_turn_never_starts(monkeypatch) -> None:
+    """Somebody stopping a session wants it quiet, not the next message begun."""
+    working = asyncio.Event()
+    started = starting(monkeypatch, FakeProcess(returncode=-9, until=working), FakeProcess())
+    ending(monkeypatch, working)
+    turning = turns()
+
+    await turning.start("s-1", ["claude", "-p", "first"])
+    queued = asyncio.ensure_future(turning.start("s-1", ["claude", "-p", "second"]))
+    await settles()
+    turning.stop("s-1")
+
+    assert await asyncio.wait_for(queued, timeout=1) is False
+    assert len(started) == 1
+
+
+async def test_a_stopped_session_takes_the_next_message(monkeypatch) -> None:
+    working = asyncio.Event()
+    started = starting(monkeypatch, FakeProcess(returncode=-9, until=working), FakeProcess())
+    ending(monkeypatch, working)
+    turning = turns()
+
+    await turning.start("s-1", ["claude", "-p", "first"])
+    turning.stop("s-1")
+    await settles()
+
+    assert await turning.start("s-1", ["claude", "-p", "again"]) is True
+    assert len(started) == 2
+
+
+async def test_nothing_to_stop_says_so() -> None:
+    assert turns().stop("s-1") is False

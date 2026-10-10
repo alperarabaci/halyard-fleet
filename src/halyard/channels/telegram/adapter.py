@@ -111,6 +111,7 @@ POLL_RETRY_MAX_SECONDS = 30.0
 #: description at most 256. Anything else is rejected for the whole list.
 COMMANDS: tuple[tuple[str, str], ...] = (
     ("chat", "Send a message into this agent's session"),
+    ("stop", "Stop the turn sent into this agent's session from here"),
     ("forward", "Hand this chat's last reply to another agent"),
     ("inspect", "Run one of this project's inspections over this chat's last reply"),
     ("transition", "Take this chat's last reply to its next stage, as this project defines it"),
@@ -1221,6 +1222,9 @@ class TelegramChannel:
                 await self._say("Usage: <code>/chat &lt;message&gt;</code>", here, thread)
                 return
             await self._forward_to_session(argument, actor, here or "", thread)
+            return
+        if command == "stop":
+            await self._stop_turn(actor, here or "", thread)
             return
         if command == "to":
             # What is being handed over: the message this replies to, or the
@@ -2779,6 +2783,13 @@ class TelegramChannel:
         if running is None:
             return
         running.stopped_by = actor
+        await self._close_cards_of(session, actor, "the inspection")
+        logger.info("Inspection %s stopped by %s", running.name, actor)
+        running.turn.cancel()
+
+    async def _close_cards_of(self, session: str, actor: str, what: str) -> int:
+        """Deny and close every card a stopped turn still has open. How many."""
+        closed = 0
         for request, message_id, chat_id, _ in list(self._open.values()):
             if request.session_id != session:
                 continue
@@ -2788,11 +2799,47 @@ class TelegramChannel:
                 await self._store.deny(
                     request.request_id,
                     reason=ResolutionReason.USER,
-                    note=f"Denied: {actor} stopped the inspection that asked for this.",
+                    note=f"Denied: {actor} stopped {what} that asked for this.",
                 )
             await self._settle_card(request, message_id, chat_id, "stop", actor)
-        logger.info("Inspection %s stopped by %s", running.name, actor)
-        running.turn.cancel()
+            closed += 1
+        return closed
+
+    async def _stop_turn(self, actor: str, chat_id: str, thread_id: int | None) -> None:
+        """End the turn sent from here into this chat's session, and its cards.
+
+        Only a turn Halyard started. One typed at the desk, or queued into a
+        Codex thread open in its app, runs there and is stopped there — and a
+        runtime this cannot stop says so rather than pretending.
+        """
+        found = await self._session_for(chat_id)
+        if found is None:
+            await self._say("No agent session is tied to this chat.", chat_id, thread_id)
+            return
+        stopping = getattr(found.runner, "stop", None)
+        if stopping is None:
+            await self._say(
+                f"A turn in {html.escape(found.runner.id)} cannot be stopped from here yet.",
+                chat_id,
+                thread_id,
+            )
+            return
+        if not stopping(found.session_id):
+            await self._say(
+                "Nothing sent from here is running in that session. A turn typed at "
+                "the desk, or queued into a Codex thread open in its app, is stopped there.",
+                chat_id,
+                thread_id,
+            )
+            return
+        closed = await self._close_cards_of(found.session_id, actor, "the turn")
+        logger.info("The turn in %s was stopped by %s", found.session_id, actor)
+        cards_said = f" {closed} open card{'s' if closed != 1 else ''} closed." if closed else ""
+        await self._say(
+            f"⏹ <b>Stopped.</b> What it already did stays done.{cards_said}",
+            chat_id,
+            thread_id,
+        )
 
     async def _reach_quietly(self, found: Project):
         """The forge and the task this project's branch is for, or None.
@@ -3999,7 +4046,7 @@ class TelegramChannel:
             # until the turn before it finished. Silence is what makes people
             # think a message was lost.
             await self._say(
-                "⏳ Still working on the last one — yours is queued behind it.",
+                "⏳ Still working on the last one — yours is queued behind it. /stop ends both.",
                 chat_id,
                 thread_id,
             )
