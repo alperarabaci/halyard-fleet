@@ -607,6 +607,8 @@ class ApprovalService:
         asks: str | None = None,
         patterns: list[str] | None = None,
         file_paths: list[str] | None = None,
+        permission_mode: str | None = None,
+        hook_event: str | None = None,
     ) -> ApprovalOutcome:
         """Ask for permission, and answer. Never raises."""
         try:
@@ -626,6 +628,8 @@ class ApprovalService:
                 asks=asks,
                 patterns=patterns,
                 file_paths=file_paths,
+                permission_mode=permission_mode,
+                hook_event=hook_event,
             )
         except Exception:
             # The outer net. Anything not handled below still has to come out of
@@ -693,6 +697,8 @@ class ApprovalService:
         asks: str | None = None,
         patterns: list[str] | None = None,
         file_paths: list[str] | None = None,
+        permission_mode: str | None = None,
+        hook_event: str | None = None,
     ) -> ApprovalOutcome:
         project = project_name(project_dir, cwd, self._project)
         role = seat_of(role, session_name, self._seats)
@@ -809,6 +815,8 @@ class ApprovalService:
             project_dir=project_dir,
             redacted=prepared.full != command,
             expires=not (agent_id in self._questions_wait and tool_use_id),
+            permission_mode=(permission_mode or None) and permission_mode[:64],
+            hook_event=(hook_event or None) and hook_event[:64],
         )
 
         if request.expires_at is not None:

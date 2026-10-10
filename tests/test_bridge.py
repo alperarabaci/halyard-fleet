@@ -155,6 +155,9 @@ def test_the_payload_is_forwarded_without_being_reinterpreted() -> None:
         # before, which a Bash call does not have, so every card arrived as a
         # bare command with the intent left to be guessed from the shell.
         "reason": "Stop the stack",
+        # The chat's own approval setting, and the hook that asked.
+        "permission_mode": "default",
+        "hook_event": "PreToolUse",
     }
 
 
@@ -434,6 +437,31 @@ def test_a_slow_control_plane_does_not_hold_the_turn_open() -> None:
 
     assert result.returncode == 0
     assert result.stdout == ""
+
+
+@pytest.mark.parametrize(
+    ("payload", "hook"),
+    [(PAYLOAD, "PreToolUse"), (PERMISSION_PAYLOAD, "PermissionRequest")],
+)
+def test_the_bridge_says_which_setting_the_chat_is_in_and_which_hook_asked(
+    payload: dict, hook: str
+) -> None:
+    """So the cards the chat's own setting would have asked for — the ones
+    that came by `PermissionRequest` — can be counted against Halyard's own."""
+    with control_plane(body={"decision": "allow", "reason": "ok"}) as (url, received):
+        run(BRIDGE, payload, HALYARD_URL=url)
+
+    assert received[0]["permission_mode"] == "default"
+    assert received[0]["hook_event"] == hook
+
+
+def test_a_payload_without_a_mode_sends_none() -> None:
+    bare = {k: v for k, v in PAYLOAD.items() if k not in ("permission_mode", "hook_event_name")}
+    with control_plane(body={"decision": "allow", "reason": "ok"}) as (url, received):
+        run(BRIDGE, bare, HALYARD_URL=url)
+
+    assert received[0]["permission_mode"] is None
+    assert received[0]["hook_event"] is None
 
 
 def test_the_bridge_reports_which_project_the_call_came_from() -> None:

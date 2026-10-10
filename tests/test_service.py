@@ -156,6 +156,26 @@ async def test_an_approved_request_comes_back_allowed(tmp_path: Path) -> None:
     ]
 
 
+async def test_a_card_keeps_the_chat_s_own_setting_and_the_hook_that_asked(
+    tmp_path: Path,
+) -> None:
+    """Counted later against Halyard's own: which cards the chat's setting
+    would have asked for anyway. Absent when the bridge did not say."""
+    service, _, sink = build_service(tmp_path)
+    await sink.open()
+
+    await ask(service, "git status", permission_mode="default", hook_event="PermissionRequest")
+    await ask(service, "git log", tool_use_id="toolu_2")
+    first, second = [
+        r.detail for r in await sink.read_all() if r.action is AuditAction.APPROVAL_REQUESTED
+    ]
+
+    assert first["permission_mode"] == "default"
+    assert first["hook_event"] == "PermissionRequest"
+    assert "permission_mode" not in second
+    assert "hook_event" not in second
+
+
 async def test_a_turn_of_halyard_s_own_is_asked_like_anyone_and_seen_working_nowhere(
     tmp_path: Path,
 ) -> None:

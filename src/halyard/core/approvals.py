@@ -135,6 +135,12 @@ class ApprovalRequest(BaseModel):
     #: Whether redaction changed the command. Kept is always the redacted
     #: copy, so one that was changed cannot be judged again from the log.
     redacted: bool = False
+    #: The approval setting the agent's own chat was in, as its hook payload
+    #: names it (`permission_mode`), and the hook that asked: `PreToolUse` is
+    #: Halyard's gate, `PermissionRequest` the agent asking by its own setting.
+    #: Recorded so what the chat itself would have asked can be counted.
+    permission_mode: str | None = None
+    hook_event: str | None = None
 
 
 class ApprovalResolution(BaseModel):
@@ -228,6 +234,8 @@ class ApprovalStore:
         project_dir: str | None = None,
         redacted: bool = False,
         expires: bool = True,
+        permission_mode: str | None = None,
+        hook_event: str | None = None,
     ) -> ApprovalRequest:
         """Open a new approval, or return the one already open for this tool call.
 
@@ -269,6 +277,8 @@ class ApprovalStore:
                 cwd=cwd,
                 project_dir=project_dir,
                 redacted=redacted,
+                permission_mode=permission_mode,
+                hook_event=hook_event,
                 created_at=now,
                 expires_at=now + self._ttl if expires else None,
             )
