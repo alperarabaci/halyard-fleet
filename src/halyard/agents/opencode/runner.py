@@ -152,6 +152,32 @@ class OpencodeRunner:
     def busy(self, session_id: str) -> bool:
         return session_id in self._busy
 
+    async def stop(self, session_id: str, cwd: str | None = None) -> bool:
+        """End the turn going in that session. Whether one was going.
+
+        Asked of opencode, not of this runner: a message goes in by
+        `PROMPT`, which answers at once, so nothing here knows whether its turn
+        is still running — and a turn stuck on a question nobody answered is
+        exactly the one somebody wants to stop. `/session/status` lists every
+        session that is not idle; `abort` ends one, read out of 1.18.35's own
+        description as stopping "any ongoing AI processing or command
+        execution". Whoever started the turn: this chat is that session's.
+        """
+        from halyard.agents import opencode
+
+        base = f"http://127.0.0.1:{opencode._port()}"
+        where = f"?directory={quote(cwd, safe='')}" if cwd else ""
+        statuses = await asyncio.to_thread(
+            self._call, "GET", f"{base}/session/status{where}", None, TIMEOUT
+        )
+        status = statuses.get(session_id) if isinstance(statuses, dict) else None
+        if not isinstance(status, dict) or status.get("type") in (None, "idle"):
+            return False
+        aborted = await asyncio.to_thread(
+            self._call, "POST", f"{base}/session/{session_id}/abort{where}", {}, TIMEOUT
+        )
+        return aborted is not None
+
     async def send(
         self,
         session_id: str,

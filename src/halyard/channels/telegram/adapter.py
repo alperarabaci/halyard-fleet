@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import html
+import inspect
 import io
 import logging
 import re
@@ -111,7 +112,7 @@ POLL_RETRY_MAX_SECONDS = 30.0
 #: description at most 256. Anything else is rejected for the whole list.
 COMMANDS: tuple[tuple[str, str], ...] = (
     ("chat", "Send a message into this agent's session"),
-    ("stop", "Stop the turn sent into this agent's session from here"),
+    ("stop", "Stop the turn running in this agent's session"),
     ("forward", "Hand this chat's last reply to another agent"),
     ("inspect", "Run one of this project's inspections over this chat's last reply"),
     ("transition", "Take this chat's last reply to its next stage, as this project defines it"),
@@ -2808,9 +2809,11 @@ class TelegramChannel:
     async def _stop_turn(self, actor: str, chat_id: str, thread_id: int | None) -> None:
         """End the turn sent from here into this chat's session, and its cards.
 
-        Only a turn Halyard started. One typed at the desk, or queued into a
-        Codex thread open in its app, runs there and is stopped there — and a
-        runtime this cannot stop says so rather than pretending.
+        Claude Code and Codex: only a turn Halyard started. One typed at the
+        desk, or queued into a Codex thread open in its app, runs there and is
+        stopped there. opencode: whatever turn its session has going, which
+        opencode itself knows. A runtime this cannot stop says so rather than
+        pretending.
         """
         found = await self._session_for(chat_id)
         if found is None:
@@ -2824,10 +2827,14 @@ class TelegramChannel:
                 thread_id,
             )
             return
-        if not stopping(found.session_id):
+        stopped = stopping(found.session_id, cwd=found.cwd)
+        if inspect.isawaitable(stopped):
+            stopped = await stopped
+        if not stopped:
             await self._say(
-                "Nothing sent from here is running in that session. A turn typed at "
-                "the desk, or queued into a Codex thread open in its app, is stopped there.",
+                "Nothing that can be stopped from here is running in that session. A "
+                "Claude Code or Codex turn typed at the desk, or queued into a Codex "
+                "thread open in its app, is stopped there.",
                 chat_id,
                 thread_id,
             )
