@@ -80,24 +80,26 @@ def answer(answer: str = "PDF", question: str = QUESTION, title: str = "Which fo
 
 
 def test_a_question_written_twice_is_one_question() -> None:
-    found, answered = questions.read(asked())
+    reading = questions.read(asked())
 
-    assert [(q.id, q.title, q.options) for q in found] == [
+    assert [(q.id, q.title, q.options) for q in reading.asked] == [
         (QUESTION, "Which format?", ("PDF", "HTML"))
     ]
-    assert answered == {}
+    assert reading.answered == {}
+    assert reading.set_aside is False
 
 
 def test_a_question_without_options_takes_free_text() -> None:
-    [found], _ = questions.read(asked(title="Which branch?", options=()))
+    [found] = questions.read(asked(title="Which branch?", options=())).asked
 
     assert found.options == ()
 
 
 def test_an_answer_names_its_question() -> None:
-    _, answered = questions.read([answer("HTML")])
+    reading = questions.read([answer("HTML")])
 
-    assert answered == {QUESTION: "HTML"}
+    assert reading.answered == {QUESTION: "HTML"}
+    assert reading.set_aside is False, "an answer is not moving on"
 
 
 def test_the_desk_s_own_record_of_an_answer_counts_too() -> None:
@@ -116,7 +118,7 @@ def test_the_desk_s_own_record_of_an_answer_counts_too() -> None:
         }
     )
 
-    assert questions.read([line])[1] == {QUESTION: "PDF"}
+    assert questions.read([line]).answered == {QUESTION: "PDF"}
 
 
 def test_the_answer_is_the_envelope_the_desktop_writes() -> None:
@@ -138,7 +140,50 @@ def test_an_ordinary_message_is_not_an_answer() -> None:
         }
     )
 
-    assert questions.read([line, "not json"]) == ([], {})
+    reading = questions.read([line, "not json"])
+
+    assert (reading.asked, reading.answered) == ((), {})
+
+
+def said(text: str) -> str:
+    """A user message, as the rollout records one typed in the chat."""
+    return json.dumps(
+        {
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "role": "user",
+                "content": [{"type": "input_text", "text": text}],
+            },
+        },
+        separators=(",", ":"),
+    )
+
+
+def test_writing_something_else_sets_the_questions_before_it_aside() -> None:
+    """Measured: three questions nobody answered, each followed by a message
+    the person typed, and the app no longer showing any of them."""
+    reading = questions.read([*asked(), said("carry on with the tests")])
+
+    assert reading.asked == ()
+    assert reading.set_aside is True
+
+
+def test_a_question_asked_after_the_message_is_still_open() -> None:
+    reading = questions.read([said("carry on"), *asked()])
+
+    assert [q.id for q in reading.asked] == [QUESTION]
+    assert reading.set_aside is True
+
+
+def test_what_codex_adds_as_a_user_message_is_not_the_person_moving_on() -> None:
+    """Every one it adds starts with a tag; none the person wrote did."""
+    reading = questions.read(
+        [*asked(), said("<environment_context>\n  <cwd>/repo</cwd>"), said("<turn_aborted>")]
+    )
+
+    assert [q.id for q in reading.asked] == [QUESTION]
+    assert reading.set_aside is False
 
 
 # --- finding the rollout being written --------------------------------------------
@@ -205,7 +250,7 @@ async def left(tmp_path: Path, *, delivered: bool = True, gate: Gate | None = No
 
 
 async def ask(carried: LeftQuestions) -> None:
-    [question], _ = questions.read(asked())
+    [question] = questions.read(asked()).asked
     await carried.asked(session_id=SESSION, agent_id="codex", question=question)
 
 
@@ -277,6 +322,21 @@ async def test_an_answer_that_did_not_reach_codex_is_said(tmp_path: Path) -> Non
     assert any("did not reach" in text for text in channel.messages)
 
 
+async def test_moving_on_closes_the_card_unanswered(tmp_path: Path) -> None:
+    carried, _store, channel, given = await left(tmp_path)
+    await ask(carried)
+    [card] = channel.questions
+
+    await carried.set_aside("another-session")
+    untouched = list(channel.closed)
+    await carried.set_aside(SESSION)
+    await settles()
+
+    assert untouched == []
+    assert channel.closed == [(card.request_id, None, "at the desk")]
+    assert given == []
+
+
 async def test_a_paused_gate_cards_nothing(tmp_path: Path) -> None:
     gate = Gate()
     await gate.pause("tg:1")
@@ -296,6 +356,10 @@ class Handler:
     def __init__(self) -> None:
         self.carded: list[str] = []
         self.closed: list[tuple[str, str]] = []
+        self.set_aside_in: list[str] = []
+
+    async def set_aside(self, session_id: str) -> None:
+        self.set_aside_in.append(session_id)
 
     async def asked(self, **kwargs) -> None:
         self.carded.append(kwargs["question"].id)
@@ -408,3 +472,51 @@ async def test_an_answer_is_queued_into_the_thread_and_nothing_more(
             questions.envelope(QUESTION, "Which format?", "PDF"),
         ]
     ]
+
+
+async def test_a_question_waiting_before_watching_began_is_carded(tmp_path: Path) -> None:
+    """Asked before Halyard started, and still waiting: found once, from the
+    start of the file, while one the person moved on from is not."""
+    handler = Handler()
+    w = watching(tmp_path, handler)
+    file = rollout(tmp_path, f"rollout-2026-10-10T10-00-00-{SESSION}.jsonl")
+    append(file, *asked(call="call_old"), said("never mind"), *asked())
+
+    w.note(session_id=SESSION, agent_id="codex")
+    await w.poll_once()
+    await w.poll_once()
+
+    assert handler.carded == [QUESTION]
+
+
+async def test_a_line_longer_than_a_read_is_stepped_over(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Measured: a 772 KB line held every poll at the same place, and two
+    questions asked an hour later were never seen."""
+    from halyard.core import transcripts
+
+    monkeypatch.setattr(transcripts, "MAX_READ_BYTES", 1024)
+    handler = Handler()
+    w = watching(tmp_path, handler)
+    file = rollout(tmp_path, f"rollout-2026-10-10T10-00-00-{SESSION}.jsonl")
+    w.note(session_id=SESSION, agent_id="codex")
+
+    append(file, json.dumps({"type": "event_msg", "payload": {"output": "x" * 5000}}))
+    append(file, *asked())
+    for _ in range(4):
+        await w.poll_once()
+
+    assert handler.carded == [QUESTION]
+
+
+async def test_writing_something_else_reaches_the_handler(tmp_path: Path) -> None:
+    handler = Handler()
+    w = watching(tmp_path, handler)
+    file = rollout(tmp_path, f"rollout-2026-10-10T10-00-00-{SESSION}.jsonl")
+    w.note(session_id=SESSION, agent_id="codex")
+
+    append(file, said("do the other thing first"))
+    await w.poll_once()
+
+    assert handler.set_aside_in == [SESSION]
