@@ -5,6 +5,7 @@ service's own rules, and a model's proposals checked and counted by Halyard."""
 from __future__ import annotations
 
 import asyncio
+import functools
 import hashlib
 import json
 from datetime import UTC, datetime, timedelta
@@ -344,6 +345,11 @@ def machine(tmp_path: Path, project, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.setattr(upkeep_cli, "_rules", lambda given: ON)
     monkeypatch.setattr(
         upkeep_cli.upkeep, "load", lambda name: upkeep.Job(name, model="opus", timeout=5)
+    )
+    # The cards are written on NOW's day, so the window is read from it too.
+    # On the clock, every one of them fell out of it fourteen days later.
+    monkeypatch.setattr(
+        upkeep_cli.runs_advice, "gather", functools.partial(runs_advice.gather, now=NOW)
     )
     return database
 
