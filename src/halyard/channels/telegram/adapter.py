@@ -4535,6 +4535,8 @@ class TelegramChannel:
                 await self._label_task(value, here or "", message.get("message_thread_id"))
                 return
             if what == "run":
+                # Spent once a command is chosen, as a transition's card is.
+                await self._close_card(message, here, f"☑️ {html.escape(value)}")
                 await self._run_command(value, here or "", message.get("message_thread_id"))
                 return
             if what in ("inspect", "check"):
