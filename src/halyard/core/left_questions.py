@@ -107,8 +107,21 @@ class LeftQuestions:
         transcript: that card is settled already, and stays as it is.
         """
         request_id = self._carded.pop(question, None)
-        if request_id is None:
-            return
+        if request_id is not None:
+            await self._close(request_id, answer)
+
+    async def set_aside(self, session_id: str) -> None:
+        """The person wrote something else in that chat, at the desk or from
+        here, so every question it asked before is over unanswered."""
+        for question, request_id in list(self._carded.items()):
+            request = await self._store.get(request_id)
+            if request is None or request.session_id != session_id:
+                continue
+            del self._carded[question]
+            await self._close(request_id, None)
+
+    async def _close(self, request_id: str, answer: str | None) -> None:
+        """Settle a card from the agent's side, unless the phone already did."""
         request = await self._store.get(request_id)
         if request is None:
             return

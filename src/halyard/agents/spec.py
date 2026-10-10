@@ -29,7 +29,7 @@ from __future__ import annotations
 
 import importlib
 import shutil
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -169,7 +169,7 @@ class Watching:
     #: question the agent put to the person and left waiting, which no hook
     #: reports. `None` for a runtime whose questions come another way — Claude
     #: Code's block on a hook, and arrive through it.
-    questions: Callable[[list[str]], tuple[list[AskedQuestion], dict[str, str]]] | None = None
+    questions: Callable[[Iterable[str]], QuestionReading] | None = None
 
 
 @dataclass(frozen=True)
@@ -183,6 +183,20 @@ class AskedQuestion:
     id: str
     title: str
     options: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class QuestionReading:
+    """What some lines of a transcript say about questions left waiting.
+
+    `asked` holds only those still open at the end of the lines; `set_aside`
+    says the person wrote something else in the chat, which leaves every
+    question asked before it unanswered for good.
+    """
+
+    asked: tuple[AskedQuestion, ...] = ()
+    answered: dict[str, str] = field(default_factory=dict)
+    set_aside: bool = False
 
 
 @dataclass(frozen=True)

@@ -302,6 +302,19 @@ def render_question_resolved(
     )
 
 
+def render_question_set_aside(request: QuestionRequest) -> str:
+    """A question left unanswered because the conversation moved on."""
+    return _fit(
+        [
+            "↩️ <i>Not answered: the conversation moved on.</i>",
+            "",
+            f"Project: <code>{html.escape(request.project)}</code>",
+            "",
+            html.escape(request.question),
+        ]
+    )
+
+
 def question_keyboard(request: QuestionRequest) -> dict | None:
     """One button per option, each on its own row so a long label is not cut.
 

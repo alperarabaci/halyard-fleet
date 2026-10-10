@@ -4903,15 +4903,26 @@ class TelegramChannel:
         await self._settle_question_card(request, message_id, chat_id, answer, actor)
         await self._dismiss(query_id, "Answered.")
 
-    async def close_question(self, request: QuestionRequest, *, answer: str, by: str) -> None:
-        """Take the buttons off a question answered somewhere else, saying what
-        was answered there, so the phone stops asking a settled question."""
+    async def close_question(
+        self, request: QuestionRequest, *, answer: str | None, by: str
+    ) -> None:
+        """Take the buttons off a question settled somewhere else, saying what
+        was answered there — or that it was left for something else — so the
+        phone stops asking a settled question."""
         handle = cards.question_handle_of(request)
         entry = self._open_questions.pop(handle, None)
         if entry is None:
             return
         _, message_id, chat_id = entry
-        await self._settle_question_card(request, message_id, chat_id, answer, by)
+        if answer is not None:
+            await self._settle_question_card(request, message_id, chat_id, answer, by)
+            return
+        try:
+            await self._api.edit_message_text(
+                chat_id, message_id, cards.render_question_set_aside(request), reply_markup=None
+            )
+        except Exception:
+            logger.warning("Could not close the question card for %s", request.request_id)
 
     async def _settle_question_card(
         self,

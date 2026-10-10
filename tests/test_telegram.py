@@ -2569,6 +2569,18 @@ async def test_a_question_answered_at_the_desk_closes_its_card(tmp_path: Path) -
     assert channel._open_questions == {}
 
 
+async def test_a_question_the_conversation_moved_on_from_closes_unanswered(
+    tmp_path: Path,
+) -> None:
+    channel, api, _qstore, request, card = await a_question_with_no_deadline(tmp_path)
+
+    await channel.close_question(request, answer=None, by="at the desk")
+
+    assert api.edits[-1]["message_id"] == card
+    assert "Not answered: the conversation moved on." in api.edits[-1]["text"]
+    assert channel._open_questions == {}
+
+
 async def test_a_stranger_cannot_answer_a_question(tmp_path: Path) -> None:
     channel, _api, qstore, request = await with_a_question(tmp_path)
 
