@@ -303,6 +303,12 @@ class RuntimeSpec:
     #: Nothing runs unapproved either way, and the difference is worth printing
     #: because the person reading it is deciding whether to walk away.
     when_unanswered: str = ""
+    #: Whether this runtime's own question stays open until somebody answers
+    #: it, so a card for it does too. opencode's does: it waits on its screen
+    #: for as long as it takes. A card that expired after five minutes said
+    #: "timed out" on the phone while the question was still there, and left
+    #: nobody away from the desk a way to answer it.
+    question_waits: bool = False
     #: How `halyard verify` drives this runtime, when it can at all.
     verify: Verification | None = None
     #: How to watch this runtime's transcript for what it never reports. `None`

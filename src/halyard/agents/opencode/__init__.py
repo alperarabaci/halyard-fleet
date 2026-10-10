@@ -499,4 +499,5 @@ RUNTIME = RuntimeSpec(
         "  that cannot answer just leaves it for whoever is at the desk. So the\n"
         "  project keeps working with Halyard down — you answer it yourself."
     ),
+    question_waits=True,
 )

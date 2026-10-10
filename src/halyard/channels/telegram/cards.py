@@ -317,7 +317,9 @@ def question_keyboard(request: QuestionRequest) -> dict | None:
     return {"inline_keyboard": rows} if rows else None
 
 
-def format_remaining(expires_at: datetime, now: datetime) -> str:
+def format_remaining(expires_at: datetime | None, now: datetime) -> str:
+    if expires_at is None:
+        return "until answered"
     seconds = int((expires_at - now).total_seconds())
     if seconds <= 0:
         return "expired"
@@ -370,8 +372,15 @@ def render(request: ApprovalRequest, *, now: datetime, inspection: str | None = 
     ]
     if request.reason:
         lines += ["", f"Why: {html.escape(request.reason)}"]
-    lines += ["", f"Expires in {format_remaining(request.expires_at, now)}"]
+    lines += ["", _deadline(request, now)]
     return _fit(lines)
+
+
+def _deadline(request: ApprovalRequest, now: datetime) -> str:
+    """When the card stops taking an answer, or that it does not."""
+    if request.expires_at is None:
+        return "Open until it is answered, here or at the desk."
+    return f"Expires in {format_remaining(request.expires_at, now)}"
 
 
 def render_resolved(

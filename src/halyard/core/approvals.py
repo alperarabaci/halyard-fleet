@@ -48,6 +48,11 @@ def _default_clock() -> datetime:
     return datetime.now(UTC)
 
 
+def _expired(request: ApprovalRequest, now: datetime) -> bool:
+    """Whether its deadline has passed. One with no deadline never expires."""
+    return request.expires_at is not None and now >= request.expires_at
+
+
 class Decision(StrEnum):
     """The only two outcomes. There is no third, and no "pending" terminal state."""
 
@@ -94,7 +99,10 @@ class ApprovalRequest(BaseModel):
     command_summary: str
     command_full: str
     risk: RiskLevel
-    expires_at: datetime
+    #: `None` for a card that stays open until somebody answers it, because the
+    #: runtime's own question does: opencode keeps it on its screen for as long
+    #: as it takes, and a card that expired before it said something untrue.
+    expires_at: datetime | None
     created_at: datetime
     #: Claude Code's own per-tool-call identifier. Undocumented, but observed on
     #: every payload — see `docs/hook-payload-notes.md`. Used to recognise a
@@ -219,6 +227,7 @@ class ApprovalStore:
         cwd: str | None = None,
         project_dir: str | None = None,
         redacted: bool = False,
+        expires: bool = True,
     ) -> ApprovalRequest:
         """Open a new approval, or return the one already open for this tool call.
 
@@ -261,7 +270,7 @@ class ApprovalStore:
                 project_dir=project_dir,
                 redacted=redacted,
                 created_at=now,
-                expires_at=now + self._ttl,
+                expires_at=now + self._ttl if expires else None,
             )
             loop = asyncio.get_running_loop()
             self._pending[request.request_id] = _Pending(
@@ -283,13 +292,17 @@ class ApprovalStore:
             if pending.resolution is not None:
                 return pending.resolution
             future = pending.future
-            remaining = (pending.request.expires_at - self._clock()).total_seconds()
+            expires_at = pending.request.expires_at
+            if expires_at is None:
+                remaining = None
+            else:
+                remaining = max((expires_at - self._clock()).total_seconds(), 0.0)
 
         try:
             # Shielded so that the timeout cancels this wait without destroying
             # the future itself, which is still the channel's way of delivering
             # a decision that lost the race by a hair.
-            return await asyncio.wait_for(asyncio.shield(future), timeout=max(remaining, 0.0))
+            return await asyncio.wait_for(asyncio.shield(future), timeout=remaining)
         except TimeoutError:
             return await self.deny(
                 request_id,
@@ -328,7 +341,7 @@ class ApprovalStore:
                 raise InvalidNonceError(request_id)
 
             now = self._clock()
-            if now >= pending.request.expires_at:
+            if _expired(pending.request, now):
                 # Close it out as denied so a late press cannot be followed by
                 # a second, luckier one.
                 self._settle(
@@ -476,7 +489,7 @@ class ApprovalStore:
             if (
                 pending.request.tool_use_id == tool_use_id
                 and pending.resolution is None
-                and now < pending.request.expires_at
+                and not _expired(pending.request, now)
             ):
                 return pending
         return None

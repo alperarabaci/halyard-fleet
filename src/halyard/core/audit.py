@@ -129,7 +129,7 @@ def approval_requested(request: ApprovalRequest, *, now: datetime | None = None)
             "role": request.role.value if request.role else None,
             "reason": request.reason,
             "tool_use_id": request.tool_use_id,
-            "expires_at": request.expires_at.isoformat(),
+            "expires_at": request.expires_at.isoformat() if request.expires_at else None,
             # Where it ran, what it was judged against, and whether the command
             # above is less than what ran — so the log can be judged again later
             # by the rules of the day, and says when it cannot be.
