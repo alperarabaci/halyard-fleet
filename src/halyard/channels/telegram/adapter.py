@@ -4892,5 +4892,9 @@ class TelegramChannel:
         them anyway.
         """
         now = self._clock()
-        for handle in [h for h, (r, _, _, _) in self._open.items() if now >= r.expires_at]:
+        for handle in [
+            h
+            for h, (r, _, _, _) in self._open.items()
+            if r.expires_at is not None and now >= r.expires_at
+        ]:
             del self._open[handle]

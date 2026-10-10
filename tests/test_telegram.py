@@ -219,6 +219,31 @@ async def test_the_card_shows_what_is_needed_to_decide(setup) -> None:
     assert "Expires in" in text
 
 
+def test_a_card_with_no_deadline_says_it_stays_open() -> None:
+    """opencode's: its question waits on the screen, and so does the card."""
+    from halyard.core.approvals import ApprovalRequest
+
+    request = ApprovalRequest(
+        request_id="req_1",
+        nonce="n",
+        session_id="ses_1",
+        agent_id="opencode",
+        project="p",
+        tool="bash",
+        command_summary="make deploy",
+        command_full="make deploy",
+        risk=RiskLevel.LOW,
+        created_at=NOW,
+        expires_at=None,
+    )
+
+    text = cards.render(request, now=NOW + timedelta(hours=3))
+
+    assert "Expires in" not in text
+    assert "Open until it is answered, here or at the desk." in text
+    assert cards.format_remaining(None, NOW) == "until answered"
+
+
 async def test_a_command_from_a_turn_of_halyard_s_own_says_whose_it_is(setup) -> None:
     """A repeat started from the command line: marked as Halyard's own, its
     card says which inspection it is rather than AGENT over a session nobody

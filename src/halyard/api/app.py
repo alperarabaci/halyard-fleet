@@ -524,6 +524,9 @@ def create_app(settings: Settings, *, channel=None) -> FastAPI:
         ),
         runs_by_project=runs_by_project,
         trusted_runs=trusted,
+        questions_wait=frozenset(
+            name for name, spec in runtimes.discover().items() if spec.question_waits
+        ),
     )
     questions = QuestionService(
         store=question_store,

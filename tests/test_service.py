@@ -110,6 +110,7 @@ def build_service(
     allow_risk_at_or_below=None,
     runs_by_project=None,
     trusted_runs=None,
+    questions_wait: frozenset[str] = frozenset(),
 ) -> tuple[ApprovalService, ApprovalStore, JsonlAuditSink]:
     store = store or ApprovalStore(ttl=ttl)
     sink = JsonlAuditSink(tmp_path / "audit.jsonl")
@@ -127,6 +128,7 @@ def build_service(
         allow_risk_at_or_below=allow_risk_at_or_below,
         runs_by_project=runs_by_project,
         trusted_runs=trusted_runs,
+        questions_wait=questions_wait,
     )
     return service, store, sink
 
@@ -1146,6 +1148,113 @@ async def test_an_answer_at_the_desk_is_never_handed_back_as_an_approval(tmp_pat
     assert outcome.decision is BridgeDecision.DEFER
     assert channel.closed == [(channel.last_request.request_id, "allow", "opencode, at the desk")]
     assert nothing_left is False
+
+
+# --- a card that waits as long as the question does ---------------------------
+
+
+class CountingChannel(SilentChannel):
+    """A silent channel that keeps every card it was handed."""
+
+    def __init__(self) -> None:
+        self.sent: list[ApprovalRequest] = []
+
+    async def send_approval_request(self, request: ApprovalRequest) -> str:
+        self.sent.append(request)
+        return "sent"
+
+
+async def card_out(channel: CountingChannel) -> ApprovalRequest:
+    for _ in range(200):
+        if channel.sent:
+            return channel.sent[-1]
+        await asyncio.sleep(0.01)
+    raise AssertionError("no card was sent")
+
+
+WAITS = {"session_id": "ses_1", "agent_id": "opencode", "tool": "bash", "tool_use_id": "per_1"}
+
+
+def waiting_service(tmp_path: Path, channel: CountingChannel):
+    return build_service(
+        tmp_path,
+        channel=channel,
+        ttl=timedelta(milliseconds=50),
+        questions_wait=frozenset({"opencode"}),
+    )
+
+
+async def test_a_card_for_a_question_that_waits_has_no_deadline(tmp_path: Path) -> None:
+    """opencode keeps its question on the screen for as long as it takes. A
+    card that expired after five minutes said "timed out" on the phone over a
+    question that was still there, and nobody away could answer it."""
+    channel = CountingChannel()
+    service, store, sink = waiting_service(tmp_path, channel)
+    await sink.open()
+
+    asking = asyncio.create_task(ask(service, "make deploy", **WAITS))
+    card = await card_out(channel)
+    await asyncio.sleep(0.2)
+    still_open = not asking.done()
+    await store.resolve(card.request_id, nonce=card.nonce, decision=Decision.ALLOW)
+
+    assert card.expires_at is None
+    assert still_open
+    assert (await asking).decision is BridgeDecision.ALLOW
+
+
+async def test_the_same_question_asked_again_finds_the_card_already_out(tmp_path: Path) -> None:
+    """The call that carried it was dropped, and the question asked again: one
+    card, answered once, and the answer goes to the call that is still there."""
+    channel = CountingChannel()
+    service, store, sink = waiting_service(tmp_path, channel)
+    await sink.open()
+
+    first = asyncio.create_task(ask(service, "make deploy", **WAITS))
+    card = await card_out(channel)
+    first.cancel()
+    again = asyncio.create_task(ask(service, "make deploy", **WAITS))
+    await asyncio.sleep(0.05)
+    await store.resolve(card.request_id, nonce=card.nonce, decision=Decision.ALLOW)
+    outcome = await again
+    actions = [record.action for record in await sink.read_all()]
+
+    assert outcome.decision is BridgeDecision.ALLOW
+    assert len(channel.sent) == 1
+    assert actions.count(AuditAction.APPROVAL_REQUESTED) == 1
+    assert actions.count(AuditAction.APPROVAL_RESOLVED) == 1
+
+
+async def test_an_answer_that_lands_between_two_calls_goes_to_the_next(tmp_path: Path) -> None:
+    """Answered on the phone just as one call ended and before the next: the
+    next one gets that answer, rather than a second card for a settled question."""
+    channel = CountingChannel()
+    service, store, sink = waiting_service(tmp_path, channel)
+    await sink.open()
+
+    first = asyncio.create_task(ask(service, "make deploy", **WAITS))
+    card = await card_out(channel)
+    first.cancel()
+    await store.resolve(card.request_id, nonce=card.nonce, decision=Decision.DENY)
+    await asyncio.sleep(0.05)
+    outcome = await ask(service, "make deploy", **WAITS)
+
+    assert outcome.decision is BridgeDecision.DENY
+    assert len(channel.sent) == 1
+
+
+async def test_a_question_that_does_not_wait_keeps_its_deadline(tmp_path: Path) -> None:
+    """Claude Code's hook is waiting on a verdict, so its card still expires."""
+    channel = CountingChannel()
+    service, _, sink = waiting_service(tmp_path, channel)
+    await sink.open()
+
+    outcome = await ask(
+        service, "make deploy", session_id="s", agent_id="claude-code", tool_use_id="toolu_1"
+    )
+
+    assert channel.sent[0].expires_at is not None
+    assert outcome.decision is BridgeDecision.DENY
 
 
 # --- a project's own commands --------------------------------------------------

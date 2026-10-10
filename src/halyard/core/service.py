@@ -50,6 +50,10 @@ from halyard.core.registry import SessionRegistry
 
 logger = logging.getLogger(__name__)
 
+#: How long the answer to a card with no deadline is kept for the call that
+#: asks it again. Comfortably longer than a bridge waits between two calls.
+ANSWER_KEPT_SECONDS = 600
+
 
 def project_name(project_dir: str | None, cwd: str | None, configured: str) -> str:
     """What to call the project a request came from.
@@ -460,8 +464,17 @@ class ApprovalService:
         allow_risk_at_or_below: RiskLevel | None = None,
         runs_by_project: Mapping[str, Sequence[str]] | None = None,
         trusted_runs: Callable[[str], Sequence[str]] | None = None,
+        questions_wait: frozenset[str] = frozenset(),
     ) -> None:
         self._seats = seats or {}
+        #: Runtimes whose own question stays open until answered, so their
+        #: cards have no deadline. See `RuntimeSpec.question_waits`.
+        self._questions_wait = questions_wait
+        #: Each such card's answer, worked out once by a task of its own and
+        #: awaited by every call that asks it. The call that carried the
+        #: question can be dropped long before anybody answers; the same
+        #: question asked again finds the card already out for it.
+        self._waiting: dict[str, asyncio.Task[ApprovalOutcome]] = {}
         # Each configured project's `runs:`, by where the project is — every
         # project, since the table may hold entries for one the file has none
         # for. An entry that no longer reads is dropped here too.
@@ -703,6 +716,13 @@ class ApprovalService:
                 cwd=cwd,
             )
 
+        # The same question again, from a runtime whose question outlives the
+        # call that carried it: back to the card already out for it, which is
+        # still the one that answers. Nothing is judged again and nothing new
+        # is put on the phone.
+        if tool_use_id and (waiting := self._waiting.get(tool_use_id)) is not None:
+            return await asyncio.shield(waiting)
+
         # Before anything is decided, including the pause. This is not an
         # approval somebody could be asked for and it is not a grant that could
         # be configured around — it is a standing answer, and a guard a pause
@@ -788,8 +808,31 @@ class ApprovalService:
             cwd=cwd,
             project_dir=project_dir,
             redacted=prepared.full != command,
+            expires=not (agent_id in self._questions_wait and tool_use_id),
         )
 
+        if request.expires_at is not None:
+            return await self._carry(request)
+        # No deadline, so the call that carried the question may be dropped
+        # and the question asked again. The card is carried by a task of its
+        # own rather than by this call, and every call for it awaits that.
+        waiting = asyncio.create_task(self._carry(request))
+        self._waiting[tool_use_id] = waiting
+        # Kept a while once answered: an answer that lands between one call
+        # and the next is still the answer the next one gets, not a new card.
+        waiting.add_done_callback(
+            lambda done: asyncio.get_running_loop().call_later(
+                ANSWER_KEPT_SECONDS, self._forget_waiting, tool_use_id, done
+            )
+        )
+        return await asyncio.shield(waiting)
+
+    def _forget_waiting(self, tool_use_id: str, done: asyncio.Task[ApprovalOutcome]) -> None:
+        if self._waiting.get(tool_use_id) is done:
+            del self._waiting[tool_use_id]
+
+    async def _carry(self, request: ApprovalRequest) -> ApprovalOutcome:
+        """Put an open request in front of a person, and wait for the answer."""
         # Record that it was asked before anybody can act on it. An approval
         # that was never written down is one nobody can account for afterwards.
         if not await self._try_to_record(approval_requested(request)):
@@ -806,7 +849,7 @@ class ApprovalService:
             await self._try_to_record(
                 bridge_error(
                     message="approval could not be delivered to the channel",
-                    session_id=session_id,
+                    session_id=request.session_id,
                     request_id=request.request_id,
                 )
             )
