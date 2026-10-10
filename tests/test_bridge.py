@@ -384,6 +384,25 @@ def test_a_turn_that_said_nothing_is_not_forwarded(payload: dict) -> None:
     assert received == []
 
 
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {**STOP_PAYLOAD, "transcript_path": None},
+        {**STOP_PAYLOAD, "transcript_path": ""},
+        {k: v for k, v in STOP_PAYLOAD.items() if k != "transcript_path"},
+    ],
+)
+def test_a_thread_nobody_keeps_is_not_forwarded(payload: dict) -> None:
+    """Codex Desktop's own side turns, such as the one drafting the next
+    prompt: they say something, and nobody is having that conversation."""
+    with control_plane(body={"delivered": True}) as (url, received):
+        result = run_relay(payload, HALYARD_URL=url)
+
+    assert result.returncode == 0
+    assert result.stdout == ""
+    assert received == []
+
+
 @pytest.mark.parametrize("stdin", ["", "not json", "[]", "null"])
 def test_an_unreadable_payload_is_dropped_quietly(stdin: str) -> None:
     result = run_relay(stdin, HALYARD_URL="http://127.0.0.1:1")

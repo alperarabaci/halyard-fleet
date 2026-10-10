@@ -104,6 +104,15 @@ def main() -> int:
                 note(f"{runtime} Stop: no message field. keys={sorted(payload)}")
             # Nothing was said — a turn that only ran tools, for instance.
             return 0
+        # A thread nobody keeps. Codex Desktop runs side turns of its own, one
+        # of them drafting the user's next prompt, and their `Stop` runs this
+        # hook like any other. Measured 2026-10-10: a "reply" from a thread with
+        # no rollout and no name, whose payload named no Codex transcript, so
+        # it was read as Claude Code's and sent to the chat. Every conversation
+        # somebody is having is kept somewhere, and the payload says where.
+        if not transcript:
+            note(f"{runtime} Stop with no transcript, not relayed. keys={sorted(payload)}")
+            return 0
 
         body = {
             "session_id": session_id,
