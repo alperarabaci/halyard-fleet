@@ -343,7 +343,7 @@ async def test_commands_run_first_and_the_checks_read_what_they_did(tmp_path: Pa
         runner=runner,
     )
 
-    ran = "Ran test-fast: make test-fast · exit 0 · 94s · last line: 1420 passed"
+    ran = "Ran test-fast: make test-fast · exit 0 (passed) · 94s · last line: 1420 passed"
     [checked] = asker.asked
     assert ran in checked
     [(_, text)] = delivery.sent
@@ -382,5 +382,56 @@ async def test_a_command_that_fails_is_reported_and_the_transition_still_goes(
     )
 
     [(_, text)] = delivery.sent
-    assert "Ran test-fast: make test-fast · exit 1 · 31s · last line: 2 failed" in text
+    assert "Ran test-fast: make test-fast · exit 1 (failed) · 31s · last line: 2 failed" in text
     assert "Command test-fast — make test-fast:\n\n2 failed" in text
+
+
+async def test_a_command_that_did_not_run_stops_the_transition_there(tmp_path: Path) -> None:
+    """No result is not a red one. Inspections over it would read green in
+    nothing, so the commands after it, the inspections and the delivery are
+    all skipped, and the line says why."""
+    a_project(tmp_path)
+    asker = Asking()
+    missing = Result(ok=False, output="make: lint: No such file", seconds=0.2, exit_code=127)
+    runner = Running(lint=missing)
+
+    handed, delivery = await hand(
+        tmp_path,
+        Transition(name="close", commands=("lint", "test-fast"), inspections=("claims",)),
+        asker=asker,
+        project_commands=COMMANDS,
+        runner=runner,
+    )
+
+    assert runner.ran == ["lint"]
+    assert asker.asked == []
+    assert delivery.sent == []
+    assert handed.stopped == (
+        "Ran lint: make lint · exit 127 (not run) · 0s · last line: make: lint: No such file"
+    )
+
+
+async def test_a_code_the_command_declares_stops_it_and_undeclared_it_is_red(
+    tmp_path: Path,
+) -> None:
+    a_project(tmp_path)
+    nothing = Result(ok=False, output="no scope on the task", seconds=1.0, exit_code=2)
+
+    declared, nothing_sent = await hand(
+        tmp_path,
+        Transition(name="close", commands=("test-fast",)),
+        project_commands=COMMANDS,
+        project_not_run={"test-fast": (2,)},
+        runner=Running(**{"test-fast": nothing}),
+    )
+    undeclared, sent = await hand(
+        tmp_path,
+        Transition(name="close", commands=("test-fast",)),
+        project_commands=COMMANDS,
+        runner=Running(**{"test-fast": nothing}),
+    )
+
+    assert "exit 2 (not run)" in declared.stopped
+    assert nothing_sent.sent == []
+    assert undeclared.stopped == ""
+    assert "exit 2 (failed)" in sent.sent[0][1]

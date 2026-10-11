@@ -259,10 +259,26 @@ under `projects/<project>/inspections/<id>/` — for whoever judges the runs.
 Under `commands:` a transition names entries of the project's `commands:`, and they
 run in that order before its inspections — one at a time, as `/command` runs them, so
 a transition does not go while something else is running in the project. What
-each did goes into the envelope the inspections read, as one line with its exit code
-and last line, and what it printed goes into the message. A command that fails
-is reported and the transition goes on: whoever receives it has to see that it
-failed. One still running after ten minutes is stopped, and its line says so.
+each did goes into the envelope the inspections read, as one line with its exit code,
+what that means — `(passed)`, `(failed)` or `(not run)` — and its last line, and what
+it printed goes into the message. A command that fails is reported and the
+transition goes on: whoever receives it has to see that it failed.
+
+A command that did not run stops the transition there: the commands after it, the
+inspections and the message are skipped, and the chat is told which command and
+why. Inspections over a run that never happened would read green in nothing. Not
+run is a command that could not start, was not found or could not be executed (exit
+127, 126), was ended by a signal (128 and up), or was still running after ten
+minutes — and any exit code the command itself says means it had nothing to run:
+
+```yaml
+commands:
+  test-fast: {run: scripts/check.sh test-fast, not_run: [2]}
+```
+
+A workflow whose step stopped this way is held there, as for any other stop: fix
+what was missing and pick the step again. Nothing is counted for it; a round is
+the agent taking a message.
 
 The inspections read that one line and nothing more, so a command whose results
 an inspection has to compare — several targets, each with a count and an exit code —

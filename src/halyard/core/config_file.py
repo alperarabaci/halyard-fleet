@@ -255,6 +255,10 @@ class Project:
     #: fails — `next-task: [cleanup, pull-branch]`, written under `commands:`
     #: like the rest and offered by `/command` with them.
     command_lists: dict[str, tuple[str, ...]] = field(default_factory=dict)
+    #: The exit codes a command says mean it did not run, by command — written
+    #: `{run: …, not_run: [2]}`. A transition stops at one; see
+    #: `commands.running.outcome`.
+    commands_not_run: dict[str, tuple[int, ...]] = field(default_factory=dict)
     #: Which kind of issue tracker this project's remote points at. Only needed
     #: for a host that does not name itself — `gitlab.com` does, and
     #: `git.example.com` cannot.
@@ -733,22 +737,34 @@ def _steps_from(
     return found
 
 
-def _commands_from(project: str, value: Any) -> tuple[dict[str, str], dict[str, tuple[str, ...]]]:
-    """`commands:` as command lines by name, and the lists of them by name.
+def _commands_from(
+    project: str, value: Any
+) -> tuple[dict[str, str], dict[str, tuple[str, ...]], dict[str, tuple[int, ...]]]:
+    """`commands:` as command lines by name, the lists of them by name, and the
+    exit codes each says mean it did not run.
 
     A command is a line — `cleanup: make cleanup` — or the names of other
     commands to run in order: `next-task: [cleanup, pull-branch]`. A list names
     lines only, so what runs is always something written down as a line.
+
+    A line can also say which of its exit codes mean it produced no result —
+    `test-fast: {run: scripts/check.sh test-fast, not_run: [2]}` — which only
+    the command itself can know. See `commands.running.outcome`.
     """
     if value is None:
-        return {}, {}
+        return {}, {}, {}
     if not isinstance(value, dict):
         raise ValueError(f"Project {project!r}: `commands:` must be a mapping of name to command.")
     lines: dict[str, str] = {}
     lists: dict[str, tuple[str, ...]] = {}
+    not_run: dict[str, tuple[int, ...]] = {}
     for raw, spec in value.items():
         if isinstance(spec, list):
             lists[str(raw)] = tuple(str(name).strip() for name in spec if str(name).strip())
+        elif isinstance(spec, dict):
+            lines[str(raw)], codes = _command_with_codes(project, str(raw), spec)
+            if codes:
+                not_run[str(raw)] = codes
         else:
             lines[str(raw)] = str(spec)
     for name, listed in lists.items():
@@ -764,7 +780,25 @@ def _commands_from(project: str, value: Any) -> tuple[dict[str, str], dict[str, 
             raise ValueError(
                 f"{where} runs commands this project does not define: {', '.join(missing)}"
             )
-    return lines, lists
+    return lines, lists, not_run
+
+
+def _command_with_codes(project: str, name: str, spec: dict) -> tuple[str, tuple[int, ...]]:
+    """`{run: <line>, not_run: [<exit code>, ...]}`, read strictly."""
+    where = f"Project {project!r}: command {name!r}"
+    if stray := sorted(str(key) for key in spec if key not in ("run", "not_run")):
+        raise ValueError(f"{where} takes `run:` and `not_run:`, not {', '.join(stray)}.")
+    line = spec.get("run")
+    if not isinstance(line, str) or not line.strip():
+        raise ValueError(f"{where} needs `run:`, the command line.")
+    codes = spec.get("not_run") or []
+    if not isinstance(codes, list) or not all(
+        isinstance(code, int) and not isinstance(code, bool) and 0 < code < 256 for code in codes
+    ):
+        raise ValueError(
+            f"{where}: `not_run:` is a list of exit codes between 1 and 255, like [2]."
+        )
+    return line, tuple(dict.fromkeys(codes))
 
 
 def _not_a_list(
@@ -1073,7 +1107,7 @@ def projects_from_yaml(text: str) -> list[Project]:
         if spelled is not None:
             older.append(spelled)
         inspections, inspection_models = _inspections_from(project, written)
-        commands, command_lists = _commands_from(project, body.get("commands"))
+        commands, command_lists, commands_not_run = _commands_from(project, body.get("commands"))
         moves, spelled = _spelled(project, body, "transitions", "handoffs", "the project")
         if spelled is not None:
             older.append(spelled)
@@ -1101,6 +1135,7 @@ def projects_from_yaml(text: str) -> list[Project]:
                 warn_if=_warnings_from(project, body.get("warn_if")),
                 commands=commands,
                 command_lists=command_lists,
+                commands_not_run=commands_not_run,
                 forge=_as_text(body.get("forge")),
                 labels=_warnings_from(project, body.get("labels")) or (),
                 label_groups=label_groups,

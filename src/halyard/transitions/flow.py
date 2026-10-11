@@ -8,7 +8,7 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 
 from halyard import frame, inspections
-from halyard.commands import Command, Result, summary
+from halyard.commands import NOT_RUN, Command, Result, outcome, summary
 from halyard.core.config_file import ModelChoice, Transition
 from halyard.transitions import rounds
 from halyard.transitions.message import compose
@@ -38,6 +38,7 @@ async def take(
     findings: Sequence[str] = (),
     labeller: inspections.Labeller | None = None,
     project_commands: Mapping[str, str] | None = None,
+    project_not_run: Mapping[str, Sequence[int]] | None = None,
     runner: Runner | None = None,
     round_number: int | None = None,
     expected: int | None = None,
@@ -52,6 +53,11 @@ async def take(
     Halyard's own run rather than setting out to make one. A command that fails
     is reported and the transition goes on — whoever receives it has to see that it
     failed.
+
+    A command that did not run — no result at all, see `running.outcome` — stops
+    the transition there: the commands after it, the inspections and the
+    delivery are all skipped, and `Handed.stopped` says why. Inspections over
+    a run that never happened would read green in nothing.
 
     The inspections run side by side, each a turn of its own, and all before
     the message is written: the seat receives the reply and what they made of
@@ -74,7 +80,11 @@ async def take(
     """
     ran: list[tuple[Command, Result]] = []
     for name in transition.commands:
-        command = Command(name=name, line=(project_commands or {}).get(name, ""))
+        command = Command(
+            name=name,
+            line=(project_commands or {}).get(name, ""),
+            not_run=tuple((project_not_run or {}).get(name, ())),
+        )
         if runner is None:
             result = Result(ok=False, output="nothing here can run a command", seconds=0.0)
         else:
@@ -86,10 +96,22 @@ async def take(
                 )
                 result = Result(ok=False, output="it could not be run", seconds=0.0)
         ran.append((command, result))
+        if outcome(result, command.not_run) == NOT_RUN:
+            last = result.output.splitlines()[-1] if result.output else ""
+            logger.warning(
+                "Not run %s · exit %s · %.0fs · %s",
+                name,
+                result.exit_code,
+                result.seconds,
+                last or "(nothing printed)",
+            )
+            return Handed(
+                "", (), tuple(ran), stopped=summary(name, command.line, result, command.not_run)
+            )
     envelope = [
         *context,
         *([f"Round: {rounds.shown(round_number, expected)}"] if round_number else []),
-        *(summary(c.name, c.line, r) for c, r in ran),
+        *(summary(c.name, c.line, r, c.not_run) for c, r in ran),
     ]
 
     answers: tuple[inspections.Answer, ...] = ()

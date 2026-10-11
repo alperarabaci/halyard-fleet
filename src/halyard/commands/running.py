@@ -20,7 +20,7 @@ import re
 import subprocess
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -95,6 +95,33 @@ class Result:
     timed_out: bool = False
     #: What it exited with. None when it never started, or was stopped.
     exit_code: int | None = None
+
+
+#: How a command ended, as the line after it says and a transition reads it.
+PASSED, FAILED, NOT_RUN = "passed", "failed", "not run"
+
+
+def outcome(result: Result, not_run: Sequence[int] = ()) -> str:
+    """Passed, failed, or not run — which is no result at all.
+
+    Failed is a result: something ran and said red, and whoever reads it next
+    decides what that means. Not run is the absence of one, and reading
+    inspections over it would find green in nothing. So it is told apart:
+
+    - by Halyard, for every command: it could not start, was stopped at the
+      clock, was not found or could not be executed (127, 126), or was ended by
+      a signal (128 and up, or the negative code Python reports one with);
+    - by the command, for the codes it declares under `not_run:` — only it can
+      know that its 2 means "nothing here to run" and not "red".
+    """
+    code = result.exit_code
+    if result.timed_out or code is None:
+        return NOT_RUN
+    if code == 0:
+        return PASSED
+    if code in (126, 127) or code >= 128 or code < 0 or code in not_run:
+        return NOT_RUN
+    return FAILED
 
 
 def _tail(text: str, lines: int) -> str:
@@ -234,19 +261,21 @@ def run(
     )
 
 
-def summary(name: str, line: str, result: Result) -> str:
+def summary(name: str, line: str, result: Result, not_run: Sequence[int] = ()) -> str:
     """One line saying what a command did, for whoever reads it next.
 
-    Which command, how it ended, how long it took, and the last thing it
-    printed — where a test runner puts its count, and where a project's own
+    Which command, how it ended — the exit code and what it means, in words, so
+    nobody reading the line has to guess — how long it took, and the last thing
+    it printed: where a test runner puts its count, and where a project's own
     target puts its status and the file the whole run went to. What it printed
     before that travels separately, for whoever needs more than the line.
     """
+    ended = outcome(result, not_run)
     if result.timed_out:
-        how = f"stopped after {result.seconds:.0f}s"
+        how = f"stopped after {result.seconds:.0f}s ({ended})"
     elif result.exit_code is None:
-        how = f"could not start: {result.output}"
+        how = f"could not start: {result.output} ({ended})"
     else:
-        how = f"exit {result.exit_code} · {result.seconds:.0f}s"
+        how = f"exit {result.exit_code} ({ended}) · {result.seconds:.0f}s"
     last = result.output.splitlines()[-1] if result.output and result.exit_code is not None else ""
     return f"Ran {name}: {line} · {how}" + (f" · last line: {last}" if last else "")

@@ -2232,9 +2232,76 @@ async def test_a_transition_runs_its_commands_and_says_how_they_went(
 
     assert ran == [("make test-fast", repo, 600.0)]
     [(_, text)] = runner.sent
-    assert "Ran test-fast: make test-fast · exit 0 · 94s · last line: 1420 passed" in text
+    assert "Ran test-fast: make test-fast · exit 0 (passed) · 94s · last line: 1420 passed" in text
     assert any("<b>test-fast</b>: passed" in sent["text"] for sent in api.sent)
     assert channel._working == {}
+
+
+def a_suite_that_does_not_run(channel: TelegramChannel, monkeypatch) -> list:
+    """`test-fast` among the project's commands, and a run of it that never found
+    what it was to run."""
+    from halyard.channels.telegram import adapter as under_test
+    from halyard.commands import Result
+
+    found = channel._repositories["alpha-engine"]
+    channel._repositories["alpha-engine"] = replace(found, commands={"test-fast": "make test-fast"})
+    ran: list = []
+
+    def running(line, path, *, timeout, on_progress=None):
+        ran.append(line)
+        return Result(ok=False, output="make: *** No rule", seconds=0.1, exit_code=127)
+
+    monkeypatch.setattr(under_test.commands_running, "run", running)
+    return ran
+
+
+async def test_a_transition_whose_command_did_not_run_stops_and_says_why(
+    tmp_path: Path, wired, monkeypatch
+) -> None:
+    """Nothing is inspected or sent: green read into a run that never
+    happened is worse than no message."""
+    channel, api, runner, repo = wired
+    transitions_in(
+        channel, repo, tmp_path, runner, close={"commands": ("test-fast",), "to": "xrev"}
+    )
+    ran = a_suite_that_does_not_run(channel, monkeypatch)
+
+    await channel._run_transition("close", CHAT, None, f"tg:{APPROVER}")
+    await settled(channel)
+
+    assert ran == ["make test-fast"]
+    assert runner.sent == []
+    said = api.sent[-1]["text"]
+    assert "stopped before reaching" in said
+    assert "exit 127 (not run)" in said
+    assert channel._working == {}
+
+
+async def test_a_workflow_step_whose_command_did_not_run_holds_the_run(
+    tmp_path: Path, wired, monkeypatch
+) -> None:
+    """Held where it is, as for any stop: fixed, the step is picked again."""
+    from halyard import workflows as flowing
+    from halyard.channels.telegram.adapter import WORKFLOW_FILE
+
+    channel, api, runner, repo = wired
+    flow_in(channel, repo, tmp_path, runner, **TWO_STEPS)
+    found = channel._repositories["alpha-engine"]
+    review = replace(found.transitions["review"], commands=("test-fast",))
+    channel._repositories["alpha-engine"] = replace(
+        found, transitions={**found.transitions, "review": review}
+    )
+    a_suite_that_does_not_run(channel, monkeypatch)
+
+    await started(channel)
+
+    work = await channel._work_item(channel._repositories["alpha-engine"])
+    run = flowing.current(channel._kept_for("alpha-engine", WORKFLOW_FILE), work)
+    assert runner.sent == []
+    assert run is not None
+    assert run.stopped == "review: a command did not run"
+    assert run.taken() == {}
+    assert "review: a command did not run" in api.sent[-1]["text"]
 
 
 async def test_a_transition_with_commands_does_not_go_while_another_runs(
