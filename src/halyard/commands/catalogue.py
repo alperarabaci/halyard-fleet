@@ -39,6 +39,9 @@ class Command:
 
     name: str
     line: str
+    #: The exit codes this command says mean it did not run — `not_run:` in
+    #: `halyard.yaml`. See `commands.running.outcome`.
+    not_run: tuple[int, ...] = ()
 
 
 def offered(commands: dict[str, str] | None) -> list[Command]:

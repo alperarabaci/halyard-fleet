@@ -9,6 +9,7 @@ of them — plus the precedence rule between the two files.
 from __future__ import annotations
 
 import contextlib
+import re
 from pathlib import Path
 
 import pytest
@@ -602,6 +603,37 @@ def test_a_list_inside_a_list_is_refused(tmp_path) -> None:
 def test_an_empty_list_is_refused(tmp_path) -> None:
     with pytest.raises(ValueError, match="empty list"):
         a_project(tmp_path, lines=["commands:", "  nothing: []"])
+
+
+def test_a_command_can_say_which_of_its_codes_mean_it_did_not_run(tmp_path) -> None:
+    """Written beside its line; a plain line and a list still read as before."""
+    [project] = a_project(
+        tmp_path,
+        lines=[
+            "commands:",
+            "  test-fast: {run: scripts/check.sh test-fast, not_run: [2]}",
+            "  lint: make lint",
+            "  both: [test-fast, lint]",
+        ],
+    )
+
+    assert project.commands == {"test-fast": "scripts/check.sh test-fast", "lint": "make lint"}
+    assert project.commands_not_run == {"test-fast": (2,)}
+    assert project.command_lists == {"both": ("test-fast", "lint")}
+
+
+@pytest.mark.parametrize(
+    ("spec", "said"),
+    [
+        ("{not_run: [2]}", "needs `run:`"),
+        ("{run: make x, not_run: two}", "list of exit codes"),
+        ("{run: make x, not_run: [0]}", "list of exit codes"),
+        ("{run: make x, retry: 3}", "takes `run:` and `not_run:`, not retry"),
+    ],
+)
+def test_a_command_written_out_is_read_strictly(tmp_path, spec: str, said: str) -> None:
+    with pytest.raises(ValueError, match=re.escape(said)):
+        a_project(tmp_path, lines=["commands:", f"  test-fast: {spec}"])
 
 
 def test_a_transition_naming_a_list_is_told_to_name_its_commands(tmp_path) -> None:

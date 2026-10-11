@@ -5,7 +5,9 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
-from halyard.commands import Result, run, summary
+import pytest
+
+from halyard.commands import Result, outcome, run, summary
 
 
 def test_a_command_says_it_started_before_anything_else(tmp_path: Path, caplog) -> None:
@@ -44,10 +46,10 @@ def test_one_line_says_how_it_ended_and_the_last_thing_it_printed() -> None:
     failed = Result(ok=False, output="2 failed · log: build/tests.log", seconds=31, exit_code=1)
 
     assert summary("test-fast", "make test-fast", passed) == (
-        "Ran test-fast: make test-fast · exit 0 · 94s · last line: 1420 passed"
+        "Ran test-fast: make test-fast · exit 0 (passed) · 94s · last line: 1420 passed"
     )
     assert summary("test-fast", "make test-fast", failed).endswith(
-        "exit 1 · 31s · last line: 2 failed · log: build/tests.log"
+        "exit 1 (failed) · 31s · last line: 2 failed · log: build/tests.log"
     )
 
 
@@ -57,7 +59,42 @@ def test_one_line_for_a_run_that_did_not_finish() -> None:
     )
     refused = Result(ok=False, output="No such file or directory", seconds=0.0)
 
-    assert summary("test-fast", "make test-fast", stopped).endswith("· stopped after 600s")
+    assert summary("test-fast", "make test-fast", stopped).endswith(
+        "· stopped after 600s (not run)"
+    )
     assert summary("test-fast", "make test-fast", refused).endswith(
-        "· could not start: No such file or directory"
+        "· could not start: No such file or directory (not run)"
+    )
+
+
+def ended(code: int | None, *, timed_out: bool = False) -> Result:
+    return Result(ok=code == 0, output="", seconds=1.0, exit_code=code, timed_out=timed_out)
+
+
+@pytest.mark.parametrize(
+    ("result", "said"),
+    [
+        (ended(0), "passed"),
+        (ended(1), "failed"),
+        (ended(2), "failed"),
+        (ended(127), "not run"),
+        (ended(126), "not run"),
+        (ended(130), "not run"),
+        (ended(-9), "not run"),
+        (ended(None), "not run"),
+        (ended(None, timed_out=True), "not run"),
+    ],
+)
+def test_how_a_command_ended_needs_nothing_declared(result: Result, said: str) -> None:
+    """Not found, not executable, ended by a signal, out of time, never
+    started: no result at all, for any command."""
+    assert outcome(result) == said
+
+
+def test_a_command_says_which_of_its_own_codes_mean_it_did_not_run() -> None:
+    """Only it can know its 2 means "nothing here to run" and not "red"."""
+    assert outcome(ended(2), (2,)) == "not run"
+    assert outcome(ended(1), (2,)) == "failed"
+    assert summary("test-fast", "scripts/check.sh", ended(2), (2,)).startswith(
+        "Ran test-fast: scripts/check.sh · exit 2 (not run)"
     )

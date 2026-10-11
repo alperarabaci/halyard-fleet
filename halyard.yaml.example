@@ -203,6 +203,7 @@ projects:
     # name entries from here rather than a command line of their own.
     # commands:
     #   test-fast: make test-fast
+    #   lint: {run: scripts/check.sh lint, not_run: [2]}   # its exit 2 means "did not run": a transition stops
     #   e2e: make test-e2e SCOPE={label_groups.area}   # the task's `area` label; asked for if missing
     #   cleanup: make cleanup
     #   pull-branch: make pull-branch TASK={input.task}   # typed when /command runs it

@@ -403,11 +403,9 @@ def _files_of(said: last_said.Said | None) -> frame.Tree | None:
     return frame.Tree(head=said.head or "?", content=said.content)
 
 
-def _ended(result: commands_running.Result) -> str:
-    """How a command ended, in a word."""
-    if result.timed_out:
-        return "stopped"
-    return "passed" if result.ok else "failed"
+def _ended(result: commands_running.Result, command: commands_offered.Command) -> str:
+    """How a command ended, in a word or two: passed, failed, or not run."""
+    return commands_running.outcome(result, command.not_run)
 
 
 @dataclass
@@ -3268,7 +3266,7 @@ class TelegramChannel:
         buttons: dict | None = None,
         command_lines: Mapping[str, str] | None = None,
         counted: StepRounds | None = None,
-    ) -> None:
+    ) -> transitioning.Handed | None:
         """Make one transition: say so, run it, deliver it — and count the round
         when it is a workflow's step.
 
@@ -3370,6 +3368,7 @@ class TelegramChannel:
                 findings=found.label_findings,
                 labeller=_Labelling(self, found),
                 project_commands={**found.commands, **(command_lines or {})},
+                project_not_run=found.commands_not_run,
                 runner=_Running(self, found.path, chat_id, thread_id),
                 round_number=number,
                 expected=expected,
@@ -3381,8 +3380,20 @@ class TelegramChannel:
             # marked busy would refuse every command after it.
             if transition.commands:
                 self._working.pop(found.name, None)
+        if handed.stopped:
+            # Nothing went, and nothing is counted: a round is the seat
+            # taking a message. Fixed and pressed again is the way on.
+            await self._say(
+                f"⏹ <b>{html.escape(name)}</b> stopped before reaching "
+                f"<b>{html.escape(_seat_name(seat))}</b>: a command did not run, so "
+                "nothing was inspected or sent.\n"
+                f"<code>{html.escape(handed.stopped)}</code>",
+                chat_id,
+                thread_id,
+            )
+            return handed
         outcomes = [
-            *(f"<b>{html.escape(c.name)}</b>: {_ended(r)}" for c, r in handed.ran),
+            *(f"<b>{html.escape(c.name)}</b>: {_ended(r, c)}" for c, r in handed.ran),
             *(
                 f"<b>{html.escape(a.name)}</b>: {'answered' if a.measured else 'unmeasured'}"
                 for a in handed.answers
@@ -3390,6 +3401,7 @@ class TelegramChannel:
         ]
         if outcomes:
             await self._say(" · ".join(outcomes), chat_id, thread_id)
+        return handed
 
     async def _run_workflow(
         self,
@@ -3636,7 +3648,7 @@ class TelegramChannel:
         async def count(label: str) -> int:
             return await asyncio.to_thread(flowing.record, kept, work, key, to=label)
 
-        await self._take_transition(
+        handed = await self._take_transition(
             found,
             step.transition,
             transition,
@@ -3663,6 +3675,10 @@ class TelegramChannel:
                 phase=run.phase if "@" in key else None,
             ),
         )
+        if handed is not None and handed.stopped:
+            # Held where it is, as for any other stop: fixed, the step is
+            # picked again and the run goes on with its rounds as they were.
+            await self._stopped(found, work, run.held(f"{step.name}: a command did not run"))
 
     @staticmethod
     def _phase_of(found: Project, run: flowing.Run) -> str:
