@@ -516,7 +516,10 @@ def one_shot_settings(**chosen):
         (
             "default_model",
             "default_effort",
+            "commit_model",
+            "commit_effort",
             "compaction_model",
+            "compaction_effort",
             "inspection_model",
             "inspection_effort",
             "claude_models",
@@ -596,6 +599,36 @@ def test_a_default_effort_the_runtime_does_not_take_is_named_too() -> None:
 
     [warning] = lines
     assert "HALYARD_DEFAULT_EFFORT asks for effort 'ultra'" in warning
+
+
+def test_commit_and_compaction_models_are_checked_at_their_own_efforts(monkeypatch):
+    codex_knows(monkeypatch, {"gpt-6-luna": ("low", "medium", "high")})
+    settings = one_shot_settings(
+        default_model="gpt-5.6-terra",
+        default_effort="high",
+        commit_model="gpt-6-luna",
+        commit_effort="low",
+        compaction_model="gpt-6-luna",
+        compaction_effort="ultra",
+    )
+    lines, failed = doctor._one_shot_models(settings, [])
+    assert failed == 1  # The unrelated default is absent from this catalog.
+    assert not any("HALYARD_COMMIT_MODEL" in line for line in lines)
+    assert any("HALYARD_COMPACTION_MODEL: gpt-6-luna takes effort" in line for line in lines)
+
+
+def test_commit_effort_only_is_checked_against_the_inherited_model(monkeypatch):
+    codex_knows(monkeypatch, {"gpt-6-luna": ("low", "medium")})
+    lines, failed = doctor._one_shot_models(
+        one_shot_settings(
+            default_model="gpt-6-luna",
+            default_effort="medium",
+            commit_effort="ultra",
+        ),
+        [],
+    )
+    assert failed == 0
+    assert any("HALYARD_COMMIT_MODEL: gpt-6-luna takes effort" in line for line in lines)
 
 
 def test_a_projects_runs_are_named_and_what_was_refused_is_said() -> None:

@@ -219,6 +219,10 @@ class Settings(BaseSettings):
     default_model: str | None = Field(default=None, validation_alias="HALYARD_DEFAULT_MODEL")
     #: How hard those turns think. Unset, the runtime's own effort for the model.
     default_effort: str | None = Field(default=None, validation_alias="HALYARD_DEFAULT_EFFORT")
+    #: Commit wording can use a smaller model without changing other one-shot
+    #: turns. Each unset field inherits its corresponding default above.
+    commit_model: str | None = Field(default=None, validation_alias="HALYARD_COMMIT_MODEL")
+    commit_effort: str | None = Field(default=None, validation_alias="HALYARD_COMMIT_EFFORT")
 
     log_level: str = Field(default="INFO", validation_alias="HALYARD_LOG_LEVEL")
     #: A ceiling on one week, so an always-on service cannot fill a disk before
@@ -281,6 +285,10 @@ class Settings(BaseSettings):
     #: already wrote — the reasoning happened in the session, not here — so it
     #: does not need the expensive one.
     compaction_model: str | None = Field(default=None, validation_alias="HALYARD_COMPACTION_MODEL")
+    #: Independent of commit wording and the default reasoning effort.
+    compaction_effort: str | None = Field(
+        default=None, validation_alias="HALYARD_COMPACTION_EFFORT"
+    )
 
     #: How much of the compaction record may be carried into the fresh context.
     #: Measured in the field: the model fills very nearly whatever it is given,

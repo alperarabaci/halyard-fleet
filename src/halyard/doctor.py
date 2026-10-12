@@ -310,6 +310,16 @@ def _one_shot_efforts(settings, projects) -> list[str]:
         return []
     asked = [
         ("HALYARD_DEFAULT_EFFORT", settings.default_model, settings.default_effort),
+        (
+            "HALYARD_COMMIT_EFFORT",
+            settings.commit_model or settings.default_model,
+            settings.commit_effort,
+        ),
+        (
+            "HALYARD_COMPACTION_EFFORT",
+            settings.compaction_model or settings.default_model,
+            settings.compaction_effort,
+        ),
         ("HALYARD_INSPECTION_EFFORT", settings.inspection_model, settings.inspection_effort),
         *(
             (
@@ -344,7 +354,17 @@ def _one_shot_models(settings, projects) -> tuple[list[str], int]:
 
     named = [
         ("HALYARD_DEFAULT_MODEL", settings.default_model, settings.default_effort),
-        ("HALYARD_COMPACTION_MODEL", settings.compaction_model, settings.default_effort),
+        (
+            "HALYARD_COMMIT_MODEL",
+            settings.commit_model or (settings.default_model if settings.commit_effort else None),
+            settings.commit_effort or settings.default_effort,
+        ),
+        (
+            "HALYARD_COMPACTION_MODEL",
+            settings.compaction_model
+            or (settings.default_model if settings.compaction_effort else None),
+            settings.compaction_effort or settings.default_effort,
+        ),
         ("HALYARD_INSPECTION_MODEL", settings.inspection_model, settings.inspection_effort),
         *(
             (

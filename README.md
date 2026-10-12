@@ -254,9 +254,25 @@ the live session is never resumed or forked. `after_compaction` is what the
 session is handed once the summary is done. Both are optional and per agent: a
 navigator holding a plan needs them, a driver running one command does not.
 The record is written on `HALYARD_DEFAULT_MODEL` at `HALYARD_DEFAULT_EFFORT` —
-sonnet at the runtime's own effort unless set, the same as the commit message
-`/commit` proposes — and `HALYARD_COMPACTION_MODEL` names its own model. A
+sonnet at the runtime's own effort unless set. `HALYARD_COMPACTION_MODEL` and
+`HALYARD_COMPACTION_EFFORT` override the record's model and effort separately. A
 `gpt-…` model there runs on Codex.
+
+Commit wording has its own pair, `HALYARD_COMMIT_MODEL` and
+`HALYARD_COMMIT_EFFORT`. Each unset field inherits its `HALYARD_DEFAULT_*`
+counterpart, preserving existing configurations. For example, a small model
+can write commit messages while inspections and compaction keep their choices:
+
+```yaml
+settings:
+  HALYARD_COMMIT_MODEL: gpt-6-luna
+  HALYARD_COMMIT_EFFORT: low
+```
+
+These settings are read when the service starts. `halyard doctor` checks the
+chosen models and efforts against the installed runtime's catalog. Usage is
+still recorded under `commit message`, `compaction record`, or the inspection's
+name, so `halyard usage` can compare the measured tokens after a change.
 
 Measured before it was built: a hook cannot steer the summary itself — output
 from `PreCompact` is refused by the runtime as an injection attempt — and

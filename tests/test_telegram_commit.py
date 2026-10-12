@@ -309,6 +309,26 @@ async def test_a_gpt_default_model_writes_the_message_on_codex(wired) -> None:
     assert runner.asked == []
 
 
+async def test_commit_override_selects_its_runtime_without_changing_other_choices(wired):
+    from halyard.core.config_file import ModelChoice
+
+    channel, _, runner, repo = wired
+    codex = FakeRunner()
+    channel._runners["codex"] = codex
+    channel._default_model = ModelChoice("sonnet", "high")
+    channel._commit_model = ModelChoice("gpt-6-luna", "low")
+    inspection = channel._inspection_model
+    wrote(repo, "loader.py", "x = 1\n")
+
+    await deliver(channel, typed("/commit"))
+
+    assert (codex.models, codex.efforts) == (["gpt-6-luna"], ["low"])
+    assert runner.asked == []
+    assert channel._default_model == ModelChoice("sonnet", "high")
+    assert channel._inspection_model == inspection
+    assert commit_count(repo) == 1
+
+
 async def test_the_message_is_written_with_nothing_but_the_diff(wired) -> None:
     """Claude Code's own prompt and tools were five sixths of what a message
     cost, and the diff in front of it is all it needs."""
