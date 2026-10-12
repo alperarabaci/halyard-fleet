@@ -131,7 +131,7 @@ turn stops at a captcha — see [Known limitations](#known-limitations).
 | `/label` | put a label on the task this branch is for |
 | `/open` | start an agent that is not running — `claude`, `codex`, `gemini` |
 | `/status` | what each agent is, what is running, and how full its limits are |
-| `/stop` | end the turn running in this chat's agent session, and close the cards it left open — for Claude Code and Codex, a turn sent from Halyard |
+| `/stop` | end what is running here: a project command (a transition's or `/command`'s), and the turn in this chat's agent session with the cards it left open — for Claude Code and Codex, a turn sent from Halyard |
 | `/doctor` | the same check as `halyard doctor`, read from a phone |
 | `/pause`, `/resume` | step out of the way, and come back |
 

@@ -21,6 +21,7 @@ import inspect
 import io
 import logging
 import re
+import threading
 import time
 import uuid
 from collections.abc import Awaitable, Callable, Mapping, Sequence
@@ -112,7 +113,7 @@ POLL_RETRY_MAX_SECONDS = 30.0
 #: description at most 256. Anything else is rejected for the whole list.
 COMMANDS: tuple[tuple[str, str], ...] = (
     ("chat", "Send a message into this agent's session"),
-    ("stop", "Stop the turn running in this agent's session"),
+    ("stop", "Stop what is running here: the agent's turn, or a project command"),
     ("forward", "Hand this chat's last reply to another agent"),
     ("inspect", "Run one of this project's inspections over this chat's last reply"),
     ("transition", "Take this chat's last reply to its next stage, as this project defines it"),
@@ -578,9 +579,15 @@ class _Running:
     """
 
     def __init__(
-        self, channel: TelegramChannel, path: Path, chat_id: str, thread_id: int | None
+        self,
+        channel: TelegramChannel,
+        path: Path,
+        chat_id: str,
+        thread_id: int | None,
+        project: str = "",
     ) -> None:
         self._channel = channel
+        self._project = project
         self._path = path
         self._chat_id = chat_id
         self._thread_id = thread_id
@@ -600,14 +607,12 @@ class _Running:
                 loop,
             )
 
-        return await asyncio.to_thread(
-            partial(
-                commands_running.run,
-                command.line,
-                self._path,
-                timeout=TRANSITION_COMMAND_TIMEOUT_SECONDS,
-                on_progress=progress,
-            )
+        return await self._channel._command_run(
+            self._project,
+            command.line,
+            self._path,
+            timeout=TRANSITION_COMMAND_TIMEOUT_SECONDS,
+            on_progress=progress,
         )
 
 
@@ -717,6 +722,8 @@ class TelegramChannel:
         #: Which command is running in which project, so a second one is
         #: refused rather than started on top of it.
         self._working: dict[str, str] = {}
+        #: How to end the command running in each project — `/stop`.
+        self._stops: dict[str, threading.Event] = {}
         #: Labels somebody picked for a command, by project and work item — the
         #: value it runs with when the task could not be given the label, or
         #: before the tracker says it has it. Gone on a restart: the task is
@@ -1981,7 +1988,7 @@ class TelegramChannel:
                         chat_id,
                         thread_id,
                     )
-                result = await self._run_and_say(path, command, chat_id, thread_id)
+                result = await self._run_and_say(path, command, chat_id, thread_id, project)
                 if result is not None and result.ok:
                     continue
                 if rest := [later.name for later in order[place + 1 :]]:
@@ -1998,13 +2005,27 @@ class TelegramChannel:
             # would refuse every command afterwards for no reason anybody could see.
             self._working.pop(project, None)
 
+    async def _command_run(
+        self, project: str, line: str, path: Path, **more
+    ) -> commands_running.Result:
+        """Run a project command where `/stop`, in that project's chats, can end it."""
+        stop = threading.Event()
+        self._stops[project] = stop
+        try:
+            return await asyncio.to_thread(
+                partial(commands_running.run, line, path, stop=stop, **more)
+            )
+        finally:
+            if self._stops.get(project) is stop:
+                del self._stops[project]
+
     async def _run_and_say(
-        self, path: Path, command, chat_id: str, thread_id: int | None
+        self, path: Path, command, chat_id: str, thread_id: int | None, project: str = ""
     ) -> commands_running.Result | None:
         """Run one command to the end, and say what happened. None when it
         could not be started at all."""
         try:
-            result = await asyncio.to_thread(commands_running.run, command.line, path)
+            result = await self._command_run(project, command.line, path)
         except Exception:
             logger.warning("A command from Telegram could not be run", exc_info=True)
             await self._say(
@@ -2014,7 +2035,9 @@ class TelegramChannel:
             )
             return None
 
-        if result.timed_out:
+        if result.stopped:
+            head = f"\u23f9 <b>{html.escape(command.name)}</b> was stopped from the chat after "
+        elif result.timed_out:
             head = f"\u23f1 <b>{html.escape(command.name)}</b> was stopped after "
         elif result.ok:
             head = f"\u2705 <b>{html.escape(command.name)}</b> finished in "
@@ -2817,46 +2840,63 @@ class TelegramChannel:
         return closed
 
     async def _stop_turn(self, actor: str, chat_id: str, thread_id: int | None) -> None:
-        """End the turn sent from here into this chat's session, and its cards.
+        """End what is running for this chat: a project command — a
+        transition's or `/command`'s — and the turn sent into its session,
+        with the cards that turn left open.
 
         Claude Code and Codex: only a turn Halyard started. One typed at the
         desk, or queued into a Codex thread open in its app, runs there and is
         stopped there. opencode: whatever turn its session has going, which
         opencode itself knows. A runtime this cannot stop says so rather than
         pretending.
+
+        A command stopped in a transition is a command that did not run, so the
+        transition stops there, and a workflow is held at that step.
         """
+        command = self._stop_command(chat_id, actor)
         found = await self._session_for(chat_id)
-        if found is None:
-            await self._say("No agent session is tied to this chat.", chat_id, thread_id)
+        stopping = getattr(found.runner, "stop", None) if found is not None else None
+        stopped = False
+        if found is not None and stopping is not None:
+            stopped = stopping(found.session_id, cwd=found.cwd)
+            if inspect.isawaitable(stopped):
+                stopped = await stopped
+        if not command and not stopped:
+            if found is None:
+                said = "No agent session is tied to this chat, and no command is running here."
+            elif stopping is None:
+                said = f"A turn in {html.escape(found.runner.id)} cannot be stopped from here yet."
+            else:
+                said = (
+                    "Nothing that can be stopped from here is running in that session. A "
+                    "Claude Code or Codex turn typed at the desk, or queued into a Codex "
+                    "thread open in its app, is stopped there."
+                )
+            await self._say(said, chat_id, thread_id)
             return
-        stopping = getattr(found.runner, "stop", None)
-        if stopping is None:
-            await self._say(
-                f"A turn in {html.escape(found.runner.id)} cannot be stopped from here yet.",
-                chat_id,
-                thread_id,
+        parts = []
+        if command:
+            parts.append(f"<b>{html.escape(command)}</b> ended, with everything it started.")
+        if stopped and found is not None:
+            closed = await self._close_cards_of(found.session_id, actor, "the turn")
+            logger.info("The turn in %s was stopped by %s", found.session_id, actor)
+            cards_said = (
+                f" {closed} open card{'s' if closed != 1 else ''} closed." if closed else ""
             )
-            return
-        stopped = stopping(found.session_id, cwd=found.cwd)
-        if inspect.isawaitable(stopped):
-            stopped = await stopped
-        if not stopped:
-            await self._say(
-                "Nothing that can be stopped from here is running in that session. A "
-                "Claude Code or Codex turn typed at the desk, or queued into a Codex "
-                "thread open in its app, is stopped there.",
-                chat_id,
-                thread_id,
-            )
-            return
-        closed = await self._close_cards_of(found.session_id, actor, "the turn")
-        logger.info("The turn in %s was stopped by %s", found.session_id, actor)
-        cards_said = f" {closed} open card{'s' if closed != 1 else ''} closed." if closed else ""
-        await self._say(
-            f"⏹ <b>Stopped.</b> What it already did stays done.{cards_said}",
-            chat_id,
-            thread_id,
-        )
+            parts.append(f"The agent's turn: what it already did stays done.{cards_said}")
+        await self._say(f"⏹ <b>Stopped.</b> {' '.join(parts)}", chat_id, thread_id)
+
+    def _stop_command(self, chat_id: str, actor: str) -> str | None:
+        """End the project command running for this chat's project, if one is.
+        What it was, as the project's busy marker names it."""
+        found = self._repository_for(chat_id)
+        stop = self._stops.get(found.name) if found is not None else None
+        if found is None or stop is None or stop.is_set():
+            return None
+        stop.set()
+        what = self._working.get(found.name) or "The command"
+        logger.info("%s in %s stopped by %s", what, found.name, actor)
+        return what
 
     async def _reach_quietly(self, found: Project):
         """The forge and the task this project's branch is for, or None.
@@ -3380,7 +3420,7 @@ class TelegramChannel:
                 labeller=_Labelling(self, found),
                 project_commands={**found.commands, **(command_lines or {})},
                 project_not_run=found.commands_not_run,
-                runner=_Running(self, found.path, chat_id, thread_id),
+                runner=_Running(self, found.path, chat_id, thread_id, found.name),
                 round_number=number,
                 expected=expected,
                 previous=previous,

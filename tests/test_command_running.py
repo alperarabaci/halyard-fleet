@@ -98,3 +98,72 @@ def test_a_command_says_which_of_its_own_codes_mean_it_did_not_run() -> None:
     assert summary("test-fast", "scripts/check.sh", ended(2), (2,)).startswith(
         "Ran test-fast: scripts/check.sh · exit 2 (not run)"
     )
+
+
+def test_halyard_s_own_virtual_environment_stays_out_of_a_project_s_command(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """uv warned on every run of a project's e2e that `VIRTUAL_ENV` was not its
+    `.venv`, and a bare `python` would have found Halyard's."""
+    own = tmp_path / "halyard" / ".venv"
+    monkeypatch.setenv("VIRTUAL_ENV", str(own))
+    monkeypatch.setenv("VIRTUAL_ENV_PROMPT", "halyard")
+    monkeypatch.setenv("PATH", f"{own / 'bin'}:/usr/bin:/bin")
+
+    result = run('echo "${VIRTUAL_ENV:-none}|${VIRTUAL_ENV_PROMPT:-none}|$PATH"', tmp_path)
+
+    assert result.output == "none|none|/usr/bin:/bin"
+
+
+def started_child(tmp_path: Path) -> str:
+    """A command that starts something of its own and waits on it, and leaves
+    that something's pid behind."""
+    return f"sleep 30 & echo $! > {tmp_path / 'child'}; wait"
+
+
+def still_running(pid: int) -> bool:
+    import os
+
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    return True
+
+
+def child_of(tmp_path: Path) -> int:
+    import time
+
+    for _ in range(100):
+        written = (tmp_path / "child").read_text().strip() if (tmp_path / "child").exists() else ""
+        if written:
+            return int(written)
+        time.sleep(0.02)
+    raise AssertionError("the command never started its child")
+
+
+def test_a_command_stopped_from_the_chat_ends_with_what_it_started(tmp_path: Path) -> None:
+    import threading
+    import time
+
+    stop = threading.Event()
+    timer = threading.Timer(0.5, stop.set)
+    timer.start()
+
+    result = run(started_child(tmp_path), tmp_path, stop=stop)
+    time.sleep(0.2)
+
+    assert result.stopped
+    assert outcome(result) == "not run"
+    assert "stopped from the chat after" in summary("e2e", "make e2e", result)
+    assert not still_running(child_of(tmp_path))
+
+
+def test_a_command_out_of_time_ends_with_what_it_started(tmp_path: Path) -> None:
+    import time
+
+    result = run(started_child(tmp_path), tmp_path, timeout=0.5)
+    time.sleep(0.2)
+
+    assert result.timed_out
+    assert not still_running(child_of(tmp_path))

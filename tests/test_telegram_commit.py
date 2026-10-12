@@ -2228,7 +2228,7 @@ def a_suite(channel: TelegramChannel, monkeypatch, *, output: str = "1420 passed
     channel._repositories["alpha-engine"] = replace(found, commands={"test-fast": "make test-fast"})
     ran: list = []
 
-    def running(line, path, *, timeout, on_progress=None):
+    def running(line, path, *, timeout, on_progress=None, stop=None):
         ran.append((line, path, timeout))
         return Result(ok=True, output=output, seconds=94.0, exit_code=0)
 
@@ -2267,7 +2267,7 @@ def a_suite_that_does_not_run(channel: TelegramChannel, monkeypatch) -> list:
     channel._repositories["alpha-engine"] = replace(found, commands={"test-fast": "make test-fast"})
     ran: list = []
 
-    def running(line, path, *, timeout, on_progress=None):
+    def running(line, path, *, timeout, on_progress=None, stop=None):
         ran.append(line)
         return Result(ok=False, output="make: *** No rule", seconds=0.1, exit_code=127)
 
@@ -2324,6 +2324,46 @@ async def test_a_workflow_step_whose_command_did_not_run_holds_the_run(
     assert "review: a command did not run" in api.sent[-1]["text"]
 
 
+async def test_stop_ends_a_transition_s_command_and_the_transition_with_it(
+    tmp_path: Path, wired, monkeypatch
+) -> None:
+    """An e2e run going wrong was ended only by restarting Halyard. `/stop`
+    in the project's chat ends it, and the transition stops as for any
+    command that did not run."""
+    from halyard.channels.telegram import adapter as under_test
+    from halyard.commands import Result
+
+    channel, api, runner, repo = wired
+    transitions_in(
+        channel, repo, tmp_path, runner, close={"commands": ("test-fast",), "to": "xrev"}
+    )
+    found = channel._repositories["alpha-engine"]
+    channel._repositories["alpha-engine"] = replace(found, commands={"test-fast": "make e2e"})
+
+    def running(line, path, *, timeout, on_progress=None, stop=None):
+        stop.wait(5)
+        return Result(ok=False, output="collecting", seconds=1.0, stopped=True)
+
+    monkeypatch.setattr(under_test.commands_running, "run", running)
+
+    going = asyncio.create_task(channel._run_transition("close", CHAT, None, f"tg:{APPROVER}"))
+    for _ in range(200):
+        if "alpha-engine" in channel._stops:
+            break
+        await asyncio.sleep(0.01)
+    await channel._handle_message(
+        {"message_id": 9, "from": {"id": int(APPROVER)}, "chat": {"id": CHAT}, "text": "/stop"}
+    )
+    await asyncio.wait_for(going, timeout=5)
+    await settled(channel)
+
+    said = [sent["text"] for sent in api.sent]
+    assert any("ended, with everything it started" in text for text in said)
+    assert any("stopped from the chat" in text and "(not run)" in text for text in said)
+    assert runner.sent == []
+    assert channel._stops == {}
+
+
 async def test_a_transition_with_commands_does_not_go_while_another_runs(
     tmp_path: Path, wired, monkeypatch
 ) -> None:
@@ -2377,7 +2417,7 @@ def scoped(channel: TelegramChannel, monkeypatch) -> list:
     )
     ran: list = []
 
-    def running(line, path, *, timeout=None, on_progress=None):
+    def running(line, path, *, timeout=None, on_progress=None, stop=None):
         ran.append(line)
         return Result(ok=True, output="12 passed", seconds=3.0, exit_code=0)
 
