@@ -104,6 +104,13 @@ settings:
   # HALYARD_DEFAULT_MODEL: sonnet
   # HALYARD_DEFAULT_EFFORT: medium
 
+  # Override each job separately. Each unset field inherits the corresponding
+  # HALYARD_DEFAULT_* value; inspection choices remain independent.
+  # HALYARD_COMMIT_MODEL: gpt-6-luna
+  # HALYARD_COMMIT_EFFORT: low
+  # HALYARD_COMPACTION_MODEL: gpt-6-luna
+  # HALYARD_COMPACTION_EFFORT: medium
+
   # How much the log says. INFO unless set; DEBUG says more. A level that does
   # not exist refuses to start rather than quietly logging at INFO.
   # HALYARD_LOG_LEVEL: DEBUG

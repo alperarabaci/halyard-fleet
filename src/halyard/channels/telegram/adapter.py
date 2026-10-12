@@ -180,8 +180,8 @@ WAIT_FOR_TEXT_SECONDS = 300
 ASK_FOR_MESSAGE = "Send the commit message for {handle}?"
 _ASKED_MESSAGE = re.compile(r"^Send the commit message for (\S+)\?")
 
-#: The one-shot model that writes the subject line when `HALYARD_DEFAULT_MODEL`
-#: names none. Named here rather than in `halyard.commits`, which is
+#: The one-shot model that writes the subject line when the commit and default
+#: settings name none. Named here rather than in `halyard.commits`, which is
 #: deliberately ignorant of runtimes: this is a Claude Code alias, and the
 #: channel is what holds the runners.
 MESSAGE_MODEL = "sonnet"
@@ -654,6 +654,8 @@ class TelegramChannel:
         #: and how hard it thinks. What it leaves unsaid is `MESSAGE_MODEL`, at
         #: the runtime's own effort.
         default_model: ModelChoice | None = None,
+        #: Commit wording alone. Unset fields inherit `default_model`.
+        commit_model: ModelChoice | None = None,
         #: Each runtime's own availability-check context, by runtime name — see
         #: `RuntimeSpec.check_context`. Asked only when a seat's session cannot
         #: be found, to say *why*; each check is handed its own and nobody else's.
@@ -673,6 +675,7 @@ class TelegramChannel:
             ModelChoice(INSPECTION_MODEL)
         )
         self._default_model = (default_model or ModelChoice()).over(ModelChoice(MESSAGE_MODEL))
+        self._commit_model = commit_model or ModelChoice()
         # Two seats and a default. A role with nowhere of its own falls back to
         # the main chat, so an existing single-chat setup keeps working
         # untouched by any of this.
@@ -2120,8 +2123,9 @@ class TelegramChannel:
         person deciding is away from the desk and has not seen this code, and a
         list of filenames says where an agent has been rather than what it did.
 
-        Written on the runtime `HALYARD_DEFAULT_MODEL` belongs to, whichever
-        chat asks — the only place the commit flow touches a runtime at all.
+        Written on the runtime the commit model belongs to — `HALYARD_COMMIT_MODEL`,
+        or `HALYARD_DEFAULT_MODEL` when it is unset — whichever chat asks: the only
+        place the commit flow touches a runtime at all.
         `halyard.commits` is handed a finished sentence, never a way to ask for
         one.
 
@@ -2129,15 +2133,22 @@ class TelegramChannel:
         somebody the commit — the reference computed from the branch is a
         usable message on its own, and `Rewrite` is one tap away.
         """
-        runner = self._one_shot_for(self._default_model.model)
+        chosen = self._commit_model.over(self._default_model)
+        runner = self._one_shot_for(chosen.model)
         said = None
         if runner is not None:
+            logger.info(
+                "Commit message for %s: model %s, effort %s",
+                self._project_name_for(chat_id),
+                chosen.model,
+                chosen.effort or "runtime default",
+            )
             try:
                 said = await asyncio.wait_for(
                     runner.ask(
                         commits.prompt(work, inquiry),
-                        model=self._default_model.model,
-                        effort=self._default_model.effort,
+                        model=chosen.model,
+                        effort=chosen.effort,
                         purpose="commit message",
                         project=self._project_name_for(chat_id),
                         system=commits.SYSTEM,

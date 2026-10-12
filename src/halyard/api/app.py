@@ -386,6 +386,7 @@ def _build_channel(
             (settings.inspection_effort or "").strip().lower() or None,
         ),
         default_model=_default_model(settings),
+        commit_model=_commit_model(settings),
     )
 
 
@@ -398,11 +399,22 @@ def _default_model(settings: Settings) -> ModelChoice:
     )
 
 
+def _commit_model(settings: Settings) -> ModelChoice:
+    """Commit-specific model and effort, each inheriting the general default."""
+    return ModelChoice(
+        (settings.commit_model or "").strip() or None,
+        (settings.commit_effort or "").strip().lower() or None,
+    ).over(_default_model(settings))
+
+
 def _compaction_model(settings: Settings) -> ModelChoice:
     """What the compaction record runs on: `HALYARD_COMPACTION_MODEL` when it
-    is set, the default otherwise — at the default's effort. What both leave
+    is set, with its own effort when named, the default otherwise. What both leave
     unsaid is the recorder's own."""
-    own = ModelChoice((settings.compaction_model or "").strip() or None)
+    own = ModelChoice(
+        (settings.compaction_model or "").strip() or None,
+        (settings.compaction_effort or "").strip().lower() or None,
+    )
     return own.over(_default_model(settings))
 
 

@@ -51,6 +51,19 @@ def test_inspections_are_kept_only_when_asked_for(monkeypatch: pytest.MonkeyPatc
     ).keep_inspections
 
 
+def test_commit_and_compaction_choices_are_read_from_the_environment(monkeypatch):
+    settings = from_env(
+        monkeypatch,
+        HALYARD_CHANNEL="stub_deny",
+        HALYARD_COMMIT_MODEL="gpt-6-luna",
+        HALYARD_COMMIT_EFFORT="low",
+        HALYARD_COMPACTION_MODEL="gpt-6-luna",
+        HALYARD_COMPACTION_EFFORT="medium",
+    )
+    assert (settings.commit_model, settings.commit_effort) == ("gpt-6-luna", "low")
+    assert (settings.compaction_model, settings.compaction_effort) == ("gpt-6-luna", "medium")
+
+
 def test_the_claude_binary_can_be_pinned() -> None:
     settings = build(
         HALYARD_CHANNEL="stub_deny",

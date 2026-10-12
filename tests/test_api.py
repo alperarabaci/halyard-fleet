@@ -55,7 +55,7 @@ def test_halyard_s_own_turns_take_the_default_model_from_halyard_yaml(tmp_path: 
     """The commit message and the compaction record: sonnet until
     `HALYARD_DEFAULT_MODEL` says otherwise, and `HALYARD_COMPACTION_MODEL`
     still names the record's alone."""
-    from halyard.api.app import _compaction_model, _default_model
+    from halyard.api.app import _commit_model, _compaction_model, _default_model
     from halyard.core.config_file import ModelChoice
 
     unset = make_settings(tmp_path, ChannelKind.STUB_ALLOW)
@@ -74,6 +74,36 @@ def test_halyard_s_own_turns_take_the_default_model_from_halyard_yaml(tmp_path: 
     assert _default_model(chosen) == ModelChoice("haiku", "low")
     assert _compaction_model(chosen) == ModelChoice("haiku", "low")
     assert _compaction_model(own) == ModelChoice("opus", "low")
+    assert _commit_model(unset) == ModelChoice()
+    assert _commit_model(chosen) == ModelChoice("haiku", "low")
+
+
+def test_commit_and_compaction_choices_can_override_each_default_independently(tmp_path):
+    from halyard.api.app import _commit_model, _compaction_model, _default_model
+    from halyard.core.config_file import ModelChoice
+
+    settings = make_settings(tmp_path, ChannelKind.STUB_ALLOW).model_copy(
+        update={
+            "default_model": "gpt-5.6-terra",
+            "default_effort": "high",
+            "commit_model": " gpt-6-luna ",
+            "commit_effort": " Low ",
+            "compaction_model": "gpt-6-luna",
+            "compaction_effort": "Medium",
+        }
+    )
+    assert _commit_model(settings) == ModelChoice("gpt-6-luna", "low")
+    assert _compaction_model(settings) == ModelChoice("gpt-6-luna", "medium")
+    assert _default_model(settings) == ModelChoice("gpt-5.6-terra", "high")
+    assert _commit_model(settings.model_copy(update={"commit_model": None})) == ModelChoice(
+        "gpt-5.6-terra", "low"
+    )
+    assert _commit_model(settings.model_copy(update={"commit_effort": None})) == ModelChoice(
+        "gpt-6-luna", "high"
+    )
+    assert _compaction_model(settings.model_copy(update={"compaction_model": None})) == ModelChoice(
+        "gpt-5.6-terra", "medium"
+    )
 
 
 @pytest.fixture
