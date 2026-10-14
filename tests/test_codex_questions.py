@@ -192,7 +192,7 @@ def test_what_codex_adds_as_a_user_message_is_not_the_person_moving_on() -> None
 def test_the_rollout_being_written_is_the_newest(tmp_path: Path) -> None:
     """The Desktop app moves a thread on to a new, suffixed rollout every so
     often; the first one stops growing."""
-    day = tmp_path / "sessions" / "2026" / "10"
+    day = tmp_path / "sessions" / "2026" / "10" / "08"
     day.mkdir(parents=True)
     first = day / f"rollout-2026-10-03T00-30-53-{SESSION}.jsonl"
     later = day / f"rollout-2026-10-08T18-27-42-{SESSION}_01a11c20-a0f4-7c23.jsonl"

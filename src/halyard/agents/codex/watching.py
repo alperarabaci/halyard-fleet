@@ -66,18 +66,12 @@ def transcript(session_id: str, root: Path) -> Path | None:
     `rollout-<timestamp>-<session_id>_<another id>.jsonl`. Measured on one
     thread: five of them in a week, each starting fresh rather than repeating
     the last — so the one being written is the newest, and reading the first
-    one found was reading a file nothing had touched for days.
+    one found was reading a file nothing had touched for days. Found the same
+    way the session itself is; see `sessions.rollout_for`.
     """
-    try:
-        found = [
-            path
-            for pattern in (f"rollout-*-{session_id}.jsonl", f"rollout-*-{session_id}_*.jsonl")
-            for path in root.glob(f"sessions/**/{pattern}")
-            if path.is_file()
-        ]
-        return max(found, key=lambda path: path.stat().st_mtime) if found else None
-    except OSError:
-        return None
+    from halyard.agents.codex.sessions import rollout_for
+
+    return rollout_for(session_id, root)
 
 
 def _has_reset(resets_at: object, now: float) -> bool:

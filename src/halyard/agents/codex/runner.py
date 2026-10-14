@@ -179,6 +179,10 @@ class CodexRunner:
         # minute, because one had asked at startup and the other just now.
         self._configured = binary
         self._turns = Turns("codex", wedged_after=wedged_after_seconds)
+        #: Why Halyard itself would not send, by session, when it would not —
+        #: no CLI, nowhere to run it from. Nothing printed those, so nothing
+        #: carried them to the phone.
+        self._refused: dict[str, str] = {}
         self._default_model = default_model or None
         self._models: dict[str, str] = {}
         self._efforts: dict[str, str] = {}
@@ -267,9 +271,9 @@ class CodexRunner:
         phone, away from the machine, and "check the control plane's log" is
         the one instruction they cannot follow — the log is on the machine they
         are away from. The reason was already printed by the CLI; it only had
-        to be carried.
+        to be carried — or it is Halyard's own, for a message it would not send.
         """
-        return self._turns.last_error(session_id)
+        return self._refused.get(session_id) or self._turns.last_error(session_id)
 
     def busy(self, session_id: str) -> bool:
         return self._turns.busy(session_id)
@@ -298,8 +302,10 @@ class CodexRunner:
         `agents/turns.py`. `when_done` is called if an accepted turn then fails,
         which is how running out of usage halfway through still gets reported.
         """
+        self._refused.pop(session_id, None)
         if not self._binary:
             logger.error("Cannot deliver a message: the codex CLI was not found.")
+            self._refused[session_id] = "The codex CLI was not found on this machine."
             return False
         if not text.strip():
             return False
@@ -331,6 +337,11 @@ class CodexRunner:
                     "Refusing to resume %s: no working directory is recorded for it, and "
                     "resuming from somewhere else would apply that directory's hooks.",
                     session_id,
+                )
+                self._refused[session_id] = (
+                    "Not sent: no working directory was found for this session in "
+                    "~/.codex/sessions, and resuming it from anywhere else would run "
+                    "another directory's hooks."
                 )
                 return False
 
