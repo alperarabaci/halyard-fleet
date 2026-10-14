@@ -62,7 +62,14 @@ def _check_session(ref: SessionRef, **_) -> list[tuple[str, str]]:
     somebody to upgrade a CLI that is fine.
     """
     model = (ref.model or "").strip()
-    return _check_model(model) if model else []
+    lines = _check_model(model) if model else []
+    if not ref.cwd:
+        # Every message to it would be refused: resuming from a directory not
+        # its own runs that directory's hooks. Nothing else says so.
+        lines.append(
+            ("fail", f"no working directory found for {ref.name} in its rollout under ~/.codex")
+        )
+    return lines
 
 
 def _claims_model(model: str) -> bool:
