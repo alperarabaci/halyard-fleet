@@ -14,11 +14,11 @@ reads them, adds what it can see for itself (`halyard.frame`), and hands the
 answer back as it came.
 
 **The turn stands in the project.** It runs in the project's directory, where
-the code a report is about is: it reads what the inspection needs, runs only
-the commands its text names — each put in front of a person by the project's
-gate first — and edits nothing. The prompt says so, and that a command refused
-or unfinished leaves the inspection unmeasured rather than clean. Whoever is
-asked to allow one of those commands can stop the inspection instead.
+the code a report is about is: it searches and reads files and inspects diffs,
+through native reading tools or read-only shell commands, and edits nothing.
+Tests, scripts, database and network operations are forbidden. The runtime's
+sandbox and the project's gate still apply: a read refused or unfinished leaves
+that part of the inspection unmeasured rather than clean.
 
 The prompt still says "check" where it speaks to the model, as it did before
 these were called inspections: what a model is told is kept the same, so that

@@ -65,14 +65,19 @@ somebody presses the button from a phone.
 ## An inspection runs inside the project
 
 Each is a one-shot turn in the project's own directory, over its own text and
-the reply: it can read files, has no tool that edits one, and is told to run
-only the commands its text names. Each of those comes to you as a card headed
-**INSPECTION**, naming the inspection and the transition it runs for, in the chat
-the transition is going to — or, for `/inspect`, the chat that asked. **Deny**
-refuses one command and the inspection carries on; **Stop the inspection**
-refuses it and ends the inspection, along with anything it started. A command
-refused, an inspection stopped, or one that runs out of time leaves the
-inspection unmeasured rather than clean.
+the reply: it may search and read local files and inspect diffs, using native
+reading tools or read-only shell commands such as `rg`, `cat`, `sed -n`, `nl`
+and `git status/diff/show/log`. These reads need not be written verbatim in the
+inspection. Git diff/show uses `--no-ext-diff --no-textconv` to avoid external
+helpers. Tests, guards, scripts, interpreters, project applications, database
+queries, network calls and file changes are forbidden, including scratch files
+and temporary indexes. Existing test sources and recorded results can be read.
+
+The runtime sandbox and the project's gate still apply. A read that needs a
+card appears as **INSPECTION** in the destination chat; reads the gate already
+recognizes can pass without a card. **Deny** refuses the read; **Stop the
+inspection** ends the inspection. A refused or unfinished read leaves the
+affected part unmeasured rather than clean, and must not be worked around.
 
 An inspection's turn is Halyard's own, not an agent's, and it is marked so
 before it begins. Its answer arrives as the inspection's; the raw reply its
