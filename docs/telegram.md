@@ -193,6 +193,18 @@ A browser tab gives you no push notifications, so a card can expire unseen and t
 on the timeout. That is fine at the desk, where you are watching anyway. It defeats the purpose
 everywhere else, which is the only place this project is for.
 
+### When an approval cannot be delivered
+
+Connection errors and connection timeouts before a Telegram JSON request is sent
+get up to three attempts, with one- and two-second pauses. Delivery uses the
+approval's original deadline; retries do not extend it.
+
+Read/write failures and Telegram API refusals are not retried. A message may
+already have arrived when its response is lost, so sending it again could put
+two cards in the chat. If delivery cannot be confirmed, Halyard denies the
+request and names the channel and error type in both the hook response and the
+audit record. Submit a new request once the channel is working again.
+
 
 ---
 

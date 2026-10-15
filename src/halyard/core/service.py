@@ -19,6 +19,7 @@ import logging
 import os
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from enum import StrEnum
 
 from halyard.core import grants, reads, refusals
@@ -851,12 +852,28 @@ class ApprovalService:
             )
 
         try:
-            await self._channel.send_approval_request(request)
-        except Exception:
-            logger.exception("Channel refused the approval request; denying")
+            remaining = (
+                None
+                if request.expires_at is None
+                else max((request.expires_at - datetime.now(UTC)).total_seconds(), 0.0)
+            )
+            # Delivery, including any connection retries, uses the same deadline
+            # as the card. A slow channel must not outlive the waiting bridge.
+            if remaining == 0:
+                raise TimeoutError
+            async with asyncio.timeout(remaining):
+                await self._channel.send_approval_request(request)
+        except Exception as exc:
+            # Exception messages can contain request URLs and channel secrets.
+            # Its category explains the failure without copying those details.
+            detail = (
+                "approval delivery could not be confirmed by "
+                f"{self._channel.name} ({type(exc).__name__})"
+            )
+            logger.error("%s; denying", detail)
             await self._try_to_record(
                 bridge_error(
-                    message="approval could not be delivered to the channel",
+                    message=detail,
                     session_id=request.session_id,
                     request_id=request.request_id,
                 )
@@ -864,7 +881,7 @@ class ApprovalService:
             return await self._fail_closed(
                 request,
                 ResolutionReason.SHUTDOWN,
-                "Denied: the approval could not be delivered to anyone, so nobody saw it.",
+                f"Denied: {detail}. Request approval again once the channel is working.",
             )
 
         # Blocks until a human answers or the deadline passes. Returns a
