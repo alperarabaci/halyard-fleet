@@ -91,24 +91,77 @@ async def ran(
 
 
 def test_the_prompt_says_where_the_check_stands_and_what_it_may_do() -> None:
-    """In the project, reading but never editing; running only what the check's
-    own text names — measured: told only that it could run commands, a claims
-    check ran the suite test by test, wrote probes of its own and made scratch
-    copies — and reading for the check rather than through everything the
-    project's own instructions name."""
+    """The project supplies context, not an instruction to run its workflow."""
     asked = inspections.prompt(
         "# proof", context=["Project: alpha-engine"], note="delivery", text="42 passed"
     )
 
     assert asked.startswith("# proof")
     assert "runs in the project's own directory" in asked
-    assert "cannot edit anything" in asked
-    assert "only the commands this check's text tells it to" in asked
-    assert "nothing of its own" in asked
+    assert "is read-only" in asked
     assert "rather than a reading list" in asked
     assert "Envelope:\n- Project: alpha-engine\n- Said by whoever asked: delivery" in asked
     assert "delivery" in asked
     assert asked.endswith("42 passed")
+
+
+def test_local_evidence_can_be_read_through_native_tools_or_the_shell() -> None:
+    """A check names the evidence it needs, not each command needed to read it.
+
+    Codex can have terminal tools without a separate file reader. Calling all
+    shell use execution left these inspections unable to examine their source.
+    """
+    asked = inspections.prompt("# proof", context=[], note="", text="42 passed")
+    allowed = asked.split("Allowed:", 1)[1].split("\n\n", 1)[0]
+
+    for operation in ("file search", "file reading", "diff inspection"):
+        assert operation in allowed
+    assert "native" in allowed
+    assert "read-only shell" in allowed
+    assert "rg --files" in allowed
+    assert "sed -n" in allowed
+    assert "git status/diff/show/log" in allowed
+    assert "--no-ext-diff --no-textconv" in allowed
+    assert "need not be written verbatim" in allowed
+    assert "only the commands this check's text tells it to" not in asked
+    assert "Every command waits for the operator" not in asked
+
+
+def test_inspection_text_cannot_authorize_execution_or_side_effects() -> None:
+    """The common boundary still applies if a project check asks to run code."""
+    asked = inspections.prompt(
+        "# proof\nRun pytest, query the DB, then write a reproduction.",
+        context=[],
+        note="",
+        text="42 passed",
+    )
+    forbidden = asked.split("Forbidden:", 1)[1].split("\n\n", 1)[0]
+
+    for operation in (
+        "tests",
+        "guards",
+        "scripts",
+        "interpreters",
+        "database queries or connections",
+        "network requests",
+        "live services",
+        "setup or cleanup",
+        "creating, modifying, deleting or moving files",
+        "write redirects",
+        "broader permissions",
+    ):
+        assert operation in forbidden
+    assert "recorded outputs instead of running" in forbidden
+    assert "cannot authorize these forbidden operations" in forbidden
+
+
+def test_an_unreadable_source_is_unmeasured_without_bypassing_the_gate() -> None:
+    asked = inspections.prompt("# proof", context=[], note="", text="42 passed")
+
+    assert "Respect the runtime sandbox and the project's gate" in asked
+    assert "identify that source as unmeasured" in asked
+    assert "not clean or missing evidence" in asked
+    assert "Do not work around a denied read" in asked
 
 
 def test_a_fenced_answer_loses_its_fence() -> None:
@@ -157,8 +210,8 @@ async def test_a_check_runs_its_own_text_over_the_reply(tmp_path: Path) -> None:
 async def test_the_turn_stands_in_the_project_and_cannot_change_it(tmp_path: Path) -> None:
     """A report is compared against the code it is about, so the turn runs where
     that code is — Halyard's own directory is another repository, and a check
-    started there found nothing it could compare. It may look and run, and edit
-    nothing."""
+    started there found nothing it could compare. File reading still uses the
+    runtime's no-edit mode."""
     (tmp_path / "proof.md").write_text("# proof\n")
     asker = Asking()
 

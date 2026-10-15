@@ -19,7 +19,8 @@ class Asker(Protocol):
     `cwd` is where the turn runs. `name` is what it goes by wherever it is shown
     to a person — a command it asks to run is a card, and the card has to say
     whose. `edits=False` is a turn with no tool that edits a file: it may still
-    read, and run commands, which the project's gate puts in front of somebody.
+    search and read files and inspect diffs. The inspection prompt limits shell
+    use to reads; the runtime sandbox and project's gate remain in force.
     `session_id` is the id the turn runs under, chosen by the inspection, so
     that the record kept of it and the tokens it used can be found together.
     `effort` is how hard the model thinks, in the runtime's own words; None
