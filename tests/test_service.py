@@ -289,6 +289,96 @@ async def test_an_undeliverable_request_denies(tmp_path: Path) -> None:
     assert await store.list_open() == []
 
 
+async def test_a_delivery_failure_names_the_channel_and_error_without_secrets(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    class LeakingChannel(ExplodingChannel):
+        name = "telegram"
+
+        async def send_approval_request(self, request: ApprovalRequest) -> str:
+            raise ConnectionError(f"failed to connect to https://example.org/bot/{SECRET}")
+
+    service, store, sink = build_service(tmp_path, channel=LeakingChannel())
+    await sink.open()
+
+    outcome = await ask(service)
+    errors = [
+        record for record in await sink.read_all() if record.action is AuditAction.BRIDGE_ERROR
+    ]
+
+    assert outcome.decision is BridgeDecision.DENY
+    assert "telegram (ConnectionError)" in outcome.reason
+    assert "delivery could not be confirmed" in outcome.reason
+    assert "Request approval again" in outcome.reason
+    assert len(errors) == 1
+    assert errors[0].request_id == outcome.request_id
+    assert "telegram (ConnectionError)" in errors[0].detail["message"]
+    for exposed in (outcome.reason, str(errors[0].detail), caplog.text):
+        assert SECRET not in exposed
+        assert "https://" not in exposed
+        assert "nobody saw it" not in exposed
+    assert await store.list_open() == []
+
+
+async def test_delivery_is_cancelled_when_the_approval_deadline_passes(tmp_path: Path) -> None:
+    cancelled = asyncio.Event()
+
+    class HangingChannel(SilentChannel):
+        async def send_approval_request(self, request: ApprovalRequest) -> str:
+            self.last_request = request
+            try:
+                await asyncio.Future()
+            except asyncio.CancelledError:
+                cancelled.set()
+                raise
+
+    channel = HangingChannel()
+    service, store, sink = build_service(tmp_path, channel=channel, ttl=timedelta(milliseconds=50))
+    await sink.open()
+
+    outcome = await asyncio.wait_for(ask(service), timeout=1)
+
+    assert cancelled.is_set()
+    assert outcome.decision is BridgeDecision.DENY
+    assert "silent (TimeoutError)" in outcome.reason
+    assert channel.last_request is not None
+    assert channel.last_request.request_id == outcome.request_id
+    assert channel.last_request.expires_at - channel.last_request.created_at == store.ttl
+    assert await store.list_open() == []
+    errors = [
+        record for record in await sink.read_all() if record.action is AuditAction.BRIDGE_ERROR
+    ]
+    assert len(errors) == 1
+    assert "silent (TimeoutError)" in errors[0].detail["message"]
+
+
+async def test_cancelling_delivery_still_cancels_the_call(tmp_path: Path) -> None:
+    started = asyncio.Event()
+    cancelled = asyncio.Event()
+
+    class HangingChannel(SilentChannel):
+        async def send_approval_request(self, request: ApprovalRequest) -> str:
+            started.set()
+            try:
+                await asyncio.Future()
+            except asyncio.CancelledError:
+                cancelled.set()
+                raise
+
+    service, store, sink = build_service(tmp_path, channel=HangingChannel())
+    await sink.open()
+
+    asking = asyncio.create_task(ask(service))
+    await asyncio.wait_for(started.wait(), timeout=1)
+    asking.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await asking
+
+    assert cancelled.is_set()
+    assert not any(record.action is AuditAction.BRIDGE_ERROR for record in await sink.read_all())
+    await store.shutdown()
+
+
 async def test_an_unwritable_audit_log_denies(tmp_path: Path) -> None:
     service, _, _ = build_service(tmp_path, audit=AuditLog([BrokenSink()]))
 
