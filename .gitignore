@@ -29,6 +29,7 @@ halyard.db-wal
 audit.jsonl
 
 # Local Claude Code settings (may contain machine-specific hook wiring)
+/AGENTS.md
 .claude/settings.local.json
 # Same reason: an absolute path to this machine's Halyard checkout.
 .codex/hooks.json
