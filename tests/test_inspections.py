@@ -41,38 +41,6 @@ class Asking:
         return self.says
 
 
-class Labelling:
-    """A `Labeller` that keeps what it was asked to put on the task."""
-
-    def __init__(self, *, fails: bool = False) -> None:
-        self.put: list[str] = []
-        self.fails = fails
-
-    async def label(self, label: str) -> None:
-        if self.fails:
-            raise RuntimeError("the tracker is down")
-        self.put.append(label)
-
-
-async def checked(
-    tmp_path: Path, says: str | None, labeller: Labelling, findings=("status: candidate",)
-) -> inspections.Answer:
-    (tmp_path / "proof.md").write_text("# proof\n")
-    return await inspections.run(
-        "proof",
-        Path("proof.md"),
-        project=tmp_path,
-        context=[],
-        note="",
-        reply="42 passed",
-        asker=Asking(says=says),
-        model="sonnet",
-        timeout=5,
-        findings=findings,
-        labeller=labeller,
-    )
-
-
 async def ran(
     tmp_path: Path, asker: Asking, check: str = "proof.md", *, transition: str = ""
 ) -> inspections.Answer:
@@ -263,50 +231,6 @@ async def test_a_check_somebody_stopped_says_so(tmp_path: Path) -> None:
     assert answer.why == "stopped by tg:4242"
 
 
-def test_a_finding_is_the_projects_own_words_whatever_their_case() -> None:
-    """Whatever the project's check files have the model write, matched as
-    written give or take case; no phrases means nothing is ever a finding."""
-    findings = ("status: candidate", "status: evidence missing")
-
-    assert (
-        inspections.finding("proof · #355 · Status: Candidate\n- one", findings)
-        == "status: candidate"
-    )
-    assert inspections.finding("proof · #355 · status: no finding", findings) is None
-    assert inspections.finding("proof · #355 · status: candidate", ()) is None
-
-
-async def test_a_check_that_finds_something_labels_the_task(tmp_path: Path) -> None:
-    """Decided by the check, from the project's own words — so a check run by
-    hand and one run by a transition label alike."""
-    labeller = Labelling()
-
-    await checked(tmp_path, "proof · status: candidate", labeller)
-
-    assert labeller.put == ["halyard:proof"]
-
-
-async def test_nothing_is_labelled_without_a_finding(tmp_path: Path) -> None:
-    """Not for a clean answer, not for one that never came, and not for a
-    project that has not said what a finding looks like."""
-    labeller = Labelling()
-
-    await checked(tmp_path, "proof · status: no finding", labeller)
-    await checked(tmp_path, None, labeller)
-    await checked(tmp_path, "proof · status: candidate", labeller, findings=())
-
-    assert labeller.put == []
-
-
-async def test_a_label_that_cannot_be_written_costs_the_label_not_the_answer(
-    tmp_path: Path,
-) -> None:
-    answer = await checked(tmp_path, "proof · status: candidate", Labelling(fails=True))
-
-    assert answer.measured
-    assert answer.text == "proof · status: candidate"
-
-
 # --- every run, kept whole --------------------------------------------------
 
 
@@ -323,9 +247,7 @@ class Keeping:
         self.kept.append(kept)
 
 
-async def kept_run(
-    tmp_path: Path, asker, keeper: Keeping, *, says_finding: bool = False, effort=None
-):
+async def kept_run(tmp_path: Path, asker, keeper: Keeping, *, effort=None):
     (tmp_path / "proof.md").write_text("# proof\n")
     return await inspections.run(
         "proof",
@@ -339,7 +261,6 @@ async def kept_run(
         effort=effort,
         timeout=5,
         transition="close",
-        findings=("status: candidate",) if says_finding else (),
         keeper=keeper,
     )
 
@@ -360,7 +281,7 @@ async def test_every_run_is_kept_whole_under_the_id_it_ran_under(tmp_path: Path)
     tokens are recorded by — which is what makes a run comparable later."""
     asker, keeper = Asking(says="proof · status: candidate"), Keeping()
 
-    await kept_run(tmp_path, asker, keeper, says_finding=True)
+    await kept_run(tmp_path, asker, keeper)
 
     [kept] = keeper.kept
     [(text, _)] = asker.asked
@@ -368,7 +289,8 @@ async def test_every_run_is_kept_whole_under_the_id_it_ran_under(tmp_path: Path)
     assert kept.session == asker.sessions[0]
     assert (kept.name, kept.transition, kept.model) == ("proof", "close", "sonnet")
     assert kept.answer == "proof · status: candidate"
-    assert kept.finding == "status: candidate"
+    # Findings no longer label tasks, so none is read out of the answer.
+    assert kept.finding is None
     assert kept.context[1] == "HEAD: 2cdcab9c"
     assert "42 passed" in kept.asked
 

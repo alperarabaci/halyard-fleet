@@ -6,19 +6,13 @@ import asyncio
 import logging
 import time
 import uuid
-from collections.abc import Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 
 from halyard import frame
-from halyard.inspections.spec import Answer, Asker, Keeper, Kept, Labeller, StoppedError
+from halyard.inspections.spec import Answer, Asker, Keeper, Kept, StoppedError
 
 logger = logging.getLogger(__name__)
-
-#: What a finding puts on the task: Halyard's corner of the tracker, then the
-#: inspection's name — `halyard:claims`. One colon, not a scope; see
-#: `halyard.tasks.attribution` for why.
-LABEL_PREFIX = "halyard:"
 
 
 def prompt(instructions: str, *, context: list[str], note: str, text: str) -> str:
@@ -81,20 +75,6 @@ def unfenced(answer: str) -> str:
     return answer.strip()
 
 
-def finding(answer: str, findings: Sequence[str]) -> str | None:
-    """Which of the project's finding phrases an answer says, if any.
-
-    In the project's own words, as its inspection files have the model write them —
-    `status: candidate` — matched regardless of case; the first that matches. No
-    phrases, no finding: a project that has not said what a finding looks like
-    is never guessed for.
-    """
-    said = answer.casefold()
-    return next(
-        (phrase for phrase in findings if phrase.strip() and phrase.casefold() in said), None
-    )
-
-
 def handed_on(
     name: str,
     *,
@@ -149,8 +129,6 @@ async def run(
     effort: str | None = None,
     about: str = "",
     transition: str = "",
-    findings: Sequence[str] = (),
-    labeller: Labeller | None = None,
     keeper: Keeper | None = None,
 ) -> Answer:
     """Run one inspection over a reply: its own text, what Halyard can see, the reply.
@@ -161,10 +139,6 @@ async def run(
     and network operations are forbidden. It goes by the inspection's name — and the transition's,
     when it runs for one — so that a command it wants run reaches a person as
     that inspection's rather than a stranger's.
-
-    An answer that says one of the project's `findings` puts the inspection's
-    label on the task through `labeller`. Decided here, from the project's own
-    words, so whoever runs it has no say in it.
 
     Never raises. An inspection that cannot be read, or a model that does not answer,
     comes back as an `Answer` with no text and the reason — never as nothing,
@@ -200,7 +174,7 @@ async def run(
     session = str(uuid.uuid4())
     at = datetime.now(UTC)
 
-    async def kept(answer: str | None, why: str, took: float, phrase: str | None = None) -> None:
+    async def kept(answer: str | None, why: str, took: float) -> None:
         if keeper is None:
             return
         record = Kept(
@@ -216,7 +190,7 @@ async def run(
             note=note,
             answer=answer,
             why=why,
-            finding=phrase,
+            finding=None,
             took=took,
             effort=effort,
         )
@@ -251,19 +225,5 @@ async def run(
         await kept(None, "the model did not answer", took)
         return Answer(name, path, version, why="the model did not answer", took=took)
     logger.info("Inspection %s answered in %.1fs:\n%s", name, took, said)
-    phrase = finding(said, findings)
-    if labeller is not None and phrase:
-        await _label(name, phrase, labeller)
-    await kept(said, "", took, phrase)
+    await kept(said, "", took)
     return Answer(name, path, version, text=unfenced(said), took=took)
-
-
-async def _label(name: str, phrase: str, labeller: Labeller) -> None:
-    """Put the inspection's label on the task. Never raises: a label that could not
-    be written is a gap in a record, and the answer is worth more."""
-    label = f"{LABEL_PREFIX}{name}"
-    logger.info("Inspection %s found something (%r); %s goes on the task", name, phrase, label)
-    try:
-        await labeller.label(label)
-    except Exception:
-        logger.warning("Inspection %s could not put %s on the task", name, label, exc_info=True)

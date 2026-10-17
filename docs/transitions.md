@@ -36,11 +36,10 @@ projects:
     inspections:                      # /inspect offers these, one button each
       proof: NOTES/inspections/proof.md
       destructive: NOTES/inspections/destructive.md
-    label_groups:                     # the task's label from each group goes on the envelope
-      level: [level::1, level::2, level::3]
-      area: [area:api, area:web, area:all]
-    label_findings:                   # an answer saying one of these labels the task halyard:<inspection>
-      - "status: candidate"
+    labels:
+      groups:                         # the task's label from each group goes on the envelope
+        level: [level::1, level::2, level::3]
+        area: [area:api, area:web, area:all]
     transitions:                      # /transition offers these, one button each
       review:                         # a prompt, handed to the reviewer
         prompt: NOTES/transitions/review.md
@@ -82,7 +81,7 @@ affected part unmeasured rather than clean, and must not be worked around.
 An inspection's turn is Halyard's own, not an agent's, and it is marked so
 before it begins. Its answer arrives as the inspection's; the raw reply its
 runtime reports is kept out of the chat, and it is never seen working on a task
-— so `label_work` puts no label on anything for it. Its commands meet the same
+— so `labels: who_worked` puts no label on anything for it. Its commands meet the same
 rules as anyone's.
 
 ## An inspection runs on the machine's model, or its own
@@ -149,20 +148,10 @@ apart — `2 files changed, 27 insertions(+), 1 deletion(-) · 3 untracked files
 — because git's own summary leaves them out, and "nothing" beside three new
 files reads as no change at all.
 
-A project can name groups of task labels under `label_groups:`, and the one the
+A project can name groups of task labels under `labels: groups:`, and the one the
 task carries from each group goes on the envelope too — `level: level::3`. It
 only reports: a task with none of them, or a tracker that cannot be read, adds
 nothing.
-
-## A finding can label the task
-
-A project writes under `label_findings:` what its inspections' answers say when
-they found something, in its own words — quoted, because a phrase with a colon
-is otherwise a YAML mapping — and whenever an answer says one of them the task
-gets `halyard:<inspection>`. From `/inspect` and from a transition alike, since
-both run the same inspection. Halyard only adds: closing a finding, as a false
-alarm or as approved, is a label somebody puts on by hand. A project that has
-not said what a finding looks like has nothing written.
 
 ## Every inspection can be kept
 
@@ -295,7 +284,7 @@ twenty-five when it failed.
 
 Some commands need to know what the work is about — which part of the codebase
 an end-to-end suite covers. The task says so: somebody labels it when the work is
-planned, from a group the project lists under `label_groups:`, and a command
+planned, from a group the project lists under `labels: groups:`, and a command
 names that group in full — `SCOPE={label_groups.area}` above. What goes in the
 line is the part of each label after its last colon, every one the task carries
 from the group, in the group's order: `area:api` and `area:web` run

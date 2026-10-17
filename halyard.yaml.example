@@ -202,10 +202,6 @@ projects:
   alpha-engine:
     # Where `halyard wire` puts the gate.
     path: ~/code/alpha-engine
-    # Put each agent's label on the task its branch is for — `navigator:claude`,
-    # `reviewer:codex` — the first time that agent works on it. Needs a forge
-    # token that may label issues; off unless set. See docs/setup.md.
-    # label_work: true
     # What `/command` offers, by name. `validate:` and a transition's `commands:`
     # name entries from here rather than a command line of their own.
     # commands:
@@ -282,19 +278,27 @@ projects:
     #     verified: {transition: reviewed, agent: navigator}
     #     close: {agent: navigator}
     #   level3: [review, reviewed, [discover, discovered, develop, verified], close]
-    # Groups of task labels. The first one the task carries from each group
-    # goes on the envelope inspections and transitions are given, as `level: level::3`.
-    # Nothing is required or refused: a task with none of them adds nothing.
-    # label_groups:
-    #   level: [level::1, level::2, level::3]
-    #   area: [area:api, area:web, area:all]   # a command can take one: {label_groups.area}
-    # What the inspections' answers say when they found something, in the
-    # project's own words — quoted, since a phrase with a colon is otherwise a
-    # mapping. An answer saying one of them puts `halyard:<inspection>` on the task. This writes
-    # to the tracker, so nothing is written unless it is set.
-    # label_findings:
-    #   - "status: candidate"
-    #   - "status: evidence missing"
+    # Everything about task labels, in one place. Each of these was a key of
+    # its own before (`label_work:`, `label_groups:`, a plain list under
+    # `labels:`, `labels_exclude:`); those still work, and doctor says where
+    # each moved. `label_findings:` is no longer read, and can be removed.
+    # labels:
+    #   # Who worked on a task, on the task: each agent's label goes on the task
+    #   # its branch is for — `navigator:claude`, `reviewer:codex` — the first
+    #   # time that agent works on it, so the tracker shows who built it and who
+    #   # reviewed it. Needs a forge token that may label issues; off unless set.
+    #   # See docs/setup.md.
+    #   who_worked: true
+    #   # Groups of task labels. The first one the task carries from each goes on
+    #   # the envelope inspections and transitions are given, as `level: level::3`.
+    #   groups:
+    #     level: [level::1, level::2, level::3]
+    #     area: [area:api, area:web, area:all]   # a command can take one: {label_groups.area}
+    #   # What `/label` offers (empty: all of them), and what it never offers, as
+    #   # patterns. Halyard's own labels — `halyard:*` and the agents' — are never
+    #   # offered whatever this says: nobody puts those on by hand.
+    #   offer: [andon, rework]
+    #   exclude: [wontfix]
     # Written `seats:` before 2026-09-24, and a step's `agent:` was `seat:`;
     # both still work.
     agents:
@@ -347,7 +351,7 @@ projects:
         # Optional. It colours the card and matches a hook that declares one.
         # Two agents may share a role; that is the point of having four.
         role: navigator
-        # Optional. The label this agent puts on a task when `label_work` is on —
+        # Optional. The label this agent puts on a task when `labels: who_worked` is on —
         # role and runtime unless set, `navigator:claude`, or `claude` alone for a
         # agent with no role. Set it to match labels your tracker already uses.
         # Leave the model out: that changes under an agent, and this never does.

@@ -605,13 +605,56 @@ def test_an_empty_list_is_refused(tmp_path) -> None:
         a_project(tmp_path, lines=["commands:", "  nothing: []"])
 
 
+def test_everything_about_labels_is_one_block(tmp_path) -> None:
+    [project] = a_project(
+        tmp_path,
+        lines=[
+            "labels:",
+            "  who_worked: true",
+            "  groups: {level: [level::1, level::2]}",
+            "  offer: [andon, rework]",
+            '  exclude: ["wontfix"]',
+        ],
+    )
+
+    assert project.label_work is True
+    assert project.label_groups == {"level": ("level::1", "level::2")}
+    assert project.labels == ("andon", "rework")
+    assert project.labels_exclude == ("wontfix",)
+    assert project.older == ()
+
+
+def test_the_keys_labels_had_before_still_read_and_say_where_they_moved(tmp_path) -> None:
+    [project] = a_project(
+        tmp_path,
+        lines=[
+            "label_work: true",
+            "label_groups: {level: [level::1]}",
+            "labels: [andon]",
+        ],
+    )
+
+    assert project.label_work is True
+    assert project.label_groups == {"level": ("level::1",)}
+    assert project.labels == ("andon",)
+    assert "the project: `label_work:` is now `labels: who_worked:`" in project.older
+    assert "the project: `labels: [...]` is now `labels: offer: [...]`" in project.older
+
+
+def test_a_label_setting_written_twice_is_refused(tmp_path) -> None:
+    with pytest.raises(ValueError, match="`labels: who_worked:` and `label_work:`"):
+        a_project(tmp_path, lines=["label_work: true", "labels:", "  who_worked: true"])
+    with pytest.raises(ValueError, match="takes who_worked, groups, offer, exclude, not hide"):
+        a_project(tmp_path, lines=["labels:", "  hide: [x]"])
+
+
 def test_labels_left_out_of_label_are_patterns(tmp_path) -> None:
     [one] = a_project(tmp_path, lines=['labels_exclude: ["halyard:*", "wontfix"]'])
     [single] = a_project(tmp_path, lines=["labels_exclude: halyard:*"])
 
     assert one.labels_exclude == ("halyard:*", "wontfix")
     assert single.labels_exclude == ("halyard:*",)
-    with pytest.raises(ValueError, match="`labels_exclude:` must be a list of patterns"):
+    with pytest.raises(ValueError, match="`labels: exclude:` must be a list of patterns"):
         a_project(tmp_path, lines=["labels_exclude: {halyard: true}"])
 
 
@@ -689,20 +732,15 @@ def test_validate_cannot_name_a_command_that_takes_a_label(tmp_path) -> None:
         )
 
 
-def test_label_findings_are_read_as_phrases(tmp_path) -> None:
-    [project] = a_project(
-        tmp_path,
-        lines=["label_findings:", '  - "status: candidate"', '  - "status: evidence missing"'],
-    )
+def test_findings_are_no_longer_read_and_a_file_naming_them_still_starts(tmp_path) -> None:
+    """They labelled a task when an inspection's answer said one of them, and
+    nothing read those labels back. Refusing the file would keep the control
+    plane from starting over a line that now does nothing."""
+    [project] = a_project(tmp_path, lines=["label_findings:", '  - "status: candidate"'])
+    [inside] = a_project(tmp_path, lines=["labels:", '  findings: ["status: candidate"]'])
 
-    assert project.label_findings == ("status: candidate", "status: evidence missing")
-
-
-def test_a_finding_phrase_left_unquoted_is_refused_with_why(tmp_path) -> None:
-    """`- status: candidate` is a mapping to YAML, and would otherwise become
-    text no answer ever contains."""
-    with pytest.raises(ValueError, match="has to be quoted"):
-        a_project(tmp_path, lines=["label_findings:", "  - status: candidate"])
+    assert any("`label_findings:` is no longer read" in said for said in project.older)
+    assert any("`labels: findings:` is no longer read" in said for said in inside.older)
 
 
 def test_transitions_are_read_with_what_they_carry(tmp_path) -> None:

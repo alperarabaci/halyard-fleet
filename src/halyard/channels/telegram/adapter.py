@@ -554,21 +554,6 @@ class _Keeping:
         self._channel._detach(write, f"keep inspection {kept.name}")
 
 
-class _Labelling:
-    """The channel's side of `inspections.Labeller`: a label onto this project's task.
-
-    Written off to one side, so an inspection's answer and a transition never wait on an
-    issue tracker, and quietly — the log says what happened, nobody is asked.
-    """
-
-    def __init__(self, channel: TelegramChannel, found: Project) -> None:
-        self._channel = channel
-        self._found = found
-
-    async def label(self, label: str) -> None:
-        self._channel._detach(self._channel._put_label(self._found, label), f"label {label}")
-
-
 class _Running:
     """The channel's side of `transitions.Runner`: a project command, run where the
     project is, with how it is getting on said in the chat the transition came from.
@@ -1741,7 +1726,7 @@ class TelegramChannel:
                 )
                 return
             choice = await task_tracker.to_offer(
-                forge, number, project.labels, project.labels_exclude
+                forge, number, project.labels, (*project.labels_exclude, *self._own_labels(project))
             )
         except task_tracker.ForgeError as refused:
             await self._say(f"\U0001f6ab {html.escape(str(refused))}", chat_id, thread_id)
@@ -1759,6 +1744,27 @@ class TelegramChannel:
             thread_id,
             reply_markup=cards.label_choices(choice.offer),
         )
+
+    def _own_labels(self, project: Project) -> tuple[str, ...]:
+        """The labels Halyard writes on tasks itself, as patterns: each of the
+        project's agents' own (`navigator:claude`), and what an inspection's
+        finding put there while findings labelled tasks (`halyard:proof`) —
+        those stay on the tracker. Nobody puts one of these on by hand, and
+        they were most of a long `/label` card."""
+        from halyard.agents import registry
+        from halyard.tasks.attribution import label_for
+
+        def tag_of(runtime: str) -> str:
+            spec = registry.get(runtime)
+            return (spec.tag or spec.name) if spec else runtime
+
+        def literally(label: str) -> str:
+            return "".join(f"[{c}]" if c in "*?[" else c for c in label)
+
+        agents = (
+            seat.task_label or label_for(tag_of(seat.runtime), seat.role) for seat in project.seats
+        )
+        return ("halyard:*", *(literally(label) for label in agents))
 
     # --- running a project's own commands -----------------------------------
 
@@ -2693,8 +2699,6 @@ class TelegramChannel:
             model=chosen.model or INSPECTION_MODEL,
             effort=chosen.effort,
             timeout=INSPECTION_TIMEOUT_SECONDS,
-            findings=found.label_findings,
-            labeller=_Labelling(self, found),
             keeper=await self._keeper(found),
             about=(
                 f"reply {arrived}, {len(said.text)} chars, "
@@ -2923,34 +2927,6 @@ class TelegramChannel:
             logger.info("%s#%d: %s", found.name, number, refused)
             return None
         return forge, number
-
-    async def _put_label(self, found: Project, label: str) -> None:
-        """One label onto the task this project's branch is for, unless it is on
-        it already. Logged whichever way it goes, never raised — see
-        `_Labelling`."""
-        reached = await self._reach_quietly(found)
-        if reached is None:
-            logger.info("%s went on no task: %s names none that can be reached", label, found.name)
-            return
-        forge, number = reached
-        try:
-            task = await asyncio.wait_for(forge.task(number), timeout=LABELS_TIMEOUT_SECONDS)
-            if label.casefold() in {name.casefold() for name in task.labels}:
-                logger.info("%s was already on %s#%d", label, found.name, number)
-                return
-            await asyncio.wait_for(
-                task_tracker.put_on(forge, number, label), timeout=LABELS_TIMEOUT_SECONDS
-            )
-        except (task_tracker.ForgeError, TimeoutError) as refused:
-            logger.warning(
-                "Could not put %s on %s#%d: %s",
-                label,
-                found.name,
-                number,
-                str(refused) or "no answer in time",
-            )
-            return
-        logger.info("Labelled %s#%d %s", found.name, number, label)
 
     async def _labels_on_task(self, found: Project) -> tuple[int | None, tuple[str, ...]]:
         """The task this project's branch is for, and the labels it carries.
@@ -3439,8 +3415,6 @@ class TelegramChannel:
                 delivery=_SeatDelivery(
                     self, actor, chat_id, thread_id, accepted=reached if number else None
                 ),
-                findings=found.label_findings,
-                labeller=_Labelling(self, found),
                 project_commands={**found.commands, **(command_lines or {})},
                 project_not_run=found.commands_not_run,
                 runner=_Running(self, found.path, chat_id, thread_id, found.name),

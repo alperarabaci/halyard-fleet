@@ -2180,45 +2180,6 @@ async def test_a_project_without_label_groups_never_asks_the_tracker(
     assert "- level:" not in asked
 
 
-def findings_in(channel: TelegramChannel) -> None:
-    """The project's checks say `status: candidate` when they found something."""
-    found = channel._repositories["alpha-engine"]
-    channel._repositories["alpha-engine"] = replace(found, label_findings=("status: candidate",))
-
-
-async def test_a_check_that_finds_something_labels_its_task(
-    tmp_path: Path, wired, monkeypatch
-) -> None:
-    """Off to one side: the answer arrives as it always did, and the task gets
-    the check's label."""
-    channel, api, runner, repo = wired
-    inspections_in(channel, repo, tmp_path, proof="# proof")
-    findings_in(channel)
-    tracker = behind_a_tracker(channel, monkeypatch, Tracker(labels=("backend",)))
-    runner.says = "proof · alpha-engine#281 · status: candidate"
-
-    await channel._handle_callback(pressed_inspection("proof"))
-    await settled(channel)
-
-    assert tracker.added == [(281, "halyard:proof")]
-    assert api.sent[-1]["text"].startswith("<b>proof</b>")
-
-
-async def test_a_findings_label_already_on_the_task_is_not_written_again(
-    tmp_path: Path, wired, monkeypatch
-) -> None:
-    channel, _, runner, repo = wired
-    inspections_in(channel, repo, tmp_path, proof="# proof")
-    findings_in(channel)
-    tracker = behind_a_tracker(channel, monkeypatch, Tracker(labels=("halyard:proof",)))
-    runner.says = "proof · status: candidate"
-
-    await channel._handle_callback(pressed_inspection("proof"))
-    await settled(channel)
-
-    assert tracker.added == []
-
-
 def a_suite(channel: TelegramChannel, monkeypatch, *, output: str = "1420 passed") -> list:
     """`test-fast` among the project's commands, and a run of it that answers at once."""
     from halyard.channels.telegram import adapter as under_test
@@ -2439,24 +2400,6 @@ async def test_a_transition_with_commands_does_not_go_while_another_runs(
     assert runner.sent == []
     assert "did not go" in api.sent[-1]["text"]
     assert channel._working == {"alpha-engine": "test-all"}
-
-
-async def test_a_transition_labels_like_a_check_run_by_hand(
-    tmp_path: Path, wired, monkeypatch
-) -> None:
-    """The same check, so the same label — transitions are no exception."""
-    channel, _, runner, repo = wired
-    transitions_in(
-        channel, repo, tmp_path, runner, discovery={"inspections": ("proof",), "to": "xrev"}
-    )
-    findings_in(channel)
-    tracker = behind_a_tracker(channel, monkeypatch, Tracker())
-    runner.says = "proof · status: candidate"
-
-    await channel._run_transition("discovery", CHAT, None, f"tg:{APPROVER}")
-    await settled(channel)
-
-    assert tracker.added == [(281, "halyard:proof")]
 
 
 def scoped(channel: TelegramChannel, monkeypatch) -> list:

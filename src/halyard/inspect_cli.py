@@ -368,7 +368,6 @@ async def _repeat(
             runtime=asker.runtime,
             project=found.path,
             context=context,
-            findings=found.label_findings,
             database=database,
             session=session,
         )

@@ -41,17 +41,6 @@ class Asker(Protocol):
     ) -> str | None: ...
 
 
-@runtime_checkable
-class Labeller(Protocol):
-    """What an inspection may do to the task it ran on: put one more label on it.
-
-    The channel answers it — it knows which task, which tracker and which
-    token. An inspection knows only what it found, and never waits on the writing.
-    """
-
-    async def label(self, label: str) -> None: ...
-
-
 @dataclass(frozen=True)
 class Kept:
     """One inspection run, whole: what the model was given, what it said, and
@@ -81,7 +70,8 @@ class Kept:
     answer: str | None
     #: Why there is no answer, when there is none.
     why: str
-    #: The project's own finding phrase the answer said, if it said one.
+    #: Left empty since findings stopped labelling tasks; older runs carry
+    #: the phrase their answer said.
     finding: str | None
     took: float
     #: How hard the model was asked to think, or None when that was left to the

@@ -32,7 +32,6 @@ from pathlib import Path
 
 from halyard.inspections import record
 from halyard.inspections.spec import Asker, Kept, StoppedError
-from halyard.inspections.turn import finding
 
 #: How long one repeat may take — the bound an inspection has in the work.
 TIMEOUT_SECONDS = 600.0
@@ -152,7 +151,6 @@ async def repeat(
     runtime: str,
     project: Path,
     context: Sequence[str],
-    findings: Sequence[str],
     database: Path,
     effort: str | None = None,
     session: str | None = None,
@@ -212,7 +210,7 @@ async def repeat(
             note=original.note,
             answer=said or None,
             why=why,
-            finding=finding(said, findings) if said else None,
+            finding=None,
             took=took,
             effort=effort,
         ),

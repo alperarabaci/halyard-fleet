@@ -279,12 +279,6 @@ class Project:
     #: cannot be read, adds nothing: this reports what is there, it does not ask
     #: for anything.
     label_groups: dict[str, tuple[str, ...]] = field(default_factory=dict)
-    #: What this project's inspections answer when they found something, in its
-    #: own words — `status: candidate`. An answer that says one of them puts
-    #: `halyard:<inspection>` on the task, wherever it ran. Empty unless
-    #: configured, and nothing is written without it: this writes to somebody's
-    #: tracker on its own.
-    label_findings: tuple[str, ...] = ()
     #: Whether each seat's label goes on the task its branch is for, the first
     #: time that seat works on it — `navigator:claude`. Off unless asked for:
     #: it writes to somebody's issue tracker on its own. See `tasks.attribution`.
@@ -855,7 +849,7 @@ def _placeholders_checked(
             where = f"Project {project!r}: command {name!r} takes {{label_groups.{group}}}"
             if group not in label_groups:
                 defined = f" ({', '.join(label_groups)})" if label_groups else ""
-                raise ValueError(f"{where}, but `label_groups:` has no group {group!r}{defined}.")
+                raise ValueError(f"{where}, but `labels: groups:` has no group {group!r}{defined}.")
             if not label_groups[group]:
                 raise ValueError(f"{where}, and that group lists no labels to take one from.")
         if name == validate and (groups_in(line) or names_in(line)):
@@ -893,6 +887,84 @@ def _validate_from(project: str, value: Any, commands: dict[str, str]) -> str | 
     )
 
 
+#: What a project's `labels:` block may say, and the names each had before
+#: it: at the top of the project, and inside the block itself.
+_LABELS_FIELDS: dict[str, tuple[str | None, str | None]] = {
+    "who_worked": ("label_work", "work"),
+    "groups": ("label_groups", None),
+    "offer": (None, None),
+    "exclude": ("labels_exclude", None),
+}
+
+#: What findings were written under, before they were taken out. An
+#: inspection's answer saying one of a project's phrases put `halyard:<name>` on
+#: the task; nothing read those labels back. A file still saying so is told
+#: rather than refused: refusing it would keep the control plane from starting.
+_FINDINGS_ONCE = ("label_findings", "findings")
+
+
+def _labels_block(project: str, body: dict, older: list[str]) -> dict[str, Any]:
+    """Everything a project says about task labels, in one place:
+
+        labels:
+          who_worked: true            # each agent's label on the task it works on
+          groups: {level: [level::1, level::2]}
+          offer: [andon, rework]      # what /label offers; empty means all
+          exclude: [wontfix]          # what /label never offers
+
+    Each was a key of its own before, and each is still read — with a sentence
+    saying where it moved, and refused alongside its new place. A plain list
+    under `labels:` is what it always was: what /label offers.
+    """
+    raw = body.get("labels")
+    if isinstance(raw, list | str):
+        older.append("the project: `labels: [...]` is now `labels: offer: [...]`")
+        block: dict = {"offer": raw}
+    elif isinstance(raw, dict):
+        block = raw
+    elif raw is None:
+        block = {}
+    else:
+        raise ValueError(f"Project {project!r}: `labels:` must be a mapping.")
+    allowed = {*_LABELS_FIELDS, *(inside for _, inside in _LABELS_FIELDS.values() if inside)}
+    if stray := sorted(str(key) for key in block if key not in allowed | {"findings"}):
+        raise ValueError(
+            f"Project {project!r}: `labels:` takes {', '.join(_LABELS_FIELDS)}, "
+            f"not {', '.join(stray)}."
+        )
+    top, inside = _FINDINGS_ONCE
+    for gone, written in ((f"`{top}:`", top in body), (f"`labels: {inside}:`", inside in block)):
+        if written:
+            older.append(
+                f"the project: {gone} is no longer read — inspection findings no longer "
+                "label tasks; it can be removed"
+            )
+    found: dict[str, Any] = {}
+    for key, (before, inside_before) in _LABELS_FIELDS.items():
+        written = [
+            (name, value)
+            for name, present, value in (
+                (f"`labels: {key}:`", key in block, block.get(key)),
+                (f"`{before}:`", before is not None and before in body, body.get(before or "")),
+                (
+                    f"`labels: {inside_before}:`",
+                    inside_before is not None and inside_before in block,
+                    block.get(inside_before or ""),
+                ),
+            )
+            if present
+        ]
+        if len(written) > 1:
+            raise ValueError(
+                f"Project {project!r} has {' and '.join(name for name, _ in written)} — "
+                f"they are the same thing; keep `labels: {key}:`."
+            )
+        if written and written[0][0] != f"`labels: {key}:`":
+            older.append(f"the project: {written[0][0]} is now `labels: {key}:`")
+        found[key] = written[0][1] if written else None
+    return found
+
+
 def _patterns_from(project: str, key: str, value: Any) -> tuple[str, ...]:
     """A list of patterns, one string or several; nothing written is none."""
     if value is None:
@@ -917,31 +989,6 @@ def _warnings_from(project: str, value: Any) -> tuple[str, ...] | None:
     if not isinstance(value, list):
         raise ValueError(f"Project {project!r}: `warn_if:` must be a list of names.")
     return tuple(str(name).strip() for name in value if str(name).strip())
-
-
-def _findings_from(project: str, value: Any) -> tuple[str, ...]:
-    """`label_findings:` as phrases, in the project's own words.
-
-    A phrase is nearly always `status: something`, which YAML reads as a
-    mapping unless it is quoted — so a mapping here is refused with that said,
-    rather than turned into text nobody's answer will ever contain.
-    """
-    if value is None:
-        return ()
-    if isinstance(value, str):
-        value = [value]
-    if not isinstance(value, list):
-        raise ValueError(f"Project {project!r}: `label_findings:` must be a list of phrases.")
-    phrases = []
-    for phrase in value:
-        if isinstance(phrase, dict):
-            raise ValueError(
-                f"Project {project!r}: a `label_findings:` phrase with a colon in it has "
-                'to be quoted — `- "status: candidate"` — or YAML reads it as a mapping.'
-            )
-        if str(phrase).strip():
-            phrases.append(str(phrase).strip())
-    return tuple(phrases)
 
 
 def _label_groups_from(project: str, value: Any) -> dict[str, tuple[str, ...]]:
@@ -1136,7 +1183,8 @@ def projects_from_yaml(text: str) -> list[Project]:
             commands=commands,
             older=older,
         )
-        label_groups = _label_groups_from(project, body.get("label_groups"))
+        tagged = _labels_block(project, body, older)
+        label_groups = _label_groups_from(project, tagged["groups"])
         validate = _validate_from(project, body.get("validate"), commands)
         _placeholders_checked(
             project, commands, label_groups, validate=validate, transitions=transitions
@@ -1153,13 +1201,10 @@ def projects_from_yaml(text: str) -> list[Project]:
                 command_lists=command_lists,
                 commands_not_run=commands_not_run,
                 forge=_as_text(body.get("forge")),
-                labels=_warnings_from(project, body.get("labels")) or (),
-                labels_exclude=_patterns_from(
-                    project, "labels_exclude", body.get("labels_exclude")
-                ),
+                labels=_patterns_from(project, "labels: offer", tagged["offer"]),
+                labels_exclude=_patterns_from(project, "labels: exclude", tagged["exclude"]),
                 label_groups=label_groups,
-                label_findings=_findings_from(project, body.get("label_findings")),
-                label_work=_as_flag(project, "label_work", body.get("label_work")),
+                label_work=_as_flag(project, "labels: who_worked", tagged["who_worked"]),
                 confirmation=_confirmation_from(project, body.get("confirmation")),
                 inspections=inspections,
                 inspection_models=inspection_models,
