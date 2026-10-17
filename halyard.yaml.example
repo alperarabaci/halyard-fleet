@@ -80,6 +80,11 @@ settings:
   # value it takes.
   # HALYARD_ALLOW_RISK_AT_OR_BELOW: low
 
+  # A chat that approves for itself — Codex's "approve for me", Claude Code's
+  # auto mode — is left to it: its own reviewer decides, nothing reaches the
+  # phone, and the audit log says so. Set this to decide every call here anyway.
+  # HALYARD_OVERRIDE_AGENT_APPROVALS: true
+
   # Keep every inspection run in the database — what the model was given, word
   # for word, and what it said — to compare models on the same input later.
   # Off unless set, because it is the one place Halyard keeps text: the input

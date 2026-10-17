@@ -35,6 +35,7 @@ from halyard.core.audit import (
     approval_requested,
     approval_resolved,
     bridge_error,
+    left_to_agent,
     question_answered,
     question_asked,
     refused_outright,
@@ -462,6 +463,7 @@ class ApprovalService:
         allowed_writes: tuple[str, ...] = (),
         allowed_tools: tuple[str, ...] = (),
         refuse_agent_commits: bool = False,
+        override_agent_approvals: bool = False,
         allow_risk_at_or_below: RiskLevel | None = None,
         runs_by_project: Mapping[str, Sequence[str]] | None = None,
         trusted_runs: Callable[[str], Sequence[str]] | None = None,
@@ -494,6 +496,8 @@ class ApprovalService:
         #: Off unless somebody says otherwise, so nothing changes for anybody
         #: who has not asked for it. See `core/refusals.py`.
         self._refuse_agent_commits = refuse_agent_commits
+        #: Off unless asked for: a chat that approves for itself is left to it.
+        self._override_agent_approvals = override_agent_approvals
         #: What goes through without a card: paths under `writes:`, tools
         #: under `tools:`, and — with the setting on — shell commands `reads`
         #: understands. All empty or off by default, which is how this shipped.
@@ -610,6 +614,7 @@ class ApprovalService:
         file_paths: list[str] | None = None,
         permission_mode: str | None = None,
         hook_event: str | None = None,
+        agent_approves: bool = False,
     ) -> ApprovalOutcome:
         """Ask for permission, and answer. Never raises."""
         try:
@@ -631,6 +636,7 @@ class ApprovalService:
                 file_paths=file_paths,
                 permission_mode=permission_mode,
                 hook_event=hook_event,
+                agent_approves=agent_approves,
             )
         except Exception:
             # The outer net. Anything not handled below still has to come out of
@@ -700,6 +706,7 @@ class ApprovalService:
         file_paths: list[str] | None = None,
         permission_mode: str | None = None,
         hook_event: str | None = None,
+        agent_approves: bool = False,
     ) -> ApprovalOutcome:
         project = project_name(project_dir, cwd, self._project)
         role = seat_of(role, session_name, self._seats)
@@ -754,6 +761,34 @@ class ApprovalService:
             return ApprovalOutcome(
                 decision=BridgeDecision.DEFER,
                 reason="Halyard is paused; this was not relayed for approval.",
+            )
+
+        # The chat approves for itself — the person chose that there, Codex's
+        # "approve for me" or Claude Code's auto mode — so this is left to it,
+        # as a pause leaves everything. Asking again on a phone made the
+        # ordinary way of working harder. Refusals above still stand, a turn of
+        # Halyard's own is never left to anyone, and
+        # `HALYARD_OVERRIDE_AGENT_APPROVALS` puts every call back here.
+        if (
+            agent_approves
+            and not self._override_agent_approvals
+            and self._registry.own(session_id) is None
+        ):
+            await self._try_to_record(
+                left_to_agent(
+                    session_id=session_id,
+                    agent_id=agent_id,
+                    project=project,
+                    tool=tool,
+                    command=self._redactor.prepare(command).full,
+                    cwd=cwd or project_dir or "",
+                    permission_mode=permission_mode,
+                    hook_event=hook_event,
+                )
+            )
+            return ApprovalOutcome(
+                decision=BridgeDecision.DEFER,
+                reason="Left to the agent's own approval setting.",
             )
 
         # What is shown and kept is redacted; what is judged is the command as

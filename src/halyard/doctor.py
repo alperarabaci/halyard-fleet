@@ -702,6 +702,15 @@ def run() -> int:
         )
         if settings.channel.decides_without_a_human:
             print(f"{WARN}channel {settings.channel.value} answers by itself — nobody is asked")
+        # Which way calls go from a chat that approves for itself, said either
+        # way: "why did nothing reach my phone" has its answer here.
+        if settings.override_agent_approvals:
+            print(f"{OK}every call is decided here, even from a chat that approves for itself")
+        else:
+            print(
+                f'{OK}a chat that approves for itself (Codex "approve for me", Claude Code'
+                " auto mode) is left to it"
+            )
     except ValidationError as exc:
         problems += 1
         print(f"{FAIL}configuration is not valid")
