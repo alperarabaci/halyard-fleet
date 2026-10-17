@@ -160,7 +160,9 @@ def _read_existing(path: Path) -> dict[str, str]:
     )
 
 
-def _back_up(path: Path, stamp: str) -> Path | None:
+def back_up(path: Path, stamp: str) -> Path | None:
+    """A copy of `path` beside it, `halyard.yaml.20260725-183503.bak`, before
+    it is written — or None when there is nothing yet to keep."""
     if not path.exists():
         return None
     backup = path.with_name(f"{path.name}.{stamp}.bak")
@@ -326,7 +328,7 @@ def run(
     )
 
     stamp = now or datetime.now().strftime("%Y%m%d-%H%M%S")
-    backup = _back_up(path, stamp)
+    backup = back_up(path, stamp)
     path.write_text(content, encoding="utf-8")
     say(f"\nWrote {path}" + (f" (previous kept at {backup})" if backup else ""))
     # Never the token — the whole point of getpass is that it does not surface.

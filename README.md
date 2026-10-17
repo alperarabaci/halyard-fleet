@@ -299,6 +299,7 @@ missing costs orientation, never the session.
 | On the machine | |
 |---|---|
 | `halyard init` | guided setup: `halyard.yaml`, wiring, and a check |
+| `halyard samples add` | put a [sample](samples/)'s project into `halyard.yaml`, keeping a backup |
 | `halyard doctor` | what is wired, where, and what is broken |
 | `halyard verify` | prove the gate stops things, by running into it |
 | `halyard wire` / `unwire` | put the gate on a project, or take it off |

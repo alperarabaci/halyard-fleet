@@ -75,6 +75,7 @@ USAGE = """usage: halyard [command]
   doctor        check the configuration and say what is wrong with it
   sessions      list the session names this machine can see
   init          build halyard.yaml, wire a project, and check it
+  samples add   put a sample's project into halyard.yaml (keeps a backup)
   verify [rt]   prove the gate stops things, by running into it (costs turns)
   wire [what]   put the gate on a project, by name or directory (keeps a backup)
   unwire [what] take it off again, leaving everything else in place
@@ -165,6 +166,11 @@ def main() -> None:
         from halyard.runs_cli import main as runs_main
 
         raise SystemExit(runs_main(args[1:]))
+
+    if command == "samples":
+        from halyard.samples_cli import main as samples_main
+
+        raise SystemExit(samples_main(args[1:]))
 
     if command == "rules":
         from halyard.rules_cli import main as rules_main
