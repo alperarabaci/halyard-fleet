@@ -62,6 +62,10 @@ class AuditAction(StrEnum):
     #: counting the two together would make a Tuesday look like a series of
     #: refusals somebody never made.
     REFUSED_OUTRIGHT = "call.refused"
+    #: A call left to the agent's own approval, because its chat approves for
+    #: itself — Codex's "approve for me", Claude Code's auto mode. Nobody was
+    #: asked here; what the agent's reviewer decided is the agent's to record.
+    LEFT_TO_AGENT = "call.left_to_agent"
     #: An agent asked a person to choose between options, and a card went out.
     QUESTION_ASKED = "question.asked"
     #: A question was answered, or left to the terminal by the deadline.
@@ -257,6 +261,36 @@ def tool_preauthorized(
         agent_id=agent_id,
         project=project,
         detail={"tool": tool, "pattern": pattern},
+    )
+
+
+def left_to_agent(
+    *,
+    session_id: str,
+    agent_id: str,
+    project: str,
+    tool: str,
+    command: str,
+    cwd: str,
+    permission_mode: str | None = None,
+    hook_event: str | None = None,
+    now: datetime | None = None,
+) -> AuditRecord:
+    """A call left to the agent's own approval, with what it was and where."""
+    return AuditRecord(
+        action=AuditAction.LEFT_TO_AGENT,
+        recorded_at=now or _default_clock(),
+        actor=agent_id,
+        session_id=session_id,
+        agent_id=agent_id,
+        project=project,
+        detail={
+            "tool": tool,
+            "command": command,
+            "cwd": cwd,
+            **({"permission_mode": permission_mode} if permission_mode else {}),
+            **({"hook_event": hook_event} if hook_event else {}),
+        },
     )
 
 

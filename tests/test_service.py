@@ -111,6 +111,7 @@ def build_service(
     runs_by_project=None,
     trusted_runs=None,
     questions_wait: frozenset[str] = frozenset(),
+    override_agent_approvals: bool = False,
 ) -> tuple[ApprovalService, ApprovalStore, JsonlAuditSink]:
     store = store or ApprovalStore(ttl=ttl)
     sink = JsonlAuditSink(tmp_path / "audit.jsonl")
@@ -129,6 +130,7 @@ def build_service(
         runs_by_project=runs_by_project,
         trusted_runs=trusted_runs,
         questions_wait=questions_wait,
+        override_agent_approvals=override_agent_approvals,
     )
     return service, store, sink
 
@@ -1438,3 +1440,58 @@ async def test_a_card_says_where_it_ran_and_whether_redaction_changed_it(tmp_pat
     ]
     assert (first["cwd"], first["project_dir"], first["redacted"]) == ("/p/src", "/p", True)
     assert (second["cwd"], second["project_dir"], second["redacted"]) == ("/p", None, False)
+
+
+# --- a chat that approves for itself --------------------------------------------
+
+
+async def test_a_chat_that_approves_for_itself_is_left_to_it(tmp_path: Path) -> None:
+    """Codex's "approve for me", Claude Code's auto mode: chosen in the chat,
+    and not asked again here. Recorded, and nobody's card."""
+    channel = CountingChannel()
+    service, _, sink = build_service(tmp_path, channel=channel)
+    await sink.open()
+
+    outcome = await ask(service, "pytest -q", agent_id="codex", agent_approves=True)
+
+    assert outcome.decision is BridgeDecision.DEFER
+    assert channel.sent == []
+    [record] = await sink.read_all()
+    assert record.action is AuditAction.LEFT_TO_AGENT
+    assert record.detail["command"] == "pytest -q"
+
+
+async def test_halyard_decides_everything_when_told_to(tmp_path: Path) -> None:
+    channel = CountingChannel()
+    service, _, sink = build_service(tmp_path, channel=channel, override_agent_approvals=True)
+    await sink.open()
+
+    asking = asyncio.create_task(ask(service, "pytest -q", agent_approves=True))
+    card = await card_out(channel)
+    asking.cancel()
+
+    assert card.command_full == "pytest -q"
+
+
+async def test_a_refusal_still_stands_for_a_chat_that_approves_for_itself(tmp_path: Path) -> None:
+    service, _, sink = build_service(tmp_path, refuse_agent_commits=True)
+    await sink.open()
+
+    outcome = await ask(service, "git commit -m x", agent_approves=True)
+
+    assert outcome.decision is BridgeDecision.DENY
+
+
+async def test_a_turn_of_halyard_s_own_is_never_left_to_anyone(tmp_path: Path) -> None:
+    channel = CountingChannel()
+    service, _, sink = build_service(tmp_path, channel=channel)
+    await sink.open()
+    service._registry.mark_own("ses_own", "proof")
+
+    asking = asyncio.create_task(
+        ask(service, "pytest -q", session_id="ses_own", agent_approves=True)
+    )
+    card = await card_out(channel)
+    asking.cancel()
+
+    assert card.session_id == "ses_own"

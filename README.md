@@ -337,6 +337,12 @@ systemd unit.
   nobody can rely on.
 - **`/pause` steps aside rather than denying.** The runtime's own permission list
   then decides, with no card and no audit entry.
+- **A chat that approves for itself is left to it.** Codex's "approve for me" and
+  Claude Code's auto mode were chosen in the chat, so their calls are not asked
+  again on the phone: the runtime's own reviewer decides, and the audit log says
+  `call.left_to_agent`. Refusals such as `HALYARD_REFUSE_AGENT_COMMITS` still
+  apply, and Halyard's own turns are always asked. `HALYARD_OVERRIDE_AGENT_APPROVALS:
+  true` puts every call back on the gate; `halyard doctor` says which way it is.
 - **The gate covers what the matcher covers** — Bash, the file tools, the
   question tool, MCP calls, `WebFetch` and `WebSearch`. Not `Read`, `Grep` or
   the client's own tool loading, which fire too and would put a card in front of

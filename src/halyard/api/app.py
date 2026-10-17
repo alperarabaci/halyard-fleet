@@ -131,6 +131,9 @@ class ApprovalRequestBody(BaseModel):
     #: these decide nothing. The service cuts them short.
     permission_mode: str | None = None
     hook_event: str | None = None
+    #: Whether the chat this came from approves its own calls — the bridge's
+    #: reading of it. See `ApprovalService` and `HALYARD_OVERRIDE_AGENT_APPROVALS`.
+    agent_approves: bool = False
 
 
 class AnsweredBody(BaseModel):
@@ -538,6 +541,7 @@ def create_app(settings: Settings, *, channel=None) -> FastAPI:
         allowed_writes=allowed_writes,
         allowed_tools=allowed_tools,
         refuse_agent_commits=settings.refuse_agent_commits,
+        override_agent_approvals=settings.override_agent_approvals,
         allow_risk_at_or_below=(
             RiskLevel(settings.allow_risk_at_or_below) if settings.allow_risk_at_or_below else None
         ),
@@ -766,6 +770,7 @@ def create_app(settings: Settings, *, channel=None) -> FastAPI:
             file_paths=body.file_paths,
             permission_mode=body.permission_mode,
             hook_event=body.hook_event,
+            agent_approves=body.agent_approves,
         )
         return ApprovalResponse(
             decision=outcome.decision,
