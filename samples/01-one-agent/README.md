@@ -37,9 +37,18 @@ cd ~/halyard-samples/hello-counter && git init && git add . && git commit -m "St
 Out of the checkout because `halyard wire` gates the repository a folder is in: left
 where it is, it would gate Halyard's own repository instead.
 
-**2. Add the project to your `halyard.yaml`,** in your Halyard checkout. Take the
-`projects:` block from `halyard.yaml.example`, put your own group in `chat:`, and keep
-your own `settings:`.
+**2. Add the project to your `halyard.yaml`** — from the Halyard checkout:
+
+```bash
+uv run halyard samples add 01 ~/halyard-samples/hello-counter
+```
+
+It adds this sample's project to the file with the path you give it, and the agent
+speaks in your default group (`TELEGRAM_CHAT_ID`). Your file is copied first, to
+`halyard.yaml.<date-time>.bak`, and only added to: your settings, your other
+projects and your comments stay as they were. With no `halyard.yaml` yet, it writes
+one from `halyard.yaml.example` for you to fill in — or run `uv run halyard init`.
+By hand instead, take the `projects:` block from `halyard.yaml.example`.
 
 **3. Gate it, check it, and start Halyard** — from the Halyard checkout:
 
