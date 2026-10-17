@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Counter</title>
+    <style>
+      body { font-family: system-ui, sans-serif; display: grid; place-items: center; min-height: 100vh; margin: 0; }
+      main { text-align: center; }
+      output { display: block; font-size: 4rem; margin: 1rem 0; }
+      button { font-size: 1.25rem; padding: 0.5rem 1.5rem; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>Counter</h1>
+      <output id="count">0</output>
+      <button id="add" type="button">Add one</button>
+    </main>
+    <script>
+      const count = document.getElementById("count");
+      document.getElementById("add").addEventListener("click", () => {
+        count.textContent = Number(count.textContent) + 1;
+      });
+    </script>
+  </body>
+</html>
