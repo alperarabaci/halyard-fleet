@@ -222,7 +222,8 @@ def test_two_projects_go_in_at_their_folders_each_agent_in_the_group_it_was_give
     assert projects["greeting-page"].seats[0].chat == "-100777"
     assert projects["todo-list"].seats[0].chat == "-100888"
     assert projects["todo-list"].commands == {"check": "./check.sh"}
-    assert any("wire todo-list" in line for line in said)
+    # One wire for both: with no name it wires every project in the file.
+    assert said[-1].startswith("Next: uv run halyard wire — every project")
 
 
 def test_an_agent_that_wants_a_group_of_its_own_is_offered_none(tmp_path: Path, two: Path) -> None:
