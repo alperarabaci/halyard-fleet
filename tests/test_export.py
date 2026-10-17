@@ -84,3 +84,44 @@ def test_a_machine_with_nothing_yet_still_gets_a_zip(tmp_path: Path) -> None:
     target = exported(tmp_path)
 
     assert zipfile.ZipFile(target).namelist() == []
+
+
+def test_the_files_a_project_s_configuration_points_at_go_in_too(tmp_path: Path) -> None:
+    """A transition's prompt, an inspection: they live in the project, and are
+    as much this setup as the YAML that names them."""
+    project = tmp_path / "alpha"
+    (project / "NOTES" / "halyard" / "handoffs").mkdir(parents=True)
+    (project / "NOTES" / "halyard" / "handoffs" / "developed.md").write_text("# developed\n")
+    (project / "NOTES" / "proof.md").write_text("# proof\n")
+    halyard = tmp_path / "halyard"
+    halyard.mkdir()
+    (halyard / "halyard.yaml").write_text(
+        f"""\
+projects:
+  alpha:
+    path: {project}
+    inspections:
+      proof: NOTES/proof.md
+    transitions:
+      developed:
+        prompt: NOTES/halyard/handoffs/developed.md
+        followup_prompt: NOTES/halyard/handoffs/gone.md
+    agents:
+      nav: {{runtime: claude-code}}
+"""
+    )
+
+    names = set(zipfile.ZipFile(exported(halyard)).namelist())
+
+    assert "project-files/alpha/NOTES/halyard/handoffs/developed.md" in names
+    assert "project-files/alpha/NOTES/proof.md" in names
+    assert not any("gone.md" in name for name in names)
+
+
+def test_a_configuration_that_does_not_read_still_backs_up_the_rest(tmp_path: Path) -> None:
+    (tmp_path / "halyard.yaml").write_text("projects: [not, a, mapping\n")
+    (tmp_path / "audit.jsonl").write_text("{}\n")
+
+    names = set(zipfile.ZipFile(exported(tmp_path)).namelist())
+
+    assert {"halyard.yaml", "audit.jsonl"} <= names

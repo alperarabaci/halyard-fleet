@@ -13,7 +13,11 @@ checkout and ignored like the rest:
 - the zip holds the bot token and any other secret in `halyard.yaml`, so it is
   written readable by its owner only, and says so;
 - `.bak` copies are left out — they are older versions of the same files, and
-  they hold old secrets.
+  they hold old secrets;
+- the files `halyard.yaml` points at inside each project go in too, under
+  `project-files/<project>/` — a transition's prompt, an inspection, the
+  confirmation round's, an agent's compaction files. They live in the project,
+  wherever it keeps them, and are as much what makes this setup as the YAML.
 
 Putting one back is unzipping it into a checkout with the service stopped.
 """
@@ -101,12 +105,60 @@ def export(
                     archive.write(path, path.relative_to(root).as_posix())
             if files:
                 taken.append(f"{folder}/")
+        for project, found in _project_files(root).items():
+            for inside, path in found:
+                archive.write(path, f"project-files/{project}/{inside}")
+            if found:
+                taken.append(f"project-files/{project}/ ({len(found)})")
     os.chmod(target, 0o600)
 
     size = target.stat().st_size
     say(f"Wrote {target} ({_size(size)}): {', '.join(taken) or 'nothing to keep yet'}.")
     say("It holds your bot token and any other secret in halyard.yaml: keep it to yourself.")
     return target
+
+
+def _project_files(root: Path) -> dict[str, list[tuple[str, Path]]]:
+    """The files each project's configuration points at, that are there: where
+    each goes in the zip, and where it is. Nothing when the configuration
+    cannot be read — the rest of the backup is worth more than these."""
+    from halyard.core.config_file import find_config, projects_from_yaml
+
+    config = find_config(root)
+    try:
+        projects = projects_from_yaml(config.read_text(encoding="utf-8")) if config else []
+    except (OSError, ValueError):
+        return {}
+    found: dict[str, list[tuple[str, Path]]] = {}
+    for project in projects:
+        named = [
+            *(transition.prompt for transition in project.transitions.values()),
+            *(transition.followup_prompt for transition in project.transitions.values()),
+            *project.inspections.values(),
+            *(
+                (project.confirmation.inquiry, project.confirmation.review)
+                if project.confirmation
+                else ()
+            ),
+            *(seat.after_compaction for seat in project.seats),
+            *(seat.before_compaction for seat in project.seats),
+        ]
+        home = project.path.expanduser() if project.path else None
+        kept: dict[str, Path] = {}
+        for written in filter(None, named):
+            path = Path(written).expanduser()
+            for base in (home, root):
+                where = path if path.is_absolute() else (base / path if base else None)
+                if where is not None and where.is_file():
+                    inside = (
+                        where.relative_to(home)
+                        if home and where.is_relative_to(home)
+                        else Path("_elsewhere") / where.relative_to(where.anchor)
+                    )
+                    kept.setdefault(inside.as_posix(), where)
+                    break
+        found[project.name] = sorted(kept.items())
+    return found
 
 
 def _snapshot(database: Path, into: Path) -> None:
