@@ -295,37 +295,6 @@ async def test_the_seat_reads_an_envelope_one_fact_to_a_line(tmp_path: Path) -> 
     assert "\n- From: drv (driver), reply from 00:21" in text
 
 
-async def test_a_check_in_a_transition_labels_the_task_as_it_would_by_hand(tmp_path: Path) -> None:
-    """No exception for transitions: the check decides, wherever it runs."""
-    a_project(tmp_path)
-    put: list[str] = []
-
-    class Labelling:
-        async def label(self, label: str) -> None:
-            put.append(label)
-
-    await transitions.take(
-        Transition(name="discovery", inspections=("proof",)),
-        project=tmp_path,
-        context=[],
-        note="",
-        reply="All 42 tests passed.",
-        arrived="00:21",
-        sender="drv (driver)",
-        recipient_label="nav",
-        recipient="nav (navigator)",
-        project_inspections={"proof": Path("NOTES/proof.md")},
-        asker=Asking(says="proof · status: candidate"),
-        model="sonnet",
-        timeout=5,
-        delivery=Delivered(),
-        findings=("status: candidate",),
-        labeller=Labelling(),
-    )
-
-    assert put == ["halyard:proof"]
-
-
 COMMANDS = {"test-fast": "make test-fast", "lint": "make lint"}
 
 

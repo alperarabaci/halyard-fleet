@@ -468,6 +468,35 @@ async def test_a_project_can_leave_labels_out_of_the_card(wired, monkeypatch) ->
     assert offered == {"andon", "rework"}
 
 
+async def test_halyard_s_own_labels_are_never_offered(wired, monkeypatch) -> None:
+    """An inspection's `halyard:proof` and an agent's `navigator:claude` are
+    written by Halyard itself; nobody puts one on by hand."""
+    from dataclasses import replace as _replace
+
+    from halyard.core.events import Role
+    from halyard.core.seats import Seat
+
+    channel, api, _ = wired
+    on_a_task(
+        channel,
+        monkeypatch,
+        FakeForge(defined=("andon", "halyard:proof", "navigator:claude", "rework")),
+    )
+    found = channel._repositories["alpha-engine"]
+    nav = Seat(label="nav", runtime="claude-code", project="alpha-engine", role=Role.NAVIGATOR)
+    channel._repositories["alpha-engine"] = _replace(found, seats=[nav])
+
+    await deliver(channel, typed("/label"))
+
+    offered = {
+        button["text"]
+        for row in api.sent[-1]["reply_markup"]["inline_keyboard"]
+        for button in row
+        if button != cards.CANCEL
+    }
+    assert offered == {"andon", "rework"}
+
+
 async def test_the_label_card_is_spent_once_a_label_is_chosen(wired, monkeypatch) -> None:
     channel, api, _ = wired
     on_a_task(channel, monkeypatch, FakeForge())

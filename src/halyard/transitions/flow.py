@@ -35,8 +35,6 @@ async def take(
     delivery: Delivery,
     effort: str | None = None,
     models: Mapping[str, ModelChoice] | None = None,
-    findings: Sequence[str] = (),
-    labeller: inspections.Labeller | None = None,
     project_commands: Mapping[str, str] | None = None,
     project_not_run: Mapping[str, Sequence[int]] | None = None,
     runner: Runner | None = None,
@@ -63,9 +61,7 @@ async def take(
     the message is written: the seat receives the reply and what they made of
     it together. An inspection that could not run goes as unmeasured rather than
     being left out — the project's prompts say an unmeasured line is not a
-    clean one, and the reader has to see it to know that. An inspection that finds
-    something labels the task as it would run by hand: the project's `findings`
-    decide, not the transition.
+    clean one, and the reader has to see it to know that.
 
     `round_number` is which round of a workflow's step this is, this one
     included, and None for a transition pressed by hand, which counts nothing —
@@ -143,8 +139,6 @@ async def take(
                         timeout=timeout,
                         about=f"transition {transition.name}, {sender}'s reply from {arrived}",
                         transition=transition.name,
-                        findings=findings,
-                        labeller=labeller,
                         keeper=keeper,
                     )
                     for name in transition.inspections

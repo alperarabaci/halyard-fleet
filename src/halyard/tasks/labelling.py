@@ -10,8 +10,9 @@ Two rules, both about not wasting a tap:
   already there" case cannot arise, so nothing has to handle it.
 - A project may narrow the list. Empty means every label the project defines,
   which is right until a project has more of them than a phone can show.
-- A project may leave labels out by pattern — `halyard:*` — the ones nobody
-  puts on a task by hand.
+- A project may leave labels out by pattern — `wontfix`, `area:*`. Halyard's
+  own (`halyard:*`, the agents') are always left out by whoever asks; nobody
+  puts those on a task by hand.
 
 Neither rule is GitLab's. They hold for whatever answers `Forge`.
 """

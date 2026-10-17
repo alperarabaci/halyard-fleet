@@ -95,7 +95,7 @@ class Attribution:
         tag_of: Callable[[str], str | None],
     ) -> None:
         #: Only the projects that asked for this, each with a `path`, a `forge`
-        #: and its `seats` — see `label_work:` in `halyard.yaml`.
+        #: and its `seats` — see `labels: work:` in `halyard.yaml`.
         self._projects = dict(projects)
         self._token = token
         #: Runtime → the short name it labels with (`claude`). Handed in by the

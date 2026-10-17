@@ -291,7 +291,8 @@ at about four, and cannot say which codebase an agent belongs to:
 projects:
   alpha-engine:
     path: ~/code/alpha-engine
-    label_work: true
+    labels:
+      who_worked: true
     agents:
       nav:
         runtime: claude-code
@@ -325,7 +326,7 @@ An agent's `role:` is `navigator`, `driver` or `reviewer`, and it is optional. N
 of them is special to routing: a card goes to the agent it came from and says
 which role that is.
 
-**`label_work: true`** puts each agent's label on the task its branch is for —
+**`labels: who_worked: true`** (written `label_work: true` before) puts each agent's label on the task its branch is for —
 `navigator:claude`, `reviewer:codex` — the first time that agent works on it.
 The task comes from the branch name (`347-power-gen-fixes` is task 347), and a
 label already on the task is never written again. It needs a forge token that

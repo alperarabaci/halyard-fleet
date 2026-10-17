@@ -24,35 +24,27 @@ The prompt still says "check" where it speaks to the model, as it did before
 these were called inspections: what a model is told is kept the same, so that
 the answers before the name changed and after it can be compared.
 
-**A finding can label the task.** A project writes under `label_findings:` what
-its inspections' answers say when they found something, in its own words, and
-an answer that says one of them puts `halyard:<inspection>` on the task. The
-inspection decides, from the project's settings — whoever runs it has no say —
-so one in a transition labels exactly as one run by hand. Halyard only adds.
-
 **Every run is kept.** What the model was given, word for word, and what it
 said, through `Keeper` into the table `record` writes — the one thing Halyard
 keeps the text of, so an inspection can be compared and run again later.
 
-**Three ports, and no chat.** An inspection reaches a model through `Asker`, the
-task through `Labeller` and its record through `Keeper`, and knows nothing of
-Telegram, of any runtime or of any tracker. `halyard.transitions` runs
+**Two ports, and no chat.** An inspection reaches a model through `Asker` and
+its record through `Keeper`, and knows nothing of Telegram, of any runtime or
+of any tracker. `halyard.transitions` runs
 inspections; nothing here hands anything on. `tests/test_layering.py` keeps it
 that way.
 """
 
 from halyard.inspections import record
-from halyard.inspections.spec import Answer, Asker, Keeper, Kept, Labeller, StoppedError
-from halyard.inspections.turn import finding, handed_on, prompt, run, unfenced
+from halyard.inspections.spec import Answer, Asker, Keeper, Kept, StoppedError
+from halyard.inspections.turn import handed_on, prompt, run, unfenced
 
 __all__ = [
     "Answer",
     "Asker",
     "Keeper",
     "Kept",
-    "Labeller",
     "StoppedError",
-    "finding",
     "handed_on",
     "prompt",
     "record",

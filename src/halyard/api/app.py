@@ -594,7 +594,7 @@ def create_app(settings: Settings, *, channel=None) -> FastAPI:
         logger.info("Labelling tasks in %s as agents work on them", ", ".join(sorted(labelled)))
     elif labelled:
         logger.warning(
-            "label_work is on for %s, but there is no forge token to write labels with",
+            "labels: work is on for %s, but there is no forge token to write labels with",
             ", ".join(sorted(labelled)),
         )
     # Prompt files live in the codebase they describe, so they are looked for

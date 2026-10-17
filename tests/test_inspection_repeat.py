@@ -95,7 +95,6 @@ async def repeated(database: Path, tmp_path: Path, asker: Asking, **kwargs) -> r
         runtime="claude-code",
         project=tmp_path,
         context=NOW,
-        findings=("status: candidate",),
         database=database,
         **kwargs,
     )
@@ -121,7 +120,7 @@ async def test_a_repeat_gives_another_model_the_same_input_word_for_word(tmp_pat
     assert (again.answer, again.outcome, again.finding) == (
         "proof · status: candidate",
         "answered",
-        "status: candidate",
+        None,
     )
     # The instructions it ran are the original's: they are inside the input.
     assert (again.file, again.file_version) == ("NOTES/proof.md", "3e8c847")
@@ -300,9 +299,7 @@ def here(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
     database = tmp_path / "halyard.db"
     kept(database)
     runner = Runner()
-    project = Project(
-        name="alpha-engine", path=tmp_path, seats=[], label_findings=("status: candidate",)
-    )
+    project = Project(name="alpha-engine", path=tmp_path, seats=[])
     monkeypatch.setattr(inspect_cli, "_settings", lambda: SimpleNamespace(db_path=database))
     monkeypatch.setattr(inspect_cli, "projects", lambda: [project])
     monkeypatch.setattr(inspect_cli, "_one_shot", lambda settings, runtime: runner)
@@ -332,7 +329,7 @@ def test_a_repeat_runs_in_the_project_and_is_kept_beside_the_original(
     assert repeating.repeats(here.database, [ORIGINAL]) == {ORIGINAL: 2}
     again = repeating.find(here.database, first["session_id"])
     assert again is not None
-    assert (again.runtime, again.finding) == ("claude-code", "status: candidate")
+    assert (again.runtime, again.finding) == ("claude-code", None)
     out = capsys.readouterr().out
     # Named as its cards name it, so a card can be told for this run's.
     session = first["session_id"]
