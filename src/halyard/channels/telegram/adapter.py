@@ -1366,7 +1366,7 @@ class TelegramChannel:
         elif command == "options":
             await self._say(self._options(here), here, thread)
         elif command == "status":
-            await self._say(await self._status(), here, thread)
+            await self._say(await self._status(here), here, thread)
         elif command in self._prompts:
             # A sentence somebody says often enough to have named. Whatever
             # follows the command is added to it, so `/md the failing test`
@@ -4453,7 +4453,7 @@ class TelegramChannel:
                 thread_id,
             )
 
-    async def _status(self) -> str:
+    async def _status(self, here: str | None = None) -> str:
         state = await self._gate.state()
         open_requests = await self._store.list_open()
         lines = [
@@ -4461,6 +4461,8 @@ class TelegramChannel:
             "",
             f"Gate: {'⏸ paused' if state.paused else '▶️ running'}",
         ]
+        if here:
+            lines.append(self._whose_chat(here))
         if state.changed_by:
             lines.append(f"  last changed by {html.escape(state.changed_by)}")
 
@@ -4602,6 +4604,40 @@ class TelegramChannel:
                 lines.append("  ↳ anything else is passed through and may work.")
         lines.append("\nAdd <code>default</code> to give a choice back to the session.")
         return "\n".join(lines)
+
+    def _whose_chat(self, here: str) -> str:
+        """This chat's id, and the agent it belongs to.
+
+        The id is what an agent's `chat:` needs, and a new group has no other
+        way to say it: reading it from Telegram's own API means stopping
+        Halyard first, because a running poll takes every update. Two agents
+        in one chat are said too — a typed message reaches only the first.
+        """
+        chat = html.escape(here)
+        owners = [
+            seat.label
+            for seat in self._seats
+            if seat.chat and (seat.chat == here or seat.chat.split(":")[0] == here)
+        ]
+        if not owners and (role := self._role_for_chat(here)):
+            owners = [role.value]
+        if not owners and here == self._chat_id:
+            return (
+                f"This chat: <code>{chat}</code> — the default group, where anything "
+                "unrouted lands."
+            )
+        if not owners:
+            return (
+                f"This chat: <code>{chat}</code> — no agent speaks here; give one "
+                f'<code>chat: "{chat}"</code> in <code>halyard.yaml</code>.'
+            )
+        if len(owners) == 1:
+            return f"This chat: <code>{chat}</code> — {html.escape(owners[0])}'s."
+        named = ", ".join(html.escape(label) for label in owners)
+        return (
+            f"This chat: <code>{chat}</code> — {named} all speak here, and a typed "
+            f"message reaches only {html.escape(owners[0])}."
+        )
 
     async def _describe_seats(self) -> list[str]:
         """One line per configured seat: what it is, and what is answering.

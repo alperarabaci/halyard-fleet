@@ -103,7 +103,7 @@ Tiny projects to run under Halyard as they are — a page or a script, the
 [All of them](samples/), one idea at a time:
 
 1. [One agent](samples/01-one-agent/) — its commands as cards on your phone, its replies, a commit
-2. Two agents, two runtimes — Claude Code and Codex, each in its own chat *(planned)*
+2. [Two agents, two runtimes](samples/02-two-agents/) — Claude Code and Codex, each in its own chat, and a project command
 3. Handing work over — a navigator, a driver and a transition *(planned)*
 4. Inspections — the work inspected before it is handed on *(planned)*
 5. The whole mechanism — commands, trusted runs, task labels *(planned)*
@@ -145,7 +145,7 @@ turn stops at a captcha — see [Known limitations](#known-limitations).
 | `/command` | run one of the project's own commands, and hear how it went |
 | `/label` | put a label on the task this branch is for |
 | `/open` | start an agent that is not running — `claude`, `codex`, `gemini` |
-| `/status` | what each agent is, what is running, and how full its limits are |
+| `/status` | what each agent is, what is running, and how full its limits are — and this group's id, and whose it is |
 | `/stop` | end what is running here: a project command (a transition's or `/command`'s), and the turn in this chat's agent session with the cards it left open — for Claude Code and Codex, a turn sent from Halyard |
 | `/doctor` | the same check as `halyard doctor`, read from a phone |
 | `/pause`, `/resume` | step out of the way, and come back |
@@ -306,7 +306,7 @@ missing costs orientation, never the session.
 | On the machine | |
 |---|---|
 | `halyard init` | guided setup: `halyard.yaml`, wiring, and a check |
-| `halyard samples add` | put a [sample](samples/)'s project into `halyard.yaml`, keeping a backup |
+| `halyard samples add` | put a [sample](samples/)'s projects into `halyard.yaml`, keeping a backup |
 | `halyard export` | everything Halyard keeps — `halyard.yaml`, the database, the audit log, prompts, kept inspections, logs, and the files your projects' configuration points at (transition prompts, inspections) — in one dated zip under `export/`, readable by you only; it holds your bot token |
 | `halyard doctor` | what is wired, where, and what is broken |
 | `halyard verify` | prove the gate stops things, by running into it |

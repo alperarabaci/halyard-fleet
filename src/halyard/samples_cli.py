@@ -16,8 +16,16 @@ A sample's prompts go in too: `/sample_01` in the group sends its task. A prompt
 of the same name already there is kept as it is. A file with no `prompts:` yet
 also gets the default `/md`, which a block of its own would otherwise drop.
 
-The sample's own `chat:` is a placeholder, so it is given the file's default
-group, `TELEGRAM_CHAT_ID`, when there is one.
+A sample with several projects is copied whole, and `<path>` is where the copy
+is: each project is the folder of its name inside it, as its example lays them
+out.
+
+The sample's own `chat:` values are placeholders, so it asks which group each
+agent speaks in. One written as the example's `TELEGRAM_CHAT_ID` offers the
+file's default group; one written as another id wants a group of its own, which
+`/status` in that group names. A group another agent already speaks in is
+refused, and so is the same group twice: a typed message there reaches only one
+of them.
 
 With no `halyard.yaml` yet, the sample's example is the file — its settings still
 placeholders, to fill in or to replace by running `halyard init`.
@@ -25,6 +33,7 @@ placeholders, to fill in or to replace by running `halyard init`.
 
 from __future__ import annotations
 
+import os
 import re
 import sys
 from collections.abc import Callable
@@ -44,12 +53,17 @@ SAMPLES = CHECKOUT / "samples"
 
 USAGE = """usage: halyard samples add <sample> <path>
 
-  Adds the sample's project to halyard.yaml, with <path> as where it is.
+  Adds the sample's projects to halyard.yaml, with <path> as where it is,
+  and asks which Telegram group each agent speaks in.
   <sample> is a folder under samples/, or its number: 01-one-agent, or 01.
   Copy the sample to <path> first; its README says how.
 """
 
 Say = Callable[[str], None]
+Ask = Callable[[str, str], str]
+
+#: What a group's id looks like: negative, with a forum topic after a colon.
+_GROUP = re.compile(r"^-\d+(:\d+)?$")
 
 
 def main(argv: list[str]) -> int:
@@ -66,8 +80,9 @@ def add(
     config: Path,
     now: str | None = None,
     say: Say = print,
+    ask: Ask | None = None,
 ) -> int:
-    """Add `sample`'s project to `config`, found at `where`. 0 when it was added."""
+    """Add `sample`'s projects to `config`, copied to `where`. 0 when they were added."""
     folder = _sample(sample)
     if folder is None:
         known = ", ".join(path.name for path in sorted(SAMPLES.glob("[0-9][0-9]-*")))
@@ -86,39 +101,54 @@ def add(
 
     example = (folder / "halyard.yaml.example").read_text(encoding="utf-8")
     shipped = yaml.safe_load(example)
-    [(name, block)] = (shipped.get("projects") or {}).items()
-    block = {**block, "path": str(where)}
+    blocks: dict[str, dict] = shipped.get("projects") or {}
+    placed = _placed(blocks, where)
+    if missing := [path for path in placed.values() if not path.is_dir()]:
+        say(f"{missing[0]} is not there. Copy the whole sample to {where}; its README says how.")
+        return 2
+    blocks = {name: {**block, "path": str(placed[name])} for name, block in blocks.items()}
     wanted: dict[str, str] = shipped.get("prompts") or {}
     kept: list[str] = []
+    chats: dict[tuple[str, str], str] = {}
 
     if config.exists():
         text = config.read_text(encoding="utf-8")
         written = yaml.safe_load(text) or {}
         before = set((written.get("projects") or {}) if isinstance(written, dict) else {})
-        if name in before:
-            say(f"{name} is already in {config}; nothing was changed.")
+        if taken := [name for name in blocks if name in before]:
+            verb = "is" if len(taken) == 1 else "are"
+            say(f"{', '.join(taken)} {verb} already in {config}; nothing was changed.")
             return 1
-        chat = str(((written.get("settings") or {}).get("TELEGRAM_CHAT_ID")) or "")
-        if chat:
-            block = _with_chat(block, chat)
         try:
-            text = _with_entry(text, "projects", name, block)
+            speaking = _speaking(text)
+        except ValueError as refused:
+            say(f"{config} does not load, so nothing was changed: {refused}")
+            return 1
+        default = str(((written.get("settings") or {}).get("TELEGRAM_CHAT_ID")) or "")
+        asked = _chats(shipped, default, speaking, ask or _ask)
+        if isinstance(asked, str):
+            say(f"{asked} Nothing was changed.")
+            return 1
+        chats = asked
+        try:
+            for name, block in reversed(blocks.items()):
+                text = _with_entry(text, "projects", name, _with_chats(name, block, chats))
             text, kept = _with_prompts(text, written, wanted)
         except ValueError as refused:
             say(f"{refused} Nothing was changed.")
             return 1
     else:
         before = set()
-        chat = ""
-        placeholder = _path_of(example)
-        text = example.replace(placeholder, str(where), 1) if placeholder else example
+        text = example
+        for name, block in shipped["projects"].items():
+            text = _with_path(text, str(block.get("path") or ""), placed[name])
 
     try:
         after = {project.name for project in projects_from_yaml(text)}
     except ValueError as refused:
         say(f"The result would not load, so nothing was changed: {refused}")
         return 1
-    if not before | {name} <= after:
+    if not before | set(blocks) <= after:
         say("The result would lose a project, so nothing was changed.")
         return 1
     try:
@@ -129,20 +159,101 @@ def add(
 
     backup = back_up(config, now or datetime.now().strftime("%Y%m%d-%H%M%S"))
     config.write_text(text, encoding="utf-8")
-    say(f"Added {name} to {config}" + (f" (previous kept at {backup})" if backup else "") + ".")
-    say(f"  path: {where}")
+    kept_at = f" (previous kept at {backup})" if backup else ""
+    say(f"Added {', '.join(blocks)} to {config}{kept_at}.")
+    for name in blocks:
+        say(f"  {name}: {placed[name]}")
+        for (project, label), chat in chats.items():
+            if project == name:
+                say(f"    {label} speaks in {chat}")
     for prompt in wanted:
         if prompt in offered:
-            say(f"  /{prompt} in the group sends this sample's task.")
+            say(f"  /{prompt} in an agent's group sends it this sample's task.")
     for line in kept:
         say(f"  {line}")
     if not backup:
         say("  A new file: put your bot token, group and user id in its `settings:`,")
-        say("  and your group in the agent's `chat:` — or run `halyard init`.")
-    elif not chat:
-        say("  No TELEGRAM_CHAT_ID in the file, so put your group in the agent's `chat:`.")
-    say(f"Next: uv run halyard wire {name}")
+        say("  and each agent's group in its `chat:` — or run `halyard init`.")
+    say("Next:")
+    for name in blocks:
+        say(f"  uv run halyard wire {name}")
     return 0
+
+
+def _placed(blocks: dict[str, dict], where: Path) -> dict[str, Path]:
+    """Where each project is, once the sample is copied to `where`.
+
+    One project is the copy itself. Several are laid out under the folder
+    their example paths share, and keep that layout in the copy.
+    """
+    written = {name: Path(str(block.get("path") or name)) for name, block in blocks.items()}
+    if len(written) == 1:
+        return dict.fromkeys(written, where)
+    shared = Path(os.path.commonpath([str(path) for path in written.values()]))
+    return {name: where / path.relative_to(shared) for name, path in written.items()}
+
+
+def _speaking(text: str) -> dict[str, str]:
+    """Which agent already speaks in each group, by the group's id.
+
+    By the group alone: a message is routed by the chat it was typed in, so
+    two topics of one group are one place to type into.
+    """
+    return {
+        seat.chat.split(":")[0]: f"{project.name}'s {seat.label}"
+        for project in projects_from_yaml(text)
+        for seat in project.seats
+        if seat.chat
+    }
+
+
+def _chats(
+    shipped: dict, default: str, speaking: dict[str, str], ask: Ask
+) -> dict[tuple[str, str], str] | str:
+    """The group each of the sample's agents speaks in, asked for — or why not.
+
+    An agent written in the example's default group is offered the file's.
+    Any other wants a group of its own, and has no default to offer.
+    """
+    placeholder = str((shipped.get("settings") or {}).get("TELEGRAM_CHAT_ID") or "")
+    chats: dict[tuple[str, str], str] = {}
+    taken = dict(speaking)
+    for name, block in (shipped.get("projects") or {}).items():
+        for label, spec in (block.get("agents") or {}).items():
+            if not isinstance(spec, dict) or not spec.get("chat"):
+                continue
+            own = str(spec["chat"]) != placeholder
+            offered = "" if own else default
+            question = (
+                f"Group for {name}'s {label} ({spec.get('runtime')}), a group of its own"
+                if own
+                else f"Group for {name}'s {label} ({spec.get('runtime')})"
+            )
+            chat = ask(question, offered).strip()
+            if not chat:
+                return (
+                    f"No group for {name}'s {label}. Make one, add the bot, send /status "
+                    "in it for its id, and run this again."
+                )
+            if not _GROUP.match(chat):
+                return f"{chat} is not a group's id, which starts with a minus: -100…"
+            if (other := taken.get(chat.split(":")[0])) is not None:
+                return (
+                    f"{chat} is where {other} speaks already, and a message typed there "
+                    f"reaches only one agent. Make a group for {name}'s {label}, send "
+                    "/status in it for its id, and run this again."
+                )
+            taken[chat.split(":")[0]] = f"{name}'s {label}"
+            chats[(name, label)] = chat
+    return chats
+
+
+def _ask(question: str, default: str) -> str:
+    shown = f"{question} [{default}]: " if default else f"{question}: "
+    try:
+        return input(shown).strip() or default
+    except EOFError:
+        return default
 
 
 def _sample(named: str) -> Path | None:
@@ -153,10 +264,10 @@ def _sample(named: str) -> Path | None:
     return None
 
 
-def _with_chat(block: dict[str, Any], chat: str) -> dict[str, Any]:
-    """The block with every agent speaking in the file's default group."""
+def _with_chats(name: str, block: dict[str, Any], chats: dict[tuple[str, str], str]) -> dict:
+    """The block with each agent speaking in the group it was given."""
     agents = {
-        label: {**spec, "chat": chat} if isinstance(spec, dict) else spec
+        label: {**spec, "chat": chats[(name, label)]} if (name, label) in chats else spec
         for label, spec in (block.get("agents") or {}).items()
     }
     return {**block, "agents": agents}
@@ -213,7 +324,12 @@ def _indent_after(text: str, at: int) -> str:
     return ""
 
 
-def _path_of(example: str) -> str:
-    """The sample's own placeholder path, as written in its example."""
-    found = re.search(r"^\s+path:\s*(\S+)", example, re.MULTILINE)
-    return found.group(1) if found else ""
+def _with_path(text: str, placeholder: str, path: Path) -> str:
+    """The example's text with one project's placeholder path made real."""
+    return re.sub(
+        rf"^(\s+path:[ \t]*){re.escape(placeholder)}[ \t]*$",
+        lambda found: f"{found.group(1)}{path}",
+        text,
+        count=1,
+        flags=re.MULTILINE,
+    )

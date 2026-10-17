@@ -10,7 +10,7 @@ the repository a folder is in — and each one says how.
 | | Sample | What it shows |
 |---|---|---|
 | 01 | [One agent](01-one-agent/) | One agent on your phone: its commands as cards, its replies, a commit |
-| 02 | Two agents, two runtimes | Claude Code and Codex on two small products, each in its own chat; a project command |
+| 02 | [Two agents, two runtimes](02-two-agents/) | Claude Code and Codex on two small products, each in its own chat; a project command |
 | 03 | Handing work over | A navigator and a driver; `/to`, `/forward`, and a transition with a short prompt |
 | 04 | Inspections | A transition that has the work inspected before it is handed on |
 | 05 | The whole mechanism | Commands, trusted runs, task labels, `/command` and `/label` |
