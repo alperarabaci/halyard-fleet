@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import sys
 import urllib.error
@@ -684,6 +685,34 @@ def check_service_log(path: Path) -> tuple[list[str], int]:
     return lines, 0
 
 
+#: The group ids the shipped examples put where a real one goes:
+#: `-1001234567890`, `-1002234567890`, … `-2001234567890`.
+_EXAMPLE_CHAT = re.compile(r"^-[12]00\d234567890$")
+
+
+def example_values(settings, seats) -> list[str]:
+    """Telegram values still as a shipped example wrote them.
+
+    Left in, the control plane starts, `doctor` used to pass, and nothing ever
+    reaches a phone — measured with the first sample, whose `halyard.yaml`
+    block was taken as it came. Each is a value somebody has to put in.
+    """
+    said: list[str] = []
+    if "replace-me" in (settings.telegram_bot_token or ""):
+        said.append("TELEGRAM_BOT_TOKEN is still the example's: your bot's token, from @BotFather")
+    if _EXAMPLE_CHAT.match(settings.telegram_chat_id or ""):
+        said.append("TELEGRAM_CHAT_ID is still the example's: the id of the group the bot is in")
+    if "11111111" in (settings.telegram_authorized_user_ids or ()):
+        said.append(
+            "TELEGRAM_AUTHORIZED_USER_IDS is still the example's: your own id, from @userinfobot"
+        )
+    for seat in seats:
+        chat = (seat.chat or "").rpartition(":")[0] or (seat.chat or "")
+        if _EXAMPLE_CHAT.match(chat):
+            said.append(f"agent {seat.label}'s chat: is still the example's: its group's id")
+    return said
+
+
 def run() -> int:
     """Check the chain end to end. Returns a process exit code."""
     problems = 0
@@ -702,6 +731,16 @@ def run() -> int:
         )
         if settings.channel.decides_without_a_human:
             print(f"{WARN}channel {settings.channel.value} answers by itself — nobody is asked")
+        if settings.channel.value == "telegram":
+            from halyard.core.config_file import load as configured_seats
+
+            try:
+                seats = configured_seats()
+            except Exception:
+                seats = []
+            for line in example_values(settings, seats):
+                problems += 1
+                print(f"{FAIL}{line}")
         # Which way calls go from a chat that approves for itself, said either
         # way: "why did nothing reach my phone" has its answer here.
         if settings.override_agent_approvals:

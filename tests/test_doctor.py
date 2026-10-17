@@ -666,3 +666,30 @@ def test_what_halyard_rules_keeps_is_named_beside_the_file(tmp_path) -> None:
     assert (
         line == f"{doctor.OK}a runs without asking: make test-fast, uv run pytest * (halyard rules)"
     )
+
+
+def test_telegram_values_left_as_an_example_wrote_them_are_failures() -> None:
+    """Left in, Halyard starts and nothing reaches a phone — measured with the
+    first sample, whose block was taken as it came."""
+    from types import SimpleNamespace
+
+    from halyard.doctor import example_values
+
+    settings = SimpleNamespace(
+        telegram_bot_token="123456:replace-me",
+        telegram_chat_id="-1001234567890",
+        telegram_authorized_user_ids=frozenset({"11111111"}),
+    )
+    seats = [SimpleNamespace(label="dev", chat="-1001234567890:7")]
+    real = SimpleNamespace(
+        telegram_bot_token="7012345:AAH-real",
+        telegram_chat_id="-1009876543210",
+        telegram_authorized_user_ids=frozenset({"42"}),
+    )
+
+    said = example_values(settings, seats)
+
+    assert len(said) == 4
+    assert any(line.startswith("TELEGRAM_BOT_TOKEN") for line in said)
+    assert any("agent dev's chat" in line for line in said)
+    assert example_values(real, [SimpleNamespace(label="dev", chat="-1009876543210")]) == []

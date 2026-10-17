@@ -22,3 +22,11 @@ projects:
         # The group its cards and replies go to. Quoted: unquoted, YAML reads it
         # as a number.
         chat: "-1001234567890"
+
+prompts:
+  # `/sample_01` in the group sends this sample's task to the agent: the text of
+  # PROMPT.md. Anything typed after the command is added on the end.
+  sample_01: >-
+    Add a "Reset" button to `index.html`, with the id `reset`, that puts the
+    counter back to 0. Keep everything else on the page as it is. When you are
+    done, run `./check.sh` and tell me what it printed.

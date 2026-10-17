@@ -64,3 +64,16 @@ def test_the_counter_s_check_passes_once_a_reset_button_is_there(counter: Path) 
 
     assert result.returncode == 0
     assert "ok   #reset" in result.stdout
+
+
+def test_each_sample_s_prompt_is_its_task_word_for_word() -> None:
+    """The phone's `/sample_NN` and PROMPT.md are the same task; one edited
+    without the other would send something nobody reads in the README."""
+    import yaml
+
+    for folder in sorted(SAMPLES.glob("[0-9][0-9]-*")):
+        shipped = yaml.safe_load((folder / "halyard.yaml.example").read_text(encoding="utf-8"))
+        prompt = (shipped.get("prompts") or {}).get(f"sample_{folder.name[:2]}")
+        assert prompt, f"{folder.name} has no /sample_{folder.name[:2]}"
+        task = (folder / "PROMPT.md").read_text(encoding="utf-8")
+        assert " ".join(prompt.split()) == " ".join(task.split()), folder.name
