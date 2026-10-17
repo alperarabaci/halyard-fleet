@@ -13,7 +13,16 @@ from halyard.core.config_file import projects_from_yaml
 ROOT = Path(__file__).resolve().parent.parent
 
 
-@pytest.mark.parametrize("name", ["halyard.simple.yaml.example", "halyard.yaml.example"])
+#: The examples at the top, and each sample's — copies of which are where
+#: somebody trying a sample starts.
+EXAMPLES = [
+    "halyard.simple.yaml.example",
+    "halyard.yaml.example",
+    *sorted(str(path.relative_to(ROOT)) for path in ROOT.glob("samples/*/halyard.yaml.example")),
+]
+
+
+@pytest.mark.parametrize("name", EXAMPLES)
 def test_an_example_configuration_loads(name: str, tmp_path: Path, monkeypatch) -> None:
     """Its settings and its projects both, read the way the control plane reads
     the copy somebody makes of it."""

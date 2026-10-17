@@ -96,6 +96,20 @@ Check it any time with `uv run halyard doctor`, and prove the gate actually stop
 things with `uv run halyard verify` — which runs real commands into it rather than
 reading configuration.
 
+## Samples
+
+Tiny projects to run under Halyard as they are — a page or a script, the
+`halyard.yaml` it needs and the prompts it uses — from one agent up to three.
+[All of them](samples/), one idea at a time:
+
+1. [One agent](samples/01-one-agent/) — its commands as cards on your phone, its replies, a commit
+2. Two agents, two runtimes — Claude Code and Codex, each in its own chat *(planned)*
+3. Handing work over — a navigator, a driver and a transition *(planned)*
+4. Inspections — the work inspected before it is handed on *(planned)*
+5. The whole mechanism — commands, trusted runs, task labels *(planned)*
+6. A simple workflow — two steps, each reply deciding what comes next *(planned)*
+7. Three agents — a navigator, a driver and a reviewer, in phases *(planned)*
+
 ## Runtimes
 
 Each runtime brings its approvals to your phone and its replies with them. They differ
