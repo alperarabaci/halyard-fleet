@@ -65,12 +65,12 @@ at its folder in the copy, and the prompt `/sample_02`. Your file is copied firs
 **4. Gate both, and check them** — from the Halyard checkout:
 
 ```bash
-uv run halyard wire greeting-page
+uv run halyard wire
 ```
 
-```bash
-uv run halyard wire todo-list
-```
+With no project named, `wire` wires every project in your `halyard.yaml`: these
+two, each for the runtime its agent is, and any of yours, which it leaves as they
+are once wired.
 
 Codex runs a hook only once you have trusted it, and skips one you have not without
 a word — so until then, `todo-list` has no gate at all. `wire` says how: open Codex
@@ -134,6 +134,7 @@ uv run halyard unwire greeting-page
 uv run halyard unwire todo-list
 ```
 
-Then take the two projects, and `/sample_02` under `prompts:`, out of your
-`halyard.yaml`. A wired project needs Halyard running: with it down, the agent's
-commands in that project are denied.
+By name, unlike `wire`: with none, `unwire` takes the gate off every project in the
+file, yours too. Then take the two projects, and `/sample_02` under `prompts:`, out
+of your `halyard.yaml`. A wired project needs Halyard running: with it down, the
+agent's commands in that project are denied.

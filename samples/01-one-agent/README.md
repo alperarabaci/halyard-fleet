@@ -63,7 +63,7 @@ instead, take the `projects:` and `prompts:` blocks from `halyard.yaml.example`.
 **3. Gate it, check it, and start Halyard** — from the Halyard checkout:
 
 ```bash
-uv run halyard wire hello-counter
+uv run halyard wire
 ```
 
 ```bash
@@ -74,8 +74,9 @@ uv run halyard doctor
 uv run halyard
 ```
 
-If Halyard already runs as a service, restart it instead of the last command, so it
-reads the new project.
+With no project named, `wire` wires every project in your `halyard.yaml` — this one,
+and any of yours, which it leaves as they are once wired. If Halyard already runs as
+a service, restart it instead of the last command, so it reads the new project.
 
 **4. Open the agent in `~/halyard-samples/hello-counter`,** and give the session the
 name in `session:`: `hello-counter`. `uv run halyard sessions` lists the names Halyard
@@ -111,6 +112,7 @@ command.
 uv run halyard unwire hello-counter
 ```
 
-Then take the project, and `/sample_01` under `prompts:`, out of your `halyard.yaml`.
-A wired project needs Halyard running: with it down, the agent's commands in that
-project are denied.
+By name, unlike `wire`: with none, `unwire` takes the gate off every project in the
+file, yours too. Then take the project, and `/sample_01` under `prompts:`, out of
+your `halyard.yaml`. A wired project needs Halyard running: with it down, the
+agent's commands in that project are denied.

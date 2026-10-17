@@ -174,9 +174,9 @@ def add(
     if not backup:
         say("  A new file: put your bot token, group and user id in its `settings:`,")
         say("  and each agent's group in its `chat:` — or run `halyard init`.")
-    say("Next:")
-    for name in blocks:
-        say(f"  uv run halyard wire {name}")
+    # Not one wire per project: with no name, `halyard wire` wires every project
+    # the file describes, and leaves one already wired as it is.
+    say("Next: uv run halyard wire — every project in the file, these among them.")
     return 0
 
 
