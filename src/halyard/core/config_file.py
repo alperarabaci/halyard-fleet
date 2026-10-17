@@ -63,6 +63,7 @@ _PROJECT_FIELDS = {
     "commands",
     "forge",
     "labels",
+    "labels_exclude",
     "label_groups",
     "label_findings",
     "label_work",
@@ -267,6 +268,10 @@ class Project:
     #: which is the right default until a project has more of them than a phone
     #: keyboard can show.
     labels: tuple[str, ...] = ()
+    #: Labels `/label` never offers, as patterns — `halyard:*`. A project's own
+    #: list grows with labels nobody puts on a task by hand, and a phone's
+    #: keyboard was full of them.
+    labels_exclude: tuple[str, ...] = ()
     #: Groups of task labels, by name — `level: [level::1, level::2, level::3]`.
     #: The first label a task carries from each goes on the envelope that
     #: inspections and transitions are given, as `level: level::3`. Empty unless
@@ -888,6 +893,17 @@ def _validate_from(project: str, value: Any, commands: dict[str, str]) -> str | 
     )
 
 
+def _patterns_from(project: str, key: str, value: Any) -> tuple[str, ...]:
+    """A list of patterns, one string or several; nothing written is none."""
+    if value is None:
+        return ()
+    if isinstance(value, str):
+        value = [value]
+    if not isinstance(value, list):
+        raise ValueError(f"Project {project!r}: `{key}:` must be a list of patterns.")
+    return tuple(str(item).strip() for item in value if str(item).strip())
+
+
 def _warnings_from(project: str, value: Any) -> tuple[str, ...] | None:
     """`warn_if:` as a tuple, or None when it was not written at all.
 
@@ -1138,6 +1154,9 @@ def projects_from_yaml(text: str) -> list[Project]:
                 commands_not_run=commands_not_run,
                 forge=_as_text(body.get("forge")),
                 labels=_warnings_from(project, body.get("labels")) or (),
+                labels_exclude=_patterns_from(
+                    project, "labels_exclude", body.get("labels_exclude")
+                ),
                 label_groups=label_groups,
                 label_findings=_findings_from(project, body.get("label_findings")),
                 label_work=_as_flag(project, "label_work", body.get("label_work")),

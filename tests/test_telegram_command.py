@@ -449,6 +449,36 @@ async def test_label_names_the_task_and_offers_what_is_not_on_it(wired, monkeypa
     assert offered == {"andon", "rework"}
 
 
+async def test_a_project_can_leave_labels_out_of_the_card(wired, monkeypatch) -> None:
+    from dataclasses import replace as _replace
+
+    channel, api, _ = wired
+    on_a_task(channel, monkeypatch, FakeForge(defined=("andon", "halyard:proof", "rework")))
+    found = channel._repositories["alpha-engine"]
+    channel._repositories["alpha-engine"] = _replace(found, labels_exclude=("halyard:*",))
+
+    await deliver(channel, typed("/label"))
+
+    offered = {
+        button["text"]
+        for row in api.sent[-1]["reply_markup"]["inline_keyboard"]
+        for button in row
+        if button != cards.CANCEL
+    }
+    assert offered == {"andon", "rework"}
+
+
+async def test_the_label_card_is_spent_once_a_label_is_chosen(wired, monkeypatch) -> None:
+    channel, api, _ = wired
+    on_a_task(channel, monkeypatch, FakeForge())
+
+    await tap(channel, label_pressed("andon"))
+    await finished(channel)
+
+    [closed] = [edit for edit in api.edits if edit["message_id"] == 5]
+    assert closed["text"] == "☑️ andon"
+
+
 async def test_a_project_can_narrow_which_labels_are_offered(wired, monkeypatch) -> None:
     from dataclasses import replace as _replace
 

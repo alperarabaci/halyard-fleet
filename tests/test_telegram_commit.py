@@ -2364,6 +2364,62 @@ async def test_stop_ends_a_transition_s_command_and_the_transition_with_it(
     assert channel._stops == {}
 
 
+async def test_a_transition_pressed_while_paused_runs_nothing(
+    tmp_path: Path, wired, monkeypatch
+) -> None:
+    """Measured: `close` pressed while paused ran its tests and inspections,
+    and only then said to send /resume. It is said first now."""
+    channel, api, runner, repo = wired
+    transitions_in(
+        channel, repo, tmp_path, runner, close={"commands": ("test-fast",), "to": "xrev"}
+    )
+    ran = a_suite(channel, monkeypatch)
+    await channel._gate.pause(f"tg:{APPROVER}")
+
+    await channel._run_transition("close", CHAT, None, f"tg:{APPROVER}")
+    await settled(channel)
+
+    assert ran == []
+    assert runner.sent == []
+    assert "did not start: Halyard is paused" in api.sent[-1]["text"]
+
+
+async def test_a_transition_to_an_agent_with_no_session_runs_nothing(
+    tmp_path: Path, wired, monkeypatch
+) -> None:
+    channel, api, runner, repo = wired
+    transitions_in(
+        channel, repo, tmp_path, runner, close={"commands": ("test-fast",), "to": "xrev"}
+    )
+    ran = a_suite(channel, monkeypatch)
+    runner.sessions.pop("alpha-engine-xreview")
+
+    await channel._run_transition("close", CHAT, None, f"tg:{APPROVER}")
+    await settled(channel)
+
+    assert ran == []
+    assert "session could not be found" in api.sent[-1]["text"]
+
+
+async def test_a_workflow_step_that_could_not_be_delivered_holds_the_run(
+    tmp_path: Path, wired
+) -> None:
+    from halyard import workflows as flowing
+    from halyard.channels.telegram.adapter import WORKFLOW_FILE
+
+    channel, _, runner, repo = wired
+    flow_in(channel, repo, tmp_path, runner, **TWO_STEPS)
+    await channel._gate.pause(f"tg:{APPROVER}")
+
+    await started(channel)
+
+    work = await channel._work_item(channel._repositories["alpha-engine"])
+    run = flowing.current(channel._kept_for("alpha-engine", WORKFLOW_FILE), work)
+    assert runner.sent == []
+    assert run is not None
+    assert run.stopped == "review: Halyard is paused. Send /resume first"
+
+
 async def test_a_transition_with_commands_does_not_go_while_another_runs(
     tmp_path: Path, wired, monkeypatch
 ) -> None:
@@ -2496,6 +2552,8 @@ async def test_a_branch_naming_no_task_keeps_the_pick_for_this_work(
     await settled(channel)
 
     assert ran == ["make test-e2e-scope SCOPE=all", "make test-e2e-scope SCOPE=all"]
+    # The card it was picked on is spent, saying which.
+    assert any(e["message_id"] == 5 and e["text"] == "☑️ ddd:all" for e in api.edits)
 
 
 async def test_command_fills_the_label_in_as_a_transition_does(

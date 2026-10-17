@@ -273,6 +273,17 @@ def test_a_project_can_narrow_what_is_offered() -> None:
     assert offered == ("andon", "rework")
 
 
+def test_a_project_can_leave_labels_out_by_pattern() -> None:
+    """The ones nobody puts on a task by hand, whatever their case."""
+    offered = labelling.worth_offering(
+        a_task(),
+        ["andon", "halyard:proof", "Halyard:Claims", "rework"],
+        exclude=["halyard:*"],
+    )
+
+    assert offered == ("andon", "rework")
+
+
 def test_narrowing_to_nothing_means_everything() -> None:
     """Empty is the right default until a project has more labels than a phone
     can show."""

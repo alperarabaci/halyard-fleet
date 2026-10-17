@@ -189,6 +189,7 @@ projects:
       bootstrap: make bootstrap-up
     validate: test-fast               # one of commands:, run first by /review_and_commit
     labels: [andon, rework]           # narrows /label; empty means all of them
+    labels_exclude: ["halyard:*"]     # never offered by /label, as patterns
     warn_if: [task-id-missing]        # the default; [] turns the warnings off
     confirmation:                     # the extra round, when a guard cannot catch it
       inquiry: NOTES/CONFIRMATION_INQUIRY.md

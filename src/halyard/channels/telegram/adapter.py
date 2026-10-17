@@ -1740,7 +1740,9 @@ class TelegramChannel:
                     thread_id,
                 )
                 return
-            choice = await task_tracker.to_offer(forge, number, project.labels)
+            choice = await task_tracker.to_offer(
+                forge, number, project.labels, project.labels_exclude
+            )
         except task_tracker.ForgeError as refused:
             await self._say(f"\U0001f6ab {html.escape(str(refused))}", chat_id, thread_id)
             return
@@ -3045,10 +3047,17 @@ class TelegramChannel:
         )
 
     async def _label_picked(
-        self, value: str, chat_id: str, thread_id: int | None, actor: str
+        self,
+        value: str,
+        chat_id: str,
+        thread_id: int | None,
+        actor: str,
+        *,
+        card: dict | None = None,
     ) -> None:
         """A label tapped for a command: onto the task, kept for this work, and
-        whatever needed it pressed again."""
+        whatever needed it pressed again. `card` is the one it was tapped on,
+        closed saying which once the label is known."""
         head, _, place = value.rpartition(">")
         head, _, group_place = head.rpartition(">")
         kind, name = head[:1], head[1:]
@@ -3064,6 +3073,8 @@ class TelegramChannel:
                 "That list has changed since it was offered — press it again.", chat_id, thread_id
             )
             return
+        if card is not None:
+            await self._close_card(card, chat_id, f"☑️ {html.escape(label)}")
 
         work = await self._work_item(found) or ""
         self._picked.setdefault((found.name, work), {})[group] = command_labels.value_of(label)
@@ -3330,6 +3341,18 @@ class TelegramChannel:
         `counted` is the step's rounds so far and how to count this one; a
         transition pressed by hand has none, and says no round.
         """
+        # What would stop the message reaching the seat is asked before anything
+        # runs. Measured: `close` pressed while paused ran its tests and its
+        # inspections, and only then said to send /resume — the work done for
+        # nothing, and nothing delivered.
+        if why := await self._what_stops_delivery(seat, chat_id):
+            await self._say(
+                f"{lead}⏸ <b>{html.escape(name)}</b> did not start: {why} Nothing was run.",
+                chat_id,
+                thread_id,
+            )
+            return transitioning.Handed("", stopped=why)
+
         # One at a time per project, as for `/command`: two `make` runs in one
         # directory fight over the same outputs, and the second one's failure
         # is a mystery. Nothing is handed on; the transition can be pressed again.
@@ -3729,7 +3752,10 @@ class TelegramChannel:
         if handed is not None and handed.stopped:
             # Held where it is, as for any other stop: fixed, the step is
             # picked again and the run goes on with its rounds as they were.
-            await self._stopped(found, work, run.held(f"{step.name}: a command did not run"))
+            # A transition that ran commands stopped at one that did not run;
+            # one that ran nothing could not have reached the seat at all.
+            why = "a command did not run" if handed.ran else handed.stopped.rstrip(".")
+            await self._stopped(found, work, run.held(f"{step.name}: {why}"))
 
     @staticmethod
     def _phase_of(found: Project, run: flowing.Run) -> str:
@@ -4087,6 +4113,24 @@ class TelegramChannel:
             reply_markup=keyboard,
             reply_to_message_id=anchor_id,
         )
+
+    async def _what_stops_delivery(self, seat: Seat, chat_id: str) -> str | None:
+        """Why a message to this seat could not be delivered now, or None.
+
+        The same refusals the delivery itself makes, asked up front: paused, no
+        way to send at all, or no session to send to. A sentence for the chat.
+        """
+        if self._gate.paused:
+            return "Halyard is paused. Send /resume first."
+        if not (self._runner or self._runners) or self._registry is None:
+            return "this control plane cannot send messages into a session."
+        destination, _ = parse_destination(seat.chat) or (chat_id, None)
+        if await self._session_for(destination) is None:
+            return (
+                f"the <b>{html.escape(seat.label)}</b> agent's session could not be found "
+                "— /status says more."
+            )
+        return None
 
     async def _forward_to_session(
         self,
@@ -4600,6 +4644,8 @@ class TelegramChannel:
                 await self._close_card(message, here)
                 return
             if what == "label":
+                # Spent once a label is chosen, as a command's card is.
+                await self._close_card(message, here, f"☑️ {html.escape(value)}")
                 await self._label_task(value, here or "", message.get("message_thread_id"))
                 return
             if what == "run":
@@ -4640,7 +4686,11 @@ class TelegramChannel:
                 # needed the label — a transition, a command, a workflow's step.
                 self._detach(
                     self._label_picked(
-                        value, here or "", message.get("message_thread_id"), f"tg:{user_id}"
+                        value,
+                        here or "",
+                        message.get("message_thread_id"),
+                        f"tg:{user_id}",
+                        card=message,
                     ),
                     "/pick",
                 )

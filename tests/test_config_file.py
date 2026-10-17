@@ -605,6 +605,16 @@ def test_an_empty_list_is_refused(tmp_path) -> None:
         a_project(tmp_path, lines=["commands:", "  nothing: []"])
 
 
+def test_labels_left_out_of_label_are_patterns(tmp_path) -> None:
+    [one] = a_project(tmp_path, lines=['labels_exclude: ["halyard:*", "wontfix"]'])
+    [single] = a_project(tmp_path, lines=["labels_exclude: halyard:*"])
+
+    assert one.labels_exclude == ("halyard:*", "wontfix")
+    assert single.labels_exclude == ("halyard:*",)
+    with pytest.raises(ValueError, match="`labels_exclude:` must be a list of patterns"):
+        a_project(tmp_path, lines=["labels_exclude: {halyard: true}"])
+
+
 def test_a_command_can_say_which_of_its_codes_mean_it_did_not_run(tmp_path) -> None:
     """Written beside its line; a plain line and a list still read as before."""
     [project] = a_project(
