@@ -142,3 +142,39 @@ def test_a_path_not_copied_to_yet_and_an_unknown_sample_are_said(tmp_path: Path)
     assert (missing, unknown) == (2, 2)
     assert "Copy the sample to it first" in said_missing[0]
     assert "01-one-agent" in said_unknown[0]
+
+
+def test_the_sample_s_prompt_goes_in_and_md_stays(tmp_path: Path, copied: Path) -> None:
+    """A `prompts:` block of its own replaces the defaults, so a file that had
+    none gets `/md` too — otherwise it would quietly stop working."""
+    from halyard.core import prompts
+
+    config = tmp_path / "halyard.yaml"
+    config.write_text(THEIRS, encoding="utf-8")
+
+    code, said = added(config, copied)
+
+    offered = prompts.from_yaml(config.read_text(encoding="utf-8"))
+    assert code == 0
+    assert set(offered) == {"md", "sample_01"}
+    assert offered["sample_01"].startswith('Add a "Reset" button')
+    assert any("/sample_01 in the group" in line for line in said)
+
+
+def test_their_own_prompts_are_kept_and_a_name_they_use_is_not_taken(
+    tmp_path: Path, copied: Path
+) -> None:
+    from halyard.core import prompts
+
+    config = tmp_path / "halyard.yaml"
+    config.write_text(
+        THEIRS + "\nprompts:\n  md: Mine.\n  sample_01: Something else of mine.\n",
+        encoding="utf-8",
+    )
+
+    code, said = added(config, copied)
+
+    offered = prompts.from_yaml(config.read_text(encoding="utf-8"))
+    assert code == 0
+    assert offered == {"md": "Mine.", "sample_01": "Something else of mine."}
+    assert any("kept as it is" in line for line in said)
