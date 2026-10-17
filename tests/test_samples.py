@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import re
 import shutil
 import subprocess
@@ -64,6 +65,56 @@ def test_the_counter_s_check_passes_once_a_reset_button_is_there(counter: Path) 
 
     assert result.returncode == 0
     assert "ok   #reset" in result.stdout
+
+
+@pytest.mark.parametrize(
+    ("product", "missing", "before"),
+    [
+        ("greeting-page", "name", "</h1>"),
+        ("todo-list", "clear", '<ul id="items">'),
+    ],
+)
+def test_the_two_products_checks_fail_until_their_tasks_are_done(
+    tmp_path: Path, product: str, missing: str, before: str
+) -> None:
+    """Sample 02: each product's task is what its check says is missing."""
+    copy = tmp_path / "two-agents"
+    shutil.copytree(SAMPLES / "02-two-agents", copy)
+    where = copy / product
+
+    first = checked(where)
+    page = where / "index.html"
+    page.write_text(
+        page.read_text(encoding="utf-8").replace(
+            before, f'{before}\n<button id="{missing}" type="button"></button>', 1
+        ),
+        encoding="utf-8",
+    )
+    then = checked(where)
+
+    assert first.returncode == 1 and f"MISSING #{missing}" in first.stdout
+    assert then.returncode == 0 and f"ok   #{missing}" in then.stdout
+
+
+def test_each_sample_lays_its_projects_out_as_its_example_says() -> None:
+    """`halyard samples add` finds each project in the copy where the example
+    puts it; a folder missing from the sample is a step its README cannot get
+    past."""
+    import yaml
+
+    from halyard import samples_cli
+
+    for folder in sorted(SAMPLES.glob("[0-9][0-9]-*")):
+        shipped = yaml.safe_load((folder / "halyard.yaml.example").read_text(encoding="utf-8"))
+        for name, where in samples_cli._placed(shipped["projects"], folder).items():
+            assert where.is_dir(), f"{folder.name}: {name} has no folder"
+
+
+def test_every_check_a_sample_runs_can_be_run() -> None:
+    """`./check.sh` is what the agents and `/command` run; a copy keeps the mode
+    git gave it."""
+    for check in sorted(SAMPLES.rglob("check.sh")):
+        assert os.access(check, os.X_OK), check.relative_to(SAMPLES)
 
 
 def test_each_sample_s_prompt_is_its_task_word_for_word() -> None:

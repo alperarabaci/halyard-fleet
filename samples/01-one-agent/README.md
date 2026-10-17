@@ -50,10 +50,13 @@ where it is, it would gate Halyard's own repository instead.
 uv run halyard samples add 01 ~/halyard-samples/hello-counter
 ```
 
-It adds the project with the path you give it, its agent speaking in your default
-group (`TELEGRAM_CHAT_ID`), and the prompt `/sample_01`. Your file is copied first,
-to `halyard.yaml.<date-time>.bak`, and only added to: your settings, your other
-projects, your prompts and your comments stay as they were. With no `halyard.yaml`
+It asks which group the agent speaks in — Enter keeps your default group
+(`TELEGRAM_CHAT_ID`) — and adds the project with the path you give it, and the prompt
+`/sample_01`. A group another agent already speaks in is refused, since a message
+typed there would reach only one of them; `/status` in a group says its id and whose
+it is. Your file is copied first, to `halyard.yaml.<date-time>.bak`, and only added
+to: your settings, your other projects, your prompts and your comments stay as they
+were. With no `halyard.yaml`
 yet, it writes one for you to fill in — or run `uv run halyard init`. By hand
 instead, take the `projects:` and `prompts:` blocks from `halyard.yaml.example`.
 

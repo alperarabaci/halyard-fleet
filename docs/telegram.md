@@ -144,10 +144,12 @@ separate conversations means separate **groups**, not separate bots.
 
 1. Create two groups and add the same bot to both. A group of one is fine.
 2. Send `/status` in each. It has to be a command: a bot in a group only sees messages starting
-   with `/` unless privacy mode is turned off, and leaving it on is the better default.
-3. **Stop the control plane**, then read the chat ids. This matters — `getUpdates` hands each
-   update to whoever asks first, so a running poll loop will swallow them before your `curl` sees
-   anything:
+   with `/` unless privacy mode is turned off, and leaving it on is the better default. With
+   Halyard running, its answer names the group — `This chat: -1001111111111` — and whose it is,
+   which is all step 3 is for.
+3. Without Halyard running yet, **keep it stopped**, and read the chat ids from Telegram. This
+   matters — `getUpdates` hands each update to whoever asks first, so a running poll loop will
+   swallow them before your `curl` sees anything:
 
    ```bash
    # stop the control plane first

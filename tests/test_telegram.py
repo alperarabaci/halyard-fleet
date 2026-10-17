@@ -1395,6 +1395,41 @@ async def test_a_missing_seat_is_reported_rather_than_hidden(
     assert "not found" in api.sent[-1]["text"]
 
 
+async def test_status_says_which_chat_it_is_and_whose(tmp_path: Path) -> None:
+    """A new group's id is what an agent's `chat:` needs, and /status is the one
+    place that can say it while Halyard runs."""
+    from halyard.core.seats import Seat
+
+    channel, api, _, _ = await wired(tmp_path)
+    channel._seats = [Seat("nav", "claude-code", "session-nav", NAV_CHAT, Role.NAVIGATOR)]
+
+    await channel._handle_message(typed_in("/status", NAV_CHAT))
+    owned = api.sent[-1]["text"]
+    await channel._handle_message(typed_in("/status", "-1009999999999"))
+    new = api.sent[-1]["text"]
+    await channel._handle_message(typed_in("/status", CHAT))
+    default = api.sent[-1]["text"]
+
+    assert f"This chat: <code>{NAV_CHAT}</code> — nav's." in owned
+    assert "no agent speaks here" in new and 'chat: "-1009999999999"' in new
+    assert "the default group" in default
+
+
+async def test_status_says_when_two_agents_share_a_chat(tmp_path: Path) -> None:
+    """A typed message reaches only the first of them, which nothing else says."""
+    from halyard.core.seats import Seat
+
+    channel, api, _, _ = await wired(tmp_path)
+    channel._seats = [
+        Seat("dev", "claude-code", "session-nav", NAV_CHAT, None),
+        Seat("other", "codex", "session-drv", NAV_CHAT, None),
+    ]
+
+    await channel._handle_message(typed_in("/status", NAV_CHAT))
+
+    assert "dev, other all speak here, and a typed message reaches only dev" in api.sent[-1]["text"]
+
+
 async def test_the_bot_answers_in_the_chat_that_asked(tmp_path: Path) -> None:
     channel, api, _, _ = await wired(tmp_path)
 
