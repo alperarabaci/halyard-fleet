@@ -323,7 +323,9 @@ def run(
         authorized_ids=authorized,
         seats=seats,
         project_name=project_name or None,
-        carried_over=existing,
+        # A first setup starts on the short menu; a file being amended keeps
+        # whichever its owner chose, or the full one they have had all along.
+        carried_over=existing or {"TELEGRAM_MENU": "simple"},
         bind=existing.get("HALYARD_BIND"),
     )
 

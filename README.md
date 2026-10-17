@@ -139,6 +139,7 @@ turn stops at a captcha — see [Known limitations](#known-limitations).
 | `/inspect` | pick one of this project's own inspections and run it over the chat's last reply; the answer has a button per agent to hand it on |
 | `/transition` | take the chat's last reply to its next stage, the way this project defines it — its own prompt in front, its commands and inspections run first |
 | `/md` | *(configurable)* have the agent write its answer to a file and pass the path |
+| `/prompts` | your prompts — `/md` and any others — as buttons, each sent into the session when pressed |
 | `/commit` | commit this branch's work, with a message to approve — and push |
 | `/review_and_commit` | the same, plus this project's own checks and its review round |
 | `/command` | run one of the project's own commands, and hear how it went |
@@ -148,6 +149,12 @@ turn stops at a captcha — see [Known limitations](#known-limitations).
 | `/stop` | end what is running here: a project command (a transition's or `/command`'s), and the turn in this chat's agent session with the cards it left open — for Claude Code and Codex, a turn sent from Halyard |
 | `/doctor` | the same check as `halyard doctor`, read from a phone |
 | `/pause`, `/resume` | step out of the way, and come back |
+| `/actions`, `/agent` | status, pause, resume and stop — or options, model and effort — as buttons |
+
+`TELEGRAM_MENU: simple` shows a short menu — `/actions`, `/stop`, `/agent`, `/prompts`,
+`/commit`, `/open`, `/doctor` and `/help` — with the rest a card away; the full one,
+every command and prompt, is the default. Every command answers when typed either way,
+and `/help` lists them all. `halyard init` and the examples start on the short one.
 
 `/md` is one of the `prompts:` in `halyard.yaml` — a sentence you say often
 enough to want a name for. Each key there becomes a command. It exists because

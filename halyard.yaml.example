@@ -25,6 +25,11 @@ settings:
   # Only these Telegram users can answer an approval. Everyone else is
   # refused and the attempt is written to the audit log.
   TELEGRAM_AUTHORIZED_USER_IDS: "11111111"
+  # Which command menu the bot shows. `full` (the default) lists every command
+  # and every prompt; `simple` lists actions, stop, agent, prompts, commit, open,
+  # doctor and help, with status, pause, resume, options, model, effort and your
+  # prompts a card away. Every command still answers when typed either way.
+  # TELEGRAM_MENU: simple
 
   # The credential the turns Halyard starts run on.
   #

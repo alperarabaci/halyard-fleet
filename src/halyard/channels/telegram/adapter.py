@@ -113,6 +113,7 @@ POLL_RETRY_MAX_SECONDS = 30.0
 #: description at most 256. Anything else is rejected for the whole list.
 COMMANDS: tuple[tuple[str, str], ...] = (
     ("chat", "Send a message into this agent's session"),
+    ("prompts", "Send one of your prompts, from a button"),
     ("stop", "Stop what is running here: the agent's turn, or a project command"),
     ("forward", "Hand this chat's last reply to another agent"),
     ("inspect", "Run one of this project's inspections over this chat's last reply"),
@@ -138,12 +139,37 @@ COMMANDS: tuple[tuple[str, str], ...] = (
 #: second way to the same place; whoever types it still gets it.
 UNLISTED: tuple[str, ...] = ("to",)
 
+#: Commands a card of buttons stands for, on the `simple` menu: each button is
+#: that command typed.
+ACTIONS: tuple[str, ...] = ("status", "pause", "resume", "stop")
+AGENT: tuple[str, ...] = ("options", "model", "effort")
+GROUPS: tuple[tuple[str, str], ...] = (
+    ("actions", "Status, pause, resume or stop, as buttons"),
+    ("agent", "This agent's options, model and effort, as buttons"),
+)
+
+#: The menu `TELEGRAM_MENU: simple` publishes: what a first setup needs, with
+#: the rest a card away. Nothing is gone from it — every command is answered
+#: when typed, and `/help` lists them all. `full`, the default, is `COMMANDS`
+#: and every prompt of yours.
+SIMPLE: tuple[str, ...] = (
+    "actions",
+    "stop",
+    "agent",
+    "prompts",
+    "commit",
+    "open",
+    "doctor",
+    "help",
+)
+MENUS: tuple[str, ...] = ("full", "simple")
+
 
 def reserved_names() -> list[str]:
     """Every name a configured prompt cannot take: the menu's, and the ones
     answered only when typed — a prompt called `to` would never run, because
     `/to` answers first."""
-    return [name for name, _ in COMMANDS] + list(UNLISTED)
+    return [name for name, _ in (*COMMANDS, *GROUPS)] + list(UNLISTED)
 
 
 #: How the prompt names the seat it is waiting for.
@@ -625,6 +651,9 @@ class TelegramChannel:
         seats: list[Seat] | None = None,
         session_names: dict[Role, str] | None = None,
         prompts: Mapping[str, str] | None = None,
+        #: Which menu Telegram is given: `full`, every command, or `simple`.
+        #: See `SIMPLE`. Anything else is `full`, said in the log.
+        menu: str = "full",
         repositories: Mapping[str, Project] | None = None,
         forge_token: str | None = None,
         #: Where the last thing said in each chat is kept, so `/forward`
@@ -694,6 +723,9 @@ class TelegramChannel:
         # so changing the wording of one is editing a file rather than waiting
         # for a release.
         self._prompts = dict(prompts if prompts is not None else configured_prompts.DEFAULTS)
+        if menu not in MENUS:
+            logger.warning("TELEGRAM_MENU %r is not one of %s; using full", menu, ", ".join(MENUS))
+        self._menu_kind = menu if menu in MENUS else "full"
         self._sending: set[asyncio.Task] = set()
         # Who pressed a seat button and has not yet said what to send. Keyed by
         # the person as well as the chat: in a group, somebody else typing must
@@ -752,14 +784,23 @@ class TelegramChannel:
         return "telegram"
 
     def _menu(self) -> tuple[tuple[str, str], ...]:
-        """Every command this bot answers: the built-in ones, then yours.
+        """The menu Telegram publishes: every command and prompt, or on
+        `simple` the few a first setup needs, with the rest a card away."""
+        if self._menu_kind == "simple":
+            described = dict((*COMMANDS, *GROUPS))
+            return tuple((name, described[name]) for name in SIMPLE)
+        return self._everything()
 
-        One list, used both for the menu Telegram publishes and for `/help`.
-        Two lists would drift, and the way you would find out is by typing a
-        command the menu offered and being ignored.
-        """
-        return COMMANDS + tuple(
-            (name, configured_prompts.describe(text)) for name, text in self._prompts.items()
+    def _everything(self) -> tuple[tuple[str, str], ...]:
+        """Every command this bot answers: the built-in ones, then yours —
+        what `/help` lists whichever menu is published, so a command off the
+        menu is never one nobody can find."""
+        return (
+            COMMANDS
+            + GROUPS
+            + tuple(
+                (name, configured_prompts.describe(text)) for name, text in self._prompts.items()
+            )
         )
 
     async def start(self) -> None:
@@ -1221,6 +1262,20 @@ class TelegramChannel:
         if command == "stop":
             await self._stop_turn(actor, here or "", thread)
             return
+        if command in ("actions", "agent"):
+            names = ACTIONS if command == "actions" else AGENT
+            await self._say(
+                "Status, pause, resume or stop:"
+                if command == "actions"
+                else "This agent's options, model or effort:",
+                here,
+                thread,
+                reply_markup=cards.menu_choices("do", names),
+            )
+            return
+        if command == "prompts":
+            await self._offer_prompts(here, thread)
+            return
         if command == "to":
             # What is being handed over: the message this replies to, or the
             # rest of the line. Replying is the natural gesture for "this one,
@@ -1321,12 +1376,31 @@ class TelegramChannel:
                 f"{said}\n\n{argument}" if argument else said, actor, here or "", thread
             )
         elif command in ("start", "help"):
-            listed = "\n".join(f"/{name} — {description}" for name, description in self._menu())
+            listed = "\n".join(
+                f"/{name} — {description}" for name, description in self._everything()
+            )
             await self._say(
                 "<b>Halyard</b>\n\nType anything to send it into the session.\n\n" + listed,
                 here,
                 thread,
             )
+
+    async def _offer_prompts(self, chat_id: str | None, thread_id: int | None) -> None:
+        """Your prompts as buttons, each sent into this chat's session when
+        pressed — what typing its command does."""
+        if not self._prompts:
+            await self._say("No prompts are configured.", chat_id, thread_id)
+            return
+        listed = "\n".join(
+            f"/{name} — {html.escape(configured_prompts.describe(text))}"
+            for name, text in self._prompts.items()
+        )
+        await self._say(
+            f"Which prompt?\n\n{listed}",
+            chat_id,
+            thread_id,
+            reply_markup=cards.menu_choices("prompt", tuple(self._prompts)),
+        )
 
     def _seat_list(self) -> str:
         """Every seat that can be addressed, as a person would pick one from.
@@ -4616,6 +4690,23 @@ class TelegramChannel:
             await self._dismiss(query_id)
             if what == "cancel":
                 await self._close_card(message, here)
+                return
+            if what in ("do", "prompt"):
+                # A command pressed on a menu card is that command typed: the
+                # same path, the same checks, the same log.
+                allowed = (*ACTIONS, *AGENT) if what == "do" else tuple(self._prompts)
+                if value not in allowed:
+                    return
+                await self._close_card(message, here, f"☑️ /{html.escape(value)}")
+                await self._handle_message(
+                    {
+                        "message_id": message.get("message_id"),
+                        "from": callback.get("from"),
+                        "chat": message.get("chat"),
+                        "message_thread_id": message.get("message_thread_id"),
+                        "text": f"/{value}",
+                    }
+                )
                 return
             if what == "label":
                 # Spent once a label is chosen, as a command's card is.

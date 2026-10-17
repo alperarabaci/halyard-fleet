@@ -741,6 +741,11 @@ def run() -> int:
             for line in example_values(settings, seats):
                 problems += 1
                 print(f"{FAIL}{line}")
+            if settings.telegram_menu not in ("full", "simple"):
+                print(
+                    f"{WARN}TELEGRAM_MENU {settings.telegram_menu!r} is not full or simple, "
+                    "so the full menu is shown"
+                )
         # Which way calls go from a chat that approves for itself, said either
         # way: "why did nothing reach my phone" has its answer here.
         if settings.override_agent_approvals:
