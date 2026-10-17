@@ -10,6 +10,8 @@ Two rules, both about not wasting a tap:
   already there" case cannot arise, so nothing has to handle it.
 - A project may narrow the list. Empty means every label the project defines,
   which is right until a project has more of them than a phone can show.
+- A project may leave labels out by pattern — `halyard:*` — the ones nobody
+  puts on a task by hand.
 
 Neither rule is GitLab's. They hold for whatever answers `Forge`.
 """
@@ -18,6 +20,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from fnmatch import fnmatchcase
 
 from halyard.tasks.spec import Forge, Task
 
@@ -36,24 +39,32 @@ class Choice:
 
 
 def worth_offering(
-    task: Task, defined: Sequence[str], narrow: Sequence[str] = ()
+    task: Task,
+    defined: Sequence[str],
+    narrow: Sequence[str] = (),
+    exclude: Sequence[str] = (),
 ) -> tuple[str, ...]:
     """The labels that would change something if tapped.
 
     Case-insensitive about what is already there, because a forge lets
     `Andon` and `andon` be the same label to a person and different strings to
-    a comparison.
+    a comparison — and about what is left out, for the same reason.
     """
     already = {name.lower() for name in task.labels}
     wanted = {name.lower() for name in narrow}
+    left_out = [pattern.lower() for pattern in exclude]
     return tuple(
         name
         for name in defined
-        if name.lower() not in already and (not wanted or name.lower() in wanted)
+        if name.lower() not in already
+        and (not wanted or name.lower() in wanted)
+        and not any(fnmatchcase(name.lower(), pattern) for pattern in left_out)
     )
 
 
-async def to_offer(forge: Forge, number: int, narrow: Sequence[str] = ()) -> Choice:
+async def to_offer(
+    forge: Forge, number: int, narrow: Sequence[str] = (), exclude: Sequence[str] = ()
+) -> Choice:
     """Read the task and work out what could go on it.
 
     Two calls rather than one, because a forge answers "what is on this issue"
@@ -61,7 +72,7 @@ async def to_offer(forge: Forge, number: int, narrow: Sequence[str] = ()) -> Cho
     would change anything.
     """
     task = await forge.task(number)
-    return Choice(task=task, offer=worth_offering(task, await forge.labels(), narrow))
+    return Choice(task=task, offer=worth_offering(task, await forge.labels(), narrow, exclude))
 
 
 async def put_on(forge: Forge, number: int, label: str) -> Task:
