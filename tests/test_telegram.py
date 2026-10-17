@@ -1918,6 +1918,42 @@ def test_to_answers_when_typed_but_is_off_the_menu() -> None:
     assert "to" in adapter.reserved_names()
 
 
+async def test_the_simple_menu_is_short_and_help_still_lists_everything(
+    tmp_path: Path,
+) -> None:
+    """A first setup does not need twenty commands on a phone. Off the menu is
+    not gone: every command answers when typed, and `/help` names them all."""
+    channel, api, _ = await routed(tmp_path)
+    channel._menu_kind = "simple"
+    await channel.start()
+    await channel.stop()
+
+    await channel._handle_message(typed_in("/help", DRV_CHAT))
+
+    assert [name for name, _ in api.commands] == list(adapter.SIMPLE)
+    for name in ("transition", "command", "label", "status", "model", "actions"):
+        assert f"/{name} — " in api.sent[-1]["text"]
+
+
+def test_an_unknown_menu_is_the_full_one() -> None:
+    from halyard.core.approvals import ApprovalStore as Store
+
+    channel = adapter.TelegramChannel(
+        api=FakeTelegramApi(),
+        store=Store(ttl=timedelta(minutes=5)),
+        audit=AuditLog([]),
+        chat_id=CHAT,
+        authorized_user_ids=frozenset({APPROVER}),
+        menu="tiny",
+    )
+
+    assert channel._menu_kind == "full"
+
+
+def test_the_card_commands_are_names_a_prompt_cannot_take() -> None:
+    assert {"actions", "agent", "prompts"} <= set(adapter.reserved_names())
+
+
 async def test_a_refused_registration_does_not_stop_the_gate(tmp_path: Path) -> None:
     """Trading the thing for the label on it. The bot answers every command
     whether Telegram knows about them or not."""
@@ -2415,6 +2451,65 @@ async def test_configured_prompts_appear_in_the_menu_and_in_help(tmp_path: Path)
 
     assert ("md", "Write it to a file.") in channel._menu()
     assert "/md — Write it to a file." in api.sent[-1]["text"]
+
+
+def buttons_of(sent: dict) -> list[str]:
+    return [b["text"] for row in sent["reply_markup"]["inline_keyboard"] for b in row]
+
+
+def pressed_in(chat: str, data: str, *, message_id: int = 77) -> dict:
+    return {
+        "id": "cb-menu",
+        "from": {"id": int(APPROVER)},
+        "message": {"message_id": message_id, "chat": {"id": chat}, "text": "a card"},
+        "data": data,
+    }
+
+
+async def test_actions_is_a_card_whose_buttons_are_those_commands(tmp_path: Path) -> None:
+    channel, api, _, _ = await wired(tmp_path)
+
+    await channel._handle_message(typed_in("/actions", NAV_CHAT))
+    card = api.sent[-1]
+    await channel._handle_callback(pressed_in(NAV_CHAT, cards.choice_data("do", "pause")))
+
+    assert buttons_of(card)[:4] == ["/status", "/pause", "/resume", "/stop"]
+    assert channel._gate.paused
+    assert any(e["message_id"] == 77 and "☑️ /pause" in e["text"] for e in api.edits)
+
+
+async def test_agent_is_a_card_of_options_model_and_effort(tmp_path: Path) -> None:
+    channel, api, _, _ = await wired(tmp_path)
+
+    await channel._handle_message(typed_in("/agent", NAV_CHAT))
+
+    assert buttons_of(api.sent[-1])[:3] == ["/options", "/model", "/effort"]
+
+
+async def test_a_prompt_pressed_on_prompts_reaches_the_session(tmp_path: Path) -> None:
+    """The same as typing it: the session gets the prompt's text."""
+    channel, api, runner, _ = await wired(tmp_path)
+    channel._prompts = {"md": "Write it to a file.", "sample_01": "Add a Reset button."}
+
+    await channel._handle_message(typed_in("/prompts", NAV_CHAT))
+    card = api.sent[-1]
+    await channel._handle_callback(pressed_in(NAV_CHAT, cards.choice_data("prompt", "sample_01")))
+    await drain()
+
+    assert buttons_of(card)[:2] == ["/md", "/sample_01"]
+    assert runner.sent == [("session-nav", "Add a Reset button.")]
+
+
+async def test_a_menu_button_naming_nothing_it_offers_does_nothing(tmp_path: Path) -> None:
+    """A button is checked against what its card offers, never run as given."""
+    channel, _, runner, _ = await wired(tmp_path)
+
+    await channel._handle_callback(pressed_in(NAV_CHAT, cards.choice_data("do", "commit")))
+    await channel._handle_callback(pressed_in(NAV_CHAT, cards.choice_data("prompt", "nope")))
+    await drain()
+
+    assert runner.sent == []
+    assert not channel._gate.paused
 
 
 async def test_a_built_in_command_is_not_shadowed_by_a_prompt(tmp_path: Path) -> None:

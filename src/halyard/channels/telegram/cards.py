@@ -123,6 +123,10 @@ _CHOOSABLE = frozenset(
         "flowpick",
         "flowstop",
         "pick",
+        # A command from a menu card — `/actions`, `/agent` — and a prompt from
+        # `/prompts`: each pressed is that command typed.
+        "do",
+        "prompt",
     }
 )
 
@@ -523,6 +527,20 @@ def open_choices(names: tuple[str, ...]) -> dict | None:
         return None
     rows = [buttons[index : index + 3] for index in range(0, len(buttons), 3)]
     return _keyboard(rows)
+
+
+def menu_choices(what: str, names: tuple[str, ...]) -> dict | None:
+    """A button per command on a menu card, each the command it names — `do`
+    for one of Halyard's, `prompt` for one of yours. Three to a row."""
+    buttons = []
+    for name in names:
+        try:
+            buttons.append({"text": f"/{name}", "callback_data": choice_data(what, name)})
+        except ValueError:
+            continue
+    if not buttons:
+        return None
+    return _keyboard([buttons[i : i + 3] for i in range(0, len(buttons), 3)])
 
 
 def command_choices(names: tuple[str, ...]) -> dict | None:

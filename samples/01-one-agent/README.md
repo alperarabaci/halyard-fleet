@@ -78,7 +78,10 @@ reads the new project.
 name in `session:`: `hello-counter`. `uv run halyard sessions` lists the names Halyard
 can see, if you would rather put your session's own name in the YAML.
 
-**5. Send the task from your phone:** `/sample_01` in the group.
+**5. Send the task from your phone:** `/prompts` in the group, then the `/sample_01`
+button — or type `/sample_01`. With `TELEGRAM_MENU: simple` in your settings the bot
+shows a short command menu, which is all this sample needs; `/help` lists every
+command.
 
 ## What you will see
 

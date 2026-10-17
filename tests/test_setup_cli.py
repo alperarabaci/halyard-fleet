@@ -136,6 +136,28 @@ def test_an_existing_env_is_backed_up_before_being_written(tmp_path: Path) -> No
     assert "HALYARD_LOG_LEVEL: INFO" in env.read_text()
 
 
+def test_a_first_setup_starts_on_the_short_menu_and_an_amended_one_keeps_its_own(
+    tmp_path: Path,
+) -> None:
+    """Somebody new gets the menu a first setup needs; somebody re-running it
+    keeps the one they have had all along."""
+
+    def answers(prompt: str, default: str = "") -> str:
+        return "0" if "How many" in prompt else default
+
+    fresh = tmp_path / "fresh.yaml"
+    amended = tmp_path / "amended.yaml"
+    amended.write_text("settings:\n  TELEGRAM_BOT_TOKEN: old\n")
+
+    for path in (fresh, amended):
+        setup_cli.run(
+            env_path=path, ask=answers, secret=lambda _p: "1:t", say=lambda _m: None, now="s"
+        )
+
+    assert "TELEGRAM_MENU: simple" in fresh.read_text()
+    assert "TELEGRAM_MENU" not in amended.read_text()
+
+
 def test_no_token_and_no_previous_one_writes_nothing(tmp_path: Path) -> None:
     """A file with no bot token cannot run the gate, so it is not written at
     all rather than written broken."""

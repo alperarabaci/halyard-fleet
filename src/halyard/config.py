@@ -238,6 +238,11 @@ class Settings(BaseSettings):
     project_name: str = Field(default="unknown", validation_alias="CLAUDE_PROJECT_NAME")
 
     telegram_bot_token: str | None = Field(default=None, validation_alias="TELEGRAM_BOT_TOKEN")
+    #: Which command menu Telegram shows: `full`, every command and prompt, or
+    #: `simple`, what a first setup needs with the rest a card away. Every
+    #: command is answered when typed either way. A value this does not know
+    #: is `full`, said in the log and by doctor.
+    telegram_menu: str = Field(default="full", validation_alias="TELEGRAM_MENU")
     telegram_chat_id: str | None = Field(default=None, validation_alias="TELEGRAM_CHAT_ID")
     #: `NoDecode` because pydantic-settings otherwise tries to JSON-decode any
     #: set-typed environment variable before a validator can see it. A single

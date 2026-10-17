@@ -7,6 +7,7 @@ settings:
   TELEGRAM_BOT_TOKEN: "123456:replace-me"          # from @BotFather; secret
   TELEGRAM_CHAT_ID: "-1001234567890"               # the group the bot is in
   TELEGRAM_AUTHORIZED_USER_IDS: "11111111"         # who may answer a card
+  TELEGRAM_MENU: simple                            # the short command menu
 
 projects:
   hello-counter:
