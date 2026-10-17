@@ -76,6 +76,7 @@ USAGE = """usage: halyard [command]
   sessions      list the session names this machine can see
   init          build halyard.yaml, wire a project, and check it
   samples add   put a sample's project into halyard.yaml (keeps a backup)
+  export        everything Halyard keeps, in one dated zip under export/
   verify [rt]   prove the gate stops things, by running into it (costs turns)
   wire [what]   put the gate on a project, by name or directory (keeps a backup)
   unwire [what] take it off again, leaving everything else in place
@@ -166,6 +167,11 @@ def main() -> None:
         from halyard.runs_cli import main as runs_main
 
         raise SystemExit(runs_main(args[1:]))
+
+    if command == "export":
+        from halyard.export_cli import main as export_main
+
+        raise SystemExit(export_main(args[1:]))
 
     if command == "samples":
         from halyard.samples_cli import main as samples_main

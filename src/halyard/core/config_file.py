@@ -1289,7 +1289,19 @@ def resolve_project(name: str, directory: Path | None = None) -> Path:
 
 #: What `halyard.yaml` holds at its top level, each read by a module of its
 #: own. Anything else there is read by nothing — see `stray_keys`.
-TOP_LEVEL = frozenset({"settings", "projects", "runtimes", "tools", "writes", "prompts", "upkeep"})
+TOP_LEVEL = frozenset(
+    {
+        "settings",
+        "projects",
+        "runtimes",
+        "tools",
+        "writes",
+        "prompts",
+        "upkeep",
+        # Read by `/open`, from `halyard.applications.catalogue`.
+        "applications",
+    }
+)
 
 
 def stray_keys(directory: Path | None = None) -> list[tuple[str, str]]:

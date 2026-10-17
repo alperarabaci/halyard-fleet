@@ -83,6 +83,8 @@ halyard.yml
 # and are written in whatever language you work in, and this repository is
 # English-only. `before_compaction:` and `after_compaction:` point at them.
 compaction_hook/
+# `halyard export` writes its zips here; they hold the bot token.
+/export/
 
 # Upkeep prompts of your own, in place of the ones each job ships with — yours,
 # like halyard.yaml. `upkeep: <job>: prompt:` points at them.

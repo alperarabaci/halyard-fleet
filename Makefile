@@ -1,7 +1,7 @@
 # The handful of things you actually type. Everything here is a shortcut for a
 # command in the README, not a new way of doing anything.
 
-.PHONY: help run service restart stop doctor sessions usage runs-advice init wire unwire verify test lint fmt check
+.PHONY: help run service restart stop doctor export sessions usage runs-advice init wire unwire verify test lint fmt check
 
 help:  ## Show this help
 	@grep -hE '^[a-z-]+:.*?## ' $(MAKEFILE_LIST) \
@@ -26,6 +26,9 @@ stop:  ## Stop the service, keeping it installed (for working on Halyard itself)
 
 doctor:  ## Check the configuration and say what is wrong with it
 	@uv run halyard doctor
+
+export:  ## Everything Halyard keeps — config, database, logs — in one dated zip under export/
+	@uv run halyard export
 
 sessions:  ## List the session names this machine can see
 	@uv run halyard sessions
