@@ -358,6 +358,13 @@ class Settings(BaseSettings):
     refuse_agent_commits: bool = Field(
         default=False, validation_alias="HALYARD_REFUSE_AGENT_COMMITS"
     )
+    #: When true, Halyard decides every call itself, even one from a chat whose
+    #: own setting approves for it — Codex's "approve for me", Claude Code's
+    #: auto mode. Off by default: that choice was made in the chat, and asking
+    #: again on a phone made the ordinary way of working harder.
+    override_agent_approvals: bool = Field(
+        default=False, validation_alias="HALYARD_OVERRIDE_AGENT_APPROVALS"
+    )
 
     #: Let a shell command through without asking when it is a read the gate
     #: understands whole, inside the project — see `core/reads.py`.

@@ -17,6 +17,7 @@ own configuration is worse than one that falls back to the default.
 from __future__ import annotations
 
 import json
+import mmap
 import os
 import re
 import sqlite3
@@ -302,6 +303,38 @@ def runtime_of(transcript_path: str | None) -> str:
     if "/antigravity/" in path or "/.gemini/" in path:
         return "antigravity"
     return "claude-code"
+
+
+def codex_approvals_reviewer(transcript_path: str | None) -> str | None:
+    """Who approves for this Codex chat right now: `auto_review` when the person
+    chose "approve for me" in the app, `user` when they are asked.
+
+    The hook payload does not say. Its `permission_mode` reads `default` either
+    way — measured over 1,661 cards. Codex writes the setting into the rollout
+    with every turn, as the `turn_context` record's `approvals_reviewer`, so
+    the newest one is the chat's setting now. Found from the end, without
+    reading the file: a rollout can be 150 MB, and this runs on every call.
+
+    None when it cannot be read, which leaves the decision where it was.
+    """
+    if not transcript_path:
+        return None
+    try:
+        with open(transcript_path, "rb") as handle:
+            if os.fstat(handle.fileno()).st_size == 0:
+                return None
+            with mmap.mmap(handle.fileno(), 0, access=mmap.ACCESS_READ) as data:
+                at = data.rfind(b'"type":"turn_context"')
+                if at < 0:
+                    return None
+                start = data.rfind(b"\n", 0, at) + 1
+                end = data.find(b"\n", at)
+                record = json.loads(data[start : end if end >= 0 else len(data)])
+    except (OSError, ValueError):
+        return None
+    payload = record.get("payload") if isinstance(record, dict) else None
+    reviewer = payload.get("approvals_reviewer") if isinstance(payload, dict) else None
+    return reviewer if isinstance(reviewer, str) else None
 
 
 def codex_thread_name(session_id: str | None, home: Path | None = None) -> str | None:
