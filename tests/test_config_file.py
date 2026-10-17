@@ -1314,6 +1314,8 @@ def test_what_the_top_of_the_file_holds_says_nothing(tmp_path) -> None:
 
     (tmp_path / "halyard.yaml").write_text(
         "settings: {}\nprojects: {}\nruntimes: {}\ntools: []\nwrites: []\nprompts: {}\nupkeep: {}\n"
+        # Read by /open, so not a key nobody reads.
+        "applications: {}\n"
     )
 
     assert stray_keys(tmp_path) == []
