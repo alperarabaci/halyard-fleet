@@ -307,7 +307,7 @@ missing costs orientation, never the session.
 |---|---|
 | `halyard init` | guided setup: `halyard.yaml`, wiring, and a check |
 | `halyard samples add` | put a [sample](samples/)'s project into `halyard.yaml`, keeping a backup |
-| `halyard export` | everything Halyard keeps — `halyard.yaml`, the database, the audit log, prompts, kept inspections, logs — in one dated zip under `export/`, readable by you only; it holds your bot token |
+| `halyard export` | everything Halyard keeps — `halyard.yaml`, the database, the audit log, prompts, kept inspections, logs, and the files your projects' configuration points at (transition prompts, inspections) — in one dated zip under `export/`, readable by you only; it holds your bot token |
 | `halyard doctor` | what is wired, where, and what is broken |
 | `halyard verify` | prove the gate stops things, by running into it |
 | `halyard wire` / `unwire` | put the gate on a project, or take it off |
