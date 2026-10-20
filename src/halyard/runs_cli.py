@@ -3,7 +3,10 @@
 A run that ends is kept in `workflow_runs` and `workflow_steps`, beside the
 tokens (see `halyard.workflows.journal`). This prints them: the latest runs a
 line each, or one piece of work's runs step by step, with what each answer
-decided and on whose word. It only reads.
+decided and on whose word. A run not finished yet — waiting on an agent, or
+stopped for somebody — is read from its project's file, so it is there before
+it ends. A run is named by its work or by its own name, the eight characters
+its log lines and its steps' first lines carry. It only reads.
 """
 
 from __future__ import annotations
@@ -13,8 +16,9 @@ from collections.abc import Sequence
 from pathlib import Path
 
 from halyard.workflows import journal
+from halyard.workflows import runs as going_runs
 
-USAGE = """usage: halyard runs [recent [n] | <work>]
+USAGE = """usage: halyard runs [recent [n] | <work> | <run>]
 
   recent [n]   the last n workflow runs (10), a line each — what plain
                `halyard runs` prints too
@@ -23,9 +27,11 @@ USAGE = """usage: halyard runs [recent [n] | <work>]
                decided — with the step whose word it was, when that was
                another step's. `alpha-engine#386`, `#386` and `386` name the
                same work.
+  <run>        one run by its own name — `3f2a9c1e`, on its log lines and on
+               the first line of each step it sent
 
-A run is kept when it finishes or is stopped with ⏹. Steps kept before
-2026-09-25 have no decisions.
+A run is kept when it finishes or is stopped with ⏹; one still going is read
+from its project's file. Steps kept before 2026-09-25 have no decisions.
 """
 
 
@@ -75,21 +81,50 @@ def _recent(database: Path, limit: int) -> int:
 
 
 def _work(database: Path, work: str) -> int:
-    runs = journal.of_work(database, work)
-    if not runs:
-        print(f"halyard runs: no run of {work!r} is kept in {database}", file=sys.stderr)
+    """The runs `work` names — as work, or as a run's own name — kept and
+    still going, oldest first."""
+    kept = journal.named(database, work) or journal.of_work(database, work)
+    names = {run.run_id for run in kept}
+    unfinished = [
+        (its_work, run)
+        for _, its_work, run in going_runs.going(database.parent / "projects")
+        if (run.ident and run.ident == work.strip()) or journal.same_work(its_work, work)
+        if journal.run_id(run, its_work) not in names
+    ]
+    if not kept and not unfinished:
+        print(
+            f"halyard runs: no run of {work!r} is kept in {database} or still going",
+            file=sys.stderr,
+        )
         return 1
-    for index, run in enumerate(runs):
-        if index:
-            print()
-        print(_heading(run))
-        print()
-        steps = journal.steps_of(database, run.run_id)
-        if not steps:
-            print("  no step reached its agent")
-            continue
-        print("\n".join(f"  {line}" for line in _steps(steps)))
+    printed = 0
+    for run in kept:
+        print(("\n" if printed else "") + _heading(run) + "\n")
+        _print_steps(journal.steps_of(database, run.run_id))
+        printed += 1
+    for its_work, run in unfinished:
+        print(("\n" if printed else "") + _going(its_work, run) + "\n")
+        _print_steps(journal.deliveries(run))
+        printed += 1
     return 0
+
+
+def _print_steps(steps: Sequence[journal.Delivery]) -> None:
+    if not steps:
+        print("  no step reached its agent")
+        return
+    print("\n".join(f"  {line}" for line in _steps(steps)))
+
+
+def _going(work: str, run: going_runs.Run) -> str:
+    """A run not finished yet: where it is, as the chat's line says it."""
+    state = (
+        f"waiting for {run.waiting_for}"
+        if run.waiting
+        else f"stopped: {run.stopped or 'not started'}"
+    )
+    named = f" · run {run.ident}" if run.ident else ""
+    return f"{work} · {run.workflow} · {state}\n{run.since.astimezone():%m-%d %H:%M} → now{named}"
 
 
 def _counted(run: journal.Kept) -> str:
@@ -103,9 +138,12 @@ def _heading(run: journal.Kept) -> str:
     """Which run, and when: two lines, as the chat's report says them."""
     start, end = run.started.astimezone(), run.finished.astimezone()
     until = f"{end:%H:%M}" if start.date() == end.date() else f"{end:%m-%d %H:%M}"
+    # A run kept since runs had names is kept under its name; one from before,
+    # under its work and start, which says nothing a reader can use.
+    named = "" if " " in run.run_id else f" · run {run.run_id}"
     return (
         f"{run.work} · {run.workflow} · {run.outcome}\n"
-        f"{start:%m-%d %H:%M} → {until} · {journal.lasted(run.started, run.finished)}"
+        f"{start:%m-%d %H:%M} → {until} · {journal.lasted(run.started, run.finished)}{named}"
     )
 
 

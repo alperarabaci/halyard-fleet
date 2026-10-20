@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import json
 import logging
+import secrets
 from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
@@ -35,6 +36,9 @@ logger = logging.getLogger(__name__)
 
 #: How many pieces of work to remember.
 WORKS = 200
+
+#: What each project's runs are kept in, under `projects/<name>/`.
+FILE = "workflow-runs.json"
 
 
 @dataclass(frozen=True)
@@ -98,6 +102,11 @@ class Run:
     #: decision afterwards takes the run on from there. -1 for any other stop,
     #: and gone as soon as the run moves.
     waited: int = -1
+    #: The run's own name: eight hex characters, on every log line it writes
+    #: and on the first line of every step it sends, so it can be found by
+    #: itself whatever a message says the work is. Empty for a run started
+    #: before runs had one.
+    ident: str = ""
 
     def held(self, why: str, *, leaving: int = -1, waited: int = -1) -> Run:
         """The same run, stopped for this reason — `waited` is the step whose
@@ -211,6 +220,23 @@ def _rounds_from(value: object) -> dict[str, tuple[Round, ...]]:
     return found
 
 
+def new_ident() -> str:
+    """A name for a new run: short enough to type, long enough not to repeat."""
+    return secrets.token_hex(4)
+
+
+def going(projects: Path) -> list[tuple[str, str, Run]]:
+    """Every run not yet finished, from each project's file under `projects` —
+    the project, the work, the run. What the database has not kept yet: a run
+    is kept there when it ends."""
+    found = []
+    for kept in sorted(projects.glob(f"*/{FILE}")):
+        for work in _load(kept):
+            if (run := current(kept, work)) is not None:
+                found.append((kept.parent.name, work, run))
+    return found
+
+
 def current(where: Path, work: str) -> Run | None:
     """The run this piece of work has, if it has one."""
     entry = _load(where).get(work)
@@ -245,6 +271,7 @@ def current(where: Path, work: str) -> Run | None:
         rounds=_rounds_from(entry.get("rounds")),
         leaving=leaving if isinstance(leaving, int) else -1,
         waited=waited if isinstance(waited, int) else -1,
+        ident=str(entry.get("ident") or ""),
     )
 
 
@@ -267,6 +294,7 @@ def save(where: Path, work: str, run: Run) -> None:
         "entered": run.entered,
         "leaving": run.leaving,
         "waited": run.waited,
+        "ident": run.ident,
         "rounds": {
             key: [
                 {

@@ -3,6 +3,7 @@ without SQL."""
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -120,3 +121,50 @@ def test_what_it_does_not_take_is_refused_with_how_to_ask(
 ) -> None:
     assert runs_cli.main(args) == 2
     assert "usage: halyard runs" in capsys.readouterr().err
+
+
+# --- a run by its own name, and one still going --------------------------------
+
+
+def going(database: Path, run: Run, work: str = "alpha-engine#453") -> None:
+    """A run not finished yet, in its project's file beside the database."""
+    from halyard.workflows import save
+    from halyard.workflows.runs import FILE
+
+    save(database.parent / "projects" / "alpha-engine" / FILE, work, run)
+
+
+def test_a_run_still_going_is_shown_by_its_work(database: Path, capsys) -> None:
+    """It is only kept in the database when it ends, and the run worth looking
+    at is usually the one that has not."""
+    waiting = replace(REVIEWED, ident="3f2a9c1e", waiting_for="xnav", waiting=True)
+    going(database, waiting)
+
+    code = runs_cli.main(["#453"])
+
+    out = capsys.readouterr().out
+    assert code == 0
+    assert "alpha-engine#453 · level3 · waiting for xnav" in out
+    assert "run 3f2a9c1e" in out
+    assert "review" in out and "reviewed" in out
+
+
+def test_a_run_is_found_by_its_own_name(database: Path, capsys) -> None:
+    going(
+        database,
+        replace(REVIEWED, ident="3f2a9c1e", waiting=False, stopped="it was asked to wait"),
+    )
+    kept(database, replace(REVIEWED, ident="aa11bb22"), work="alpha-engine#400")
+
+    assert runs_cli.main(["3f2a9c1e"]) == 0
+    first = capsys.readouterr().out
+    assert runs_cli.main(["aa11bb22"]) == 0
+    second = capsys.readouterr().out
+
+    assert "alpha-engine#453 · level3 · stopped: it was asked to wait" in first
+    assert "alpha-engine#400 · level3 · done" in second and "run aa11bb22" in second
+
+
+def test_a_name_nothing_has_is_said(database: Path, capsys) -> None:
+    assert runs_cli.main(["ffffffff"]) == 1
+    assert "or still going" in capsys.readouterr().err

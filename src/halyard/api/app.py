@@ -80,10 +80,14 @@ def configured_projects() -> dict:
     from halyard.core.config_file import projects as described
 
     try:
-        return {p.name: p for p in described() if p.path}
+        found = {p.name: p for p in described() if p.path}
     except Exception:
         logger.warning("Could not read `projects:`", exc_info=True)
         return {}
+    for project in found.values():
+        for sentence in project.workflows.astray:
+            logger.warning("%s: %s — check the step's agent", project.name, sentence)
+    return found
 
 
 class ApprovalRequestBody(BaseModel):

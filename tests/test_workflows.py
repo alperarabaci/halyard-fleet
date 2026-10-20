@@ -916,3 +916,22 @@ def test_the_work_with_the_oldest_run_is_forgotten_first(tmp_path: Path, monkeyp
 
     assert current(kept, "alpha-engine#1") is None
     assert current(kept, "alpha-engine#3") is not None
+
+
+def test_a_run_s_name_survives_being_written_and_read(tmp_path: Path) -> None:
+    from halyard.workflows import new_ident
+
+    kept = tmp_path / "workflow-runs.json"
+    ident = new_ident()
+
+    save(kept, "alpha-engine#453", a_run(2, ident=ident))
+
+    assert len(ident) == 8 and int(ident, 16) >= 0
+    assert current(kept, "alpha-engine#453").ident == ident
+
+
+def test_a_run_is_kept_under_its_name_and_an_older_one_as_before() -> None:
+    from halyard.workflows.journal import run_id
+
+    assert run_id(a_run(1, ident="3f2a9c1e"), "alpha-engine#453") == "3f2a9c1e"
+    assert run_id(a_run(1), "alpha-engine#453") == f"alpha-engine#453 {AT.isoformat()}"

@@ -262,6 +262,20 @@ def _older_spellings(projects) -> list[str]:
     ]
 
 
+def _steps_astray(projects) -> list[str]:
+    """Workflow steps sent to an agent of another role than their transition's.
+
+    A warning: it may be meant, and the step goes where it says. Usually it is
+    a label copied onto the wrong line, and the step goes to the wrong agent in
+    every run until somebody reads the first line of what it was sent.
+    """
+    return [
+        f"{WARN}{project.name} — {sentence}"
+        for project in projects
+        for sentence in project.workflows.astray
+    ]
+
+
 def _runs(settings, projects) -> list[str]:
     """What each project trusts to run without asking — its `runs:` and what
     `halyard rules` keeps for it — what was refused, and whether any of it can
@@ -883,6 +897,8 @@ def run() -> int:
     if seats and not absent:
         print(f"{OK}every file the configuration names is where it says")
     for line in _older_spellings(described):
+        print(line)
+    for line in _steps_astray(described):
         print(line)
     for line in _one_shot_efforts(settings, described) if settings_ok else []:
         print(line)

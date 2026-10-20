@@ -247,7 +247,7 @@ TRANSITION_COMMAND_TIMEOUT_SECONDS = 600.0
 #: `_kept`.
 SAID_FILE = "last-said.json"
 RESULTS_FILE = "check-results.json"
-WORKFLOW_FILE = "workflow-runs.json"
+WORKFLOW_FILE = flowing.runs.FILE
 
 
 def _local(moment: datetime) -> datetime:
@@ -257,6 +257,13 @@ def _local(moment: datetime) -> datetime:
     reply that arrived at 23:20 was shown as 20:20, and read as three hours old.
     """
     return moment.astimezone()
+
+
+def _named(run: flowing.Run) -> str:
+    """A run the way a log line or a step's first line names it: its workflow,
+    and its own name when it has one — `level3 (run 3f2a9c1e)` — so one run
+    can be found by itself, whatever its messages say the work is."""
+    return f"{run.workflow} (run {run.ident})" if run.ident else run.workflow
 
 
 def _seat_name(seat: Seat | None) -> str:
@@ -3670,6 +3677,7 @@ class TelegramChannel:
                 by=actor,
                 phase=phase or 1,
                 entered=start if inside else -1,
+                ident=flowing.new_ident(),
             )
         kept_said = self._kept(chat_id, SAID_FILE)
         await self._take_step(
@@ -3689,9 +3697,12 @@ class TelegramChannel:
             f"<b>{html.escape(run.workflow)}</b> {min(run.step + 1, len(flow))}/{len(flow)} · "
             f"{html.escape(step)}{self._phase_of(found, run)}"
         )
+        # On a line of its own: the name to find the run by in the logs and in
+        # `halyard runs`, whatever its messages say the work is.
+        named = f"\nrun <code>{html.escape(run.ident)}</code>" if run.ident else ""
         if run.waiting:
-            return f"▶️ {where} — waiting for <b>{html.escape(run.waiting_for)}</b>."
-        return f"⏸ {where} — {html.escape(run.stopped or 'not started yet')}."
+            return f"▶️ {where} — waiting for <b>{html.escape(run.waiting_for)}</b>.{named}"
+        return f"⏸ {where} — {html.escape(run.stopped or 'not started yet')}.{named}"
 
     async def _take_step(
         self,
@@ -3749,7 +3760,7 @@ class TelegramChannel:
             # tap puts it on the task and sends this step on.
             held = run.held(f"{lines.needing} takes a {lines.missing} label the task does not have")
             await asyncio.to_thread(flowing.save, kept, work, held)
-            logger.info("Workflow %s for %s stopped: %s", run.workflow, work, held.stopped)
+            logger.info("Workflow %s for %s stopped: %s", _named(run), work, held.stopped)
             await self._ask_for_label(
                 found,
                 lines,
@@ -3786,7 +3797,7 @@ class TelegramChannel:
         await asyncio.to_thread(flowing.save, kept, work, run.waiting_on(seat.label))
         logger.info(
             "Workflow %s step %d/%d (phase %d) for %s: %s → %s",
-            run.workflow,
+            _named(run),
             run.step + 1,
             len(flow),
             run.phase,
@@ -3816,7 +3827,7 @@ class TelegramChannel:
             ),
             buttons=cards.workflow_keyboard(run.workflow),
             command_lines=lines.lines,
-            step_line=f"{run.workflow}, step {run.step + 1} of {len(flow)}: {step.name}",
+            step_line=f"{_named(run)}, step {run.step + 1} of {len(flow)}: {step.name}",
             counted=StepRounds(
                 before=run.rounds.get(key, ()),
                 allowed=step.rounds,
@@ -3883,7 +3894,7 @@ class TelegramChannel:
         kept = self._kept_for(found.name, WORKFLOW_FILE)
         if kept is not None:
             await asyncio.to_thread(flowing.save, kept, work, run)
-        logger.info("Workflow %s for %s stopped: %s", run.workflow, work, run.stopped)
+        logger.info("Workflow %s for %s stopped: %s", _named(run), work, run.stopped)
         flow = found.workflows.flows.get(run.workflow) or ()
         if go and not go_text and run.step < len(flow):
             agent = self._step_seats(found, flow).get(flow[run.step], "")
@@ -3976,7 +3987,7 @@ class TelegramChannel:
         kept = self._kept_for(found.name, WORKFLOW_FILE)
         if kept is not None:
             await asyncio.to_thread(flowing.clear, kept, work)
-        logger.info("Workflow %s for %s %s", run.workflow, work, outcome)
+        logger.info("Workflow %s for %s %s", _named(run), work, outcome)
         if outcome != "done":
             return
         flow = found.workflows.flows.get(run.workflow) or ()
@@ -3984,7 +3995,9 @@ class TelegramChannel:
         start, end = _local(run.since), _local(finished)
         shape = "%H:%M" if start.date() == end.date() else "%b %d %H:%M"
         await self._say(
-            f"📋 <b>{html.escape(run.workflow)}</b> is done — {html.escape(work)}\n"
+            f"📋 <b>{html.escape(run.workflow)}</b> is done — {html.escape(work)}"
+            + (f" · run <code>{html.escape(run.ident)}</code>" if run.ident else "")
+            + "\n"
             f"{start.strftime(shape)} → {end.strftime(shape)} · "
             f"{flowing.journal.lasted(run.since, finished)}\n"
             f"{html.escape(flowing.journal.steps_line(run, flow=flow, stretch=stretch))}",
@@ -4039,7 +4052,7 @@ class TelegramChannel:
         )
         logger.info(
             "Workflow %s for %s: %s decided %s%s%s, acting on %s",
-            run.workflow,
+            _named(run),
             work,
             answered.label,
             decision or "nothing",
