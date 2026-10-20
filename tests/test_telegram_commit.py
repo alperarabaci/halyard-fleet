@@ -943,6 +943,80 @@ async def test_a_transition_without_a_to_offers_every_seat(tmp_path: Path, wired
     assert runner.sent == []
 
 
+def with_drivers(channel, repo: Path, runner) -> None:
+    """Two drivers on the project, as a machine with one per runtime has."""
+    for label, session, chat in (
+        ("drv", "alpha-engine-driver", "-100901"),
+        ("xdrv", "alpha-engine-xdriver", "-100902"),
+    ):
+        channel._seats.append(
+            Seat(
+                label=label,
+                runtime="claude-code",
+                chat=chat,
+                project="alpha-engine",
+                role=Role.DRIVER,
+                session=session,
+            )
+        )
+        runner.sessions[session] = SessionRef(f"id-{label}", session, str(repo), None, None)
+
+
+def first_row(api) -> list[tuple[str, str | None]]:
+    return [
+        (key["text"], key.get("style"))
+        for key in api.sent[-1]["reply_markup"]["inline_keyboard"][0]
+    ]
+
+
+async def test_a_transition_offers_the_driver_last_worked_with_first(tmp_path: Path, wired) -> None:
+    """Whichever way the work went: its reply counts, from the desk or not."""
+    channel, api, runner, repo = wired
+    transitions_in(channel, repo, tmp_path, runner, develop={"to": "driver"})
+    with_drivers(channel, repo, runner)
+
+    await channel.send_message(
+        "id-xdrv", "Done.", agent_id="claude-code", session_name="alpha-engine-xdriver"
+    )
+    await channel._run_transition("develop", CHAT, None, f"tg:{APPROVER}")
+
+    assert first_row(api) == [("→ xdrv", "primary")]
+    assert runner.sent == [], "offered first, not chosen"
+
+
+async def test_work_handed_to_an_agent_makes_it_the_first_offered(tmp_path: Path, wired) -> None:
+    channel, api, runner, repo = wired
+    transitions_in(channel, repo, tmp_path, runner, develop={"to": "driver"})
+    with_drivers(channel, repo, runner)
+    await channel.send_message(
+        "id-xdrv", "Done.", agent_id="claude-code", session_name="alpha-engine-xdriver"
+    )
+
+    await channel._handle_message(typed("/to drv start on the loader"))
+    await settled(channel)
+    await channel._run_transition("develop", CHAT, None, f"tg:{APPROVER}")
+
+    assert first_row(api) == [("→ drv", "primary")]
+
+
+async def test_forward_offers_the_project_s_last_agents_first_and_not_its_own(
+    tmp_path: Path, wired
+) -> None:
+    channel, api, runner, repo = wired
+    transitions_in(channel, repo, tmp_path, runner)
+    with_drivers(channel, repo, runner)
+    await channel.send_message(
+        "id-xdrv", "Done.", agent_id="claude-code", session_name="alpha-engine-xdriver"
+    )
+
+    await channel._handle_message(typed("/forward"))
+
+    rows = api.sent[-1]["reply_markup"]["inline_keyboard"]
+    keys = [key["text"] for row in rows for key in row]
+    assert first_row(api) == [("xdrv", "primary")]
+    assert "nav" not in keys, "this chat's own agent is not offered"
+
+
 async def test_pressing_a_seat_hands_it_on_there(tmp_path: Path, wired) -> None:
     channel, api, runner, repo = wired
     transitions_in(channel, repo, tmp_path, runner, back={})

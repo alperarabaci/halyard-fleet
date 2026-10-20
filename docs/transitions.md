@@ -57,7 +57,16 @@ projects:
 
 A transition carries the chat's last reply unless it says
 `include_last_message: false`, and goes to the agent or role in `to:` — every
-agent is offered when it names none. An inspection, a command or an agent it names that
+agent is offered when it names none.
+
+When a card asks which agent — a role two agents hold, or no `to:` at all — the
+agent that role last worked with in the project is first, in blue. Last worked
+with whichever way the work went: a message delivered to it, a transition, a
+workflow step, `/to`, `/forward`, or its own reply arriving. It is only offered
+first; pressing another makes that one first next time. `/forward` and `/to`
+offer the project's last agents first the same way, and leave out the chat's own
+agent. Kept per project in `projects/<name>/last-agents.json`, beside the
+database. An inspection, a command or an agent it names that
 the project does not define is refused when the file is read, rather than when
 somebody presses the button from a phone.
 

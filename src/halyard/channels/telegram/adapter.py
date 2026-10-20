@@ -43,7 +43,7 @@ from halyard.commands import catalogue as commands_offered
 from halyard.commands import inputs as command_inputs
 from halyard.commands import labels as command_labels
 from halyard.commands import running as commands_running
-from halyard.core import last_said, transcripts
+from halyard.core import last_agents, last_said, transcripts
 from halyard.core import prompts as configured_prompts
 from halyard.core.approvals import (
     AlreadyResolvedError,
@@ -1016,9 +1016,11 @@ class TelegramChannel:
         # A workflow waiting on this seat takes its next step — off this path,
         # which is relaying a reply: the step ahead may run commands and inspections,
         # and none of that should hold up what the seat just said.
-        answered = for_session(self._seats, agent_id, session_name, session_id) or for_project(
-            self._seats, agent_id, project
-        )
+        speaking = for_session(self._seats, agent_id, session_name, session_id)
+        # Only the seat the session is known to be: the project-wide guess
+        # below is good enough to wake a workflow, not to say who worked last.
+        self._worked_with(speaking)
+        answered = speaking or for_project(self._seats, agent_id, project)
         if answered is not None:
             self._detach(self._advance_workflow(answered, text), "/workflow")
         # A provider that has stopped answering is the one message worth a
@@ -2649,7 +2651,7 @@ class TelegramChannel:
 
         label = (label or "").strip()
         if not label:
-            keyboard = cards.forward_choices(tuple(seat.label for seat in self._seats))
+            keyboard = cards.forward_choices(*self._agents_to_offer(chat_id))
             if keyboard is None:
                 await self._say(self._seat_list(), chat_id, thread_id)
                 return
@@ -3324,12 +3326,16 @@ class TelegramChannel:
 
         seats = self._seats_for(found.name, to or transition.to)
         if len(seats) != 1:
+            recent = self._recent_agents(found.name)
+            wanted = (to or transition.to or "").lower()
             await self._say(
                 f"Hand <b>{html.escape(name)}</b> to which agent?",
                 chat_id,
                 thread_id,
                 reply_markup=cards.transition_seat_choices(
-                    name, tuple(seat.label for seat in seats or self._seats)
+                    name,
+                    tuple(seat.label for seat in seats or self._seats),
+                    first=(recent[wanted],) if wanted in recent else tuple(recent.values()),
                 ),
             )
             return
@@ -4169,7 +4175,7 @@ class TelegramChannel:
         *truncated* version of what it is shown next to would be worse than no
         button.
         """
-        keyboard = cards.seat_choices(tuple(seat.label for seat in self._seats))
+        keyboard = cards.seat_choices(*self._agents_to_offer(chat_id))
         if keyboard is None:
             await self._say(self._seat_list(), chat_id, thread_id)
             return
@@ -4271,6 +4277,7 @@ class TelegramChannel:
             await self._say(said, chat_id, thread_id)
             return
 
+        self._worked_with(self._seat_for_chat(chat_id))
         task = asyncio.create_task(self._deliver(found, text, actor, chat_id, thread_id, accepted))
         # Held so the loop does not drop the only reference and cancel it.
         self._sending.add(task)
@@ -4341,6 +4348,33 @@ class TelegramChannel:
 
     def _seat_for_chat(self, chat_id: str) -> Seat | None:
         return for_chat(self._seats, chat_id) if self._seats else None
+
+    def _worked_with(self, seat: Seat | None) -> None:
+        """Note `seat` as the agent its role last worked with in its project,
+        which the cards that ask for an agent offer first — see `last_agents`."""
+        if seat is None or not seat.project or seat.role is None:
+            return
+        last_agents.remember(
+            self._kept_for(seat.project, last_agents.FILE), role=seat.role.value, label=seat.label
+        )
+
+    def _recent_agents(self, project: str | None) -> dict[str, str]:
+        """The agent each role last worked with in `project`, in the order the
+        roles are listed: navigator, driver, reviewer."""
+        if not project:
+            return {}
+        kept = last_agents.recent(self._kept_for(project, last_agents.FILE))
+        return {role.value: kept[role.value] for role in Role if role.value in kept}
+
+    def _agents_to_offer(self, chat_id: str) -> tuple[tuple[str, ...], tuple[str, ...]]:
+        """The agents `/forward` and `/to` offer from this chat, and the ones to
+        offer first: those this chat's project last worked with. Never the
+        chat's own agent — handing a reply back to whoever wrote it is a slip
+        of the thumb, not an intention."""
+        own = self._seat_for_chat(chat_id)
+        labels = tuple(seat.label for seat in self._seats if seat is not own)
+        first = tuple(self._recent_agents(self._project_name_for(chat_id)).values())
+        return labels, first
 
     def _runner_for(self, seat: Seat | None):
         """The runtime a seat is, falling back to the only one there is."""

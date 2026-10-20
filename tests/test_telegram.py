@@ -2096,7 +2096,8 @@ async def test_a_bare_to_offers_the_seats(tmp_path: Path) -> None:
     await channel._handle_message(typed_in("/to", DRV_CHAT))
 
     keyboard = api.sent[-1].get("reply_markup")
-    assert [b["text"] for b in keyboard["inline_keyboard"][0]] == ["drv", "xnav"]
+    # Not `drv`, whose chat this is: that would be typing here with extra steps.
+    assert [b["text"] for b in keyboard["inline_keyboard"][0]] == ["xnav"]
 
 
 async def test_plain_text_that_answers_nothing_still_goes_to_this_seat(tmp_path: Path) -> None:
@@ -2276,7 +2277,7 @@ async def test_a_reply_without_a_seat_offers_the_buttons(tmp_path: Path) -> None
     await channel._handle_message(replying("/to", "hand this over", DRV_CHAT, message_id=42))
 
     last = api.sent[-1]
-    assert [b["text"] for b in last["reply_markup"]["inline_keyboard"][0]] == ["drv", "xnav"]
+    assert [b["text"] for b in last["reply_markup"]["inline_keyboard"][0]] == ["xnav"]
     # Attached to the message that holds the text, so the press can read it
     # back exactly rather than from the shortened preview.
     assert last["reply_to_message_id"] == 42
