@@ -4,10 +4,13 @@ One function, and no side effects: everything a run does is decided here and
 carried out by whoever drives it. A flow that went round three times when it
 should have gone round twice is the failure this exists to make testable.
 
-**Forward is the default.** A decision Halyard could not read carries the work
-to the next step rather than stopping — most transitions ask for no decision at
-all — and whoever drives this says so in the chat. The exceptions are the end
-of a phase and the end of the flow, below.
+**No decision stops.** Every step is told the words it decides in, so a reply
+without one is something gone wrong — a step sent to the wrong agent, a turn
+that ended on a question — and carrying it on handed the next agent a reply
+that was never meant for it. It stops the run the way a wait does: the agent's
+own decision afterwards moves it, and the card offers where its words would
+have taken the work. A review whose decision the next step acts on still goes
+to that step, and that step still goes on the review's decision.
 
 **The end is `done`.** Leaving the last step says the work is finished, which
 is a claim, so only `done` makes it. A `forward` there, written out of habit,
@@ -177,6 +180,10 @@ def after(
             leaving=stretch[1] + 1,
             liftable=last,
         )
+    if deciding is None and not last and not lending:
+        # Told the words it decides in, and used none of them. A review whose
+        # decision the next step acts on goes there whichever way it went.
+        return Next(stop=f"{flow[run.step]} ended with no decision", decided=None, liftable=True)
     if last and deciding in (None, Decision.FORWARD):
         # Ending the workflow is a claim that the work is finished, made in
         # `done`. A habitual forward, or no word at all, leaves the end to the

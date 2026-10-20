@@ -142,11 +142,21 @@ def test_forward_takes_the_next_step() -> None:
     assert next_after(Decision.FORWARD) == Next(step=2, decided=Decision.FORWARD)
 
 
-def test_a_reply_that_decided_nothing_carries_on() -> None:
+def test_a_reply_that_decided_nothing_stops_rather_than_carrying_on() -> None:
+    """Carried on, it handed the next agent a reply never meant for it — a step
+    sent to the wrong agent, a turn that ended on a question. Stopped, the
+    agent's own decision afterwards still moves it."""
     moving = next_after(None)
 
-    assert moving.step == 2
-    assert moving.stop == ""
+    assert moving.step is None
+    assert moving.stop == "review ended with no decision"
+    assert moving.liftable
+
+
+def test_a_review_that_decided_nothing_still_reaches_the_step_that_acts_on_it() -> None:
+    moving = reviewed_after(None, 0)
+
+    assert (moving.step, moving.stop) == (1, "")
 
 
 def test_back_is_one_step() -> None:
@@ -294,7 +304,8 @@ def test_only_the_step_that_names_it_acts_on_a_carried_decision() -> None:
     """A decision left over on a run moves nothing at a step that decides for itself."""
     moving = reviewed_after(None, 2, carried="back", discover=1)
 
-    assert (moving.step, moving.back) == (3, False)
+    assert (moving.step, moving.back) == (None, False)
+    assert moving.stop == "discover ended with no decision"
 
 
 # --- phases: the steps that go round again going forward ---------------------

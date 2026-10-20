@@ -42,6 +42,7 @@ async def take(
     expected: int | None = None,
     previous: Previous | None = None,
     keeper: inspections.Keeper | None = None,
+    step: str = "",
 ) -> Handed:
     """Run a transition's commands, then its inspections, write the message, deliver it.
 
@@ -69,7 +70,8 @@ async def take(
     `followup_prompt:` sends that in place of its `prompt:`, and `previous`
     carries what the seat said back to the round before. `expected` is how many
     rounds the step allows. `keeper` keeps each inspection it runs — see
-    `halyard.inspections.record`.
+    `halyard.inspections.record`. `step` names the workflow's step this is, for
+    the message's first line, and is empty for a transition pressed by hand.
 
     Each inspection runs on `model` at `effort`, unless `models` — the
     project's own, by inspection — names another for it.
@@ -168,6 +170,7 @@ async def take(
         reply=reply,
         ran=ran,
         previous=previous,
+        step=step,
     )
     await delivery.to_seat(recipient_label, text)
     logger.info(

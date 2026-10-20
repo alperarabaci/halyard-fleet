@@ -75,8 +75,12 @@ When the agent a step went to replies, Halyard reads the last line of that reply
   [Phases](#phases-the-steps-that-go-round-going-forward);
 - `done` ends the workflow, and only at its last step — see
   [The end is done](#the-end-is-done);
-- anything else carries on to the next step, and the chat says there was no decision
-  line — except at the end of a phase or of the workflow, where it stops.
+- a reply with none of them stops the run, the way a wait does: every step is told the
+  words it decides in, so a reply without one is something gone wrong — a step sent to
+  the wrong agent, a turn that ended on a question — and carrying it on handed the next
+  agent a reply never meant for it. A review whose decision the next step acts on is the
+  exception: it goes to that step whichever way it went — see
+  [A step can act on the decision before it](#a-step-can-act-on-the-decision-before-it).
 
 The label before the word is the project's own: `DECISION: forward`, `RESULT: forward`
 and a line that is only `forward` read the same, and so does one a model put in bold. The
@@ -184,9 +188,16 @@ review it is meant to act on would never reach it.
 
 ## What each step is told
 
-A transition pressed by hand carries nothing of a workflow. A step's envelope carries the
-workflow's own lines as well — where it is, and where each word on its last line would
-take the work, with the agent, the round and the phase it would be:
+A transition pressed by hand carries nothing of a workflow. A step says on its first line
+that a Halyard workflow sent it — something a project's prompts can point at, to tell an
+agent to keep going and to put any question in its reply:
+
+```
+To xdrv (driver), from Halyard workflow level3, step 6 of 8: develop — transition: driver_develop.
+```
+
+Its envelope carries the workflow's own lines as well — where it is, and where each word
+on its last line would take the work, with the agent, the round and the phase it would be:
 
 ```
 - Workflow: level3 · step 5 of 8 · discovered
@@ -247,11 +258,15 @@ going says where it is — `level3 5/8 · develop · phase 2 — waiting for xdr
 offers the same button.
 
 A run stops, and says why, when a step would go past its rounds, when the phases would
-go past theirs, when a phase ends with no decision, when an agent decides to wait, when the
-last step ends without `done`, and when a step's agent could be more than one agent. The
-card it stops with keeps the work in the run:
+go past theirs, when a reply decides nothing, when an agent decides to wait, when the last
+step ends without `done`, and when a step's agent could be more than one agent. The card
+it stops with keeps the work in the run:
 
-- **▶️ Send it anyway** — or **↻ Phase 2 at discover** — sends what is ready;
+- **▶️ forward: developed → nav** and **↩️ back: discover → xdrv** — after a wait or a
+  reply that decided nothing, where the agent's own words would have taken the work, the
+  step and its agent named. A move a button cannot make as it is — into another phase,
+  or past a step's rounds — is left to picking a step;
+- **▶️ develop → xdrv** — or **↻ Phase 2 at discover** — sends what is ready, named;
 - **⏭ On to close** leaves the phases instead, where a phase just ended or waited, and
   **⏭ On to the end** ends the workflow where its last step ended without `done`;
 - **🧭 Pick a step** offers the flow's steps, and the one pressed goes next, with the
@@ -259,8 +274,9 @@ card it stops with keeps the work in the run:
   `/workflow level3 develop` does the same for a stopped run;
 - **⏹ Stop the workflow** clears it. Starting it again after that starts afresh.
 
-**A wait goes on with the agent that asked for it,** and so does a last step that ended
-without `done`. What the agent stopped for is usually a word with you, in its own chat.
+**A wait goes on with the agent that asked for it,** and so do a reply that decided
+nothing and a last step that ended without `done`. What the agent stopped for is usually
+a word with you, in its own chat — the card says so.
 
 - Its replies until then decide nothing, and another `wait` is the same one.
 - The first reply that ends in a decision — `forward`, `back`, `next`, or `done` at the
