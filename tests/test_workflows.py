@@ -462,6 +462,57 @@ def test_back_in_the_first_phase_is_the_step_before_as_ever() -> None:
     assert (moving.step, moving.phase) == (0, None)
 
 
+#: The same flow, with close taking the driver's work rather than the
+#: navigator's `verified` just before it.
+WORKED_ON_STEPS = {
+    **PHASED_STEPS,
+    "develop": Step(name="develop", transition="driver_develop", seat="xdrv", rounds=2),
+    "close": Step(name="close", transition="close", seat="nav", rounds=2, works_on="develop"),
+}
+
+
+def test_back_from_a_step_that_works_on_another_goes_to_that_one() -> None:
+    """Not to `verified`, the navigator's own step: what close sends back is
+    the driver's to fix, in the phase the work was made in."""
+    moving = after(
+        Decision.BACK,
+        run=a_run(4, phase=2, entered=1),
+        flow=PHASED,
+        steps=WORKED_ON_STEPS,
+        taken={"develop@2": 1, "verified@2": 1, "close": 1},
+        stretch=STRETCH,
+    )
+
+    assert (moving.step, moving.back, moving.phase, moving.stop) == (2, True, None, "")
+
+
+def test_back_to_the_step_worked_on_still_counts_its_rounds() -> None:
+    moving = after(
+        Decision.BACK,
+        run=a_run(4, phase=1, entered=1),
+        flow=PHASED,
+        steps=WORKED_ON_STEPS,
+        taken={"develop@1": 2, "close": 1},
+        stretch=STRETCH,
+    )
+
+    assert moving.step == 2
+    assert moving.stop == "develop would go for round 3 of 2"
+
+
+def test_a_step_that_works_on_another_is_told_its_back_goes_there() -> None:
+    lines = lines_for(
+        a_run(4, phase=1),
+        flow=PHASED,
+        steps=WORKED_ON_STEPS,
+        taken={"develop@1": 1, "verified@1": 1, "close": 1},
+        seats={"discover": "xdrv", "develop": "xdrv", "verified": "nav", "close": "nav"},
+        stretch=STRETCH,
+    )
+
+    assert "back (→ develop, xdrv, round 2 of 2)" in lines[1]
+
+
 def test_entering_the_phases_marks_where_the_first_one_started() -> None:
     moving = phased_after(Decision.FORWARD, 0)
 

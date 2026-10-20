@@ -275,7 +275,9 @@ projects:
     # `rounds:` says more. A list inside a workflow is its phases: the steps a plan
     # in parts goes through once per part, whose last step says `next` for another
     # phase — or `next develop` to start it further on — and `forward` to leave
-    # them. See docs/workflows.md.
+    # them. A step that `works_on:` an earlier one carries that step's agent's last
+    # reply, and its back goes there: close on the driver's report, not on the
+    # navigator's word that it can close. See docs/workflows.md.
     # workflows:
     #   decisions: {forward: forward, back: back, wait: wait, next: next}   # the defaults
     #   phases: 3                        # how many phases go before it stops and asks
@@ -286,7 +288,7 @@ projects:
     #     discovered: {transition: discover_completed, agent: navigator, rounds: 2}
     #     develop: {transition: driver_develop, agent: driver}
     #     verified: {transition: reviewed, agent: navigator}
-    #     close: {agent: navigator}
+    #     close: {agent: navigator, works_on: develop}
     #   level3: [review, reviewed, [discover, discovered, develop, verified], close]
     # Everything about task labels, in one place. Each of these was a key of
     # its own before (`label_work:`, `label_groups:`, a plain list under

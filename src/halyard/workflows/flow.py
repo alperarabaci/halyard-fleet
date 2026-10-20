@@ -21,6 +21,12 @@ step's next round, so what the seat receives is the project's own text for
 going round again. From the step a later phase started at, the step before is
 the end of the phase before it.
 
+**A step can work on an earlier step's work.** `close` after `developed` goes to
+the navigator who just read the driver's report, so the step before it is the
+navigator's own, and its back would hand the navigator its own reply. A step
+that names `works_on: develop` carries that step's agent's last reply instead,
+and its back goes there: what close sends back is the driver's to fix.
+
 **A step can act on the decision made before it.** A reviewer's back is for the
 navigator to act on — the navigator holds the context, so the review goes to
 it whichever way the reviewer decided, and the navigator's reply then goes
@@ -186,7 +192,12 @@ def after(
 
     going_back = deciding is Decision.BACK and not lending
     phase, entered = run.phase, None
-    if going_back and stretch is not None and run.phase > 1 and run.step == run.entered:
+    worked_on = _worked_on(run.step, flow=flow, steps=steps) if going_back else None
+    if worked_on is not None:
+        # Back to the step whose work this one took, in the phase the run is in:
+        # after the phases, that is the last one, where the work was made.
+        target = worked_on
+    elif going_back and stretch is not None and run.phase > 1 and run.step == run.entered:
         # The first step of a later phase was handed the end of the one before.
         # Where that one started is not kept, and the phases' first step is
         # where a phase starts unless a `next` said otherwise.
@@ -227,6 +238,16 @@ def after(
     if would_be > step.rounds:
         return replace(going, stop=f"{step.name} would go for round {would_be} of {step.rounds}")
     return going
+
+
+def _worked_on(place: int, *, flow: Sequence[str], steps: Mapping[str, Step]) -> int | None:
+    """Where in the flow the step at `place` takes its work from — the nearest
+    place before it of the step its `works_on:` names — or None."""
+    here = steps.get(flow[place]) if 0 <= place < len(flow) else None
+    if here is None or here.works_on is None:
+        return None
+    earlier = [at for at in range(place) if flow[at] == here.works_on]
+    return earlier[-1] if earlier else None
 
 
 def _next_phase(

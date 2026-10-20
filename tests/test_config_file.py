@@ -946,6 +946,60 @@ def test_a_step_cannot_act_on_its_own_decision(tmp_path) -> None:
         with_workflows(tmp_path, "  steps:", "    review: {decided_by: review}", "  l3: [review]")
 
 
+def test_a_step_can_work_on_an_earlier_step(tmp_path) -> None:
+    [project] = with_workflows(
+        tmp_path,
+        "  steps:",
+        "    discover: {transition: driver_discover, seat: reviewer}",
+        "    review: {}",
+        "    close: {transition: review, works_on: discover}",
+        "  level3: [[discover, review], close]",
+    )
+
+    assert project.workflows.steps["close"].works_on == "discover"
+    assert project.workflows.steps["review"].works_on is None
+
+
+def test_works_on_naming_no_step_or_itself_is_refused(tmp_path) -> None:
+    for named in ("gone", "close"):
+        with pytest.raises(ValueError, match="`works_on:` must name another step"):
+            with_workflows(
+                tmp_path,
+                "  steps:",
+                f"    close: {{transition: review, works_on: {named}}}",
+                "  level3: [close]",
+            )
+
+
+def test_a_workflow_without_the_step_worked_on_before_it_is_refused(tmp_path) -> None:
+    """Said when the file is read, not when the step comes round with nothing
+    to carry."""
+    for flow in ("[close]", "[close, discover]"):
+        with pytest.raises(ValueError, match="close works on discover, which does not come"):
+            with_workflows(
+                tmp_path,
+                "  steps:",
+                "    discover: {transition: driver_discover, seat: reviewer}",
+                "    close: {transition: review, works_on: discover}",
+                f"  level3: {flow}",
+            )
+
+
+def test_a_step_cannot_both_act_on_the_step_before_and_work_on_an_earlier_one(
+    tmp_path,
+) -> None:
+    """Together the review it is meant to act on would never reach it."""
+    with pytest.raises(ValueError, match="both `decided_by:` and `works_on:`"):
+        with_workflows(
+            tmp_path,
+            "  steps:",
+            "    discover: {transition: driver_discover, seat: reviewer}",
+            "    review: {}",
+            "    reviewed: {transition: review, decided_by: review, works_on: discover}",
+            "  level3: [discover, review, reviewed]",
+        )
+
+
 def test_decisions_are_their_own_names_unless_a_project_renames_them(tmp_path) -> None:
     """Like a key written once standing for its own value: nothing to write
     for `forward`, `back` and `wait`, and any of them can be renamed."""

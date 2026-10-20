@@ -171,6 +171,11 @@ class Step:
     #: nothing — `reviewed` after `review`, so a reviewer's back reaches the
     #: navigator first and the navigator's reply goes back to the reviewer.
     decided_by: str | None = None
+    #: An earlier step, whose work this one takes: it carries that step's
+    #: agent's last reply rather than the one just before it, and its back goes
+    #: there — `close` on `develop`, so the driver's report is what is closed
+    #: and what close sends back is the driver's to fix.
+    works_on: str | None = None
 
 
 @dataclass(frozen=True)
@@ -545,6 +550,7 @@ _STEP_FIELDS = {
     "seat",
     "rounds",
     "decided_by",
+    "works_on",
 }
 _DECISION_FIELDS = ("forward", "back", "wait", "next", "done")
 _NOT_A_FLOW = ("steps", "decisions", "phases")
@@ -593,6 +599,12 @@ def _workflows_from(
                 f"{where} names steps this project does not define under "
                 f"`workflows: steps:`: {', '.join(missing)}"
             )
+        for place, named in enumerate(wanted):
+            earlier = steps[named].works_on
+            if earlier is not None and earlier not in wanted[:place]:
+                raise ValueError(
+                    f"{where}: {named} works on {earlier}, which does not come before it here."
+                )
         flows[name] = tuple(wanted)
         if stretch is not None:
             stretches[name] = stretch
@@ -723,15 +735,24 @@ def _steps_from(
             seat=seat.lower() if seat and seat.lower() in roles else seat,
             rounds=rounds,
             decided_by=_as_text(spec.get("decided_by")),
+            works_on=_as_text(spec.get("works_on")),
         )
     for step in found.values():
         # Checked once every step is known: the one it names may come later.
-        if step.decided_by is not None and (
-            step.decided_by == step.name or step.decided_by not in found
-        ):
+        for field_name in ("decided_by", "works_on"):
+            other = getattr(step, field_name)
+            if other is not None and (other == step.name or other not in found):
+                raise ValueError(
+                    f"Project {project!r}: step {step.name!r}: `{field_name}:` must name "
+                    "another step under `workflows: steps:`."
+                )
+        if step.decided_by is not None and step.works_on is not None:
+            # One acts on the reply just before it, the other takes an earlier
+            # one instead: together the review it is meant to act on is lost.
             raise ValueError(
-                f"Project {project!r}: step {step.name!r}: `decided_by:` must name another "
-                "step under `workflows: steps:`."
+                f"Project {project!r}: step {step.name!r} has both `decided_by:` and "
+                "`works_on:`; a step acts on the step before it or works on an earlier "
+                "one, not both."
             )
     return found
 
