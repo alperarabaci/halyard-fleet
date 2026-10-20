@@ -1404,10 +1404,11 @@ async def test_a_step_says_on_its_first_line_that_a_halyard_workflow_sent_it(
     await started(channel)
 
     first_line = runner.sent[0][1].splitlines()[0]
-    assert first_line == (
-        "To xrev (reviewer), from Halyard workflow level3, step 1 of 2: review "
-        "— transition: review."
-    )
+    assert re.fullmatch(
+        r"To xrev \(reviewer\), from Halyard workflow level3 \(run [0-9a-f]{8}\), "
+        r"step 1 of 2: review — transition: review\.",
+        first_line,
+    ), first_line
 
 
 async def test_done_at_the_last_step_finishes_the_run(tmp_path: Path, wired) -> None:
@@ -1509,7 +1510,10 @@ async def test_a_finished_run_reports_what_it_did_and_is_kept(tmp_path: Path, wi
 
     [report] = [sent["text"] for sent in api.sent if "is done" in sent["text"]]
     heading, when, steps = report.split("\n")
-    assert heading == "📋 <b>level3</b> is done — alpha-engine#281"
+    # With the run's own name, to find it by in the logs and `halyard runs`.
+    assert re.fullmatch(
+        r"📋 <b>level3</b> is done — alpha-engine#281 · run <code>[0-9a-f]{8}</code>", heading
+    ), heading
     assert " → " in when and "min" in when
     assert steps == "review x2 · to_nav x2"
     with sqlite3.connect(channel._database) as db:
@@ -3018,7 +3022,7 @@ async def test_an_inspection_a_workflow_step_ran_is_kept_against_that_step(
         ).fetchall()
     inspection, transition, workflow_run, step, phase, number = row
     assert (inspection, transition, step, phase, number) == ("proof", "review", "review", None, 1)
-    assert workflow_run.startswith("alpha-engine#281 ")
+    assert re.fullmatch(r"[0-9a-f]{8}", workflow_run), "kept under the run's own name"
 
 
 async def test_inspections_are_not_kept_unless_asked_for(tmp_path: Path, wired) -> None:

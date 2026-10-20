@@ -1000,6 +1000,45 @@ def test_a_step_cannot_both_act_on_the_step_before_and_work_on_an_earlier_one(
         )
 
 
+def test_a_step_sent_to_an_agent_of_another_role_is_said(tmp_path) -> None:
+    """alpha-engine#453: the driver's discovery named the navigator, and went
+    to it in both phases. Said, not refused — it may be meant."""
+    [project] = with_workflows(
+        tmp_path,
+        "  steps:",
+        "    discover: {transition: driver_discover, seat: reviewer}",
+        "    review: {}",
+        "  level3: [discover, review]",
+    )
+
+    assert project.workflows.astray == ()
+
+    from halyard.core.config_file import projects_from_yaml
+
+    [project] = projects_from_yaml(
+        "projects:\n"
+        "  alpha-engine:\n"
+        f"    path: {tmp_path}\n"
+        "    transitions:\n"
+        "      driver_discover: {prompt: NOTES/transitions/forward.md, to: driver}\n"
+        "    workflows:\n"
+        "      steps:\n"
+        "        discover_x: {transition: driver_discover, agent: xnav}\n"
+        "        discover_d: {transition: driver_discover, agent: xdrv}\n"
+        "        discover_r: {transition: driver_discover, agent: navigator}\n"
+        "      level3: [discover_x, discover_d, discover_r]\n"
+        "    agents:\n"
+        "      xnav: {runtime: codex, role: navigator}\n"
+        "      xdrv: {runtime: codex, role: driver}\n"
+    )
+
+    assert project.workflows.astray == (
+        "step discover_x goes to xnav, a navigator, while its transition driver_discover "
+        "goes to a driver",
+        "step discover_r goes to navigator, while its transition driver_discover goes to a driver",
+    )
+
+
 def test_decisions_are_their_own_names_unless_a_project_renames_them(tmp_path) -> None:
     """Like a key written once standing for its own value: nothing to write
     for `forward`, `back` and `wait`, and any of them can be renamed."""

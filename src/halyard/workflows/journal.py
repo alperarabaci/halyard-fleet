@@ -99,8 +99,9 @@ def _upgraded(db: sqlite3.Connection) -> None:
 
 
 def run_id(run: Run, work: str) -> str:
-    """One run of one piece of work: the work, and when the run started."""
-    return f"{work} {run.since.isoformat()}"
+    """One run of one piece of work: its own name — or, for a run started
+    before runs had one, the work and when the run started."""
+    return run.ident or f"{work} {run.since.isoformat()}"
 
 
 def _step_and_phase(key: str) -> tuple[str, int | None]:
@@ -249,13 +250,23 @@ def recent(path: Path, limit: int = 10) -> list[Kept]:
 def of_work(path: Path, work: str) -> list[Kept]:
     """Every run one piece of work had, oldest first. Named in full or by its
     number: `alpha-engine#386`, `#386` and `386` are the same work."""
-    wanted = work.strip()
-    number = wanted.lstrip("#")
     return [
         kept
         for kept in map(_kept, _read(path, _RUNS + "ORDER BY started_at"))
-        if kept.work == wanted or (number and kept.work.rpartition("#")[2] == number)
+        if same_work(kept.work, work)
     ]
+
+
+def same_work(work: str, named: str) -> bool:
+    """Whether `named` names `work`: in full, or by its number."""
+    wanted = named.strip()
+    number = wanted.lstrip("#")
+    return work == wanted or bool(number and work.rpartition("#")[2] == number)
+
+
+def named(path: Path, ident: str) -> list[Kept]:
+    """The kept run with this name, if there is one."""
+    return [_kept(row) for row in _read(path, _RUNS + "WHERE run_id = ?", (ident,))]
 
 
 def steps_of(path: Path, ident: str) -> list[Delivery]:

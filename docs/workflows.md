@@ -50,6 +50,11 @@ under `workflows:` that are not workflows.
 A flow naming a step, a step naming a transition, or a step naming an agent that the project
 does not define is refused when the file is read, rather than part-way through a flow.
 
+A step whose agent holds another role than the one its transition goes to — the driver's
+`driver_discover` given to a navigator — is said when the file is read, in the log and by
+`halyard doctor`. It still goes where it says, since it may be meant; usually it is a label
+on the wrong line, and the step goes to the wrong agent in every run.
+
 ## Starting one
 
 `/workflow` offers each workflow as a button, then each step of the one pressed: the
@@ -193,8 +198,12 @@ that a Halyard workflow sent it — something a project's prompts can point at, 
 agent to keep going and to put any question in its reply:
 
 ```
-To xdrv (driver), from Halyard workflow level3, step 6 of 8: develop — transition: driver_develop.
+To xdrv (driver), from Halyard workflow level3 (run 3f2a9c1e), step 6 of 8: develop — transition: driver_develop.
 ```
+
+`3f2a9c1e` is the run's own name. Every `Workflow …` line in Halyard's log carries it, and
+so does the line that says where a run is, so one run can be found by itself — `grep
+3f2a9c1e logs/halyard.log`, `halyard runs 3f2a9c1e` — whatever its messages say the work is.
 
 Its envelope carries the workflow's own lines as well — where it is, and where each word
 on its last line would take the work, with the agent, the round and the phase it would be:
@@ -311,7 +320,9 @@ empty for an answer that decided nothing or never came, and for steps kept befor
 2026-09-25.
 
 `halyard runs` reads them back without SQL: the latest runs a line each, or one piece of
-work's runs step by step.
+work's runs step by step — named by the work or by the run's own name. A run not finished
+yet, waiting on an agent or stopped for you, is read from its project's file, so it shows
+before it ends.
 
 ```
 $ halyard runs #386

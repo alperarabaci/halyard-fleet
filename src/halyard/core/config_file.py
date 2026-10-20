@@ -218,6 +218,11 @@ class Workflows:
     stretches: dict[str, tuple[int, int]] = field(default_factory=dict)
     #: How many phases any stretch may go through before a run stops and asks.
     phases: int = _DEFAULT_PHASES
+    #: Steps whose agent does not hold the role their transition goes to, a
+    #: sentence each — `discover` sending the driver's transition to a
+    #: navigator. Said rather than refused: it may be meant, and the step still
+    #: goes where it says. See `_astray`.
+    astray: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -614,7 +619,36 @@ def _workflows_from(
         flows=flows,
         stretches=stretches,
         phases=_phases_from(project, value.get("phases")),
+        astray=_astray(steps, transitions, seats),
     )
+
+
+def _astray(
+    steps: dict[str, Step], transitions: dict[str, Transition], seats: list[Seat]
+) -> tuple[str, ...]:
+    """Steps whose agent holds another role than the one their transition goes to.
+
+    Measured on alpha-engine#453: `discover` named the navigator where its
+    transition goes to a driver, and the discovery went to the navigator in
+    both phases — which said so, both times, and stopped. The file said it
+    all along; nothing read it that way.
+    """
+    roles = {role.value for role in Role}
+    held = {seat.label: seat.role.value for seat in seats if seat.role is not None}
+    found = []
+    for step in steps.values():
+        transition = transitions.get(step.transition)
+        wanted = (transition.to or "").lower() if transition else ""
+        if wanted not in roles or not step.seat:
+            continue
+        has = step.seat if step.seat in roles else held.get(step.seat)
+        if has and has != wanted:
+            who = step.seat if step.seat in roles else f"{step.seat}, a {has}"
+            found.append(
+                f"step {step.name} goes to {who}, while its transition {step.transition} "
+                f"goes to a {wanted}"
+            )
+    return tuple(found)
 
 
 def _flow_from(where: str, listed: list) -> tuple[list[str], tuple[int, int] | None]:
