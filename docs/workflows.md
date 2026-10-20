@@ -33,7 +33,7 @@ projects:
         develop:      {transition: driver_develop, agent: xdrv}
         develop_glm:  {transition: driver_develop, agent: zdrv}
         verified:     {transition: to_nav, agent: nav}
-        close:        {agent: nav}
+        close:        {agent: nav, works_on: develop}
       level3:    [to_nav, review, reviewed, [discover, discovered, develop, verified], close]
       level2glm: [to_nav, discover_glm, discovered, develop_glm, close]
 ```
@@ -67,7 +67,8 @@ When the agent a step went to replies, Halyard reads the last line of that reply
 
 - `forward` takes the next step, carrying the reply to it;
 - `back` sends the work to the step before — the one that produced what was just judged
-  — as that step's next round;
+  — as that step's next round, or to the step it works on, for one that says
+  `works_on:`;
 - `wait` stops the run until the agent that asked to wait decides again, or somebody
   sends it on — see [Stopping](#stopping-steering-and-asking-where-it-is);
 - `next` starts another phase, and only means something at the end of one — see
@@ -155,6 +156,32 @@ The navigator does not have to write the decision again, and can overrule it by 
 one. A reviewer's wait stops the run before the navigator, as any wait does; sent on
 from there, the navigator decides for itself.
 
+## A step can work on an earlier step's work
+
+`close` comes after `verified`, and both go to the navigator: the navigator reads the
+driver's report, decides the work can close, and close goes to it next. Left at
+that, what close carries is the navigator's own "this can close" — and that is the
+text its inspections read, where pressed by hand from the driver's chat they would
+read the driver's report. Its `back` would hand the navigator its own reply too.
+
+`works_on:` names the step whose work this one takes:
+
+```yaml
+        close:        {agent: nav, works_on: develop}
+```
+
+- It carries that step's agent's last reply — the last thing said in the driver's
+  chat, its report — as `/transition` pressed there would.
+- Its `back` goes to that step, in the phase the work was made in: what close found
+  is the driver's to fix. From there the run comes forward as ever — `develop`, then
+  `verified`, then `close` again, on the driver's new report.
+- Sent back to itself, it carries what sent it back, as any step does.
+
+The step it names has to come before it in every workflow that takes it, which is
+checked when the file is read. A step either acts on the decision before it or works
+on an earlier one: `decided_by:` and `works_on:` together are refused, since the
+review it is meant to act on would never reach it.
+
 ## What each step is told
 
 A transition pressed by hand carries nothing of a workflow. A step's envelope carries the
@@ -177,7 +204,7 @@ The workflow's last step is told `done` in place of `forward`:
 
 ```
 - Workflow: level3 · step 8 of 8 · close
-- Decide on your last line: done (→ the workflow ends) · back (→ verified, nav, round 2 of 1, which waits for the operator) · wait (→ the operator)
+- Decide on your last line: done (→ the workflow ends) · back (→ develop, xdrv, round 2 of 1, which waits for the operator) · wait (→ the operator)
 ```
 
 The review is told where its decision goes, and the navigator what was decided:
@@ -201,7 +228,8 @@ what goes in front of it, with the agent's own answer to the round before.
 A step goes once unless its `rounds:` says more. Going back and forth takes two steps
 round again, so both say it: `discovered` sending the work back runs `discover` a second
 time, and then `discovered` a second time, which is why both have `rounds: 2` above.
-`develop` and `close` say nothing, so a `back` at `close` stops and asks.
+`develop` and `close` say nothing, so a `back` at `close`, which goes to `develop`, stops
+and asks.
 
 **Rounds are the run's own.** Each step counts the times it reached its agent in this
 run — per phase, inside the phases — and the envelope's `Round: n/…` counts against the

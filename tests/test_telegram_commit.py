@@ -1211,6 +1211,52 @@ async def test_back_returns_to_the_step_before_and_says_who_sent_it(tmp_path: Pa
     assert "- Round: 2/2" in text, "the step before goes round again"
 
 
+#: The reviewer reports, the navigator says it can close, and the close
+#: works on the reviewer's report rather than the navigator's word on it.
+WORKED_ON = {
+    "flows": {"level3": ["review", "to_nav", "close"]},
+    "steps": {
+        "review": {"transition": "review", "seat": "xrev", "rounds": 2},
+        "to_nav": {"transition": "to_nav", "seat": "nav"},
+        "close": {"transition": "to_nav", "seat": "nav", "rounds": 2, "works_on": "review"},
+    },
+}
+
+
+async def test_a_step_that_works_on_another_carries_that_agent_s_last_reply(
+    tmp_path: Path, wired
+) -> None:
+    channel, _, runner, repo = wired
+    flow_in(channel, repo, tmp_path, runner, **WORKED_ON)
+    await started(channel)
+    await answered(channel, "xrev", "Report: the loader is fixed.\nDECISION: forward")
+
+    await answered(channel, "nav", "This can be closed.\nDECISION: forward")
+
+    session, text = runner.sent[-1]
+    assert session == "id-nav"
+    assert "- Workflow: level3 · step 3 of 3 · close" in text
+    assert "Report: the loader is fixed." in text
+    assert "This can be closed." not in text
+
+
+async def test_back_from_a_step_that_works_on_another_goes_to_that_agent(
+    tmp_path: Path, wired
+) -> None:
+    channel, _, runner, repo = wired
+    flow_in(channel, repo, tmp_path, runner, **WORKED_ON)
+    await started(channel)
+    await answered(channel, "xrev", "Report: the loader is fixed.\nDECISION: forward")
+    await answered(channel, "nav", "This can be closed.\nDECISION: forward")
+
+    await answered(channel, "nav", "The proof misses a case.\nDECISION: back")
+
+    session, text = runner.sent[-1]
+    assert session == "id-rev"
+    assert "The proof misses a case." in text, "sent back to, it carries what sent it back"
+    assert "- Round: 2/2" in text
+
+
 async def test_a_reply_that_decides_nothing_carries_on_and_says_so(tmp_path: Path, wired) -> None:
     channel, api, runner, repo = wired
     flow_in(channel, repo, tmp_path, runner, **TWO_STEPS)

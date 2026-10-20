@@ -3714,6 +3714,26 @@ class TelegramChannel:
             await self._stopped(found, work, run.held(f"{step.name} names no one agent to go to"))
             return
         [seat] = seats
+        if step.works_on and not run.back:
+            # Its work is an earlier step's: what is carried is that step's
+            # agent's last reply, not the one just before — a close after the
+            # navigator's `developed` closes the driver's report. Sent back to,
+            # it carries what sent it back, as any step does.
+            other = found.workflows.steps.get(step.works_on)
+            made = found.transitions.get(other.transition) if other else None
+            makers = self._seats_for(found.name, other.seat or made.to) if other and made else []
+            if len(makers) != 1:
+                await self._stopped(
+                    found,
+                    work,
+                    run.held(f"{step.name} works on {step.works_on}, which names no one agent"),
+                )
+                return
+            [maker] = makers
+            where = parse_destination(maker.chat) or (self._chat_id, None)
+            said_kept = self._kept_for(found.name, SAID_FILE)
+            said = last_said.last(said_kept, where[0]) if said_kept else None
+            sender = _seat_name(maker)
 
         lines = await self._command_lines(found, transition.commands)
         if lines.missing:
