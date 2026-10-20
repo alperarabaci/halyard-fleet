@@ -48,6 +48,29 @@ def test_every_choice_card_can_be_cancelled() -> None:
         assert keyboard["inline_keyboard"][-1] == [cards.CANCEL]
 
 
+def test_the_agent_last_worked_with_comes_first_and_in_colour() -> None:
+    """Five drivers is a list to search; the one used last is almost always
+    the answer, so it is offered first — and only offered: the rest stay."""
+    keyboard = cards.transition_seat_choices(
+        "develop", ("drv", "xdrv", "zdrv", "odrv"), first=("zdrv",)
+    )
+
+    rows = keyboard["inline_keyboard"]
+    assert [(key["text"], key.get("style")) for key in rows[0]] == [("→ zdrv", "primary")]
+    assert [key["text"] for key in rows[1]] == ["→ drv", "→ xdrv", "→ odrv"]
+    assert not any("style" in key for key in rows[1])
+    assert cards.parse_choice_data(rows[0][0]["callback_data"]) == ("handto", "develop>zdrv")
+
+
+def test_an_agent_first_that_is_not_offered_is_left_out() -> None:
+    """A label renamed or removed since, or the chat's own agent."""
+    keyboard = cards.forward_choices(("nav", "drv"), first=("gone", "drv", "drv"))
+
+    rows = keyboard["inline_keyboard"]
+    assert [key["text"] for key in rows[0]] == ["drv"]
+    assert [key["text"] for key in rows[1]] == ["nav"]
+
+
 def test_a_result_button_carries_the_check_as_well_as_the_seat() -> None:
     """A chat holds several checks' answers, and the button under one of them
     must send that one."""

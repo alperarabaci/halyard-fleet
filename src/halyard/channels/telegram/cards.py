@@ -14,6 +14,7 @@ the only secret involved.
 from __future__ import annotations
 
 import html
+from collections.abc import Callable
 from datetime import datetime
 
 from halyard.core.approvals import ApprovalRequest
@@ -152,6 +153,31 @@ def _keyboard(rows: list[list[dict]]) -> dict:
     return {"inline_keyboard": [*rows, [dict(CANCEL)]]}
 
 
+#: How an agent offered first is drawn: Bot API 9.4's button `style`, in blue.
+#: An app too old to know it shows an ordinary button, and the order still says it.
+FIRST = "primary"
+
+
+def _agent_rows(
+    labels: tuple[str, ...], first: tuple[str, ...], button: Callable[[str], dict]
+) -> dict | None:
+    """A button per agent, three to a row: those in `first` — the agent each
+    role last worked with — ahead of the rest, on a row of their own and in
+    colour, and everybody else in the order they were given."""
+    ahead = [label for label in dict.fromkeys(first) if label in labels]
+    rest = [label for label in labels if label not in ahead]
+    rows: list[list[dict]] = []
+    for group, styled in ((ahead, True), (rest, False)):
+        made = []
+        for label in group:
+            try:
+                made.append({**button(label), **({"style": FIRST} if styled else {})})
+            except ValueError:
+                continue
+        rows += [made[i : i + 3] for i in range(0, len(made), 3)]
+    return _keyboard(rows) if rows else None
+
+
 def choices(what: str, values: tuple[str, ...]) -> dict | None:
     """A row of buttons for the values a runtime accepts.
 
@@ -179,8 +205,8 @@ def choices(what: str, values: tuple[str, ...]) -> dict | None:
     return _keyboard(rows)
 
 
-def forward_choices(labels: tuple[str, ...]) -> dict | None:
-    """Buttons for `/forward`, one per seat.
+def forward_choices(labels: tuple[str, ...], first: tuple[str, ...] = ()) -> dict | None:
+    """Buttons for `/forward`, one per seat, `first` ahead of the rest.
 
     The same shape as `seat_choices` and a different `what`, because pressing
     one means something else: there is no text to carry, so the answer is read
@@ -190,19 +216,13 @@ def forward_choices(labels: tuple[str, ...]) -> dict | None:
     cannot. Nothing has to be remembered between the tap and the message — the
     message is already on disk.
     """
-    buttons = []
-    for label in labels:
-        try:
-            buttons.append({"text": label, "callback_data": choice_data("fwd", label)})
-        except ValueError:
-            continue
-    if not buttons:
-        return None
-    return _keyboard([buttons[i : i + 3] for i in range(0, len(buttons), 3)])
+    return _agent_rows(
+        labels, first, lambda label: {"text": label, "callback_data": choice_data("fwd", label)}
+    )
 
 
-def seat_choices(labels: tuple[str, ...]) -> dict | None:
-    """Buttons for `/to`, one per seat.
+def seat_choices(labels: tuple[str, ...], first: tuple[str, ...] = ()) -> dict | None:
+    """Buttons for `/to`, one per seat, `first` ahead of the rest.
 
     Offered only when the text to send is already known — a seat button that
     still needed a message would have to remember which seat was pressed until
@@ -210,15 +230,9 @@ def seat_choices(labels: tuple[str, ...]) -> dict | None:
     reaches the wrong agent. Telegram's reply already carries the text, so
     there is nothing to hold.
     """
-    buttons = []
-    for label in labels:
-        try:
-            buttons.append({"text": label, "callback_data": choice_data("to", label)})
-        except ValueError:
-            continue
-    if not buttons:
-        return None
-    return _keyboard([buttons[i : i + 3] for i in range(0, len(buttons), 3)])
+    return _agent_rows(
+        labels, first, lambda label: {"text": label, "callback_data": choice_data("to", label)}
+    )
 
 
 #: Its own prefix, apart from the approval buttons and the preference ones.
@@ -719,19 +733,20 @@ def transition_choices(names: tuple[str, ...]) -> dict | None:
     return _keyboard([buttons[i : i + 2] for i in range(0, len(buttons), 2)])
 
 
-def transition_seat_choices(transition: str, labels: tuple[str, ...]) -> dict | None:
-    """Buttons for where a transition goes, when its `to:` does not settle it.
+def transition_seat_choices(
+    transition: str, labels: tuple[str, ...], first: tuple[str, ...] = ()
+) -> dict | None:
+    """Buttons for where a transition goes, when its `to:` does not settle it —
+    the agent that role last worked with first.
 
     The transition travels in the button with the seat, so nothing has to be
     remembered between the tap and the send.
     """
-    buttons = []
-    for label in labels:
-        try:
-            data = choice_data("handto", f"{transition}>{label}")
-        except ValueError:
-            continue
-        buttons.append({"text": f"→ {label}", "callback_data": data})
-    if not buttons:
-        return None
-    return _keyboard([buttons[i : i + 3] for i in range(0, len(buttons), 3)])
+    return _agent_rows(
+        labels,
+        first,
+        lambda label: {
+            "text": f"→ {label}",
+            "callback_data": choice_data("handto", f"{transition}>{label}"),
+        },
+    )
