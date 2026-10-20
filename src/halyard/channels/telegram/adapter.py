@@ -3384,6 +3384,7 @@ class TelegramChannel:
         buttons: dict | None = None,
         command_lines: Mapping[str, str] | None = None,
         counted: StepRounds | None = None,
+        step_line: str = "",
     ) -> transitioning.Handed | None:
         """Make one transition: say so, run it, deliver it — and count the round
         when it is a workflow's step.
@@ -3502,6 +3503,7 @@ class TelegramChannel:
                 expected=expected,
                 previous=previous,
                 keeper=keeper,
+                step=step_line,
             )
         finally:
             # Released whatever happened, as `/command` does: a project left
@@ -3814,6 +3816,7 @@ class TelegramChannel:
             ),
             buttons=cards.workflow_keyboard(run.workflow),
             command_lines=lines.lines,
+            step_line=f"{run.workflow}, step {run.step + 1} of {len(flow)}: {step.name}",
             counted=StepRounds(
                 before=run.rounds.get(key, ()),
                 allowed=step.rounds,
@@ -3863,26 +3866,87 @@ class TelegramChannel:
         go: bool = False,
         go_text: str = "",
         on: str = "",
+        offers: tuple[tuple[str, int, bool], ...] = (),
     ) -> None:
         """Keep a run that is not going on, and say so where it was started.
 
-        The card keeps the work in the run: send what is ready, leave the
-        phases (`on` names where to), pick the step to go on from, or stop it.
-        Taking it by hand would take it out of the run, and nothing asked for
-        that.
+        The card keeps the work in the run: where the agent's own words would
+        have taken it (`offers`), send what is ready, leave the phases (`on`
+        names where to), pick the step to go on from, or stop it. Taking it by
+        hand would take it out of the run, and nothing asked for that.
+
+        What is ready is named — the step and its agent — rather than "send it
+        anyway": after a wait, what is ready is the step after the one that
+        waited, and somebody who meant "carry on" sent the navigator a driver's
+        question instead of the driver's work.
         """
         kept = self._kept_for(found.name, WORKFLOW_FILE)
         if kept is not None:
             await asyncio.to_thread(flowing.save, kept, work, run)
         logger.info("Workflow %s for %s stopped: %s", run.workflow, work, run.stopped)
+        flow = found.workflows.flows.get(run.workflow) or ()
+        if go and not go_text and run.step < len(flow):
+            agent = self._step_seats(found, flow).get(flow[run.step], "")
+            go_text = f"▶️ {flow[run.step]}" + (f" → {agent}" if agent else "")
+        said = self._where_the_run_is(found, run)
+        if run.waited >= 0 and run.waiting_for:
+            said += (
+                f"\n\nOr answer <b>{html.escape(run.waiting_for)}</b> in its own chat: its "
+                "own decision moves the run on from there."
+            )
         await self._say(
-            self._where_the_run_is(found, run),
+            said,
             run.chat,
             run.thread,
             reply_markup=cards.workflow_keyboard(
-                run.workflow, go=go, go_text=go_text, on=on, pick=True
+                run.workflow, go=go, go_text=go_text, on=on, pick=True, offers=offers
             ),
         )
+
+    def _offers(
+        self,
+        found: Project,
+        run: flowing.Run,
+        flow: Sequence[str],
+        stretch: tuple[int, int] | None,
+    ) -> tuple[tuple[str, int, bool], ...]:
+        """Where the agent that stopped `run` would have sent the work with its
+        own words — forward and back — as buttons: the word, the step and its
+        agent. Only the moves a button can make as they are: one that would
+        change phase, enter the phases, or go past a step's rounds is left to
+        picking a step."""
+        words = found.workflows.decisions
+        agents = self._step_seats(found, flow)
+        offered: list[tuple[str, int, bool]] = []
+        for decision, icon in ((flowing.Decision.FORWARD, "▶️"), (flowing.Decision.BACK, "↩️")):
+            going = flowing.after(
+                decision,
+                run=run,
+                flow=flow,
+                steps=found.workflows.steps,
+                taken=run.taken(),
+                stretch=stretch,
+                most=found.workflows.phases,
+            )
+            if (
+                going.step is None
+                or going.stop
+                or going.done
+                or going.phase is not None
+                or going.entered is not None
+            ):
+                continue
+            name = flow[going.step]
+            agent = agents.get(name, "")
+            word = flowing.word_for(decision, words)
+            offered.append(
+                (
+                    f"{icon} {word}: {name}" + (f" → {agent}" if agent else ""),
+                    going.step,
+                    going.back,
+                )
+            )
+        return tuple(offered)
 
     async def _finished(self, found: Project, work: str, run: flowing.Run, outcome: str) -> None:
         """The end of a run: what it did is kept for reading later, and one
@@ -3999,7 +4063,7 @@ class TelegramChannel:
                 decided_by=whose,
             )
             await asyncio.to_thread(flowing.save, kept, work, run)
-        if decision is None and moving.leaving is None:
+        if decision is None and moving.leaving is None and not moving.stop:
             # Said rather than done quietly: a flow that moves on a reply
             # nobody wrote a decision into is a step somebody should see taken.
             if moving.decided is not None and here is not None and here.decided_by:
@@ -4043,6 +4107,14 @@ class TelegramChannel:
             on = ""
             if moving.leaving is not None:
                 on = flow[moving.leaving] if moving.leaving < len(flow) else "the end"
+            # A stop on the agent's own reply — a wait, or no decision — offers
+            # where its words would have taken the work. The end of a phase and
+            # the end of the flow have buttons of their own.
+            offers = (
+                self._offers(found, run, flow, stretch)
+                if moving.liftable and moving.leaving is None
+                else ()
+            )
             await self._stopped(
                 found,
                 work,
@@ -4051,9 +4123,10 @@ class TelegramChannel:
                     leaving=moving.leaving if moving.leaving is not None else -1,
                     waited=run.step if moving.liftable else -1,
                 ),
-                go=target is not None,
+                go=target is not None and not offers,
                 go_text=go_text,
                 on=on,
+                offers=offers,
             )
             return
         if moving.step is None:
@@ -4096,10 +4169,19 @@ class TelegramChannel:
             f"<b>{html.escape(by)}</b> named where to start."
         )
 
-    async def _resume_workflow(self, action: str, chat_id: str, thread_id: int | None) -> None:
-        """The buttons on a run: send the step it stopped before (`go`), leave
-        its phases instead (`on`), offer its steps to go on from (`pick`), or
-        stop it (`stop`)."""
+    async def _resume_workflow(
+        self,
+        action: str,
+        chat_id: str,
+        thread_id: int | None,
+        *,
+        place: int = -1,
+        back: bool = False,
+    ) -> None:
+        """The buttons on a run: send the step it stopped before (`go`), send
+        the step at `place` its agent's own words would have (`to`), leave its
+        phases instead (`on`), offer its steps to go on from (`pick`), or stop
+        it (`stop`)."""
         found = self._repository_for(chat_id)
         if found is None:
             await self._say(self._no_repository(chat_id), chat_id, thread_id)
@@ -4123,6 +4205,11 @@ class TelegramChannel:
             await self._say(self._where_the_run_is(found, run), chat_id, thread_id)
             return
         flow = found.workflows.flows.get(run.workflow) or ()
+        if action == "to":
+            if not 0 <= place < len(flow):
+                await self._say(self._where_the_run_is(found, run), chat_id, thread_id)
+                return
+            run = run.at(place, back=back)
         if action == "pick":
             await self._say(
                 f"Send <b>{html.escape(run.workflow)}</b> on from which step"
@@ -4848,6 +4935,19 @@ class TelegramChannel:
                         card=message,
                     ),
                     "/pick",
+                )
+                return
+            if what == "flowto":
+                _, place, way = value.rsplit(">", 2) if value.count(">") >= 2 else ("", "", "")
+                self._detach(
+                    self._resume_workflow(
+                        "to",
+                        here or "",
+                        message.get("message_thread_id"),
+                        place=int(place) if place.isdigit() else -1,
+                        back=way == "b",
+                    ),
+                    "/workflow",
                 )
                 return
             if what in ("flowgo", "flowstop", "flowon", "flowpick"):

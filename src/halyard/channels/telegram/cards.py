@@ -123,6 +123,7 @@ _CHOOSABLE = frozenset(
         "flowon",
         "flowpick",
         "flowstop",
+        "flowto",
         "pick",
         # A command from a menu card — `/actions`, `/agent` — and a prompt from
         # `/prompts`: each pressed is that command typed.
@@ -673,10 +674,20 @@ def label_picks(
 
 
 def workflow_keyboard(
-    workflow: str, *, go: bool = False, go_text: str = "", on: str = "", pick: bool = False
+    workflow: str,
+    *,
+    go: bool = False,
+    go_text: str = "",
+    on: str = "",
+    pick: bool = False,
+    offers: tuple[tuple[str, int, bool], ...] = (),
 ) -> dict:
     """What can be done with a run: send the step it stopped before, leave its
     phases for the step `on` names, pick a step to go on from, or stop it.
+
+    `offers` are where the agent that stopped it would have sent the work with
+    its own words — text, the step's place in the flow, and whether it goes
+    back — each a button of its own, first.
 
     Every one of them keeps the work in the run but the last: a stop is where
     somebody steers, and steering by hand would leave the run behind. No cancel
@@ -687,6 +698,13 @@ def workflow_keyboard(
     def button(text: str, what: str) -> dict:
         return {"text": text, "callback_data": choice_data(what, workflow)}
 
+    offered = []
+    for text, place, back in offers:
+        try:
+            data = choice_data("flowto", f"{workflow}>{place}>{'b' if back else 'f'}")
+        except ValueError:
+            continue
+        offered.append([{"text": text, "callback_data": data}])
     moving = []
     if go:
         moving.append(button(go_text or "▶️ Send it anyway", "flowgo"))
@@ -694,7 +712,7 @@ def workflow_keyboard(
         moving.append(button(f"⏭ On to {on}", "flowon"))
     steering = [*([button("🧭 Pick a step", "flowpick")] if pick else [])]
     steering.append(button("⏹ Stop the workflow", "flowstop"))
-    return {"inline_keyboard": [row for row in (moving, steering) if row]}
+    return {"inline_keyboard": [*offered, *(row for row in (moving, steering) if row)]}
 
 
 def result_choices(inspection: str, labels: tuple[str, ...]) -> dict | None:

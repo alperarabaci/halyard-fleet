@@ -24,20 +24,27 @@ def compose(
     reply: str | None,
     ran: Sequence[tuple[Command, Result]] = (),
     previous: Previous | None = None,
+    step: str = "",
 ) -> str:
     """Everything a seat needs to act on a transition, in the order it reads it.
 
     Who it is for and from, first, so a session can tell a transition from an
-    instruction typed at it. Then the project's own text for this transition, which
-    speaks of "the message below". Then the envelope: what Halyard can see for
-    itself — the task, the machine, the tree, which round this is and which
-    revision of the prompt — one fact to a line, because the project's prompts
-    refuse to guess at any of it. Then what its commands printed, and the
-    inspections' answers, measured or not. Then, on a round after the first, what the
-    seat said back to the round before. Then the reply itself, last, where the
-    prompt said it would be.
+    instruction typed at it — and, for a workflow's `step`, that a Halyard
+    workflow sent it, which a project's prompts can tell an agent to keep going
+    for: nothing that would stop it half way. Then the project's own text for
+    this transition, which speaks of "the message below". Then the envelope:
+    what Halyard can see for itself — the task, the machine, the tree, which
+    round this is and which revision of the prompt — one fact to a line,
+    because the project's prompts refuse to guess at any of it. Then what its
+    commands printed, and the inspections' answers, measured or not. Then, on a
+    round after the first, what the seat said back to the round before. Then
+    the reply itself, last, where the prompt said it would be.
     """
-    parts = [f"To {recipient}, from Halyard — transition: {name}."]
+    parts = [
+        f"To {recipient}, from Halyard workflow {step} — transition: {name}."
+        if step
+        else f"To {recipient}, from Halyard — transition: {name}."
+    ]
     if prompt:
         parts += ["", prompt]
     facts = list(context)
