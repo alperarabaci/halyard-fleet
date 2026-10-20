@@ -38,6 +38,12 @@ def counter(tmp_path: Path) -> Path:
     return copy
 
 
+def _placed(blocks: dict, folder: Path) -> dict[str, Path]:
+    from halyard import samples_cli
+
+    return samples_cli._placed(blocks, folder)
+
+
 def checked(where: Path) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         ["./check.sh"], cwd=where, capture_output=True, text=True, timeout=10, check=False
@@ -94,6 +100,42 @@ def test_the_two_products_checks_fail_until_their_tasks_are_done(
 
     assert first.returncode == 1 and f"MISSING #{missing}" in first.stdout
     assert then.returncode == 0 and f"ok   #{missing}" in then.stdout
+
+
+def test_the_reading_list_s_check_fails_until_the_task_is_done(tmp_path: Path) -> None:
+    """Sample 03: what the driver is asked to add is missing to begin with."""
+    copy = tmp_path / "reading-list"
+    shutil.copytree(SAMPLES / "03-handing-work-over", copy)
+
+    first = checked(copy)
+    page = copy / "index.html"
+    page.write_text(
+        page.read_text(encoding="utf-8").replace(
+            '<ul id="books"></ul>',
+            '<input id="filter">\n<ul id="books"></ul>\n<p id="shown"></p>',
+        ),
+        encoding="utf-8",
+    )
+    then = checked(copy)
+
+    assert first.returncode == 1
+    assert "MISSING #filter" in first.stdout and "MISSING #shown" in first.stdout
+    assert then.returncode == 0
+
+
+def test_each_transition_prompt_a_sample_names_is_in_it() -> None:
+    """A transition reads its prompt from the project when it goes; one the
+    sample does not ship would arrive with no prompt in front."""
+    import yaml
+
+    for folder in sorted(SAMPLES.glob("[0-9][0-9]-*")):
+        shipped = yaml.safe_load((folder / "halyard.yaml.example").read_text(encoding="utf-8"))
+        placed = _placed(shipped["projects"], folder)
+        for name, block in shipped["projects"].items():
+            for transition, spec in (block.get("transitions") or {}).items():
+                for key in ("prompt", "followup_prompt"):
+                    if spec.get(key):
+                        assert (placed[name] / spec[key]).is_file(), f"{folder.name}: {transition}"
 
 
 def test_each_sample_lays_its_projects_out_as_its_example_says() -> None:

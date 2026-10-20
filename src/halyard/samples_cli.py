@@ -176,7 +176,8 @@ def add(
         say("  and each agent's group in its `chat:` — or run `halyard init`.")
     # Not one wire per project: with no name, `halyard wire` wires every project
     # the file describes, and leaves one already wired as it is.
-    say("Next: uv run halyard wire — every project in the file, these among them.")
+    these = "this one" if len(blocks) == 1 else "these"
+    say(f"Next: uv run halyard wire — every project in the file, {these} among them.")
     return 0
 
 

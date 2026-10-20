@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Reading list</title>
+    <style>
+      body { font-family: system-ui, sans-serif; max-width: 30rem; margin: 3rem auto; padding: 0 1rem; }
+      li { padding: 0.25rem 0; }
+    </style>
+  </head>
+  <body>
+    <h1>Reading list</h1>
+    <ul id="books"></ul>
+    <script>
+      const books = [
+        "The Pragmatic Programmer",
+        "Refactoring",
+        "Domain-Driven Design",
+        "The Mythical Man-Month",
+        "Working Effectively with Legacy Code",
+      ];
+      const list = document.getElementById("books");
+      for (const title of books) {
+        const entry = document.createElement("li");
+        entry.textContent = title;
+        list.append(entry);
+      }
+    </script>
+  </body>
+</html>
