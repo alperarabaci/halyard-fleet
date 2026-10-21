@@ -935,3 +935,14 @@ def test_a_run_is_kept_under_its_name_and_an_older_one_as_before() -> None:
 
     assert run_id(a_run(1, ident="3f2a9c1e"), "alpha-engine#453") == "3f2a9c1e"
     assert run_id(a_run(1), "alpha-engine#453") == f"alpha-engine#453 {AT.isoformat()}"
+
+
+def test_when_a_run_stopped_is_kept_and_forgotten_once_it_moves(tmp_path: Path) -> None:
+    kept = tmp_path / "workflow-runs.json"
+    stopped = a_run(2, stopped_at=AT + timedelta(minutes=5)).held("it was asked to wait")
+
+    save(kept, "alpha-engine#454", stopped)
+
+    assert current(kept, "alpha-engine#454").stopped_at == AT + timedelta(minutes=5)
+    assert stopped.at(3).stopped_at is None
+    assert stopped.waiting_on("xnav").stopped_at is None

@@ -680,14 +680,15 @@ def workflow_keyboard(
     go_text: str = "",
     on: str = "",
     pick: bool = False,
-    offers: tuple[tuple[str, int, bool], ...] = (),
+    offers: tuple[tuple[str, int, bool, str], ...] = (),
 ) -> dict:
     """What can be done with a run: send the step it stopped before, leave its
     phases for the step `on` names, pick a step to go on from, or stop it.
 
-    `offers` are where the agent that stopped it would have sent the work with
-    its own words — text, the step's place in the flow, and whether it goes
-    back — each a button of its own, first.
+    `offers` are where an agent's own words would send the work — text, the
+    step's place in the flow, whether it goes back, and whose reply it carries
+    (empty for the agent the run last dealt with) — each a button of its own,
+    first.
 
     Every one of them keeps the work in the run but the last: a stop is where
     somebody steers, and steering by hand would leave the run behind. No cancel
@@ -699,9 +700,10 @@ def workflow_keyboard(
         return {"text": text, "callback_data": choice_data(what, workflow)}
 
     offered = []
-    for text, place, back in offers:
+    for text, place, back, speaker in offers:
+        value = f"{workflow}>{place}>{'b' if back else 'f'}" + (f">{speaker}" if speaker else "")
         try:
-            data = choice_data("flowto", f"{workflow}>{place}>{'b' if back else 'f'}")
+            data = choice_data("flowto", value)
         except ValueError:
             continue
         offered.append([{"text": text, "callback_data": data}])

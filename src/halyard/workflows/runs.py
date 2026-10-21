@@ -107,6 +107,9 @@ class Run:
     #: itself whatever a message says the work is. Empty for a run started
     #: before runs had one.
     ident: str = ""
+    #: When it stopped, for a run that is stopped: what its agents said after
+    #: that is what a person may want to send it on with. None while it goes.
+    stopped_at: datetime | None = None
 
     def held(self, why: str, *, leaving: int = -1, waited: int = -1) -> Run:
         """The same run, stopped for this reason — `waited` is the step whose
@@ -143,7 +146,14 @@ class Run:
     def waiting_on(self, label: str) -> Run:
         """The same run, its step delivered and that seat's reply awaited."""
         return replace(
-            self, waiting=True, waiting_for=label, stopped="", back=False, leaving=-1, waited=-1
+            self,
+            waiting=True,
+            waiting_for=label,
+            stopped="",
+            back=False,
+            leaving=-1,
+            waited=-1,
+            stopped_at=None,
         )
 
     def at(
@@ -171,6 +181,7 @@ class Run:
             entered=self.entered if entered is None else entered,
             leaving=-1,
             waited=-1,
+            stopped_at=None,
         )
 
     def taken(self) -> dict[str, int]:
@@ -272,7 +283,19 @@ def current(where: Path, work: str) -> Run | None:
         leaving=leaving if isinstance(leaving, int) else -1,
         waited=waited if isinstance(waited, int) else -1,
         ident=str(entry.get("ident") or ""),
+        stopped_at=_moment(entry.get("stopped_at")),
     )
+
+
+def _moment(value: object) -> datetime | None:
+    """A time written into the file, or None for one that is not there."""
+    try:
+        moment = datetime.fromisoformat(str(value)) if value else None
+    except ValueError:
+        return None
+    if moment is not None and moment.tzinfo is None:
+        moment = moment.replace(tzinfo=UTC)
+    return moment
 
 
 def save(where: Path, work: str, run: Run) -> None:
@@ -295,6 +318,7 @@ def save(where: Path, work: str, run: Run) -> None:
         "leaving": run.leaving,
         "waited": run.waited,
         "ident": run.ident,
+        "stopped_at": run.stopped_at.isoformat() if run.stopped_at else None,
         "rounds": {
             key: [
                 {
