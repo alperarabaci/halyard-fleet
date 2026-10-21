@@ -1394,6 +1394,63 @@ async def test_after_a_wait_the_card_names_what_it_would_send(tmp_path: Path, wi
     assert keys[-1] == "⏹ Stop the workflow"
 
 
+#: A review that may go once, and a navigator that may go twice: the
+#: navigator's back runs into the review's round limit.
+ONE_REVIEW = {
+    "flows": {"level3": ["review", "to_nav"]},
+    "steps": {
+        "review": {"transition": "review", "seat": "xrev", "rounds": 1},
+        "to_nav": {"transition": "to_nav", "seat": "nav", "rounds": 2},
+    },
+}
+
+
+async def stopped_on_the_round_limit(channel) -> None:
+    await started(channel)
+    await answered(channel, "xrev", "Reviewed.\nDECISION: forward")
+    await answered(channel, "nav", "Not yet.\nDECISION: back")
+
+
+async def test_workflow_shows_a_stopped_run_the_card_its_stop_showed(tmp_path: Path, wired) -> None:
+    """Asked again later, the card offered only the round it had stopped on
+    and Stop: nothing to send the run on with."""
+    channel, api, runner, repo = wired
+    flow_in(channel, repo, tmp_path, runner, **ONE_REVIEW)
+    await stopped_on_the_round_limit(channel)
+    at_the_stop = keys_of(api.sent[-1])
+
+    await channel._run_workflow("", CHAT, None, f"tg:{APPROVER}")
+
+    assert "review would go for round 2 of 1" in api.sent[-1]["text"]
+    assert keys_of(api.sent[-1]) == at_the_stop
+    assert keys_of(api.sent[-1]) == ["▶️ review → xrev", "🧭 Pick a step", "⏹ Stop the workflow"]
+
+
+async def test_workflow_offers_what_an_agent_said_since_the_stop(tmp_path: Path, wired) -> None:
+    """alpha-engine#454: the run stopped, the work went on outside it, and the
+    agent's forward an hour later moved nothing."""
+    channel, api, runner, repo = wired
+    flow_in(channel, repo, tmp_path, runner, **ONE_REVIEW)
+    await stopped_on_the_round_limit(channel)
+    sent = len(runner.sent)
+    await answered(channel, "xrev", "Fixed what nav found.\nDECISION: forward")
+    assert len(runner.sent) == sent, "a stopped run is moved by its card, not by a reply"
+
+    await channel._run_workflow("", CHAT, None, f"tg:{APPROVER}")
+
+    card = api.sent[-1]
+    assert "Since it stopped, <b>xrev</b> said <b>forward</b>" in card["text"]
+    assert keys_of(card)[0] == "💬 xrev forward: to_nav → nav"
+    assert keys_of(card)[-1] == "⏹ Stop the workflow"
+
+    await channel._handle_callback(pressed_transition("flowto", "level3>1>f>xrev"))
+    await settled(channel)
+
+    session, text = runner.sent[-1]
+    assert session == "id-nav"
+    assert "Fixed what nav found." in text, "it carries the reply of the agent that said it"
+
+
 async def test_a_step_says_on_its_first_line_that_a_halyard_workflow_sent_it(
     tmp_path: Path, wired
 ) -> None:

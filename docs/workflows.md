@@ -269,8 +269,13 @@ offers the same button.
 A run stops, and says why, when a step would go past its rounds, when the phases would
 go past theirs, when a reply decides nothing, when an agent decides to wait, when the last
 step ends without `done`, and when a step's agent could be more than one agent. The card
-it stops with keeps the work in the run:
+it stops with — and the same card again whenever `/workflow` is asked — keeps the work in
+the run:
 
+- **💬 xdrv forward: developed → nav** — what the run's agents have said since it stopped.
+  A stopped run is moved by its card, not by a reply, and the work often goes on outside it:
+  an agent's later decision is offered from each of that agent's steps, since which one it
+  finished is not something the run can know, and the button carries that agent's reply;
 - **▶️ forward: developed → nav** and **↩️ back: discover → xdrv** — after a wait or a
   reply that decided nothing, where the agent's own words would have taken the work, the
   step and its agent named. A move a button cannot make as it is — into another phase,
