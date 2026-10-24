@@ -16,6 +16,4 @@ the repository a folder is in — and each one says how.
 | 05 | [The whole mechanism](05-the-whole-mechanism/) | Commands, trusted runs, task labels, `/command` and `/label` |
 | 06 | [Transitions](06-transitions/) | A navigator and a driver handing work there and back with `/transition`, the tests run on the way |
 | 07 | [A workflow](07-a-workflow/) | The same transitions as steps, each reply's last line deciding what comes next |
-| 08 | Three agents | A navigator, a driver and a reviewer, in a workflow with phases |
-
-Samples without a link are planned, and come one at a time.
+| 08 | [Three agents](08-three-agents/) | A navigator and a driver on Claude, a reviewer on GPT, and two bounded contexts kept apart by a guard, a contract and an inspection, in a workflow with phases |

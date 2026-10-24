@@ -1,0 +1,112 @@
+# What this sample adds to your halyard.yaml — the one in your Halyard checkout.
+# One project with two bounded contexts, three agents on two kinds of model, and
+# a workflow that takes the work from a plan, through a review and two parts, to
+# close — with the project's own checks at every hand-over. Keep your own
+# `settings:`; put the project under `projects:` next to any you already have,
+# and fill in your own path, session names and groups.
+
+settings:
+  HALYARD_CHANNEL: telegram
+  TELEGRAM_BOT_TOKEN: "123456:replace-me"          # from @BotFather; secret
+  TELEGRAM_CHAT_ID: "-1001234567890"               # the group the bot is in
+  TELEGRAM_AUTHORIZED_USER_IDS: "11111111"         # who may answer a card
+  TELEGRAM_MENU: simple                            # the short command menu
+  # The reviewer and the inspection read a great deal, and each plain read
+  # inside the project would otherwise be a card on your phone — sample 05.
+  HALYARD_ALLOW_RISK_AT_OR_BELOW: low
+
+projects:
+  shop:
+    # Where you copied this sample to — not inside the Halyard checkout.
+    path: ~/halyard-samples/shop
+    # One command does every check, as the Makefile's `test-fast` does: the
+    # boundary guard, the contract, the tests. scripts/validate.sh runs them one
+    # by one and answers the way Halyard reads a command — exit 0 passed, 1
+    # failed, 2 did not run, and one last line with every part in it. Called
+    # straight, not through `make`, which exits 2 for any failure.
+    commands:
+      test-fast: {run: scripts/validate.sh test-fast, not_run: [2]}
+    # Read at close by another family of model, on Codex. `codex debug models
+    # --bundled` lists what your CLI can run, and `halyard doctor` fails a model
+    # it cannot.
+    inspections:
+      bounded-context:
+        file: inspections/bounded-context.md
+        model: gpt-6.1-sol
+        effort: high
+    transitions:
+      # The navigator's plan, to the reviewer. From the second round on,
+      # `followup_prompt:` goes in front instead, with the reviewer's own answer
+      # to the round before.
+      review:
+        prompt: transitions/review.md
+        followup_prompt: transitions/review-followup.md
+        to: reviewer
+      reviewed:
+        prompt: transitions/reviewed.md
+        to: navigator
+      develop:
+        prompt: transitions/develop.md
+        to: driver
+      developed:
+        prompt: transitions/developed.md
+        commands: [test-fast]
+        to: navigator
+      close:
+        prompt: transitions/close.md
+        commands: [test-fast]
+        inspect: [bounded-context]
+        to: navigator
+    workflows:
+      steps:
+        review: {agent: shop-rev, rounds: 2}
+        # Acts on the review's decision: the review reaches the navigator
+        # whichever way it went, and the navigator's reply goes where the review
+        # said — back to the reviewer, or on to the driver.
+        reviewed: {agent: shop-nav, decided_by: review, rounds: 2}
+        develop: {agent: shop-drv, rounds: 2}
+        developed: {agent: shop-nav, rounds: 2}
+        # The driver's report, not the navigator's word that it can close; its
+        # `back` goes to the driver, in the part the work was made in.
+        close: {agent: shop-nav, works_on: develop}
+      # The list inside is the workflow's phases: one per part of the plan —
+      # catalog, then cart. Its last step decides `next` for another part, or
+      # `forward` to leave them for close.
+      deliver: [review, reviewed, [develop, developed], close]
+    agents:
+      # Agent labels are unique across every project in the file: they are how
+      # `/to` and `/forward` name an agent. Each runs on the model its session was
+      # opened with — sample 06.
+      shop-nav:
+        runtime: claude-code
+        # The name the runtime knows the session by. `uv run halyard sessions`
+        # lists the ones it can see.
+        session: shop-nav
+        role: navigator
+        # Your default group: the same id as TELEGRAM_CHAT_ID. Quoted: unquoted,
+        # YAML reads it as a number.
+        chat: "-1001234567890"
+      shop-drv:
+        runtime: claude-code
+        session: shop-drv
+        role: driver
+        # A group of its own: a second group, with the bot in it. `/status`
+        # sent there says its id.
+        chat: "-1002234567890"
+      shop-rev:
+        # Another family of model: Codex, on GPT.
+        runtime: codex
+        # The thread's name in Codex, or its id.
+        session: shop-rev
+        role: reviewer
+        # A third group, of its own.
+        chat: "-1003234567890"
+
+prompts:
+  # `/sample_08` in the navigator's group asks it for a plan: the text of
+  # PROMPT.md.
+  sample_08: >-
+    Read `TASK.md` and `AGENTS.md`. Do not change any file yourself: write a plan
+    for the driver in two parts, one per context — first `catalog`, then `cart` —
+    each saying what to change and how `make test-fast` will show it done. Keep
+    each part under eight lines.

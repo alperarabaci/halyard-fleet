@@ -217,6 +217,123 @@ def test_the_cart_s_coupon_tests_fail_until_the_task_is_done(tmp_path: Path) -> 
     assert then.returncode == 0, then.stderr
 
 
+@pytest.fixture
+def shop(tmp_path: Path) -> Path:
+    """Sample 08, copied out as its README says."""
+    if shutil.which("make") is None:
+        pytest.skip("sample 08's checks run through make")
+    copy = tmp_path / "shop"
+    shutil.copytree(SAMPLES / "08-three-agents", copy)
+    return copy
+
+
+def validated(where: Path) -> subprocess.CompletedProcess[str]:
+    """`test-fast` the way Halyard runs it: through scripts/validate.sh."""
+    return subprocess.run(
+        ["scripts/validate.sh", "test-fast"],
+        cwd=where,
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+        env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"},
+    )
+
+
+def test_the_shop_s_checks_fail_until_the_task_is_done(shop: Path) -> None:
+    """Sample 08: the contract and both contexts' tests are there before the
+    stock is, so `test-fast` is red until the driver has done the task — and
+    says so on its last line, part by part, the line Halyard reads."""
+    first = validated(shop)
+    (shop / "catalog" / "products.py").write_text(
+        'PRICES = {"tea": 450, "mug": 1200, "biscuits": 250}\n'
+        'STOCK = {"tea": 10, "mug": 2, "biscuits": 0}\n',
+        encoding="utf-8",
+    )
+    (shop / "catalog" / "__init__.py").write_text(
+        "from catalog.products import PRICES, STOCK\n\n"
+        '__all__ = ["UnknownProductError", "in_stock", "price_of"]\n\n\n'
+        "class UnknownProductError(KeyError):\n    pass\n\n\n"
+        "def price_of(sku):\n"
+        "    if sku not in PRICES:\n        raise UnknownProductError(sku)\n"
+        "    return PRICES[sku]\n\n\n"
+        "def in_stock(sku):\n    price_of(sku)\n    return STOCK[sku]\n",
+        encoding="utf-8",
+    )
+    (shop / "cart" / "__init__.py").write_text(
+        "import catalog\n\n"
+        '__all__ = ["Cart", "OutOfStockError"]\n\n\n'
+        "class OutOfStockError(ValueError):\n    pass\n\n\n"
+        "class Cart:\n"
+        "    def __init__(self):\n        self.lines = {}\n\n"
+        "    def add(self, sku, quantity=1):\n"
+        "        wanted = self.lines.get(sku, 0) + quantity\n"
+        "        if wanted > catalog.in_stock(sku):\n            raise OutOfStockError(sku)\n"
+        "        self.lines[sku] = wanted\n\n"
+        "    def total(self):\n"
+        "        return sum(catalog.price_of(s) * q for s, q in self.lines.items())\n",
+        encoding="utf-8",
+    )
+    then = validated(shop)
+
+    assert first.returncode == 1
+    assert first.stdout.splitlines()[-1] == (
+        "test-fast: exit 1 — boundaries: every boundary kept (2 contexts, 3 files), exit 0; "
+        "contract: FAILED (errors=1), exit 1; unit: not run (stopped after contract)"
+    )
+    assert then.returncode == 0, then.stdout
+    assert then.stdout.splitlines()[-1].startswith("test-fast: exit 0 — boundaries: every")
+
+
+def test_the_guard_names_a_crossing_and_test_fast_fails_on_it(shop: Path) -> None:
+    """Sample 08: the shortcut the task tempts — the cart reading the catalog's
+    own data — is named by file and line, before any test runs."""
+    cart = shop / "cart" / "__init__.py"
+    cart.write_text(
+        cart.read_text(encoding="utf-8")
+        + "\n\ndef prices():\n    return catalog.products.PRICES\n",
+        encoding="utf-8",
+    )
+
+    result = validated(shop)
+
+    assert result.returncode == 1
+    assert "boundaries: 1 crossing: cart/__init__.py:" in result.stdout.splitlines()[-1]
+    assert "reaches into catalog.products, which catalog does not offer, exit 1" in result.stdout
+    assert "contract: not run (stopped after boundaries)" in result.stdout
+
+
+@pytest.mark.parametrize(
+    "broken",
+    [
+        # The catalog's public face is gone: there is nothing to check against.
+        "catalog/__init__.py",
+        # And a target the Makefile does not have.
+        None,
+    ],
+)
+def test_a_check_that_cannot_run_answers_2_which_halyard_reads_as_not_run(
+    shop: Path, broken: str | None
+) -> None:
+    """Sample 08: `not_run: [2]` stops a transition there, rather than hand on
+    checks that never ran as if they had passed or failed."""
+    if broken:
+        (shop / broken).unlink()
+        result = validated(shop)
+    else:
+        result = subprocess.run(
+            ["scripts/validate.sh", "test-slow"],
+            cwd=shop,
+            capture_output=True,
+            text=True,
+            timeout=60,
+            check=False,
+        )
+
+    assert result.returncode == 2
+    assert " exit 2 — " in result.stdout.splitlines()[-1]
+
+
 def test_each_inspection_a_sample_names_is_in_it() -> None:
     """An inspection reads its text from the project when it runs; one the
     sample does not ship would fail the transition that names it."""
@@ -290,9 +407,12 @@ def test_the_last_step_of_each_workflow_a_sample_has_asks_for_done() -> None:
                 assert "`done`" in text, f"{folder.name}: {flow} ends at {last} without done"
 
 
-def test_every_effort_a_sample_s_inspections_ask_for_is_one_claude_code_takes() -> None:
+def test_every_effort_a_sample_s_inspections_ask_of_claude_code_is_one_it_takes() -> None:
     """An effort the runtime does not take is dropped, and the inspection runs
-    at the model's own — the sample would say one thing and do another."""
+    at the model's own — the sample would say one thing and do another. A
+    `gpt-…` model runs on Codex, whose efforts are its CLI's to say, and
+    `halyard doctor` checks those against the CLI on the machine."""
+    from halyard.agents import registry
     from halyard.agents.claude_code.runner import EFFORT_LEVELS
     from halyard.core.config_file import projects_from_yaml
 
@@ -300,7 +420,7 @@ def test_every_effort_a_sample_s_inspections_ask_for_is_one_claude_code_takes() 
         text = (folder / "halyard.yaml.example").read_text(encoding="utf-8")
         for project in projects_from_yaml(text):
             for name, choice in project.inspection_models.items():
-                if choice.effort is not None:
+                if choice.effort is not None and registry.for_model(choice.model) == "claude-code":
                     assert choice.effort in EFFORT_LEVELS, f"{folder.name}: {name}"
 
 
@@ -330,8 +450,11 @@ def test_each_script_a_sample_s_commands_run_is_in_it_and_can_be_run() -> None:
         for name, block in shipped["projects"].items():
             for command, spec in (block.get("commands") or {}).items():
                 line = spec["run"] if isinstance(spec, dict) else spec
-                if isinstance(line, str) and line.startswith("./"):
-                    script = placed[name] / line.split()[0]
+                program = line.split()[0] if isinstance(line, str) and line.strip() else ""
+                # A program named by its path in the project — `./check.sh`,
+                # `scripts/validate.sh` — rather than one found on PATH.
+                if "/" in program and not program.startswith(("/", "~")):
+                    script = placed[name] / program
                     assert script.is_file(), f"{folder.name}: {command}"
                     assert os.access(script, os.X_OK), f"{folder.name}: {command}"
 
