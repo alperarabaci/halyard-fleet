@@ -297,7 +297,7 @@ def render_question(request: QuestionRequest, *, now: datetime) -> str:
 
 
 def render_question_resolved(
-    request: QuestionRequest, *, answer: str | None, by: str | None
+    request: QuestionRequest, *, answer: str | None, by: str | None, why: str = ""
 ) -> str:
     """What the question card becomes once it has been answered.
 
@@ -308,7 +308,7 @@ def render_question_resolved(
     chosen = (
         f"✅ <b>{html.escape(answer)}</b>{who}"
         if answer is not None
-        else "↩️ <i>Left to the terminal — nobody answered in time.</i>"
+        else f"↩️ <i>Left to the terminal — {html.escape(why or 'nobody answered in time')}.</i>"
     )
     return _fit(
         [
@@ -429,7 +429,14 @@ def render_resolved(
     buttons on questions that were settled hours ago. An inspection's card
     stays an inspection's, so the chat still says what was allowed to look.
     """
-    mark = {"allow": "✅ ALLOWED", "stop": "⏹ STOPPED"}.get(decision, "⛔ DENIED")
+    mark = {
+        "allow": "✅ ALLOWED",
+        "stop": "⏹ STOPPED",
+        # Nobody answered before the deadline; denied, as every unanswered card is.
+        "expired": "⌛ EXPIRED — DENIED",
+        # Halyard stopped while the card was open; denied, so nothing runs unasked.
+        "shutdown": "⏹ DENIED — HALYARD STOPPED",
+    }.get(decision, "⛔ DENIED")
     who = f" by {html.escape(by)}" if by else ""
     return _fit(
         [

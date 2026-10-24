@@ -106,6 +106,35 @@ def seat_of(
     return seats.get(session_name.strip().casefold())
 
 
+def _card_ended(closing: set[asyncio.Task], channel, hook: str, request, resolution) -> None:
+    """Tell the channel how a request it carried ended, so its card can say so.
+
+    However it ended: a press closes its own card, but the deadline and a
+    shutdown reach no button, and a card nobody tells goes on asking a question
+    that is over. A channel without the hook has nothing to close; one that
+    fails is said in the log and changes nothing — the request is decided
+    and recorded already.
+
+    Beside the answer, not in front of it: the bridge waiting on this request
+    is answered first. Closing a card is an edit on Telegram, and one that
+    hangs there must not hold up a denial. `closing` holds the task until it
+    is done, since a task nobody holds can be collected before it finishes.
+    """
+    ending = getattr(channel, hook, None)
+    if ending is None:
+        return
+
+    async def close() -> None:
+        try:
+            await ending(request, resolution)
+        except Exception:
+            logger.warning("Could not close the card for %s", request.request_id, exc_info=True)
+
+    task = asyncio.get_running_loop().create_task(close())
+    closing.add(task)
+    task.add_done_callback(closing.discard)
+
+
 class BridgeDecision(StrEnum):
     """What the bridge is told to do.
 
@@ -192,6 +221,8 @@ class QuestionService:
         self._registry = registry
         self._channel = channel
         self._project = project
+        #: Cards being closed beside their answers — see `_card_ended`.
+        self._closing: set[asyncio.Task] = set()
 
     async def ask(
         self,
@@ -289,6 +320,7 @@ class QuestionService:
         # unanswered resolution on timeout; it does not raise.
         resolution = await self._store.wait_for(request.request_id)
         await self._try_to_record(question_answered(request, resolution))
+        _card_ended(self._closing, self._channel, "question_ended", request, resolution)
         return QuestionOutcome(answer=resolution.answer)
 
     async def _try_to_record(self, record) -> bool:
@@ -478,6 +510,8 @@ class ApprovalService:
         #: question can be dropped long before anybody answers; the same
         #: question asked again finds the card already out for it.
         self._waiting: dict[str, asyncio.Task[ApprovalOutcome]] = {}
+        #: Cards being closed beside their answers — see `_card_ended`.
+        self._closing: set[asyncio.Task] = set()
         # Each configured project's `runs:`, by where the project is — every
         # project, since the table may hold entries for one the file has none
         # for. An entry that no longer reads is dropped here too.
@@ -924,6 +958,7 @@ class ApprovalService:
         resolution = await self._store.wait_for(request.request_id)
 
         recorded = await self._try_to_record(approval_resolved(request, resolution))
+        _card_ended(self._closing, self._channel, "approval_ended", request, resolution)
         if resolution.reason is ResolutionReason.ELSEWHERE:
             # Answered at the desk, in the runtime's own prompt, and acted on
             # there already. Handed back as an allow, anything able to post

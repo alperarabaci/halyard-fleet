@@ -124,6 +124,21 @@ class TelegramApi:
             reply_markup=reply_markup,
         )
 
+    async def edit_message_reply_markup(
+        self, chat_id: str, message_id: int, *, reply_markup: dict | None = None
+    ) -> Any:
+        """Change only the buttons under a message — with none, take them away.
+
+        For a card whose text Telegram will not take back as it is, so its
+        buttons still go. See `CardDesk`.
+        """
+        return await self._call(
+            "editMessageReplyMarkup",
+            chat_id=chat_id,
+            message_id=message_id,
+            reply_markup=reply_markup,
+        )
+
     async def answer_callback_query(
         self, callback_query_id: str, *, text: str | None = None
     ) -> Any:

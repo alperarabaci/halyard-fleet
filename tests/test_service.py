@@ -6,13 +6,14 @@ the rest are the ways this could quietly start approving things.
 
 from __future__ import annotations
 
+import asyncio
 from datetime import timedelta
 from pathlib import Path
 
 import pytest
 
 from halyard.channels.stub import StubChannel
-from halyard.core.approvals import ApprovalRequest, ApprovalStore, Decision
+from halyard.core.approvals import ApprovalRequest, ApprovalStore, Decision, ResolutionReason
 from halyard.core.audit import AuditAction, AuditLog, AuditRecord, JsonlAuditSink
 from halyard.core.events import RiskLevel
 from halyard.core.policy import Policy
@@ -279,6 +280,70 @@ async def test_nobody_answering_denies(tmp_path: Path) -> None:
     assert "expired" in outcome.reason.lower()
 
 
+class HangingChannel(SilentChannel):
+    """Never answers, and takes as long as a test likes to close a card."""
+
+    def __init__(self) -> None:
+        self.release = asyncio.Event()
+
+    async def approval_ended(self, request, resolution) -> None:
+        await self.release.wait()
+
+
+class EndingChannel(SilentChannel):
+    """Never answers, and hears how each request ended."""
+
+    def __init__(self, *, breaks: bool = False) -> None:
+        self.ended: list[tuple[str, ResolutionReason]] = []
+        self._breaks = breaks
+
+    async def approval_ended(self, request, resolution) -> None:
+        if self._breaks:
+            raise ConnectionError("telegram unreachable")
+        self.ended.append((request.request_id, resolution.reason))
+
+
+async def test_the_channel_hears_that_a_request_nobody_answered_is_over(tmp_path: Path) -> None:
+    """So its card can say so. Nothing else reaches it: no button was pressed,
+    and a card nobody tells goes on asking a question that is over."""
+    channel = EndingChannel()
+    service, _, sink = build_service(tmp_path, channel=channel, ttl=timedelta(milliseconds=50))
+    await sink.open()
+
+    await ask(service)
+    await asyncio.gather(*service._closing)
+
+    assert channel.ended == [(channel.last_request.request_id, ResolutionReason.TIMEOUT)]
+
+
+async def test_a_channel_that_cannot_close_its_card_changes_no_answer(tmp_path: Path) -> None:
+    service, _, sink = build_service(
+        tmp_path, channel=EndingChannel(breaks=True), ttl=timedelta(milliseconds=50)
+    )
+    await sink.open()
+
+    outcome = await ask(service)
+    await asyncio.gather(*service._closing)
+
+    assert not outcome.allowed
+    assert "expired" in outcome.reason.lower()
+
+
+async def test_the_answer_does_not_wait_for_the_card_to_close(tmp_path: Path) -> None:
+    """A denial is the bridge's to have at once; an edit hanging on Telegram
+    is closed beside it."""
+    channel = HangingChannel()
+    service, _, sink = build_service(tmp_path, channel=channel, ttl=timedelta(milliseconds=50))
+    await sink.open()
+
+    outcome = await asyncio.wait_for(ask(service), timeout=2)
+
+    assert not outcome.allowed
+    assert len(service._closing) == 1, "still closing"
+    channel.release.set()
+    await asyncio.gather(*service._closing)
+
+
 async def test_an_undeliverable_request_denies(tmp_path: Path) -> None:
     service, store, sink = build_service(tmp_path, channel=ExplodingChannel())
     await sink.open()
@@ -494,7 +559,6 @@ async def test_a_request_without_a_project_dir_keeps_the_configured_name(
 
 # --- questions: the fail-open twin of the approval path ----------------------
 
-import asyncio  # noqa: E402
 import json  # noqa: E402
 
 from halyard.core.gate import Gate  # noqa: E402
@@ -599,6 +663,29 @@ async def test_a_channel_that_cannot_deliver_falls_back_to_the_terminal(tmp_path
     # The approval twin denies here. A question is not dangerous to leave to the
     # desk, so it says nothing instead.
     assert outcome.answer is None
+
+
+class EndingQuestionChannel(QuestionChannel):
+    """Captures the question, and hears how it ended."""
+
+    def __init__(self, store: QuestionStore) -> None:
+        super().__init__(store)
+        self.ended: list[ResolutionReason] = []
+
+    async def question_ended(self, request, resolution) -> None:
+        self.ended.append(resolution.reason)
+
+
+async def test_the_channel_hears_that_a_question_nobody_answered_is_over(tmp_path: Path) -> None:
+    store = QuestionStore(ttl=timedelta(seconds=0))
+    channel = EndingQuestionChannel(store)
+    service, _, sink = build_questions(tmp_path, channel=channel, store=store)
+    await sink.open()
+
+    await ask_question(service)
+    await asyncio.gather(*service._closing)
+
+    assert channel.ended == [ResolutionReason.TIMEOUT]
 
 
 async def test_a_question_nobody_answers_comes_back_empty(tmp_path: Path) -> None:
