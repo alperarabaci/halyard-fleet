@@ -10,11 +10,11 @@ you run from your phone with `/command`.
 
 | File | What it is |
 |---|---|
-| `greeting-page/` | A page that says "Hello, world". Its `TASK.md`: a field to type a name into, that the greeting answers to |
-| `todo-list/` | A to-do list you can add to. Its `TASK.md`: a "Clear" button |
-| `*/check.sh` | Each page's check: says which parts are there, fails if one is missing |
-| `PROMPT.md` | The task both agents are sent, as text: read `TASK.md`, do it, run the check |
-| `halyard.yaml.example` | What this sample adds to your `halyard.yaml`: the two projects, their `check` command, and the task as the prompt `/sample_02` |
+| [`greeting-page/`](greeting-page/) | A page that says "Hello, world". Its [`TASK.md`](greeting-page/TASK.md): a field to type a name into, that the greeting answers to |
+| [`todo-list/`](todo-list/) | A to-do list you can add to. Its [`TASK.md`](todo-list/TASK.md): a "Clear" button |
+| [`greeting-page/check.sh`](greeting-page/check.sh), [`todo-list/check.sh`](todo-list/check.sh) | Each page's check: says which parts are there, fails if one is missing |
+| [`PROMPT.md`](PROMPT.md) | The task both agents are sent, as text: read `TASK.md`, do it, run the check |
+| [`halyard.yaml.example`](halyard.yaml.example) | What this sample adds to your `halyard.yaml`: the two projects, their `check` command, and the task as the prompt `/sample_02` |
 
 ## Before you start
 
@@ -60,7 +60,10 @@ It asks which group each agent speaks in. For `greeting-dev`, the Claude Code ag
 Enter keeps your default group (`TELEGRAM_CHAT_ID`); for `todo-dev`, the Codex
 agent, paste the id from step 2. Then it adds `greeting-page` and `todo-list`, each
 at its folder in the copy, and the prompt `/sample_02`. Your file is copied first, to
-`halyard.yaml.<date-time>.bak`, and only added to, as in sample 01.
+`halyard.yaml.<date-time>.bak`, and only added to, as in sample 01. What it adds
+comes from [`halyard.yaml.example`](halyard.yaml.example), where each part has a
+comment saying what it is for: open it to see the whole setup before you add it, or
+to take its `projects:` and `prompts:` blocks by hand.
 
 **4. Gate both, and check them** — from the Halyard checkout:
 

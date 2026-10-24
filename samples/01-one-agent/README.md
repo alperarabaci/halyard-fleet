@@ -11,10 +11,10 @@ second button and run the page's check.
 
 | File | What it is |
 |---|---|
-| `index.html` | The page: a counter and an "Add one" button |
-| `check.sh` | The page's check: says which buttons are there, fails if one is missing |
-| `PROMPT.md` | The task, as text |
-| `halyard.yaml.example` | What this sample adds to your `halyard.yaml`: the project, and the task as the prompt `/sample_01` |
+| [`index.html`](index.html) | The page: a counter and an "Add one" button |
+| [`check.sh`](check.sh) | The page's check: says which buttons are there, fails if one is missing |
+| [`PROMPT.md`](PROMPT.md) | The task, as text |
+| [`halyard.yaml.example`](halyard.yaml.example) | What this sample adds to your `halyard.yaml`: the project, and the task as the prompt `/sample_01` |
 
 ## Before you start
 
@@ -57,8 +57,10 @@ typed there would reach only one of them; `/status` in a group says its id and w
 it is. Your file is copied first, to `halyard.yaml.<date-time>.bak`, and only added
 to: your settings, your other projects, your prompts and your comments stay as they
 were. With no `halyard.yaml`
-yet, it writes one for you to fill in — or run `uv run halyard init`. By hand
-instead, take the `projects:` and `prompts:` blocks from `halyard.yaml.example`.
+yet, it writes one for you to fill in — or run `uv run halyard init`. What it adds
+comes from [`halyard.yaml.example`](halyard.yaml.example), where each part has a
+comment saying what it is for: open it to see the whole setup before you add it, or
+to take its `projects:` and `prompts:` blocks by hand.
 
 **3. Gate it, check it, and start Halyard** — from the Halyard checkout:
 

@@ -17,12 +17,12 @@ reads from top to bottom in one place.
 
 | File | What it is |
 |---|---|
-| `index.html` | A reading list: five books, nothing else |
-| `TASK.md` | The task: a field that filters the list, and a count of what is shown |
-| `check.sh` | The page's check: says which parts are there, fails if one is missing |
-| `transitions/report.md` | The `report` transition's prompt, put in front of the driver's report |
-| `PROMPT.md` | What the navigator is asked, as text: a plan for the driver, changing nothing |
-| `halyard.yaml.example` | What this sample adds to your `halyard.yaml`: the project, its two agents, the `report` transition, and the prompt `/sample_03` |
+| [`index.html`](index.html) | A reading list: five books, nothing else |
+| [`TASK.md`](TASK.md) | The task: a field that filters the list, and a count of what is shown |
+| [`check.sh`](check.sh) | The page's check: says which parts are there, fails if one is missing |
+| [`transitions/report.md`](transitions/report.md) | The `report` transition's prompt, put in front of the driver's report |
+| [`PROMPT.md`](PROMPT.md) | What the navigator is asked, as text: a plan for the driver, changing nothing |
+| [`halyard.yaml.example`](halyard.yaml.example) | What this sample adds to your `halyard.yaml`: the project, its two agents, the `report` transition, and the prompt `/sample_03` |
 
 ## Before you start
 
@@ -58,7 +58,10 @@ It asks which group each agent speaks in. For `reading-nav`, the navigator, Ente
 keeps your default group (`TELEGRAM_CHAT_ID`); for `reading-drv`, the driver, paste
 the id from step 2. Then it adds the project, its `report` transition and the prompt
 `/sample_03`. Your file is copied first, to `halyard.yaml.<date-time>.bak`, and only
-added to, as in sample 01.
+added to, as in sample 01. What it adds comes from
+[`halyard.yaml.example`](halyard.yaml.example), where each part has a comment saying
+what it is for: open it to see the whole setup before you add it, or to take its
+`projects:` and `prompts:` blocks by hand.
 
 **4. Gate it, and check it** — from the Halyard checkout:
 

@@ -316,3 +316,32 @@ def test_a_sample_s_inspections_go_in_with_the_transition_that_runs_them(
     assert code == 0
     assert projects["packing-list"].inspections == {"claims": Path("inspections/claims.md")}
     assert projects["packing-list"].transitions["report"].inspections == ("claims",)
+
+
+# --- a sample with commands and trusted runs -----------------------------------
+
+
+def test_a_sample_s_commands_and_runs_go_in_whole(tmp_path: Path) -> None:
+    """Sample 05: commands that take a typed value, a list of them, and the
+    agent's trusted runs — each kept as the sample wrote it."""
+    config = tmp_path / "halyard.yaml"
+    config.write_text(THEIRS, encoding="utf-8")
+    where = tmp_path / "shopping-cart"
+    where.mkdir()
+
+    code, _ = added(config, where, "05")
+
+    [cart] = [
+        p
+        for p in projects_from_yaml(config.read_text(encoding="utf-8"))
+        if p.name == "shopping-cart"
+    ]
+    assert code == 0
+    assert cart.commands == {
+        "test-fast": "make test-fast",
+        "test-only": "python3 -m unittest -q -k {input.word}",
+        "to-main": "git switch main",
+        "new-branch": "git switch -c {input.task}",
+    }
+    assert cart.command_lists == {"next-task": ("to-main", "new-branch")}
+    assert cart.runs == ("make test-fast",)
