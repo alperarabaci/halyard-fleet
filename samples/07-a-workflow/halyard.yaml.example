@@ -1,0 +1,93 @@
+# What this sample adds to your halyard.yaml — the one in your Halyard checkout.
+# One project with a navigator and a driver, each in a group of its own; the
+# transitions that hand work between them; and a workflow that takes those
+# transitions in order, each reply's last line deciding what comes next. Keep
+# your own `settings:`; put the project under `projects:` next to any you
+# already have, and fill in your own path, session names and groups.
+
+settings:
+  HALYARD_CHANNEL: telegram
+  TELEGRAM_BOT_TOKEN: "123456:replace-me"          # from @BotFather; secret
+  TELEGRAM_CHAT_ID: "-1001234567890"               # the group the bot is in
+  TELEGRAM_AUTHORIZED_USER_IDS: "11111111"         # who may answer a card
+  TELEGRAM_MENU: simple                            # the short command menu
+
+projects:
+  cart-workflow:
+    # Where you copied this sample to — not inside the Halyard checkout.
+    path: ~/halyard-samples/cart-workflow
+    commands:
+      test-fast: make test-fast
+    # Run over a reply as a one-shot, read-only model turn — sample 04. Each
+    # here names a model and an effort of its own: the one whose answer the
+    # navigator leans on most thinks hardest. Left out, an inspection runs on
+    # HALYARD_INSPECTION_MODEL — Sonnet unless set. A `gpt-…` model runs on
+    # Codex instead, and needs the `codex` CLI.
+    inspections:
+      test-reliability:
+        file: inspections/test-reliability.md
+        model: opus
+        effort: high
+      over-engineering:
+        file: inspections/over-engineering.md
+        model: sonnet
+        effort: medium
+    # Each takes a reply to the agent in `to:`, with the project's own prompt
+    # in front — sample 06. `/transition` still offers each of them by hand.
+    transitions:
+      develop:
+        prompt: transitions/develop.md
+        to: driver
+      developed:
+        prompt: transitions/developed.md
+        commands: [test-fast]
+        to: navigator
+      # The last stop: the tests again, then both inspections, then the
+      # navigator, who closes the work or sends it back.
+      close:
+        prompt: transitions/close.md
+        commands: [test-fast]
+        inspect: [test-reliability, over-engineering]
+        to: navigator
+    workflows:
+      # A step is a transition going to an agent. A step goes once unless
+      # `rounds:` says more: here the work may come back to the driver once.
+      steps:
+        develop: {agent: flow-drv, rounds: 2}
+        developed: {agent: flow-nav, rounds: 2}
+        # `close` takes the driver's report, not the navigator's "it can
+        # close", and its `back` goes to the driver.
+        close: {agent: flow-nav, works_on: develop}
+      # What `/workflow` offers: the steps, in order. Each reply's last line
+      # decides — `forward` to the next step, `back` to the one before, `wait`
+      # for you — and at the last step only `done` ends the run.
+      deliver: [develop, developed, close]
+    agents:
+      # Agent labels are unique across every project in the file: they are how
+      # `/to` and `/forward` name an agent. Each runs on the model its session
+      # was opened with — sample 06.
+      flow-nav:
+        runtime: claude-code
+        # The name the runtime knows the session by. `uv run halyard sessions`
+        # lists the ones it can see.
+        session: cart-workflow-nav
+        role: navigator
+        # Your default group: the same id as TELEGRAM_CHAT_ID. Quoted: unquoted,
+        # YAML reads it as a number.
+        chat: "-1001234567890"
+      flow-drv:
+        # claude-code for both here; `codex` or `opencode` work the same way.
+        runtime: claude-code
+        session: cart-workflow-drv
+        role: driver
+        # A group of its own: a second group, with the bot in it. `/status`
+        # sent there says its id.
+        chat: "-1002234567890"
+
+prompts:
+  # `/sample_07` in the navigator's group asks it for a plan: the text of
+  # PROMPT.md.
+  sample_07: >-
+    Read `TASK.md`. Do not change any file yourself: write a short plan for the
+    driver who will make the change — what to change, in order. Keep it under
+    ten lines.

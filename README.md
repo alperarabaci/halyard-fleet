@@ -108,7 +108,7 @@ Tiny projects to run under Halyard as they are — a page or a script, the
 4. [Inspections](samples/04-inspections/) — the work inspected before it is handed on
 5. [The whole mechanism](samples/05-the-whole-mechanism/) — commands, trusted runs, task labels
 6. [Transitions](samples/06-transitions/) — work handed there and back with `/transition`, the tests run on the way
-7. A workflow — the same transitions as steps, each reply deciding what comes next *(planned)*
+7. [A workflow](samples/07-a-workflow/) — the same transitions as steps, each reply deciding what comes next
 8. Three agents — a navigator, a driver and a reviewer, in phases *(planned)*
 
 ## Runtimes
