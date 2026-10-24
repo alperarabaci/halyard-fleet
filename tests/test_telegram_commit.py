@@ -2158,6 +2158,160 @@ async def test_leaving_from_an_old_card_moves_nothing_once_the_run_went_on(
     assert "to_nav · phase 2 — it was asked to wait" in api.sent[-1]["text"]
 
 
+# --- a run's cards: one live, the newest; every one closed when it ends ------
+
+
+def run_cards(channel: TelegramChannel) -> list:
+    """The run cards still open, oldest first."""
+    return [card for card in channel._desk.live() if card.kind == "run"]
+
+
+def pressed_on(card, what: str, value: str) -> dict:
+    """A run's button, pressed on a card the desk sent."""
+    from halyard.channels.telegram import cards
+
+    return {
+        "id": "cb1",
+        "from": {"id": int(APPROVER)},
+        "data": cards.choice_data(what, value),
+        "message": {"message_id": card.message_id, "chat": {"id": card.chat}},
+    }
+
+
+def closed_with(api, card) -> list[str]:
+    return [edit["text"] for edit in api.edits if edit["message_id"] == card.message_id]
+
+
+async def test_a_run_keeps_one_card_with_buttons_the_newest(tmp_path: Path, wired) -> None:
+    """Every step said itself with a Stop under it, and every one stayed: a
+    long run left a trail of buttons that all acted on the run going now."""
+    channel, api, runner, repo = wired
+    flow_in(channel, repo, tmp_path, runner, **TWO_STEPS)
+    await started(channel)
+    [first] = run_cards(channel)
+
+    await answered(channel, "xrev", "DECISION: forward")
+
+    [now] = run_cards(channel)
+    assert now.message_id != first.message_id
+    assert "This run has a newer card." in closed_with(api, first)[-1]
+
+
+async def test_a_stop_card_takes_the_place_of_the_step_line(tmp_path: Path, wired) -> None:
+    channel, _, runner, repo = wired
+    flow_in(channel, repo, tmp_path, runner, **capped())
+
+    await stopped_on_the_round_limit(channel)
+
+    [card] = run_cards(channel)
+    assert "round 2 of 1" in card.html
+
+
+async def test_asking_where_a_run_is_moves_its_buttons_to_the_answer(tmp_path: Path, wired) -> None:
+    channel, _, runner, repo = wired
+    flow_in(channel, repo, tmp_path, runner, **TWO_STEPS)
+    await started(channel)
+    [line] = run_cards(channel)
+
+    await channel._run_workflow("", CHAT, None, f"tg:{APPROVER}")
+
+    [where] = run_cards(channel)
+    assert where.message_id != line.message_id
+    assert "waiting for <b>xrev</b>" in where.html
+
+
+async def test_a_run_that_is_done_closes_every_card_it_had(tmp_path: Path, wired) -> None:
+    channel, api, runner, repo = wired
+    flow_in(channel, repo, tmp_path, runner, **TWO_STEPS)
+    await started(channel)
+    await answered(channel, "xrev", "DECISION: forward")
+    [last] = run_cards(channel)
+
+    await answered(channel, "nav", "All good.\nDECISION: done")
+
+    assert run_cards(channel) == []
+    assert "The run is done." in closed_with(api, last)[-1]
+
+
+async def test_stopping_a_run_from_its_card_closes_every_card_it_had(tmp_path: Path, wired) -> None:
+    channel, api, runner, repo = wired
+    flow_in(channel, repo, tmp_path, runner, **TWO_STEPS)
+    await started(channel)
+    [card] = run_cards(channel)
+
+    await channel._handle_callback(pressed_on(card, "flowstop", "level3"))
+    await settled(channel)
+
+    assert run_cards(channel) == []
+    assert "The run was stopped." in closed_with(api, card)[-1]
+
+
+async def test_a_card_of_a_run_left_on_another_branch_steers_nothing_here(
+    tmp_path: Path, wired
+) -> None:
+    """`/command next-task` moves the checkout on, and the last task's run is
+    left where it was — its card still in the chat. Its Stop named only the
+    workflow, so it stopped the run of the task checked out now."""
+    channel, api, runner, repo = wired
+    flow_in(channel, repo, tmp_path, runner, **TWO_STEPS)
+    await started(channel)
+    [old] = run_cards(channel)
+    git(repo, "switch", "-q", "-c", "282-the-next-task")
+    await started(channel)
+
+    await channel._handle_callback(pressed_on(old, "flowstop", "level3"))
+    await settled(channel)
+
+    assert "From an earlier run" in closed_with(api, old)[-1]
+    assert not any("stopped at step" in message["text"] for message in api.sent)
+    [going] = run_cards(channel)
+    assert going.message_id != old.message_id
+
+
+async def test_a_run_s_picker_goes_when_the_run_moves(tmp_path: Path, wired) -> None:
+    """Offered by the run's card, it leaves that card where it is — and both
+    go once the run moves on."""
+    channel, api, runner, repo = wired
+    flow_in(channel, repo, tmp_path, runner, **capped())
+    await stopped_on_the_round_limit(channel)
+    [stop] = run_cards(channel)
+
+    await channel._handle_callback(pressed_on(stop, "flowpick", "level3"))
+    await settled(channel)
+    assert len(run_cards(channel)) == 2, "the picker leaves the run's card where it is"
+    [picker] = [card for card in run_cards(channel) if card.message_id != stop.message_id]
+
+    await channel._handle_callback(pressed_on(picker, "flowat", "level3>0"))
+    await settled(channel)
+
+    [now] = run_cards(channel)
+    assert now.message_id not in (stop.message_id, picker.message_id)
+    assert "This run has a newer card." in closed_with(api, stop)[-1]
+
+
+async def test_a_stopped_run_another_workflow_replaces_closes_its_cards(
+    tmp_path: Path, wired
+) -> None:
+    channel, api, runner, repo = wired
+    flow_in(
+        channel,
+        repo,
+        tmp_path,
+        runner,
+        flows={"level3": ["review", "to_nav"], "quick": ["to_nav"]},
+        steps=capped()["steps"],
+    )
+    await stopped_on_the_round_limit(channel)
+    [stop] = run_cards(channel)
+
+    await channel._run_workflow("quick", CHAT, None, f"tg:{APPROVER}", start=0)
+    await settled(channel)
+
+    assert "Replaced by a run of quick." in closed_with(api, stop)[-1]
+    [now] = run_cards(channel)
+    assert now.message_id != stop.message_id
+
+
 async def test_the_phases_stop_past_their_count_and_can_be_sent_anyway(
     tmp_path: Path, wired
 ) -> None:

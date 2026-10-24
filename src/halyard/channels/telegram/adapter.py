@@ -252,6 +252,19 @@ SAID_FILE = "last-said.json"
 RESULTS_FILE = "check-results.json"
 WORKFLOW_FILE = flowing.runs.FILE
 
+#: What a run's older card says once a newer card for the run has taken its
+#: place. Only a run's newest card keeps buttons: they carry the workflow's
+#: name alone, so on an old card they acted on whatever run was going when they
+#: were pressed. See `TelegramChannel._say_about_run`.
+RUN_SUPERSEDED = "↪️ <i>This run has a newer card.</i>"
+#: What every card of a run says once the run is over.
+RUN_DONE = "📋 <i>The run is done.</i>"
+RUN_STOPPED = "⏹ <i>The run was stopped.</i>"
+#: What a card says when a button on it is pressed after its run was over or
+#: replaced: nothing is done, and the card closes.
+RUN_EARLIER = "↪️ <i>From an earlier run — /workflow shows the one going now.</i>"
+RUN_OVER = "⏹ <i>That run is over.</i>"
+
 
 def _local(moment: datetime) -> datetime:
     """A stored UTC time as this machine's clock reads it.
@@ -3200,6 +3213,7 @@ class TelegramChannel:
         thread_id: int | None,
         workflow: str | None = None,
         lead: str = "",
+        card_key: str = "",
     ) -> None:
         """Offer a group's labels for a command the task gave no value.
 
@@ -3219,13 +3233,15 @@ class TelegramChannel:
             where = "this branch names no task to read one from"
             after = "it is kept for this work until Halyard restarts"
         pick = f"Pick one — {after}." if buttons else "Put one on the task and press it again."
-        await self._say(
+        asked = (
             f"{lead}\U0001f3f7 <b>{html.escape(lines.needing)}</b> takes the task's "
-            f"<b>{html.escape(group)}</b> label, and {where}. {pick}",
-            chat_id,
-            thread_id,
-            reply_markup=buttons,
+            f"<b>{html.escape(group)}</b> label, and {where}. {pick}"
         )
+        if card_key:
+            # Under a workflow's step: the run's card while it waits for a label.
+            await self._say_about_run(card_key, asked, chat_id, thread_id, buttons)
+        else:
+            await self._say(asked, chat_id, thread_id, reply_markup=buttons)
 
     async def _label_picked(
         self,
@@ -3511,6 +3527,7 @@ class TelegramChannel:
         extra: Sequence[str] = (),
         lead: str = "",
         buttons: dict | None = None,
+        card_key: str = "",
         command_lines: Mapping[str, str] | None = None,
         counted: StepRounds | None = None,
         step_line: str = "",
@@ -3525,7 +3542,8 @@ class TelegramChannel:
         which flow it belongs to and offers to stop it. `command_lines` are its
         commands as they run, with any task label in them — see `_command_lines`.
         `counted` is the step's rounds so far and how to count this one; a
-        transition pressed by hand has none, and says no round.
+        transition pressed by hand has none, and says no round. `card_key`
+        names the run a step's line belongs to, so it is the run's live card.
         """
         # What would stop the message reaching the seat is asked before anything
         # runs. Measured: `close` pressed while paused ran its tests and its
@@ -3579,13 +3597,14 @@ class TelegramChannel:
         ]
         first = f", {' then '.join(steps)} first" if steps else ""
         which = f" (round {rounds.shown(number, expected)})" if number and number > 1 else ""
-        await self._say(
+        line = (
             f"{lead}\U0001f91d <b>{html.escape(name)}</b>{which} → "
-            f"<b>{html.escape(_seat_name(seat))}</b>{html.escape(first)}…",
-            chat_id,
-            thread_id,
-            reply_markup=buttons,
+            f"<b>{html.escape(_seat_name(seat))}</b>{html.escape(first)}…"
         )
+        if card_key:
+            await self._say_about_run(card_key, line, chat_id, thread_id, buttons)
+        else:
+            await self._say(line, chat_id, thread_id, reply_markup=buttons)
         if transition.commands:
             self._working[found.name] = f"transition {name}"
         try:
@@ -3715,7 +3734,9 @@ class TelegramChannel:
         if not wanted:
             if run is not None:
                 said, keyboard = self._run_card(found, run)
-                await self._say(said, chat_id, thread_id, reply_markup=keyboard)
+                await self._say_about_run(
+                    self._run_key(found, work, run), said, chat_id, thread_id, keyboard
+                )
                 return
             await self._say(
                 "Take this project's transitions how?",
@@ -3735,11 +3756,12 @@ class TelegramChannel:
             await self._run_workflow("", chat_id, thread_id, actor)
             return
         if run is not None and run.waiting:
-            await self._say(
+            await self._say_about_run(
+                self._run_key(found, work, run),
                 self._where_the_run_is(found, run),
                 chat_id,
                 thread_id,
-                reply_markup=cards.workflow_keyboard(run.workflow),
+                cards.workflow_keyboard(run.workflow),
             )
             return
 
@@ -3757,12 +3779,20 @@ class TelegramChannel:
                     thread_id,
                 )
         if start is None or not 0 <= start < len(flow):
-            await self._say(
-                f"Start <b>{html.escape(name)}</b> at which step?",
-                chat_id,
-                thread_id,
-                reply_markup=cards.workflow_steps(name, flow),
-            )
+            asked = f"Start <b>{html.escape(name)}</b> at which step?"
+            steps = cards.workflow_steps(name, flow)
+            if run is not None and run.workflow == name:
+                # The stopped run's own picker: it goes when the run moves.
+                await self._say_about_run(
+                    self._run_key(found, work, run),
+                    asked,
+                    chat_id,
+                    thread_id,
+                    steps,
+                    supersedes=False,
+                )
+            else:
+                await self._say(asked, chat_id, thread_id, reply_markup=steps)
             return
         inside = stretch is not None and stretch[0] <= start <= stretch[1]
         if phase is not None and not inside:
@@ -3785,6 +3815,14 @@ class TelegramChannel:
                 entered=start if phase is not None or (inside and run.entered < 0) else None,
             )
         else:
+            if run is not None:
+                # A stopped run of another workflow, replaced by this one: its
+                # cards would otherwise steer the run that took its place.
+                await self._desk.close_about(
+                    "run",
+                    self._run_key(found, work, run),
+                    outcome=f"↪️ <i>Replaced by a run of {html.escape(name)}.</i>",
+                )
             going = flowing.Run(
                 workflow=name,
                 step=start,
@@ -3887,6 +3925,7 @@ class TelegramChannel:
                 chat_id=run.chat,
                 thread_id=run.thread,
                 workflow=run.workflow,
+                card_key=self._run_key(found, work, run),
                 lead=(
                     f"⏸ <b>{html.escape(run.workflow)}</b> {run.step + 1}/{len(flow)} · "
                     f"{html.escape(step.name)}{self._phase_of(found, run)} — "
@@ -3944,6 +3983,7 @@ class TelegramChannel:
                 f"{self._phase_of(found, run)} · "
             ),
             buttons=cards.workflow_keyboard(run.workflow),
+            card_key=self._run_key(found, work, run),
             command_lines=lines.lines,
             step_line=f"{_named(run)}, step {run.step + 1} of {len(flow)}: {step.name}",
             counted=StepRounds(
@@ -3986,6 +4026,37 @@ class TelegramChannel:
             named[name] = seats[0].label if len(seats) == 1 else (step.seat or transition.to or "")
         return named
 
+    @staticmethod
+    def _run_key(found: Project, work: str, run: flowing.Run) -> str:
+        """What a run's cards are about, for the desk: the run's own name — or,
+        for a run started before runs had one, its workflow on its work."""
+        return run.ident or f"{found.name}|{work}|{run.workflow}"
+
+    async def _say_about_run(
+        self,
+        key: str,
+        text: str,
+        chat_id: str | None,
+        thread_id: int | None,
+        keyboard: dict | None,
+        *,
+        supersedes: bool = True,
+    ) -> Card | None:
+        """Put a card about a run in the chat, as that run's one live card.
+
+        Every card the run had before closes once this one is there. A run's
+        buttons carry its workflow's name alone, so left live on an old card
+        they acted on whatever run was going when they were pressed. A picker
+        the run's card offers — `supersedes=False` — is the run's too, and goes
+        when the run moves, without closing the card it came from.
+        """
+        before = self._desk.of("run", key) if supersedes else []
+        card = await self._say(text, chat_id, thread_id, reply_markup=keyboard, kind="run", key=key)
+        if card is not None:
+            for old in before:
+                await self._desk.close_card(old, outcome=RUN_SUPERSEDED)
+        return card
+
     async def _stopped(
         self,
         found: Project,
@@ -4012,7 +4083,9 @@ class TelegramChannel:
             await asyncio.to_thread(flowing.save, kept, work, run)
         logger.info("Workflow %s for %s stopped: %s", _named(run), work, run.stopped)
         said, keyboard = self._run_card(found, run, go=go, go_text=go_text, on=on, offers=offers)
-        await self._say(said, run.chat, run.thread, reply_markup=keyboard)
+        await self._say_about_run(
+            self._run_key(found, work, run), said, run.chat, run.thread, keyboard
+        )
 
     def _run_card(
         self,
@@ -4225,6 +4298,13 @@ class TelegramChannel:
         if kept is not None:
             await asyncio.to_thread(flowing.clear, kept, work)
         logger.info("Workflow %s for %s %s", _named(run), work, outcome)
+        # Its cards say so, every one: buttons left on them would steer the
+        # next run of the same workflow.
+        await self._desk.close_about(
+            "run",
+            self._run_key(found, work, run),
+            outcome=RUN_DONE if outcome == "done" else RUN_STOPPED,
+        )
         if outcome != "done":
             return
         flow = found.workflows.flows.get(run.workflow) or ()
@@ -4428,11 +4508,17 @@ class TelegramChannel:
         place: int = -1,
         back: bool = False,
         speaker: str = "",
+        card: Card | None = None,
     ) -> None:
         """The buttons on a run: send the step it stopped before (`go`), send
         the step at `place` its agent's own words would have (`to`), leave its
         phases instead (`on`), offer its steps to go on from (`pick`), or stop
-        it (`stop`)."""
+        it (`stop`).
+
+        `card` is the one pressed, when the desk sent it. Its buttons name only
+        the workflow, so a card of a run that is over or was replaced is not
+        acted on: it would steer the run going now — an old Stop stopping a run
+        started since. It closes instead, saying so."""
         found = self._repository_for(chat_id)
         if found is None:
             await self._say(self._no_repository(chat_id), chat_id, thread_id)
@@ -4440,8 +4526,14 @@ class TelegramChannel:
         kept = self._kept_for(found.name, WORKFLOW_FILE)
         work = await self._work_item(found)
         run = await asyncio.to_thread(flowing.current, kept, work) if kept and work else None
+        ours = card is not None and card.kind == "run"
         if run is None or kept is None or work is None:
+            if ours:
+                await self._desk.close_card(card, outcome=RUN_OVER)
             await self._say("No workflow is going here.", chat_id, thread_id)
+            return
+        if ours and card.key != self._run_key(found, work, run):
+            await self._desk.close_card(card, outcome=RUN_EARLIER)
             return
         if action == "stop":
             await self._finished(found, work, run, "stopped")
@@ -4462,13 +4554,17 @@ class TelegramChannel:
                 return
             run = run.at(place, back=back)
         if action == "pick":
-            await self._say(
+            # The run's own picker: it goes when the run moves, and leaves the
+            # run's card where it is until then.
+            await self._say_about_run(
+                self._run_key(found, work, run),
                 f"Send <b>{html.escape(run.workflow)}</b> on from which step"
                 f"{self._phase_of(found, run).replace(' · ', ', in ')}? Its rounds so far "
                 "are kept.",
                 chat_id,
                 thread_id,
-                reply_markup=cards.workflow_steps(run.workflow, flow),
+                cards.workflow_steps(run.workflow, flow),
+                supersedes=False,
             )
             return
         if action == "on":
@@ -5214,6 +5310,7 @@ class TelegramChannel:
                         place=int(place) if place.isdigit() else -1,
                         back=len(parts) > 2 and parts[2] == "b",
                         speaker=parts[3] if len(parts) > 3 else "",
+                        card=self._desk.find(here, message.get("message_id")),
                     ),
                     "/workflow",
                 )
@@ -5221,7 +5318,10 @@ class TelegramChannel:
             if what in ("flowgo", "flowstop", "flowon", "flowpick"):
                 self._detach(
                     self._resume_workflow(
-                        what.removeprefix("flow"), here or "", message.get("message_thread_id")
+                        what.removeprefix("flow"),
+                        here or "",
+                        message.get("message_thread_id"),
+                        card=self._desk.find(here, message.get("message_id")),
                     ),
                     "/workflow",
                 )

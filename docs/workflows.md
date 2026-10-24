@@ -266,6 +266,13 @@ Every step's line in the chat carries **⏹ Stop the workflow**. `/workflow` wit
 going says where it is — `level3 5/8 · develop · phase 2 — waiting for xdrv` — and
 offers the same button.
 
+**A run has one card with buttons at a time: its newest.** When the next step goes, the
+run stops, or `/workflow` is asked, the card before says *This run has a newer card* and
+loses its buttons. They name only the workflow, so left live they would act on whatever
+run is going when pressed. A button on a card of a run that is over or was replaced — one
+left in the chat when the checkout moved on to another task — is not acted on: its card
+closes, saying it is from an earlier run.
+
 A run stops, and says why, when a step would go past its rounds, when the phases would
 go past theirs, when a reply decides nothing, when an agent decides to wait, when the last
 step ends without `done`, and when a step's agent could be more than one agent. The card
@@ -304,7 +311,9 @@ a word with you, in its own chat — the card says so.
 ## When a run ends
 
 A run that goes all the way says so in the chat it was started from, in three lines —
-when it started and finished, how long that was, and the steps it took with their rounds:
+when it started and finished, how long that was, and the steps it took with their rounds.
+Every card it had says so too — *The run is done*, or *The run was stopped* — and loses
+its buttons:
 
 ```
 📋 level3phased is done — alpha-engine#386
