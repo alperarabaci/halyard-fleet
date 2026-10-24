@@ -290,6 +290,20 @@ def test_the_last_step_of_each_workflow_a_sample_has_asks_for_done() -> None:
                 assert "`done`" in text, f"{folder.name}: {flow} ends at {last} without done"
 
 
+def test_every_effort_a_sample_s_inspections_ask_for_is_one_claude_code_takes() -> None:
+    """An effort the runtime does not take is dropped, and the inspection runs
+    at the model's own — the sample would say one thing and do another."""
+    from halyard.agents.claude_code.runner import EFFORT_LEVELS
+    from halyard.core.config_file import projects_from_yaml
+
+    for folder in sorted(SAMPLES.glob("[0-9][0-9]-*")):
+        text = (folder / "halyard.yaml.example").read_text(encoding="utf-8")
+        for project in projects_from_yaml(text):
+            for name, choice in project.inspection_models.items():
+                if choice.effort is not None:
+                    assert choice.effort in EFFORT_LEVELS, f"{folder.name}: {name}"
+
+
 def test_each_transition_prompt_a_sample_names_is_in_it() -> None:
     """A transition reads its prompt from the project when it goes; one the
     sample does not ship would arrive with no prompt in front."""

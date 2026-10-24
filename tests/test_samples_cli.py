@@ -377,8 +377,9 @@ def test_a_sample_s_transitions_go_in_with_the_command_they_run(tmp_path: Path) 
 
 
 def test_a_sample_s_workflow_goes_in_with_its_steps_and_their_rounds(tmp_path: Path) -> None:
-    """Sample 07: the steps, their agents, rounds and `works_on:`, and the
-    workflow taking them in order — each kept as the sample wrote it."""
+    """Sample 07: the steps, their agents, rounds and `works_on:`, the
+    workflow taking them in order, and the inspections `close` runs, each on
+    a model of its own — all kept as the sample wrote them."""
     config = tmp_path / "halyard.yaml"
     config.write_text(THEIRS, encoding="utf-8")
     where = tmp_path / "cart-workflow"
@@ -394,5 +395,10 @@ def test_a_sample_s_workflow_goes_in_with_its_steps_and_their_rounds(tmp_path: P
     assert (steps["develop"].seat, steps["develop"].rounds) == ("flow-drv", 2)
     assert (steps["developed"].seat, steps["developed"].rounds) == ("flow-nav", 2)
     assert (steps["close"].seat, steps["close"].works_on) == ("flow-nav", "develop")
-    assert cart.transitions["close"].inspections == ("claims",)
+    assert cart.transitions["close"].inspections == ("test-reliability", "over-engineering")
     assert cart.transitions["close"].commands == ("test-fast",)
+    # Each inspection's own model and effort, which the navigator's turn does
+    # not share.
+    assert {
+        name: (choice.model, choice.effort) for name, choice in cart.inspection_models.items()
+    } == {"test-reliability": ("opus", "high"), "over-engineering": ("sonnet", "medium")}

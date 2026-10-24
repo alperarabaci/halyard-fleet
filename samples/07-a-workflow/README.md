@@ -10,7 +10,7 @@ goes next. You are needed for the cards, and when the run stops to ask.
 | Hand the navigator's plan to the driver | `/workflow`, then **deliver**, then **develop** |
 | Notice the driver has finished, run the tests, take its report to the navigator | Nothing: the driver's last line, `forward`, does it |
 | Take what the navigator found back to the driver, and round again | Nothing: `back` does it, as many times as the step's `rounds:` allow |
-| Run the tests and an inspection, and take it all to the navigator to close | Nothing: `close` does it, and the navigator's `done` ends the run |
+| Run the tests, have the tests and the change looked over, and take it all to the navigator to close | Nothing: `close` does it, and the navigator's `done` ends the run |
 
 ## What is here
 
@@ -23,10 +23,11 @@ goes next. You are needed for the cards, and when the run stops to ask.
 | [`PROMPT.md`](PROMPT.md) | What the navigator is asked: a plan for the driver, changing nothing |
 | [`transitions/develop.md`](transitions/develop.md) | The `develop` step's prompt, for the driver: make the change, report, decide |
 | [`transitions/developed.md`](transitions/developed.md) | The `developed` step's prompt, for the navigator: weigh the report and the tests, decide `forward` or `back` |
-| [`transitions/close.md`](transitions/close.md) | The `close` step's prompt, for the navigator: weigh the report, the tests and the inspection, decide `done` or `back` |
-| [`inspections/claims.md`](inspections/claims.md) | The `claims` inspection `close` runs: which of the report's claims the change backs |
+| [`transitions/close.md`](transitions/close.md) | The `close` step's prompt, for the navigator: weigh the report, the tests and both inspections, decide `done` or `back` |
+| [`inspections/test-reliability.md`](inspections/test-reliability.md) | An inspection `close` runs, on Opus: whether the tests would catch the task done wrong |
+| [`inspections/over-engineering.md`](inspections/over-engineering.md) | The other, on Sonnet: whether the change is more than the task needs |
 | [`.gitignore`](.gitignore) | Keeps Python's `__pycache__/` out of your commits |
-| [`halyard.yaml.example`](halyard.yaml.example) | What this sample adds to your `halyard.yaml`: the project, its command, inspection, three transitions, the workflow `deliver`, its two agents, and the prompt `/sample_07` — each part with a comment saying what it is for |
+| [`halyard.yaml.example`](halyard.yaml.example) | What this sample adds to your `halyard.yaml`: the project, its command, two inspections, three transitions, the workflow `deliver`, its two agents, and the prompt `/sample_07` — each part with a comment saying what it is for |
 
 ## Before you start
 
@@ -36,9 +37,9 @@ goes next. You are needed for the cards, and when the run stops to ask.
   default group, and step 3 refuses a group another agent already has.
 - **`python3` and `make`** on this machine. The tests use Python's own `unittest`;
   nothing to install.
-- **The CLI the inspection runs on:** `claude` unless your `HALYARD_INSPECTION_MODEL`
-  is a `gpt-…` model, `codex` if it is. Each inspection is a model turn of its own —
-  [sample 04](../04-inspections/README.md).
+- **`claude`, for the inspections too.** Each is a model turn of its own —
+  [sample 04](../04-inspections/README.md) — and each here names its model: Opus and
+  Sonnet, both on Claude Code. A `gpt-…` model would run on Codex, and need `codex`.
 
 ## Run it
 
@@ -69,7 +70,7 @@ uv run halyard samples add 07 ~/halyard-samples/cart-workflow
 
 It asks which group each agent speaks in. For `flow-nav`, the navigator, Enter keeps
 your default group (`TELEGRAM_CHAT_ID`); for `flow-drv`, the driver, paste the id
-from step 2. Then it adds the project, with its inspection, transitions and workflow,
+from step 2. Then it adds the project, with its inspections, transitions and workflow,
 and the prompt `/sample_07`. Your file is copied first, to
 `halyard.yaml.<date-time>.bak`, and only added to, as in sample 01. What it adds comes
 from [`halyard.yaml.example`](halyard.yaml.example), where each part has a comment
@@ -109,7 +110,7 @@ your sessions' own names in the YAML.
   - the driver makes the change, reports, and ends with `forward`;
   - `developed` runs the tests and takes the report and their result to the
     navigator, who ends with `forward` — or `back`, and the driver goes again;
-  - `close` runs the tests and the `claims` inspection, and the navigator ends with
+  - `close` runs the tests and both inspections, and the navigator ends with
     `done` — or `back`, to the driver.
 - Meanwhile, the driver's cards come to its group: allow them. `/workflow` in either
   group says where the run is.
@@ -124,9 +125,10 @@ your sessions' own names in the YAML.
 - `deliver 2/3 · 🤝 developed → flow-nav (navigator), running test-fast first…`, then
   `test-fast: passed`.
 - `deliver 3/3 · 🤝 close → flow-nav (navigator), running test-fast then inspecting
-  claims first…`, then `test-fast: passed · claims: answered` — and an
-  **INSPECTION** card in the navigator's group for any read of the inspection's that
-  the gate does not pass on its own.
+  test-reliability, over-engineering first…`, then `test-fast: passed ·
+  test-reliability: answered · over-engineering: answered` — and an **INSPECTION**
+  card in the navigator's group for any read of theirs that the gate does not pass on
+  its own.
 - In each agent's session, a first line that says a workflow sent it, and the run's
   own name: `To flow-drv (driver), from Halyard workflow deliver (run 3f2a9c1e),
   step 1 of 3: develop — transition: develop.` Under it, where each word on its last
@@ -154,6 +156,10 @@ your sessions' own names in the YAML.
 
   When each step reached its agent, which round it was, and what the answer decided.
   `uv run halyard runs` lists the latest runs, a line each.
+- **Another model for an inspection.** Change its `model:` or `effort:` under
+  `inspections:` and restart Halyard; a `gpt-…` model runs on Codex. To compare two
+  on the very same input, keep the runs and repeat one —
+  [A kept inspection can be run again](../../docs/transitions.md#a-kept-inspection-can-be-run-again).
 - `/transition` still offers each transition by hand, as in sample 06, outside the
   run.
 

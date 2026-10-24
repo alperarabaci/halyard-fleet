@@ -18,9 +18,20 @@ projects:
     path: ~/halyard-samples/cart-workflow
     commands:
       test-fast: make test-fast
-    # Run over a reply as a one-shot, read-only model turn — sample 04.
+    # Run over a reply as a one-shot, read-only model turn — sample 04. Each
+    # here names a model and an effort of its own: the one whose answer the
+    # navigator leans on most thinks hardest. Left out, an inspection runs on
+    # HALYARD_INSPECTION_MODEL — Sonnet unless set. A `gpt-…` model runs on
+    # Codex instead, and needs the `codex` CLI.
     inspections:
-      claims: inspections/claims.md
+      test-reliability:
+        file: inspections/test-reliability.md
+        model: opus
+        effort: high
+      over-engineering:
+        file: inspections/over-engineering.md
+        model: sonnet
+        effort: medium
     # Each takes a reply to the agent in `to:`, with the project's own prompt
     # in front — sample 06. `/transition` still offers each of them by hand.
     transitions:
@@ -31,12 +42,12 @@ projects:
         prompt: transitions/developed.md
         commands: [test-fast]
         to: navigator
-      # The last stop: the tests again, then the inspection, then the
+      # The last stop: the tests again, then both inspections, then the
       # navigator, who closes the work or sends it back.
       close:
         prompt: transitions/close.md
         commands: [test-fast]
-        inspect: [claims]
+        inspect: [test-reliability, over-engineering]
         to: navigator
     workflows:
       # A step is a transition going to an agent. A step goes once unless
