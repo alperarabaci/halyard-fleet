@@ -193,6 +193,30 @@ def test_the_cart_s_shipping_tests_fail_until_the_task_is_done(tmp_path: Path) -
     assert then.returncode == 0, then.stderr
 
 
+def test_the_cart_s_coupon_tests_fail_until_the_task_is_done(tmp_path: Path) -> None:
+    """Sample 07: the coupon tests are there before `with_coupon()` is, so
+    `developed` and `close` report them failing until the driver has done the
+    task."""
+    copy = tmp_path / "cart-workflow"
+    shutil.copytree(SAMPLES / "07-a-workflow", copy)
+
+    first = unit_tested(copy)
+    with (copy / "cart.py").open("a", encoding="utf-8") as cart:
+        cart.write(
+            "\n\ndef with_coupon(items, code):\n"
+            "    if code == 'SAVE10':\n"
+            "        return total(items, discount=10)\n"
+            "    if code == 'FIVEOFF':\n"
+            "        return max(total(items) - 500, 0)\n"
+            "    raise ValueError(code)\n"
+        )
+    then = unit_tested(copy)
+
+    assert first.returncode == 1 and "test_fiveoff_never_goes_below_zero" in first.stderr
+    assert "test_shipping_is_free_from_5000" not in first.stderr
+    assert then.returncode == 0, then.stderr
+
+
 def test_each_inspection_a_sample_names_is_in_it() -> None:
     """An inspection reads its text from the project when it runs; one the
     sample does not ship would fail the transition that names it."""
@@ -220,6 +244,50 @@ def test_every_transition_a_sample_has_reaches_one_of_its_agents() -> None:
             }
             for name, transition in project.transitions.items():
                 assert transition.to in reachable, f"{folder.name}: {name} → {transition.to}"
+
+
+def test_every_workflow_step_a_sample_has_goes_to_one_agent_of_its_role() -> None:
+    """A step that could reach two agents stops the run there, and one given to
+    an agent of another role goes to the wrong agent in every run."""
+    from halyard.core.config_file import projects_from_yaml
+
+    for folder in sorted(SAMPLES.glob("[0-9][0-9]-*")):
+        text = (folder / "halyard.yaml.example").read_text(encoding="utf-8")
+        for project in projects_from_yaml(text):
+            for name, step in project.workflows.steps.items():
+                to = project.transitions[step.transition].to
+                wanted = step.seat or to
+                reached = [
+                    seat
+                    for seat in project.seats
+                    if wanted in (seat.label, seat.role.value if seat.role else None)
+                ]
+                assert len(reached) == 1, f"{folder.name}: {name} reaches {len(reached)}"
+                [seat] = reached
+                assert to in (seat.label, seat.role.value if seat.role else None), (
+                    f"{folder.name}: {name} goes to {seat.label}, not to {to}"
+                )
+
+
+def test_the_last_step_of_each_workflow_a_sample_has_asks_for_done() -> None:
+    """At a workflow's last step only `done` ends the run; a prompt there that
+    asks for `forward` stops every run instead of ending it."""
+    import yaml
+
+    for folder in sorted(SAMPLES.glob("[0-9][0-9]-*")):
+        shipped = yaml.safe_load((folder / "halyard.yaml.example").read_text(encoding="utf-8"))
+        placed = _placed(shipped["projects"], folder)
+        for name, block in shipped["projects"].items():
+            workflows = block.get("workflows") or {}
+            steps = workflows.get("steps") or {}
+            for flow, order in workflows.items():
+                if flow in ("steps", "decisions", "phases"):
+                    continue
+                last = order[-1]
+                transition = (steps.get(last) or {}).get("transition") or last
+                prompt = block["transitions"][transition]["prompt"]
+                text = (placed[name] / prompt).read_text(encoding="utf-8")
+                assert "`done`" in text, f"{folder.name}: {flow} ends at {last} without done"
 
 
 def test_each_transition_prompt_a_sample_names_is_in_it() -> None:

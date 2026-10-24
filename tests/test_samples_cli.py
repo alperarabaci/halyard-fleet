@@ -371,3 +371,28 @@ def test_a_sample_s_transitions_go_in_with_the_command_they_run(tmp_path: Path) 
         "cart-nav": "-100777",
         "cart-drv": "-100888",
     }
+
+
+# --- a sample with a workflow --------------------------------------------------
+
+
+def test_a_sample_s_workflow_goes_in_with_its_steps_and_their_rounds(tmp_path: Path) -> None:
+    """Sample 07: the steps, their agents, rounds and `works_on:`, and the
+    workflow taking them in order — each kept as the sample wrote it."""
+    config = tmp_path / "halyard.yaml"
+    config.write_text(THEIRS, encoding="utf-8")
+    where = tmp_path / "cart-workflow"
+    where.mkdir()
+
+    code, _ = added(config, where, "07", answers=["", "-100888"])
+
+    projects = {p.name: p for p in projects_from_yaml(config.read_text(encoding="utf-8"))}
+    cart = projects["cart-workflow"]
+    steps = cart.workflows.steps
+    assert code == 0
+    assert cart.workflows.flows == {"deliver": ("develop", "developed", "close")}
+    assert (steps["develop"].seat, steps["develop"].rounds) == ("flow-drv", 2)
+    assert (steps["developed"].seat, steps["developed"].rounds) == ("flow-nav", 2)
+    assert (steps["close"].seat, steps["close"].works_on) == ("flow-nav", "develop")
+    assert cart.transitions["close"].inspections == ("claims",)
+    assert cart.transitions["close"].commands == ("test-fast",)
