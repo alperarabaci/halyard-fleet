@@ -221,7 +221,7 @@ def test_the_cart_s_coupon_tests_fail_until_the_task_is_done(tmp_path: Path) -> 
 def shop(tmp_path: Path) -> Path:
     """Sample 08, copied out as its README says."""
     if shutil.which("make") is None:
-        pytest.skip("sample 08's checks run through make")
+        pytest.skip("sample 08's guard and tests run through make")
     copy = tmp_path / "shop"
     shutil.copytree(SAMPLES / "08-three-agents", copy)
     return copy
@@ -240,7 +240,7 @@ def validated(where: Path) -> subprocess.CompletedProcess[str]:
     )
 
 
-def test_the_shop_s_checks_fail_until_the_task_is_done(shop: Path) -> None:
+def test_the_shop_s_guard_and_tests_fail_until_the_task_is_done(shop: Path) -> None:
     """Sample 08: the contract and both contexts' tests are there before the
     stock is, so `test-fast` is red until the driver has done the task — and
     says so on its last line, part by part, the line Halyard reads."""
@@ -312,11 +312,11 @@ def test_the_guard_names_a_crossing_and_test_fast_fails_on_it(shop: Path) -> Non
         None,
     ],
 )
-def test_a_check_that_cannot_run_answers_2_which_halyard_reads_as_not_run(
+def test_a_guard_or_target_that_cannot_run_answers_2_which_halyard_reads_as_not_run(
     shop: Path, broken: str | None
 ) -> None:
     """Sample 08: `not_run: [2]` stops a transition there, rather than hand on
-    checks that never ran as if they had passed or failed."""
+    a guard and tests that never ran as if they had passed or failed."""
     if broken:
         (shop / broken).unlink()
         result = validated(shop)
@@ -332,6 +332,85 @@ def test_a_check_that_cannot_run_answers_2_which_halyard_reads_as_not_run(
 
     assert result.returncode == 2
     assert " exit 2 — " in result.stdout.splitlines()[-1]
+
+
+@pytest.fixture
+def measured(tmp_path: Path) -> Path:
+    """Sample 10, copied out as its README says."""
+    copy = tmp_path / "cart-inspections"
+    shutil.copytree(SAMPLES / "10-measuring-inspections", copy)
+    return copy
+
+
+def with_bulk_discount(where: Path, body: str) -> subprocess.CompletedProcess[str]:
+    """The cart's tests, with `bulk_discount` written as `body` says."""
+    with (where / "cart.py").open("a", encoding="utf-8") as cart:
+        cart.write(f"\n\ndef bulk_discount(items):\n    {body}\n")
+    return unit_tested(where)
+
+
+def test_the_cart_s_bulk_discount_tests_fail_until_the_task_is_done(measured: Path) -> None:
+    """Sample 10: the bulk discount tests are there before the discount is."""
+    first = unit_tested(measured)
+    then = with_bulk_discount(
+        measured, "return sum(p * q * 95 // 100 if q >= 10 else p * q for p, q in items)"
+    )
+
+    assert first.returncode == 1 and "test_fewer_than_ten_pay_the_full_price" in first.stderr
+    assert then.returncode == 0, then.stderr
+
+
+@pytest.mark.parametrize(
+    "wrong",
+    [
+        # Rounds up: no test has an amount that needs rounding.
+        "return sum(-(-p * q * 95 // 100) if q >= 10 else p * q for p, q in items)",
+        # 5% off the whole cart, not each line: the mixed test asserts only > 0.
+        "whole = sum(p * q for p, q in items)\n"
+        "    return whole * 95 // 100 if any(q >= 10 for _, q in items) else whole",
+    ],
+)
+def test_the_bulk_discount_tests_leave_the_two_gaps_the_readme_names(
+    measured: Path, wrong: str
+) -> None:
+    """Sample 10: what a good inspection should find is there to find — each
+    gap lets a wrong `bulk_discount` pass every test. Close one, and the README
+    judges the answers by a gap that is gone."""
+    result = with_bulk_discount(measured, wrong)
+
+    assert result.returncode == 0, result.stderr
+
+
+def test_the_query_sample_10_gives_runs_on_halyard_s_own_tables(tmp_path: Path) -> None:
+    """The README's `sqlite3` line is read against `inspection_runs` and
+    `turn_usage` as Halyard makes them; a column renamed would leave it a
+    query that no longer runs."""
+    import sqlite3
+
+    from halyard.core import usage
+    from halyard.inspections import record
+
+    readme = (SAMPLES / "10-measuring-inspections" / "README.md").read_text(encoding="utf-8")
+    [query] = re.findall(r'sqlite3 halyard\.db "([^"]+)"', readme)
+    database = sqlite3.connect(tmp_path / "halyard.db")
+    database.executescript(record._SCHEMA)
+    database.executescript(usage._SCHEMA)
+    database.execute(
+        "INSERT INTO inspection_runs (id, at, project, inspection, file, file_version, model, "
+        "context, note, input, answer, outcome, why, took) VALUES ('run1', '2026-10-24', "
+        "'cart-inspections', 'test-reliability', 'inspections/test-reliability.md', '1a2b3c4', "
+        "'opus', '', '', 'in', 'out', 'answered', '', 31.0)"
+    )
+    database.execute(
+        "INSERT INTO turn_usage (recorded_at, runtime, session_id, model, purpose, project, "
+        "input_tokens, output_tokens, cache_write_tokens, cache_read_tokens) VALUES "
+        "('2026-10-24', 'claude-code', 'run1', 'opus', 'inspect test-reliability', "
+        "'cart-inspections', 3, 812, 40000, 0)"
+    )
+
+    rows = database.execute(query).fetchall()
+
+    assert rows == [("test-reliability", "1a2b3c4", "opus", 1, 31.0, 812)]
 
 
 def test_each_inspection_a_sample_names_is_in_it() -> None:
