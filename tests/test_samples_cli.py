@@ -402,3 +402,57 @@ def test_a_sample_s_workflow_goes_in_with_its_steps_and_their_rounds(tmp_path: P
     assert {
         name: (choice.model, choice.effort) for name, choice in cart.inspection_models.items()
     } == {"test-reliability": ("opus", "high"), "over-engineering": ("sonnet", "medium")}
+
+
+# --- a sample with three agents on two runtimes --------------------------------
+
+
+def test_three_agents_go_in_each_in_the_group_it_was_given(tmp_path: Path) -> None:
+    """Sample 08: two groups of their own asked for and kept, the review the
+    navigator acts on, the phases, the inspections on the plan and on the
+    change, and the navigator's compaction files — all as the sample wrote
+    them."""
+    config = tmp_path / "halyard.yaml"
+    config.write_text(THEIRS, encoding="utf-8")
+    where = tmp_path / "shop"
+    where.mkdir()
+
+    code, _ = added(config, where, "08", answers=["", "-100888", "-100999"])
+
+    projects = {p.name: p for p in projects_from_yaml(config.read_text(encoding="utf-8"))}
+    shop = projects["shop"]
+    steps = shop.workflows.steps
+    assert code == 0
+    assert {(seat.label, seat.runtime, seat.chat) for seat in shop.seats} == {
+        ("shop-nav", "claude-code", "-100777"),
+        ("shop-drv", "claude-code", "-100888"),
+        ("shop-rev", "codex", "-100999"),
+    }
+    assert shop.workflows.flows == {
+        "deliver": ("review", "reviewed", "develop", "developed", "close")
+    }
+    assert shop.workflows.stretches == {"deliver": (2, 3)}
+    assert steps["reviewed"].decided_by == "review"
+    assert steps["close"].works_on == "develop"
+    assert shop.transitions["review"].followup_prompt == Path("transitions/review-followup.md")
+    assert shop.commands_not_run == {"test-fast": (2,)}
+    # Two inspections on the plan at review, two on the change at close, each
+    # on its own model — `proof` on the machine's.
+    assert shop.transitions["review"].inspections == ("proof", "over-engineering")
+    assert shop.transitions["close"].inspections == ("test-reliability", "bounded-context")
+    assert {
+        name: (choice.model, choice.effort) for name, choice in shop.inspection_models.items()
+    } == {
+        "over-engineering": ("gpt-6.1-sol", "high"),
+        "test-reliability": ("opus", "high"),
+        "bounded-context": ("gpt-6.1-sol", "high"),
+    }
+    # The navigator's state is carried across a compaction; the others need not be.
+    compaction = {
+        seat.label: (seat.before_compaction, seat.after_compaction) for seat in shop.seats
+    }
+    assert compaction == {
+        "shop-nav": ("compaction/before.md", "compaction/after.md"),
+        "shop-drv": (None, None),
+        "shop-rev": (None, None),
+    }
