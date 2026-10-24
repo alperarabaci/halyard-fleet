@@ -334,6 +334,189 @@ def test_a_guard_or_target_that_cannot_run_answers_2_which_halyard_reads_as_not_
     assert " exit 2 — " in result.stdout.splitlines()[-1]
 
 
+FEWER_CARDS = SAMPLES / "09-fewer-cards"
+
+
+@pytest.fixture
+def fewer_cards(tmp_path: Path) -> Path:
+    """Sample 09, copied out as its README says, and a repository of its own."""
+    copy = tmp_path / "fewer-cards"
+    shutil.copytree(FEWER_CARDS, copy)
+    (copy / ".git").mkdir()
+    return copy
+
+
+def test_the_first_round_starts_from_tests_that_pass(fewer_cards: Path) -> None:
+    """Sample 09: the agent adds a test for each task, so what it runs first is
+    its own test failing, not one the sample left broken."""
+    result = unit_tested(fewer_cards)
+
+    assert result.returncode == 0, result.stderr
+
+
+def test_what_sample_09_trusts_lets_the_test_runs_and_notes_through_and_nothing_else(
+    fewer_cards: Path,
+) -> None:
+    """The entries the README adds, and the example's `writes:`, judged by the
+    gate's own rules: what PROMPT.md has the agent run and write goes through,
+    and its edits, code given to python3, and `.git/` still ask."""
+    from halyard.core import grants, reads, writes
+    from halyard.core.policy import Policy
+
+    readme = (FEWER_CARDS / "README.md").read_text(encoding="utf-8")
+    entries = dict.fromkeys(re.findall(r"halyard rules add fewer-cards '([^']+)'", readme))
+    example = (FEWER_CARDS / "halyard.yaml.example").read_text(encoding="utf-8")
+    rules = grants.Rules(reads=True, writes=writes.from_yaml(example))
+    runs = tuple(reads.run_entry(entry) for entry in entries)
+    root = str(fewer_cards)
+
+    def through(tool: str, command: str = "", path: str | None = None) -> bool:
+        return (
+            grants.grant_for(
+                tool=tool,
+                command=command,
+                risk=Policy().classify(command).risk,
+                cwd=root,
+                project_dir=root,
+                rules=rules,
+                runs=runs,
+                file_path=f"{root}/{path}" if path else None,
+            )
+            is not None
+        )
+
+    assert list(entries) == ["python3 -m unittest *", "make test-fast"]
+    assert through("Bash", "python3 -m unittest -q test_cart.ShippingTest.test_free_from_5000")
+    assert through("Bash", "python3 -m unittest -q test_cart.ShippingTest")
+    assert through("Bash", "make test-fast")
+    assert through("Write", path="NOTES/shipping.md")
+    assert not through("Bash", "python3 -c 'import cart; print(cart.total([]))'")
+    for edited in ("cart.py", "test_cart.py", "TASK.md", "NOTES/../cart.py", ".git/config"):
+        assert not through("Edit", path=edited), edited
+
+
+def test_what_sample_09_shows_is_what_halyard_prints(fewer_cards: Path, tmp_path: Path) -> None:
+    """The README's evidence and proposals, line for line, from the job's own
+    rendering of a round like the one it describes; a change to how either is
+    printed would leave the README showing a screen nobody sees."""
+    import asyncio
+    import json
+    from datetime import UTC, datetime
+
+    from halyard.core import grants
+    from halyard.core.audit import AuditAction, AuditRecord, SqliteAuditSink
+    from halyard.core.config_file import projects_from_yaml
+    from halyard.upkeep import runs_advice
+
+    root = str(fewer_cards)
+    one_test = "python3 -m unittest -q test_cart.CouponTest.test_save10_takes_10_percent_off"
+    asked = [
+        ("Edit", {"file_path": f"{root}/test_cart.py"}),
+        ("Bash", {"command": one_test}),
+        ("Edit", {"file_path": f"{root}/cart.py"}),
+        ("Bash", {"command": one_test}),
+        ("Bash", {"command": "python3 -m unittest -q test_cart.CouponTest"}),
+        ("Bash", {"command": "make test-fast"}),
+        ("Edit", {"file_path": f"{root}/TASK.md"}),
+        ("Write", {"file_path": f"{root}/NOTES/coupon.md"}),
+    ]
+    database = tmp_path / "halyard.db"
+
+    async def answered() -> None:
+        sink = SqliteAuditSink(database)
+        await sink.open()
+        for number, (tool, detail) in enumerate(asked):
+            for action, said in (
+                (AuditAction.APPROVAL_REQUESTED, {"tool": tool, **detail, "project_dir": root}),
+                (AuditAction.APPROVAL_RESOLVED, {"decision": "allow", "reason": "user"}),
+            ):
+                await sink.write(
+                    AuditRecord(
+                        action=action,
+                        recorded_at=datetime.now(UTC),
+                        request_id=f"req_{number}",
+                        project="fewer-cards",
+                        detail=said,
+                    )
+                )
+        await sink.close()
+
+    asyncio.run(answered())
+    [project] = projects_from_yaml(f"projects:\n  fewer-cards:\n    path: {root}\n")
+    found = runs_advice.gather(database, project, grants.Rules(reads=True), days=14)
+    proposals = [
+        {
+            "entry": "python3 -m unittest *",
+            "why": "the project's own test runner; its arguments are test names and options",
+        },
+        {
+            "entry": "make test-fast",
+            "why": "the project's whole test suite, the target named exactly",
+        },
+        {"entry": "python3 *", "why": "every one was allowed"},
+    ]
+    advice = runs_advice.advise(json.dumps({"proposals": proposals}), found)
+    printed = runs_advice.render(found) + runs_advice.render_advice(found, advice)
+    readme = (FEWER_CARDS / "README.md").read_text(encoding="utf-8")
+    [evidence, proposed] = re.findall(
+        r"(?:Among what it prints|Something like):\n\n```\n(.*?)```", readme, re.DOTALL
+    )
+
+    for line in (evidence + proposed).splitlines():
+        if line.strip() != "…":
+            assert line in printed.splitlines(), line
+    assert "not an entry: `python3 *` could run anything" in printed
+    assert "halyard rules add fewer-cards 'python3 *'" not in printed
+
+
+def test_the_query_sample_09_gives_runs_on_the_audit_log(tmp_path: Path) -> None:
+    """The README's `sqlite3` line, read against the audit log as Halyard keeps
+    it and the records the gate writes for a trusted run and a note."""
+    import asyncio
+    import sqlite3
+
+    from halyard.core import audit
+
+    readme = (FEWER_CARDS / "README.md").read_text(encoding="utf-8")
+    [query] = re.findall(r'sqlite3 halyard\.db "([^"]+)"', readme)
+    database = tmp_path / "halyard.db"
+    who = {"session_id": "s1", "agent_id": "fewer-cards-dev", "project": "fewer-cards"}
+
+    async def granted() -> None:
+        sink = audit.SqliteAuditSink(database)
+        await sink.open()
+        await sink.write(
+            audit.risk_preauthorized(
+                **who,
+                tool="Bash",
+                matched=(),
+                command="make test-fast",
+                why="the project's own `runs:` and reads inside it: make test-fast",
+            )
+        )
+        await sink.write(
+            audit.write_preauthorized(
+                **who,
+                tool="Write",
+                file_path="/x/fewer-cards/NOTES/shipping.md",
+                pattern="NOTES/**",
+            )
+        )
+        await sink.close()
+
+    asyncio.run(granted())
+    rows = sqlite3.connect(database).execute(query).fetchall()
+
+    assert [row[1:] for row in rows] == [
+        ("write.preauthorized", "/x/fewer-cards/NOTES/shipping.md", "NOTES/**"),
+        (
+            "risk.preauthorized",
+            "make test-fast",
+            "the project's own `runs:` and reads inside it: make test-fast",
+        ),
+    ]
+
+
 @pytest.fixture
 def measured(tmp_path: Path) -> Path:
     """Sample 10, copied out as its README says."""
