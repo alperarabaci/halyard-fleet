@@ -281,6 +281,12 @@ class QuestionStore:
             pending = self._pending.get(request_id)
             return pending.request if pending else None
 
+    async def resolution_of(self, request_id: str) -> QuestionResolution | None:
+        """How a question ended, or None while it is open or once it is gone."""
+        async with self._lock:
+            pending = self._pending.get(request_id)
+            return pending.resolution if pending else None
+
     async def list_open(self) -> list[QuestionRequest]:
         async with self._lock:
             return sorted(

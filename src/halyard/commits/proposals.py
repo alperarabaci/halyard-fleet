@@ -108,6 +108,12 @@ class Proposals:
             return None
         return found
 
+    def deadline(self, handle: str) -> datetime | None:
+        """When the proposal stops being worth answering, or None when it is
+        gone already — what its card's buttons are good until."""
+        found = self.peek(handle)
+        return found.at + self._ttl if found is not None else None
+
     def take(self, handle: str) -> Proposal | None:
         """The proposal, removed. For an answer, which happens once."""
         found = self.peek(handle)

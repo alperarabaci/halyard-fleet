@@ -580,6 +580,70 @@ async def test_a_rewrite_of_a_proposal_that_expired_says_so(wired) -> None:
     assert commit_count(repo) == 1
 
 
+async def test_a_reworded_card_takes_the_place_of_the_one_before(wired) -> None:
+    """Left open, the old card's Commit committed the new wording under the old
+    one's text — a card that says one thing and does another."""
+    channel, api, _, repo = wired
+    wrote(repo, "loader.py", "x = 1\n")
+    await deliver(channel, typed("/commit"))
+    handle = only_handle(channel)
+    [first] = channel._desk.of("commit", handle)
+    await tap(channel, press(handle, commit_card.REWRITE, message_id=first.message_id))
+
+    await deliver(channel, replying("power gen minor fixes", api.sent[-1]["text"]))
+
+    [now] = channel._desk.of("commit", handle)
+    assert now.message_id != first.message_id
+    [closed] = [edit for edit in api.edits if edit["message_id"] == first.message_id]
+    assert "Reworded" in closed["text"]
+
+
+async def test_a_card_git_refused_says_nothing_was_committed(wired) -> None:
+    """The proposal is spent by the press, so its card says so instead of
+    offering a Commit that can only answer that the commit is no longer open."""
+    channel, api, _, repo = wired
+    wrote(repo, "loader.py", "x = 1\n")
+    await deliver(channel, typed("/commit"))
+    handle = only_handle(channel)
+    [card] = channel._desk.of("commit", handle)
+    (repo / "loader.py").unlink()
+
+    await tap(channel, press(handle, commit_card.MAKE, message_id=card.message_id))
+
+    [closed] = [edit for edit in api.edits if edit["message_id"] == card.message_id]
+    assert "NOT COMMITTED" in closed["text"]
+    assert channel._desk.of("commit", handle) == []
+
+
+async def test_a_proposal_left_too_long_closes_its_card(wired) -> None:
+    channel, api, _, repo = wired
+    wrote(repo, "loader.py", "x = 1\n")
+    await deliver(channel, typed("/commit"))
+    [card] = channel._desk.of("commit", only_handle(channel))
+    assert card.expires_at is not None, "good until the proposal goes stale"
+    card.expires_at = channel._clock() - timedelta(seconds=1)
+
+    await channel._close_expired()
+
+    [closed] = [edit for edit in api.edits if edit["message_id"] == card.message_id]
+    assert "EXPIRED" in closed["text"]
+
+
+async def test_a_press_on_a_proposal_that_is_gone_closes_its_card(wired) -> None:
+    channel, api, _, repo = wired
+    wrote(repo, "loader.py", "x = 1\n")
+    await deliver(channel, typed("/commit"))
+    handle = only_handle(channel)
+    [card] = channel._desk.of("commit", handle)
+    channel._proposals._open.clear()
+
+    await tap(channel, press(handle, commit_card.MAKE, message_id=card.message_id))
+
+    assert api.answers[-1]["text"] == "That commit is no longer open."
+    [closed] = [edit for edit in api.edits if edit["message_id"] == card.message_id]
+    assert "No longer open" in closed["text"]
+
+
 # --- the command itself -----------------------------------------------------
 
 
@@ -3554,6 +3618,7 @@ async def test_a_project_with_no_navigator_says_so(wired) -> None:
 
     assert "no navigator" in api.sent[-1]["text"]
     assert commit_count(repo) == 1
+    assert "NO ROUND SENT" in api.edits[-1]["text"], "the card says so too"
 
 
 async def test_a_round_file_that_is_not_there_says_so_rather_than_committing(wired) -> None:
@@ -3571,6 +3636,7 @@ async def test_a_round_file_that_is_not_there_says_so_rather_than_committing(wir
 
     assert "no confirmation round" in api.sent[-1]["text"]
     assert commit_count(repo) == 1
+    assert "NO ROUND SENT" in api.edits[-1]["text"], "the card says so too"
 
 
 async def test_a_slow_commit_does_not_stop_anything_else_being_answered(wired) -> None:

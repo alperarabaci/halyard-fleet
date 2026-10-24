@@ -39,6 +39,7 @@ from halyard.agents.base import AgentRunner
 from halyard.applications import catalogue, desktop
 from halyard.channels.telegram import cards, commit_card
 from halyard.channels.telegram.api import TelegramApi
+from halyard.channels.telegram.desk import STANDING, Card, CardDesk
 from halyard.commands import catalogue as commands_offered
 from halyard.commands import inputs as command_inputs
 from halyard.commands import labels as command_labels
@@ -49,6 +50,7 @@ from halyard.core.approvals import (
     AlreadyResolvedError,
     ApprovalExpiredError,
     ApprovalRequest,
+    ApprovalResolution,
     ApprovalStore,
     Decision,
     InvalidNonceError,
@@ -70,6 +72,7 @@ from halyard.core.questions import (
     AlreadyAnsweredError,
     QuestionExpiredError,
     QuestionRequest,
+    QuestionResolution,
     QuestionStore,
     UnknownQuestionError,
 )
@@ -780,6 +783,10 @@ class TelegramChannel:
         # Same shape otherwise — handle to (request, message id, chat).
         self._question_store = question_store
         self._open_questions: dict[str, tuple[QuestionRequest, int, str]] = {}
+        #: Every card with buttons this channel sent, and how each one closes.
+        #: See `CardDesk`. The maps above say what a button answers; this says
+        #: whether its card is still open, and closes it.
+        self._desk = CardDesk(api, clock)
         self._poller: asyncio.Task | None = None
         self._offset: int | None = None
         # Which chat the command being handled came from, so a listing can mark
@@ -928,10 +935,20 @@ class TelegramChannel:
             request.session_id,
             request.project,
         )
-        message = await self._api.send_message(
-            chat_id, text, reply_markup=markup, message_thread_id=thread_id
+        card = await self._desk.open(
+            chat_id,
+            text,
+            markup,
+            thread=thread_id,
+            kind="approval",
+            key=request.request_id,
+            expires_at=request.expires_at,
+            ending=lambda how, by: cards.render_resolved(
+                request, decision=how, by=by, inspection=inspection
+            ),
         )
-        message_id = int(message["message_id"])
+        assert card is not None, "an approval is always kept"
+        message_id = card.message_id
         self._open[cards.handle_of(request)] = (request, message_id, chat_id, thread_id)
         # Where a card went, said once per card. "It arrived in the wrong
         # group" is otherwise a question only the person holding the phone can
@@ -958,6 +975,31 @@ class TelegramChannel:
         _, message_id, chat_id, _ = entry
         await self._settle_card(request, message_id, chat_id, decision, by)
 
+    async def approval_ended(
+        self, request: ApprovalRequest, resolution: ApprovalResolution
+    ) -> None:
+        """Close an approval's card the way it ended, when no button did.
+
+        Core says so once the wait for an answer is over, however it ended. A
+        press closes its own card as it answers it, and an answer at the desk
+        closes it through `close_approval`; what is left is the deadline passing
+        and Halyard stopping, which no button reaches — and which used to leave
+        the card asking, buttons and all, long after it had been denied.
+        """
+        late = self._too_late(resolution.reason)
+        if late is not None:
+            await self._desk.end_about("approval", request.request_id, late[0])
+
+    async def question_ended(
+        self, request: QuestionRequest, resolution: QuestionResolution
+    ) -> None:
+        """Close a question's card the way it ended, when no answer here did:
+        the deadline passing, or Halyard stopping. See `approval_ended`."""
+        if resolution.reason in (ResolutionReason.TIMEOUT, ResolutionReason.EXPIRED):
+            await self._desk.end_about("question", request.request_id, "expired")
+        elif resolution.reason is ResolutionReason.SHUTDOWN:
+            await self._desk.end_about("question", request.request_id, "shutdown")
+
     async def send_question(self, request: QuestionRequest) -> str:
         """Put a question card in the seat's chat.
 
@@ -976,10 +1018,23 @@ class TelegramChannel:
             request.session_id,
             request.project,
         )
-        message = await self._api.send_message(
-            chat_id, text, reply_markup=markup, message_thread_id=thread_id
+        card = await self._desk.open(
+            chat_id,
+            text,
+            markup,
+            thread=thread_id,
+            kind="question",
+            key=request.request_id,
+            expires_at=request.expires_at,
+            ending=lambda how, _by: cards.render_question_resolved(
+                request,
+                answer=None,
+                by=None,
+                why="Halyard stopped" if how == "shutdown" else "",
+            ),
         )
-        message_id = int(message["message_id"])
+        assert card is not None, "a question is always kept"
+        message_id = card.message_id
         self._open_questions[cards.question_handle_of(request)] = (request, message_id, chat_id)
         logger.info(
             "Question for %s (%s, session %r) sent to %s",
@@ -1040,13 +1095,14 @@ class TelegramChannel:
         message = None
         for index, chunk in enumerate(chunks, start=1):
             marker = f"<i>({index}/{len(chunks)})</i>\n" if len(chunks) > 1 else ""
-            message = await self._api.send_message(
-                chat_id,
-                marker + html.escape(chunk),
-                message_thread_id=thread_id,
-                # On the last one, where somebody's thumb already is.
-                reply_markup=keyboard if index == len(chunks) else None,
-            )
+            said = marker + html.escape(chunk)
+            if keyboard is not None and index == len(chunks):
+                # On the last one, where somebody's thumb already is — and a
+                # card, so the button goes once it is pressed.
+                card = await self._desk.open(chat_id, said, keyboard, thread=thread_id)
+                message = {"message_id": card.message_id} if card is not None else message
+                continue
+            message = await self._api.send_message(chat_id, said, message_thread_id=thread_id)
         return str(message["message_id"]) if message else ""
 
     def _offer_another_model(self, text: str, agent_id: str | None) -> dict | None:
@@ -1175,6 +1231,22 @@ class TelegramChannel:
                     # One bad update must not take the loop down with it, or a
                     # single malformed message would silence every future answer.
                     logger.exception("Failed to handle a Telegram update")
+            await self._close_expired()
+
+    async def _close_expired(self) -> None:
+        """Close every card whose deadline has passed, once per poll.
+
+        Whatever a card is about normally closes it as it ends — a press, a
+        decision at the desk, the request timing out. This is what makes a card
+        with a deadline unable to outlive it when none of those reached it.
+        """
+        try:
+            closed = await self._desk.sweep()
+        except Exception:
+            logger.warning("Could not close the cards past their deadline", exc_info=True)
+            return
+        if closed:
+            logger.info("Closed %d card%s past their deadline", closed, "s" if closed != 1 else "")
 
     async def _handle_message(self, message: dict) -> None:
         """Handle a typed command.
@@ -2417,6 +2489,7 @@ class TelegramChannel:
             chat_id,
             thread_id,
             reply_markup=commit_card.keyboard(handle, confirmation=offers_round),
+            **self._commit_card_about(handle, project, message),
         )
 
     async def _rewrite_commit(
@@ -2441,7 +2514,10 @@ class TelegramChannel:
         if reworded is None:
             await self._say("That commit is no longer open.", chat_id, thread_id)
             return
-        await self._say(
+        # The card it replaces closes once the new one is there. Left live, its
+        # Commit would commit the new wording under the old one's text.
+        before = self._desk.of("commit", handle)
+        card = await self._say(
             commit_card.render(
                 project=reworded.project,
                 work=reworded.work,
@@ -2452,7 +2528,28 @@ class TelegramChannel:
             chat_id,
             thread_id,
             reply_markup=commit_card.keyboard(handle, confirmation=reworded.reviewed),
+            **self._commit_card_about(handle, reworded.project, reworded.message),
         )
+        if card is not None:
+            for old in before:
+                await self._desk.close_card(
+                    old, outcome="✏️ <i>Reworded — the card below is the one to answer.</i>"
+                )
+
+    def _commit_card_about(self, handle: str, project: str, message: str) -> dict:
+        """What a commit card is about, for the desk: the proposal its buttons
+        carry, good until the proposal is stale — and what the card says then."""
+        return {
+            "kind": "commit",
+            "key": handle,
+            "expires_at": self._proposals.deadline(handle),
+            "ending": lambda how, by: commit_card.render_resolved(
+                project=project,
+                message=message,
+                outcome="⌛ EXPIRED — /commit again to see the branch as it is now",
+                by=None,
+            ),
+        }
 
     async def _decide_commit(
         self, proposed: tuple[str, str], user_id: str, query_id: str, callback: dict
@@ -2475,6 +2572,7 @@ class TelegramChannel:
             # Left in place: the sentence still has to find it.
             if handle not in self._proposals:
                 await self._dismiss(query_id, "That commit is no longer open.")
+                await self._commit_card_gone(message, here)
                 return
             await self._dismiss(query_id)
             await self._say(
@@ -2490,6 +2588,7 @@ class TelegramChannel:
         proposal = self._proposals.take(handle)
         if proposal is None:
             await self._dismiss(query_id, "That commit is no longer open.")
+            await self._commit_card_gone(message, here)
             return
 
         if action == commit_card.CONFIRM:
@@ -2512,6 +2611,11 @@ class TelegramChannel:
             await self._dismiss(query_id, "git refused.")
             await self._say(
                 f"\U0001f6ab git refused: {html.escape(str(refused))}", here or "", thread_id
+            )
+            # The proposal is spent: its card says so, and a fresh `/commit`
+            # reads the branch as it is after whatever git objected to.
+            await self._settle_commit(
+                proposal, "\U0001f6ab NOT COMMITTED \u2014 git refused", user_id, here, message_id
             )
             return
 
@@ -2569,6 +2673,13 @@ class TelegramChannel:
         )
         if not round_text:
             await self._say("That project has no confirmation round to send.", chat_id, thread_id)
+            await self._settle_commit(
+                proposal,
+                "\u2716\ufe0f NO ROUND SENT \u2014 none configured",
+                user_id,
+                chat_id,
+                message_id,
+            )
             return
 
         seat = next(
@@ -2585,6 +2696,13 @@ class TelegramChannel:
                 chat_id,
                 thread_id,
             )
+            await self._settle_commit(
+                proposal,
+                "\u2716\ufe0f NO ROUND SENT \u2014 no navigator",
+                user_id,
+                chat_id,
+                message_id,
+            )
             return
 
         await self._settle_commit(
@@ -2600,6 +2718,16 @@ class TelegramChannel:
             f"{seat.label} {round_text}", f"tg:{user_id}", chat_id, thread_id
         )
 
+    async def _commit_card_gone(self, message: dict, chat_id: str | None) -> None:
+        """Close a commit card whose proposal is gone — answered on another
+        card, or stale — so it stops offering what it can no longer do."""
+        await self._desk.close(
+            chat_id,
+            message.get("message_id"),
+            outcome="⌛ <i>No longer open — /commit again to see the branch as it is now.</i>",
+            shown=message.get("text") or "",
+        )
+
     async def _settle_commit(
         self,
         proposal,
@@ -2609,22 +2737,16 @@ class TelegramChannel:
         message_id: int | None,
     ) -> None:
         """Edit the card to say what happened, so scrolling back is honest."""
-        if message_id is None:
-            return
-        try:
-            await self._api.edit_message_text(
-                chat_id or self._chat_id,
-                message_id,
-                commit_card.render_resolved(
-                    project=proposal.project,
-                    message=proposal.message,
-                    outcome=outcome,
-                    by=f"tg:{user_id}",
-                ),
-                reply_markup=None,
-            )
-        except Exception:
-            logger.warning("Could not update a commit card", exc_info=True)
+        await self._desk.close(
+            chat_id or self._chat_id,
+            message_id,
+            text=commit_card.render_resolved(
+                project=proposal.project,
+                message=proposal.message,
+                outcome=outcome,
+                by=f"tg:{user_id}",
+            ),
+        )
 
     async def _forward_last(
         self, label: str, actor: str, chat_id: str, thread_id: int | None
@@ -4962,23 +5084,38 @@ class TelegramChannel:
         thread_id: int | None = None,
         reply_markup: dict | None = None,
         reply_to_message_id: int | None = None,
-    ) -> None:
+        *,
+        kind: str = "",
+        key: str = "",
+        expires_at: datetime | None = None,
+        ending: Callable[[str, str | None], str] | None = None,
+    ) -> Card | None:
         """Answer in the conversation that asked.
 
         Not in the configured default chat, which is where this used to go: ask
         the navigator group something and the reply appeared in a private chat
         with the bot, which reads as the message having been lost.
+
+        Anything said with buttons under it is a card, kept by the desk so it
+        closes: `kind` and `key` say what it is about when the buttons do not,
+        `expires_at` when it stops meaning anything, and `ending` what it says
+        then. See `CardDesk`. The card, when it is one and it arrived.
         """
         try:
-            await self._api.send_message(
+            return await self._desk.open(
                 chat_id or self._chat_id,
                 text,
-                message_thread_id=thread_id,
-                reply_markup=reply_markup,
-                reply_to_message_id=reply_to_message_id,
+                reply_markup,
+                thread=thread_id,
+                reply_to=reply_to_message_id,
+                kind=kind,
+                key=key,
+                expires_at=expires_at,
+                ending=ending,
             )
         except Exception:
             logger.warning("Could not answer a command", exc_info=True)
+            return None
 
     async def _handle_callback(self, callback: dict) -> None:
         query_id = str(callback.get("id", ""))
@@ -4997,8 +5134,10 @@ class TelegramChannel:
             here = str((message.get("chat") or {}).get("id") or "") or None
             what, value = chosen
             await self._dismiss(query_id)
+            # Spent before it is acted on, whatever it is: a second press then
+            # finds nothing to press. Only a run's own buttons keep their card.
+            await self._spend(what, value, callback.get("data") or "", message, here)
             if what == "cancel":
-                await self._close_card(message, here)
                 return
             if what in ("do", "prompt"):
                 # A command pressed on a menu card is that command typed: the
@@ -5006,7 +5145,6 @@ class TelegramChannel:
                 allowed = (*ACTIONS, *AGENT) if what == "do" else tuple(self._prompts)
                 if value not in allowed:
                     return
-                await self._close_card(message, here, f"☑️ /{html.escape(value)}")
                 await self._handle_message(
                     {
                         "message_id": message.get("message_id"),
@@ -5018,13 +5156,9 @@ class TelegramChannel:
                 )
                 return
             if what == "label":
-                # Spent once a label is chosen, as a command's card is.
-                await self._close_card(message, here, f"☑️ {html.escape(value)}")
                 await self._label_task(value, here or "", message.get("message_thread_id"))
                 return
             if what == "run":
-                # Spent once a command is chosen, as a transition's card is.
-                await self._close_card(message, here, f"☑️ {html.escape(value)}")
                 await self._run_command(value, here or "", message.get("message_thread_id"))
                 return
             if what in ("inspect", "check"):
@@ -5096,10 +5230,6 @@ class TelegramChannel:
             # were handoffs: the wire format, never shown, and in every chat.
             if what in ("handoff", "handto"):
                 name, _, label = value.partition(">")
-                # The card is spent once a transition is chosen on it: closed,
-                # saying which, so it cannot send the same thing again by mistake.
-                chosen = f"{name} → {label}" if label else name
-                await self._close_card(message, here, f"☑️ {html.escape(chosen)}")
                 self._detach(
                     self._run_transition(
                         name,
@@ -5159,7 +5289,7 @@ class TelegramChannel:
 
         asked = cards.parse_question_data(callback.get("data") or "")
         if asked is not None:
-            await self._answer_question(asked, user_id, query_id)
+            await self._answer_question(asked, user_id, query_id, callback)
             return
 
         proposed = commit_card.parse_callback_data(callback.get("data") or "")
@@ -5195,6 +5325,7 @@ class TelegramChannel:
 
         if entry is None:
             await self._dismiss(query_id, "That request is no longer open.")
+            await self._close_pressed(callback, "⌛ <i>No longer open.</i>")
             return
 
         request, message_id, chat_id, thread_id = entry
@@ -5215,6 +5346,16 @@ class TelegramChannel:
                 request.request_id, nonce=nonce, decision=decision, decided_by=actor
             )
         except AlreadyResolvedError:
+            ended = await self._store.resolution_of(request.request_id)
+            late = self._too_late(ended.reason if ended else None)
+            if late:
+                # Not a second press: the first one, after nobody answered in
+                # time or after Halyard stopped. Recorded as what it is — the
+                # timeout already is — rather than as a replay.
+                decision, said = late
+                await self._settle_card(request, message_id, chat_id, decision, None)
+                await self._dismiss(query_id, said)
+                return
             await self._record(replayed_callback(actor=actor, request_id=request.request_id))
             await self._dismiss(query_id, "Already decided.")
             return
@@ -5231,6 +5372,7 @@ class TelegramChannel:
             # The store has evicted it, so nothing here can be resolved again.
             self._open.pop(handle, None)
             await self._dismiss(query_id, "That request is no longer open.")
+            await self._desk.close(chat_id, message_id, outcome="⌛ <i>No longer open.</i>")
             return
 
         if action == cards.STOP:
@@ -5258,23 +5400,92 @@ class TelegramChannel:
         decision: str,
         by: str | None,
     ) -> None:
-        """Rewrite the card to show the outcome and drop the buttons."""
-        try:
-            await self._api.edit_message_text(
-                chat_id,
-                message_id,
-                cards.render_resolved(
-                    request,
-                    decision=decision,
-                    by=by,
-                    inspection=self._inspection_named(request.session_id),
-                ),
-                reply_markup=None,
-            )
-        except Exception:
-            # Cosmetic. The decision is already recorded and the nonce is spent,
-            # so a stale-looking card is untidy rather than dangerous.
-            logger.warning("Could not update the card for %s", request.request_id, exc_info=True)
+        """Rewrite the card to show the outcome and drop the buttons.
+
+        Cosmetic, through the desk: the decision is already recorded and the
+        nonce is spent, so a card that cannot be edited is untidy rather than
+        dangerous, and one already closed is left as it is.
+        """
+        await self._desk.close(
+            chat_id,
+            message_id,
+            text=cards.render_resolved(
+                request,
+                decision=decision,
+                by=by,
+                inspection=self._inspection_named(request.session_id),
+            ),
+        )
+
+    async def _spend(
+        self, what: str, value: str, data: str, message: dict, chat_id: str | None
+    ) -> None:
+        """Close the card a choice was pressed on, saying what was chosen.
+
+        Every choice is made once: a picker pressed twice ran its inspection
+        twice and handed the same reply on twice. So the card closes on the
+        press, before the choice is acted on. A workflow run's own buttons are
+        the exception — the run goes on after them, and so does its card. See
+        `STANDING`.
+        """
+        if what in STANDING:
+            return
+        card = self._desk.find(chat_id, message.get("message_id"))
+        if what == "cancel":
+            outcome = "✖️ Cancelled"
+        else:
+            chosen = self._chosen(what, value, self._desk.button(card, data))
+            if not chosen:
+                # A label picked for a command on a card from before a restart:
+                # which label it was is read from the project, and its handler
+                # closes the card once it knows. See `_label_picked`.
+                return
+            outcome = f"☑️ {html.escape(chosen)}"
+        await self._desk.close(
+            chat_id, message.get("message_id"), outcome=outcome, shown=message.get("text") or ""
+        )
+
+    @staticmethod
+    def _chosen(what: str, value: str, button: str) -> str:
+        """What a pressed choice was, in words, for the card it closes: the
+        value, where the value is readable, and the button's own label where it
+        is not — a step's place, a label's position in its group."""
+        if what in ("do", "prompt"):
+            return f"/{value}"
+        if what in ("handoff", "handto", "result"):
+            name, _, label = value.partition(">")
+            return f"{name} → {label}" if label else name
+        if what == "flowat":
+            if button:
+                return button
+            name, _, index = value.rpartition(">")
+            return f"{name}, step {int(index) + 1}" if index.isdigit() else name
+        if what == "pick":
+            return button
+        return value
+
+    async def _close_pressed(self, callback: dict, outcome: str) -> None:
+        """Close the card a button was pressed on, when what it asked is gone —
+        decided and forgotten, or from before a restart. It can do nothing
+        more, so it stops offering to."""
+        message = callback.get("message") or {}
+        await self._desk.close(
+            str((message.get("chat") or {}).get("id") or "") or None,
+            message.get("message_id"),
+            outcome=outcome,
+            shown=message.get("text") or "",
+        )
+
+    @staticmethod
+    def _too_late(reason: ResolutionReason | None) -> tuple[str, str] | None:
+        """How a card reads, and what its press is told, when the approval it
+        asked ended without anybody here: the deadline, or Halyard stopping.
+        None for an approval somebody decided."""
+        if reason in (ResolutionReason.TIMEOUT, ResolutionReason.EXPIRED):
+            return "expired", "Too late — that expired and was denied."
+        if reason is ResolutionReason.SHUTDOWN:
+            return "shutdown", "Too late — Halyard stopped, and it was denied."
+        return None
 
     async def _close_card(
         self, message: dict, chat_id: str | None, outcome: str = "✖️ Cancelled"
@@ -5285,16 +5496,12 @@ class TelegramChannel:
         The text stays, so the chat still shows what was offered; the buttons
         go, so nothing on it can be pressed by mistake afterwards.
         """
-        message_id = message.get("message_id")
-        if not chat_id or not message_id:
-            return
-        shown = html.escape((message.get("text") or "").strip())
-        try:
-            await self._api.edit_message_text(
-                chat_id, message_id, f"{shown}\n\n{outcome}" if shown else outcome
-            )
-        except Exception:
-            logger.debug("Could not close a choice card", exc_info=True)
+        await self._desk.close(
+            chat_id,
+            message.get("message_id"),
+            outcome=outcome,
+            shown=message.get("text") or "",
+        )
 
     async def _dismiss(self, query_id: str, text: str | None = None) -> None:
         if not query_id:
@@ -5311,7 +5518,7 @@ class TelegramChannel:
             logger.exception("Could not record %s", record.action.value)
 
     async def _answer_question(
-        self, asked: tuple[str, str, int], user_id: str, query_id: str
+        self, asked: tuple[str, str, int], user_id: str, query_id: str, callback: dict
     ) -> None:
         """Resolve a question from a tapped option."""
         handle, nonce, index = asked
@@ -5329,6 +5536,7 @@ class TelegramChannel:
 
         if entry is None:
             await self._dismiss(query_id, "That question is no longer open.")
+            await self._close_pressed(callback, "⌛ <i>No longer open.</i>")
             return
 
         request, message_id, chat_id = entry
@@ -5388,6 +5596,14 @@ class TelegramChannel:
                 request.request_id, nonce=nonce, answer=answer, decided_by=actor
             )
         except AlreadyAnsweredError:
+            ended = await self._question_store.resolution_of(request.request_id)
+            if ended is not None and ended.answer is None:
+                # Nobody answered it here in time: it went back to the terminal,
+                # and this press is the first one, late — not a replay.
+                await self._settle_question_card(request, message_id, chat_id, None, None)
+                self._open_questions.pop(handle, None)
+                await self._dismiss(query_id, "Too late — that went back to the terminal.")
+                return
             await self._record(replayed_callback(actor=actor, request_id=request.request_id))
             await self._dismiss(query_id, "Already answered.")
             return
@@ -5403,6 +5619,7 @@ class TelegramChannel:
         except UnknownQuestionError:
             self._open_questions.pop(handle, None)
             await self._dismiss(query_id, "That question is no longer open.")
+            await self._desk.close(chat_id, message_id, outcome="⌛ <i>No longer open.</i>")
             return
 
         self._open_questions.pop(handle, None)
@@ -5423,12 +5640,7 @@ class TelegramChannel:
         if answer is not None:
             await self._settle_question_card(request, message_id, chat_id, answer, by)
             return
-        try:
-            await self._api.edit_message_text(
-                chat_id, message_id, cards.render_question_set_aside(request), reply_markup=None
-            )
-        except Exception:
-            logger.warning("Could not close the question card for %s", request.request_id)
+        await self._desk.close(chat_id, message_id, text=cards.render_question_set_aside(request))
 
     async def _settle_question_card(
         self,
@@ -5438,17 +5650,9 @@ class TelegramChannel:
         answer: str | None,
         by: str | None,
     ) -> None:
-        try:
-            await self._api.edit_message_text(
-                chat_id,
-                message_id,
-                cards.render_question_resolved(request, answer=answer, by=by),
-                reply_markup=None,
-            )
-        except Exception:
-            logger.warning(
-                "Could not update the question card for %s", request.request_id, exc_info=True
-            )
+        await self._desk.close(
+            chat_id, message_id, text=cards.render_question_resolved(request, answer=answer, by=by)
+        )
 
     def _oldest_open_question_in(
         self, chat_id: str

@@ -142,6 +142,13 @@ class LeftQuestions:
         """Wait for the phone's answer, and hand it to the runtime."""
         resolution = await self._store.wait_for(request.request_id)
         await self._try_to_record(question_answered(request, resolution))
+        # However it ended, its card says so — Halyard stopping reaches no button.
+        ending = getattr(self._channel, "question_ended", None)
+        if ending is not None:
+            try:
+                await ending(request, resolution)
+            except Exception:
+                logger.warning("Could not close the card for %s", request.request_id, exc_info=True)
         if resolution.reason is not ResolutionReason.USER or resolution.answer is None:
             return
         try:
