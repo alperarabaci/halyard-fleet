@@ -32,6 +32,24 @@ Code version as the process holding the open desktop task. `halyard doctor`
 prints the executable it selected. Set `HALYARD_CLAUDE_BINARY` to a command name
 or absolute path only when you need to override that choice.
 
+### The runtimes, at a glance
+
+Each runtime brings its approvals to your phone and its replies with them. They differ
+in where the gate lives and in what a message from the phone needs. `halyard wire`
+writes the gate, and `halyard doctor` says what is still missing.
+
+| Runtime | The gate | A message from the phone |
+|---|---|---|
+| Claude Code | hooks in `.claude/settings.local.json` | resumes the session |
+| Codex | hooks in `.codex/hooks.json`, trusted once in Codex | resumes the thread |
+| opencode | a plugin in `.opencode/plugins/`, and `permission` in `opencode.json`; opencode started with `--port 4096` | goes into the opencode that is open |
+| ZCode | hooks in `.zcode/config.json`, trusted once in ZCode | needs `ZCODE_TOKEN` and `ZCODE_MODEL` in `halyard.yaml`; without them the agent takes its messages at the desk |
+
+Codex and ZCode skip hooks nobody has trusted, without a word; `halyard wire` says how
+to trust them, and never does it itself. opencode's question is on its
+own screen as well as your phone: either can answer, and the first answer wins. A ZCode
+turn stops at a captcha — see [Known limitations](limitations.md).
+
 ### Wiring the hooks
 
 One command, and it takes no argument in the ordinary case:
