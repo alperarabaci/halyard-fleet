@@ -61,3 +61,40 @@ def test_every_link_in_the_readme_and_the_docs_leads_somewhere() -> None:
             if fragment and destination.suffix == ".md":
                 headings = re.findall(r"^#+ (.+)$", destination.read_text(encoding="utf-8"), re.M)
                 assert fragment in {_anchor(heading) for heading in headings}, where
+
+
+def _tree() -> set[str]:
+    """Every path the architecture page's layout names, as written: `docs/`,
+    `docs/setup.md`, `src/halyard/*_cli.py`."""
+    text = (ROOT / "docs" / "architecture.md").read_text(encoding="utf-8")
+    block = text.split("## Layout", 1)[1].split("```", 2)[1]
+    named: set[str] = set()
+    parents: list[str] = []
+    for line in block.splitlines():
+        found = re.match(r"^((?:│   |    )*)[├└]── ([^#]+?)\s*(?:#.*)?$", line)
+        if not found:
+            continue
+        depth = len(found.group(1)) // 4
+        parents = parents[:depth]
+        for name in found.group(2).split(", "):
+            named.add("".join(parents) + name)
+        if found.group(2).endswith("/"):
+            parents.append(found.group(2))
+    return named
+
+
+def test_the_architecture_layout_names_what_is_there() -> None:
+    """The layout went stale once already — a design document that never
+    existed, half the docs and most of the packages missing. Everything it
+    names is there, and every page under docs/ and every package is in it."""
+    named = _tree()
+    for path in named:
+        assert list(ROOT.glob(path)), f"the layout names {path}, which is not there"
+
+    covered = {found.relative_to(ROOT) for path in named for found in ROOT.glob(path)}
+    for page in (ROOT / "docs").iterdir():
+        if not page.name.startswith("."):
+            assert page.relative_to(ROOT) in covered, f"docs/{page.name} is not in the layout"
+    for package in (ROOT / "src" / "halyard").iterdir():
+        if package.is_dir() and not package.name.startswith((".", "__")):
+            assert package.relative_to(ROOT) in covered, f"{package.name}/ is not in the layout"

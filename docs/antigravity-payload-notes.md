@@ -104,7 +104,7 @@ Two of these are better than anything the other runtimes offer.
 
 `force_ask` is what `/pause` has always wanted to mean. On Claude Code, pausing
 returns no opinion and the runtime's own allow-list then runs matching commands
-with no prompt at all — documented in the README because it surprises people.
+with no prompt at all — in [Known limitations](limitations.md) because it surprises people.
 Under Antigravity a paused gate could return `force_ask` and be genuinely
 certain a human sees it.
 
