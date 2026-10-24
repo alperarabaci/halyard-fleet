@@ -106,7 +106,7 @@ Tiny projects to run under Halyard as they are — a page or a script, the
 2. [Two agents, two runtimes](samples/02-two-agents/) — Claude Code and Codex, each in its own chat, and a project command
 3. [Handing work over](samples/03-handing-work-over/) — a navigator and a driver; `/forward`, `/to` and a transition
 4. [Inspections](samples/04-inspections/) — the work inspected before it is handed on
-5. The whole mechanism — commands, trusted runs, task labels *(planned)*
+5. [The whole mechanism](samples/05-the-whole-mechanism/) — commands, trusted runs, task labels
 6. A simple workflow — two steps, each reply deciding what comes next *(planned)*
 7. Three agents — a navigator, a driver and a reviewer, in phases *(planned)*
 

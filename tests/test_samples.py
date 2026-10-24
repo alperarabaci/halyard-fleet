@@ -6,6 +6,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -144,6 +145,34 @@ def test_the_packing_list_s_check_fails_until_the_task_is_done(tmp_path: Path) -
     assert then.returncode == 0
 
 
+def test_the_shopping_cart_s_tests_fail_until_the_task_is_done(tmp_path: Path) -> None:
+    """Sample 05: the discount test is there before the discount is, so
+    `make test-fast` is red until the agent has done the task."""
+    copy = tmp_path / "shopping-cart"
+    shutil.copytree(SAMPLES / "05-the-whole-mechanism", copy)
+
+    def tested() -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            [sys.executable, "-B", "-m", "unittest", "-q"],
+            cwd=copy,
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+
+    first = tested()
+    (copy / "cart.py").write_text(
+        "def total(items, discount=0):\n"
+        "    return sum(p * q for p, q in items) * (100 - discount) // 100\n",
+        encoding="utf-8",
+    )
+    then = tested()
+
+    assert first.returncode == 1 and "test_a_discount_takes_a_percentage_off" in first.stderr
+    assert then.returncode == 0, then.stderr
+
+
 def test_each_inspection_a_sample_names_is_in_it() -> None:
     """An inspection reads its text from the project when it runs; one the
     sample does not ship would fail the transition that names it."""
@@ -171,6 +200,34 @@ def test_each_transition_prompt_a_sample_names_is_in_it() -> None:
                 for key in ("prompt", "followup_prompt"):
                     if spec.get(key):
                         assert (placed[name] / spec[key]).is_file(), f"{folder.name}: {transition}"
+
+
+def test_each_script_a_sample_s_commands_run_is_in_it_and_can_be_run() -> None:
+    """`/command` runs a line in the project as it is written; a script the
+    sample does not ship, or ships without its mode, fails on the phone."""
+    import yaml
+
+    for folder in sorted(SAMPLES.glob("[0-9][0-9]-*")):
+        shipped = yaml.safe_load((folder / "halyard.yaml.example").read_text(encoding="utf-8"))
+        placed = _placed(shipped["projects"], folder)
+        for name, block in shipped["projects"].items():
+            for command, spec in (block.get("commands") or {}).items():
+                line = spec["run"] if isinstance(spec, dict) else spec
+                if isinstance(line, str) and line.startswith("./"):
+                    script = placed[name] / line.split()[0]
+                    assert script.is_file(), f"{folder.name}: {command}"
+                    assert os.access(script, os.X_OK), f"{folder.name}: {command}"
+
+
+def test_every_command_a_sample_trusts_under_runs_is_accepted() -> None:
+    """An entry Halyard refuses still asks, and the README would promise a
+    command with no card that comes as one."""
+    from halyard.core.config_file import projects_from_yaml
+
+    for folder in sorted(SAMPLES.glob("[0-9][0-9]-*")):
+        text = (folder / "halyard.yaml.example").read_text(encoding="utf-8")
+        for project in projects_from_yaml(text):
+            assert not project.runs_refused, f"{folder.name}: {project.runs_refused}"
 
 
 def test_each_sample_lays_its_projects_out_as_its_example_says() -> None:

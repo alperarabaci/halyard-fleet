@@ -18,12 +18,12 @@ its own reaches your phone as an **INSPECTION** card.
 
 | File | What it is |
 |---|---|
-| `index.html` | A packing list: five things to tick, nothing else |
-| `TASK.md` | The task: a checkbox that hides what is packed, and a count of what is left |
-| `check.sh` | The page's check: says which parts are there, fails if one is missing |
-| `inspections/claims.md` | The `claims` inspection: which of the report's claims the change backs, which it does not, and which could not be measured |
-| `transitions/report.md` | The `report` transition's prompt, put in front of the report and the inspection's answer |
-| `PROMPT.md` | What the navigator is asked, as text: a plan for the driver, changing nothing |
+| [`index.html`](index.html) | A packing list: five things to tick, nothing else |
+| [`TASK.md`](TASK.md) | The task: a checkbox that hides what is packed, and a count of what is left |
+| [`check.sh`](check.sh) | The page's check: says which parts are there, fails if one is missing |
+| [`inspections/claims.md`](inspections/claims.md) | The `claims` inspection: which of the report's claims the change backs, which it does not, and which could not be measured |
+| [`transitions/report.md`](transitions/report.md) | The `report` transition's prompt, put in front of the report and the inspection's answer |
+| [`PROMPT.md`](PROMPT.md) | What the navigator is asked, as text: a plan for the driver, changing nothing |
 | [`halyard.yaml.example`](halyard.yaml.example) | What this sample adds to your `halyard.yaml`: the project, its two agents, the `claims` inspection, the `report` transition that runs it, and the prompt `/sample_04` |
 
 ## Before you start
