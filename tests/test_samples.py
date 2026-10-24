@@ -123,6 +123,41 @@ def test_the_reading_list_s_check_fails_until_the_task_is_done(tmp_path: Path) -
     assert then.returncode == 0
 
 
+def test_the_packing_list_s_check_fails_until_the_task_is_done(tmp_path: Path) -> None:
+    """Sample 04: what the driver is asked to add is missing to begin with."""
+    copy = tmp_path / "packing-list"
+    shutil.copytree(SAMPLES / "04-inspections", copy)
+
+    first = checked(copy)
+    page = copy / "index.html"
+    page.write_text(
+        page.read_text(encoding="utf-8").replace(
+            '<ul id="items">',
+            '<input type="checkbox" id="hide-packed">\n<p id="left"></p>\n<ul id="items">',
+        ),
+        encoding="utf-8",
+    )
+    then = checked(copy)
+
+    assert first.returncode == 1
+    assert "MISSING #hide-packed" in first.stdout and "MISSING #left" in first.stdout
+    assert then.returncode == 0
+
+
+def test_each_inspection_a_sample_names_is_in_it() -> None:
+    """An inspection reads its text from the project when it runs; one the
+    sample does not ship would fail the transition that names it."""
+    import yaml
+
+    for folder in sorted(SAMPLES.glob("[0-9][0-9]-*")):
+        shipped = yaml.safe_load((folder / "halyard.yaml.example").read_text(encoding="utf-8"))
+        placed = _placed(shipped["projects"], folder)
+        for name, block in shipped["projects"].items():
+            for inspection, spec in (block.get("inspections") or {}).items():
+                file = spec["file"] if isinstance(spec, dict) else spec
+                assert (placed[name] / file).is_file(), f"{folder.name}: {inspection}"
+
+
 def test_each_transition_prompt_a_sample_names_is_in_it() -> None:
     """A transition reads its prompt from the project when it goes; one the
     sample does not ship would arrive with no prompt in front."""

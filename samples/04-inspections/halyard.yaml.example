@@ -1,0 +1,63 @@
+# What this sample adds to your halyard.yaml — the one in your Halyard checkout.
+# One project with two agents, a navigator and a driver as in sample 03, and an
+# inspection that reads the driver's report before the navigator gets it. Keep
+# your own `settings:`; put the project under `projects:` next to any you
+# already have, and fill in your own path, session names and groups.
+
+settings:
+  HALYARD_CHANNEL: telegram
+  TELEGRAM_BOT_TOKEN: "123456:replace-me"          # from @BotFather; secret
+  TELEGRAM_CHAT_ID: "-1001234567890"               # the group the bot is in
+  TELEGRAM_AUTHORIZED_USER_IDS: "11111111"         # who may answer a card
+  TELEGRAM_MENU: simple                            # the short command menu
+  # The model every inspection runs on: Sonnet, on Claude Code, unless set. A
+  # `gpt-…` model runs on Codex instead.
+  # HALYARD_INSPECTION_MODEL: sonnet
+
+projects:
+  packing-list:
+    # Where you copied this sample to — not inside the Halyard checkout.
+    path: ~/halyard-samples/packing-list
+    # What `/inspect` offers, and what a transition can name. Each is the
+    # project's own text, read relative to `path`, run over a reply as a
+    # one-shot, read-only model turn of its own.
+    inspections:
+      claims: inspections/claims.md
+    # `report` takes the driver's report to the navigator, as in sample 03.
+    # `inspect:` runs `claims` over the report first and waits for its answer,
+    # which goes to the navigator with the report.
+    transitions:
+      report:
+        prompt: transitions/report.md
+        inspect: [claims]
+        to: navigator
+    agents:
+      # Agent labels are unique across every project in the file: they are how
+      # `/to` and `/forward` name an agent.
+      packing-nav:
+        runtime: claude-code
+        # The name the runtime knows the session by. `uv run halyard sessions`
+        # lists the ones it can see.
+        session: packing-list-nav
+        # What `to: navigator` above finds.
+        role: navigator
+        # Your default group: the same id as TELEGRAM_CHAT_ID. Quoted: unquoted,
+        # YAML reads it as a number.
+        chat: "-1001234567890"
+      packing-drv:
+        # claude-code for both here; `codex` or `opencode` work the same way.
+        runtime: claude-code
+        session: packing-list-drv
+        role: driver
+        # A group of its own: a second group, with the bot in it. `/status`
+        # sent there says its id.
+        chat: "-1002234567890"
+
+prompts:
+  # `/sample_04` in the navigator's group asks it for a plan: the text of
+  # PROMPT.md.
+  sample_04: >-
+    Read `TASK.md`. Do not change any file yourself: write a short plan for the
+    driver who will make the change — what to change, in order, and how to check
+    it with `./check.sh`. Ask the driver to end with a report: what it changed,
+    and what `./check.sh` printed. Keep it under ten lines.

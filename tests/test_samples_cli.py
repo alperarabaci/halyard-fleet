@@ -295,3 +295,24 @@ def test_with_no_file_both_paths_are_made_real(tmp_path: Path, two: Path) -> Non
     projects = {p.name: p.path for p in projects_from_yaml(config.read_text(encoding="utf-8"))}
     assert code == 0
     assert projects == {"greeting-page": two / "greeting-page", "todo-list": two / "todo-list"}
+
+
+# --- a sample with an inspection -----------------------------------------------
+
+
+def test_a_sample_s_inspections_go_in_with_the_transition_that_runs_them(
+    tmp_path: Path,
+) -> None:
+    """Sample 04: `report` names `claims` under `inspect:`; without the
+    `inspections:` block beside it the project would not load."""
+    config = tmp_path / "halyard.yaml"
+    config.write_text(THEIRS, encoding="utf-8")
+    where = tmp_path / "packing-list"
+    where.mkdir()
+
+    code, _ = added(config, where, "04", answers=["", "-100888"])
+
+    projects = {p.name: p for p in projects_from_yaml(config.read_text(encoding="utf-8"))}
+    assert code == 0
+    assert projects["packing-list"].inspections == {"claims": Path("inspections/claims.md")}
+    assert projects["packing-list"].transitions["report"].inspections == ("claims",)
