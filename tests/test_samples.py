@@ -51,6 +51,19 @@ def checked(where: Path) -> subprocess.CompletedProcess[str]:
     )
 
 
+def unit_tested(where: Path) -> subprocess.CompletedProcess[str]:
+    """The tests of a sample written in Python, as `make test-fast` runs them —
+    without leaving `__pycache__` in the copy."""
+    return subprocess.run(
+        [sys.executable, "-B", "-m", "unittest", "-q"],
+        cwd=where,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+
+
 def test_the_counter_s_check_fails_until_the_task_is_done(counter: Path) -> None:
     """What the agent is asked to fix is missing to begin with."""
     result = checked(counter)
@@ -151,25 +164,32 @@ def test_the_shopping_cart_s_tests_fail_until_the_task_is_done(tmp_path: Path) -
     copy = tmp_path / "shopping-cart"
     shutil.copytree(SAMPLES / "05-the-whole-mechanism", copy)
 
-    def tested() -> subprocess.CompletedProcess[str]:
-        return subprocess.run(
-            [sys.executable, "-B", "-m", "unittest", "-q"],
-            cwd=copy,
-            capture_output=True,
-            text=True,
-            timeout=30,
-            check=False,
-        )
-
-    first = tested()
+    first = unit_tested(copy)
     (copy / "cart.py").write_text(
         "def total(items, discount=0):\n"
         "    return sum(p * q for p, q in items) * (100 - discount) // 100\n",
         encoding="utf-8",
     )
-    then = tested()
+    then = unit_tested(copy)
 
     assert first.returncode == 1 and "test_a_discount_takes_a_percentage_off" in first.stderr
+    assert then.returncode == 0, then.stderr
+
+
+def test_the_cart_s_shipping_tests_fail_until_the_task_is_done(tmp_path: Path) -> None:
+    """Sample 06: the shipping tests are there before `shipping()` is, so the
+    `developed` transition reports them failing until the driver has done the
+    task."""
+    copy = tmp_path / "cart-transitions"
+    shutil.copytree(SAMPLES / "06-transitions", copy)
+
+    first = unit_tested(copy)
+    with (copy / "cart.py").open("a", encoding="utf-8") as cart:
+        cart.write("\n\ndef shipping(items):\n    return 0 if total(items) >= 5000 else 499\n")
+    then = unit_tested(copy)
+
+    assert first.returncode == 1 and "test_shipping_is_free_from_5000" in first.stderr
+    assert "test_a_discount_takes_a_percentage_off" not in first.stderr
     assert then.returncode == 0, then.stderr
 
 
@@ -185,6 +205,21 @@ def test_each_inspection_a_sample_names_is_in_it() -> None:
             for inspection, spec in (block.get("inspections") or {}).items():
                 file = spec["file"] if isinstance(spec, dict) else spec
                 assert (placed[name] / file).is_file(), f"{folder.name}: {inspection}"
+
+
+def test_every_transition_a_sample_has_reaches_one_of_its_agents() -> None:
+    """`to:` naming a role nobody in the project holds loads, and then has
+    nowhere to go when somebody presses it from a phone."""
+    from halyard.core.config_file import projects_from_yaml
+
+    for folder in sorted(SAMPLES.glob("[0-9][0-9]-*")):
+        text = (folder / "halyard.yaml.example").read_text(encoding="utf-8")
+        for project in projects_from_yaml(text):
+            reachable = {seat.label for seat in project.seats} | {
+                seat.role.value for seat in project.seats if seat.role
+            }
+            for name, transition in project.transitions.items():
+                assert transition.to in reachable, f"{folder.name}: {name} → {transition.to}"
 
 
 def test_each_transition_prompt_a_sample_names_is_in_it() -> None:

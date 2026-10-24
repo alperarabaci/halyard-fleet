@@ -345,3 +345,29 @@ def test_a_sample_s_commands_and_runs_go_in_whole(tmp_path: Path) -> None:
     }
     assert cart.command_lists == {"next-task": ("to-main", "new-branch")}
     assert cart.runs == ("make test-fast",)
+
+
+# --- a sample with transitions that run a command ------------------------------
+
+
+def test_a_sample_s_transitions_go_in_with_the_command_they_run(tmp_path: Path) -> None:
+    """Sample 06: `developed` runs `test-fast` before it hands the report on;
+    without the command beside it the project would not load."""
+    config = tmp_path / "halyard.yaml"
+    config.write_text(THEIRS, encoding="utf-8")
+    where = tmp_path / "cart-transitions"
+    where.mkdir()
+
+    code, _ = added(config, where, "06", answers=["", "-100888"])
+
+    projects = {p.name: p for p in projects_from_yaml(config.read_text(encoding="utf-8"))}
+    cart = projects["cart-transitions"]
+    assert code == 0
+    assert cart.commands == {"test-fast": "make test-fast"}
+    assert cart.transitions["develop"].to == "driver"
+    assert cart.transitions["developed"].commands == ("test-fast",)
+    assert cart.transitions["developed"].to == "navigator"
+    assert {seat.label: seat.chat for seat in cart.seats} == {
+        "cart-nav": "-100777",
+        "cart-drv": "-100888",
+    }

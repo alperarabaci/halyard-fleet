@@ -1,0 +1,71 @@
+# What this sample adds to your halyard.yaml — the one in your Halyard checkout.
+# One project with two agents, a navigator and a driver, each in a group of its
+# own, and the two transitions that hand work between them. Keep your own
+# `settings:`; put the project under `projects:` next to any you already have,
+# and fill in your own path, session names and groups.
+
+settings:
+  HALYARD_CHANNEL: telegram
+  TELEGRAM_BOT_TOKEN: "123456:replace-me"          # from @BotFather; secret
+  TELEGRAM_CHAT_ID: "-1001234567890"               # the group the bot is in
+  TELEGRAM_AUTHORIZED_USER_IDS: "11111111"         # who may answer a card
+  TELEGRAM_MENU: simple                            # the short command menu
+
+projects:
+  cart-transitions:
+    # Where you copied this sample to — not inside the Halyard checkout.
+    path: ~/halyard-samples/cart-transitions
+    # What `/command` offers, and what a transition can run on the way.
+    commands:
+      test-fast: make test-fast
+    # What `/transition` offers, a button each. A transition takes the last
+    # reply in the group it is pressed in to the agent in `to:`, with the
+    # project's own prompt in front — a file in the project, read relative to
+    # `path`.
+    transitions:
+      # The navigator's plan, or what is still missing, to the driver.
+      develop:
+        prompt: transitions/develop.md
+        to: driver
+      # The driver's report, back to the navigator, with the tests run first:
+      # Halyard runs them itself, and what they printed goes with the report,
+      # so the navigator reads a result rather than a claim. Failing, they go
+      # with it too; stopped, or unable to run, they stop the transition there,
+      # and nothing is sent.
+      developed:
+        prompt: transitions/developed.md
+        commands: [test-fast]
+        to: navigator
+    agents:
+      # Agent labels are unique across every project in the file: they are how
+      # `/to` and `/forward` name an agent. Each runs on the model its session
+      # was opened with — the navigator on Opus and the driver on Sonnet, say —
+      # and nothing here sets it; `/model` and `/effort` in its group change it
+      # from your phone when you want.
+      cart-nav:
+        runtime: claude-code
+        # The name the runtime knows the session by. `uv run halyard sessions`
+        # lists the ones it can see.
+        session: cart-transitions-nav
+        # What `to: navigator` above finds.
+        role: navigator
+        # Your default group: the same id as TELEGRAM_CHAT_ID. Quoted: unquoted,
+        # YAML reads it as a number.
+        chat: "-1001234567890"
+      cart-drv:
+        # claude-code for both here; `codex` or `opencode` work the same way.
+        runtime: claude-code
+        session: cart-transitions-drv
+        # What `to: driver` above finds.
+        role: driver
+        # A group of its own: a second group, with the bot in it. `/status`
+        # sent there says its id.
+        chat: "-1002234567890"
+
+prompts:
+  # `/sample_06` in the navigator's group asks it for a plan: the text of
+  # PROMPT.md.
+  sample_06: >-
+    Read `TASK.md`. Do not change any file yourself: write a short plan for the
+    driver who will make the change — what to change, in order. Keep it under
+    ten lines.
