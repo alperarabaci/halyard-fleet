@@ -40,6 +40,7 @@ from halyard.applications import catalogue, desktop
 from halyard.channels.telegram import cards, commit_card
 from halyard.channels.telegram.api import TelegramApi
 from halyard.channels.telegram.desk import STANDING, Card, CardDesk
+from halyard.channels.telegram.shelf import Shelf
 from halyard.commands import catalogue as commands_offered
 from halyard.commands import inputs as command_inputs
 from halyard.commands import labels as command_labels
@@ -798,8 +799,9 @@ class TelegramChannel:
         self._open_questions: dict[str, tuple[QuestionRequest, int, str]] = {}
         #: Every card with buttons this channel sent, and how each one closes.
         #: See `CardDesk`. The maps above say what a button answers; this says
-        #: whether its card is still open, and closes it.
-        self._desk = CardDesk(api, clock)
+        #: whether its card is still open, and closes it. Written down in the
+        #: database as well, so a restart closes what this process left open.
+        self._desk = CardDesk(api, clock, shelf=Shelf(database) if database else None)
         self._poller: asyncio.Task | None = None
         self._offset: int | None = None
         # Which chat the command being handled came from, so a listing can mark
@@ -832,6 +834,10 @@ class TelegramChannel:
 
     async def start(self) -> None:
         await self._api.open()
+        # Read before any card of this process is sent, so none of its own is
+        # taken for one the last process left open. Closed off to one side:
+        # answering is what starting is for.
+        left = await self._desk.left_over()
         # Registered so they appear when somebody types `/`. Best-effort: the
         # bot answers every one of these whether Telegram knows about them or
         # not, and a control plane that would not start because a menu could
@@ -841,6 +847,11 @@ class TelegramChannel:
         except Exception:
             logger.warning("Could not register the command list with Telegram", exc_info=True)
         self._poller = asyncio.create_task(self._poll_forever(), name="telegram-poll")
+        if left:
+            logger.info(
+                "Closing %d card%s the last run left open", len(left), "s" if len(left) != 1 else ""
+            )
+            self._detach(self._desk.close_left_over(left), "closing the cards left open")
 
     async def stop(self) -> None:
         if self._poller is not None:

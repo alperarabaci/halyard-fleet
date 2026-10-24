@@ -176,6 +176,22 @@ An agent with no `chat:` speaks in `TELEGRAM_CHAT_ID`, the way it does with one 
 read only from the environment, when there is no `halyard.yaml`; with one, its agents are the
 whole answer.
 
+### Every card closes
+
+A card is a message with buttons, and every one closes — its buttons go, and a line
+says what became of it:
+
+- **when it is pressed:** a picker says what was chosen, before it is done, so a second
+  press finds nothing to press;
+- **when what it asks ends:** an approval or a question answered, here or at the desk,
+  or out of time (*⌛ Expired — denied*); a commit made, cancelled or reworded;
+- **at its deadline,** if nothing else closed it first;
+- **after a restart:** what the last run of Halyard left open closes as it starts
+  (*Closed — Halyard restarted*).
+
+A workflow run keeps one card with buttons, its newest — see
+[Workflows](workflows.md#stopping-steering-and-asking-where-it-is).
+
 ### Use the app, not a browser tab
 
 A browser tab gives you no push notifications, so a card can expire unseen and the command is denied

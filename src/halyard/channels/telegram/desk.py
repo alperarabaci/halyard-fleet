@@ -25,12 +25,15 @@ is untidy, never wrong — and closing one twice edits it once.
 
 from __future__ import annotations
 
+import asyncio
 import html
 import logging
 from collections import OrderedDict
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
+
+from halyard.channels.telegram.shelf import Kept, Shelf
 
 logger = logging.getLogger(__name__)
 
@@ -46,6 +49,18 @@ REMEMBERED = 2000
 
 #: What a card says when its deadline passed before anything closed it.
 EXPIRED = "⌛ Expired"
+
+#: What a card the last process left open says, closed as this one starts.
+RESTARTED = "⏹ <i>Closed — Halyard restarted.</i>"
+
+#: How long a card that could not be closed after a restart is tried again at
+#: the next one. Past this it is let go: a message deleted, or one Telegram will
+#: no longer let the bot edit, would otherwise be tried on every start.
+KEPT_FOR = timedelta(days=2)
+
+#: The pause between closing one left-over card and the next, so a restart with
+#: many open runs into no rate limit of Telegram's.
+PACE_SECONDS = 0.3
 
 
 @dataclass
@@ -100,11 +115,22 @@ def has_buttons(keyboard: dict | None) -> bool:
 class CardDesk:
     """Opens cards, remembers them, and closes each exactly once."""
 
-    def __init__(self, api, clock: Callable[[], datetime]) -> None:
+    def __init__(
+        self,
+        api,
+        clock: Callable[[], datetime],
+        *,
+        shelf: Shelf | None = None,
+        pace: float = PACE_SECONDS,
+    ) -> None:
         self._api = api
         self._clock = clock
         self._cards: dict[tuple[str, int], Card] = {}
         self._closed: OrderedDict[tuple[str, int], None] = OrderedDict()
+        #: Where open cards are written down, so the next start can close what
+        #: this one leaves open. None keeps them in memory only.
+        self._shelf = shelf
+        self._pace = pace
 
     # --- opening -------------------------------------------------------------
 
@@ -150,6 +176,13 @@ class CardDesk:
             ending=ending,
         )
         self._cards[(card.chat, card.message_id)] = card
+        if self._shelf is not None:
+            kept = Kept(card.chat, card.message_id, card.kind, key, text, self._clock())
+            await asyncio.to_thread(self._shelf.put, kept)
+            if (card.chat, card.message_id) in self._closed:
+                # Closed while it was being written down: struck off again, or
+                # the next start would close it a second time.
+                await asyncio.to_thread(self._shelf.take, card.chat, card.message_id)
         return card
 
     # --- finding -------------------------------------------------------------
@@ -205,6 +238,8 @@ class CardDesk:
             return False
         card = self._cards.pop(where, None)
         self._remember(where)
+        if self._shelf is not None:
+            await asyncio.to_thread(self._shelf.take, *where)
         if text is None:
             said = card.html if card is not None else html.escape(shown.strip())
             line = outcome or "✖️ Closed"
@@ -253,14 +288,43 @@ class CardDesk:
             return await self.close_card(card, text=card.ending(how, by))
         return await self.close_card(card, outcome=EXPIRED if how == "expired" else None)
 
+    async def left_over(self) -> list[Kept]:
+        """The cards the last process left open — read before this one opens
+        any, so none of its own is taken for one of them."""
+        if self._shelf is None:
+            return []
+        return await asyncio.to_thread(self._shelf.everything)
+
+    async def close_left_over(self, kept: list[Kept]) -> int:
+        """Close the cards the last process left open. How many.
+
+        An approval was denied as that process stopped, and anything else is
+        better asked again than answered from a card left over from before. Each
+        says so and loses its buttons. One Telegram would not let go of is tried
+        again at the next start, for a while — see `KEPT_FOR`.
+        """
+        closed = 0
+        for card in kept:
+            where = (card.chat, card.message_id)
+            if where in self._cards or where in self._closed:
+                continue
+            self._remember(where)
+            said = f"{card.html}\n\n{RESTARTED}" if card.html else RESTARTED
+            done = await self._edit(where, said)
+            if done or self._clock() - card.opened_at > KEPT_FOR:
+                await asyncio.to_thread(self._shelf.take, *where)
+            closed += done
+            await asyncio.sleep(self._pace)
+        return closed
+
     def _remember(self, where: tuple[str, int]) -> None:
         self._closed[where] = None
         while len(self._closed) > REMEMBERED:
             self._closed.popitem(last=False)
 
-    async def _edit(self, where: tuple[str, int], text: str) -> None:
+    async def _edit(self, where: tuple[str, int], text: str) -> bool:
         """Rewrite the message without its buttons — or, when Telegram will not
-        take the new text, at least take the buttons away.
+        take the new text, at least take the buttons away. Whether either did.
 
         The text can be refused where the buttons cannot: a message grown past
         Telegram's limit by the line under it, or one somebody's client says is
@@ -270,13 +334,15 @@ class CardDesk:
         chat, message_id = where
         try:
             await self._api.edit_message_text(chat, message_id, text, reply_markup=None)
-            return
+            return True
         except Exception:
             logger.debug("Could not rewrite card %s in %s", message_id, chat, exc_info=True)
         try:
             await self._api.edit_message_reply_markup(
                 chat, message_id, reply_markup={"inline_keyboard": []}
             )
+            return True
         except Exception:
             # Cosmetic. What the card asked is decided and recorded already.
             logger.warning("Could not close card %s in %s", message_id, chat, exc_info=True)
+            return False
