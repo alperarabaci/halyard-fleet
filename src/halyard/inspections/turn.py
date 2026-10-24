@@ -18,23 +18,24 @@ logger = logging.getLogger(__name__)
 def prompt(instructions: str, *, context: list[str], note: str, text: str) -> str:
     """One inspection's turn: its own instructions, what Halyard knows, and the text.
 
-    It still says "check" to the model, as it did before these were called
-    inspections: what a model is told stays the same, so that answers from
-    before the name changed and after it can be compared.
+    It said "check" to the model until 2026-10-24, a month after these were
+    renamed inspections, so that answers from either side of the rename could
+    be compared. A run kept before then was given that wording, and a repeat of
+    it is given it again, word for word.
     """
     parts = [
         instructions,
         "",
         "---",
         "",
-        "This check runs in the project's own directory and is read-only.",
+        "This inspection runs in the project's own directory and is read-only.",
         "",
         "Allowed: local file search, file reading and diff inspection. Use native "
         "read/search tools, or read-only shell commands such as rg (including "
         "rg --files), cat, sed -n, nl, head, tail, and git status/diff/show/log. "
         "For git diff and git show, use --no-ext-diff --no-textconv so reading "
         "does not execute external helpers. Read-only pipelines are allowed. "
-        "These reading commands need not be written verbatim in the check. "
+        "These reading commands need not be written verbatim in the inspection. "
         "If there is no native file-reading tool, use the read-only shell path; "
         "shell as a reading tool is not a ban on reading.",
         "",
@@ -51,13 +52,13 @@ def prompt(instructions: str, *, context: list[str], note: str, text: str) -> st
         "is refused or cannot finish, identify that source as unmeasured, not "
         "clean or missing evidence. Do not work around a denied read.",
         "",
-        "It is checking, not changing: read what this check needs. The project's "
+        "It is inspecting, not changing: read what this inspection needs. The project's "
         "own instructions, and the files they point to, are background here "
         "rather than a reading list.",
         "",
         *frame.envelope([*context, *([f"Said by whoever asked: {note}"] if note else [])]),
         "",
-        "Text to check:",
+        "Text to inspect:",
         "",
         text,
     ]

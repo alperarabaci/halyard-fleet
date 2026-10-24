@@ -142,7 +142,7 @@ turn stops at a captcha — see [Known limitations](#known-limitations).
 | `/md` | *(configurable)* have the agent write its answer to a file and pass the path |
 | `/prompts` | your prompts — `/md` and any others — as buttons, each sent into the session when pressed |
 | `/commit` | commit this branch's work, with a message to approve — and push |
-| `/review_and_commit` | the same, plus this project's own checks and its review round |
+| `/review_and_commit` | the same, plus this project's own validation and its review round |
 | `/command` | run one of the project's own commands, and hear how it went |
 | `/label` | put a label on the task this branch is for |
 | `/open` | start an agent that is not running — `claude`, `codex`, `gemini` |
