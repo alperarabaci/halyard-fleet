@@ -110,6 +110,8 @@ Tiny projects to run under Halyard as they are — a page or a script, the
 6. [Transitions](samples/06-transitions/) — work handed there and back with `/transition`, the tests run on the way
 7. [A workflow](samples/07-a-workflow/) — the same transitions as steps, each reply deciding what comes next
 8. [Three agents](samples/08-three-agents/) — Claude and GPT on one workflow with phases, two bounded contexts kept apart by a guard
+9. Fewer cards — what the project trusts, proposed from the cards it still asks *(planned)*
+10. [Measuring inspections](samples/10-measuring-inspections/) — every run kept, the same input on another model, and what each cost
 
 ## Runtimes
 

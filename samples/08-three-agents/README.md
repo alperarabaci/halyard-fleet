@@ -4,7 +4,8 @@ Everything the earlier samples showed, working together on a project that has
 something to protect. Two bounded contexts, a catalog and the cart that buys from it,
 and three agents: a navigator and a driver on Claude, and a reviewer on GPT, through
 Codex. One `/workflow` takes a task from a plan, through a review and two parts, to
-close — and at every hand-over the project's own checks have their say.
+close — and at every hand-over the project's guard, its tests and its inspections
+have their say.
 
 ## Why it takes three agents and a guard
 
@@ -36,7 +37,7 @@ two sides — and none of it costs you more than a press on your phone.
 | Check the plan's premises and its scope, hand it to a second model for review, and take the answer back to the navigator | `/workflow`, then **deliver**, then **review** |
 | Send the revised plan back for a second round | Nothing: the review's `back` does it |
 | Hand each part of the plan to the driver, and run the guard, the contract and the tests after each | Nothing: `forward` and `next` do it, and `developed` runs `test-fast` |
-| Before closing, run every check again, and have the tests and both contexts looked over | Nothing: `close` does it, and the navigator's `done` ends the run |
+| Before closing, run the guard, the contract and the tests again, and have the tests and both contexts looked over | Nothing: `close` does it, and the navigator's `done` ends the run |
 
 ## What is here
 
@@ -77,8 +78,9 @@ wrong: it exits 2 for any failure, and its last line is its own,
 test-fast: exit 1 — boundaries: every boundary kept (2 contexts, 3 files), exit 0; contract: FAILED (errors=1), exit 1; unit: not run (stopped after contract)
 ```
 
-One command, every check — the way a Makefile gathers many targets under one name,
-so that from the phone it is one press, not one per check.
+One command for the guard, the contract and the tests — the way a Makefile gathers
+many targets under one name, so that from the phone it is one press, not one per
+target.
 
 **A reply ends with its decision.** A workflow reads the last line of each reply and
 nothing else. `DECISION: forward` moves the work on, `back` returns it, `wait` stops
@@ -252,11 +254,11 @@ service, or stop `uv run halyard` and start it again.
   catalog.products, which catalog does not offer, exit 1`, and nothing after it runs.
   In a run, `developed` and `close` carry that line to the navigator, who sends the
   work back. `git checkout -- cart` puts the file back.
-- **A check that cannot run stops the run.** Move `catalog/__init__.py` aside, and
+- **A guard that cannot run stops the run.** Move `catalog/__init__.py` aside, and
   the guard cannot look: it exits 2, and so does `test-fast`, which `not_run: [2]`
   reads as "did not run". `/command` shows it as failed, with that last line; in a
-  run, `developed` or `close` stops there, and nothing reaches the navigator — checks
-  that never ran are no result. Put the file back, and pick the step again from
+  run, `developed` or `close` stops there, and nothing reaches the navigator — a
+  guard and tests that never ran are no result. Put the file back, and pick the step again from
   `/workflow`.
 - **Watch the navigator keep its place.** At the desk, `/compact` in the navigator's
   session while a run is going: Halyard writes the record as the compaction starts,

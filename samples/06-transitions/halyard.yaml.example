@@ -20,7 +20,7 @@ projects:
       # The tests `make test-fast` runs, called straight. Through make, a
       # failure would end on make's own `make: *** … Error 1`: the last line,
       # the one Halyard shows and reads. Sample 08 does this for a whole
-      # project's checks.
+      # project's guard and tests.
       test-fast: python3 -m unittest -q
     # What `/transition` offers, a button each. A transition takes the last
     # reply in the group it is pressed in to the agent in `to:`, with the

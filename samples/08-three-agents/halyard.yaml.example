@@ -1,9 +1,9 @@
 # What this sample adds to your halyard.yaml — the one in your Halyard checkout.
 # One project with two bounded contexts, three agents on two kinds of model, and
 # a workflow that takes the work from a plan, through a review and two parts, to
-# close — with the project's own checks at every hand-over. Keep your own
-# `settings:`; put the project under `projects:` next to any you already have,
-# and fill in your own path, session names and groups.
+# close — with the project's guard, tests and inspections at every hand-over.
+# Keep your own `settings:`; put the project under `projects:` next to any you
+# already have, and fill in your own path, session names and groups.
 
 settings:
   HALYARD_CHANNEL: telegram
@@ -19,7 +19,7 @@ projects:
   shop:
     # Where you copied this sample to — not inside the Halyard checkout.
     path: ~/halyard-samples/shop
-    # One command does every check, as the Makefile's `test-fast` does: the
+    # One command runs all of them, as the Makefile's `test-fast` does: the
     # boundary guard, the contract, the tests. scripts/validate.sh runs them one
     # by one and answers the way Halyard reads a command — exit 0 passed, 1
     # failed, 2 did not run, and one last line with every part in it. Called

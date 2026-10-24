@@ -1,0 +1,54 @@
+# What this sample adds to your halyard.yaml — the one in your Halyard checkout.
+# One project with one agent and two inspections, each on a model of its own,
+# and every run of them kept, to be measured. Keep your own `settings:`; put the
+# project under `projects:` next to any you already have, and fill in your own
+# path, session name and group.
+
+settings:
+  HALYARD_CHANNEL: telegram
+  TELEGRAM_BOT_TOKEN: "123456:replace-me"          # from @BotFather; secret
+  TELEGRAM_CHAT_ID: "-1001234567890"               # the group the bot is in
+  TELEGRAM_AUTHORIZED_USER_IDS: "11111111"         # who may answer a card
+  TELEGRAM_MENU: simple                            # the short command menu
+  # Keep every inspection run — what the model was given, word for word, what
+  # it said, its model and effort, the revision of the inspection's file — for
+  # `halyard inspect` to read back and run again. Off unless set: it is the one
+  # place Halyard keeps text, since the input holds the reply inspected.
+  # `halyard samples add` never changes settings, so add it to yours by hand.
+  HALYARD_KEEP_INSPECTIONS: true
+
+projects:
+  cart-inspections:
+    # Where you copied this sample to — not inside the Halyard checkout.
+    path: ~/halyard-samples/cart-inspections
+    # What `/inspect` offers, each on a model of its own: the one to measure
+    # thinks hard on Opus, the other runs lighter on Sonnet. Every run of
+    # either is kept, with the tokens it used.
+    inspections:
+      test-reliability:
+        file: inspections/test-reliability.md
+        model: opus
+        effort: high
+      over-engineering:
+        file: inspections/over-engineering.md
+        model: sonnet
+        effort: medium
+    agents:
+      # Agent labels are unique across every project in the file: they are how
+      # `/to` and `/forward` name an agent.
+      inspections-dev:
+        # claude-code here; `codex` or `opencode` work the same way.
+        runtime: claude-code
+        # The name the runtime knows the session by. `uv run halyard sessions`
+        # lists the ones it can see.
+        session: cart-inspections
+        # Your default group: the same id as TELEGRAM_CHAT_ID. Quoted: unquoted,
+        # YAML reads it as a number.
+        chat: "-1001234567890"
+
+prompts:
+  # `/sample_10` in the group sends this sample's task to the agent: the text
+  # of PROMPT.md.
+  sample_10: >-
+    Read `TASK.md` and make the change it asks for. When you are done, run
+    `make test-fast`, and tell me what you changed and what it printed.

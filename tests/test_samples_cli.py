@@ -456,3 +456,27 @@ def test_three_agents_go_in_each_in_the_group_it_was_given(tmp_path: Path) -> No
         "shop-drv": (None, None),
         "shop-rev": (None, None),
     }
+
+
+# --- a sample whose inspections are measured -----------------------------------
+
+
+def test_a_sample_s_inspections_go_in_each_with_its_model(tmp_path: Path) -> None:
+    """Sample 10: two inspections on two models, kept as the sample wrote
+    them. `HALYARD_KEEP_INSPECTIONS` is a setting, which `samples add` leaves
+    to you."""
+    config = tmp_path / "halyard.yaml"
+    config.write_text(THEIRS, encoding="utf-8")
+    where = tmp_path / "cart-inspections"
+    where.mkdir()
+
+    code, _ = added(config, where, "10")
+
+    text = config.read_text(encoding="utf-8")
+    [cart] = [p for p in projects_from_yaml(text) if p.name == "cart-inspections"]
+    assert code == 0
+    assert set(cart.inspections) == {"test-reliability", "over-engineering"}
+    assert {
+        name: (choice.model, choice.effort) for name, choice in cart.inspection_models.items()
+    } == {"test-reliability": ("opus", "high"), "over-engineering": ("sonnet", "medium")}
+    assert "HALYARD_KEEP_INSPECTIONS" not in text

@@ -1,4 +1,4 @@
-# The project's checks. `test-fast` is all of them, the fastest to fail first:
+# The guard and the tests. `test-fast` is all of them, the fastest to fail first:
 # the boundaries, then what the cart needs from the catalog, then each
 # context's own tests. scripts/validate.sh runs them one by one for Halyard.
 .PHONY: test-fast boundaries contract unit
