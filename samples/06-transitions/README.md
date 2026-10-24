@@ -96,7 +96,7 @@ model of its own — see [Two agents, two models](#two-agents-two-models).
   with `transitions/develop.md` in front. The driver's cards, and its report, arrive
   in the driver's group.
 - Once the driver has answered, in its group: `/transition`, then **developed** —
-  Halyard runs `make test-fast`, then the report and what the tests printed go to the
+  Halyard runs the tests, then the report and what they printed go to the
   navigator together. The navigator answers in its own group.
 - If the navigator says something is missing: in its group, `/transition`, then
   **develop** — its answer goes back to the driver, and round it goes.

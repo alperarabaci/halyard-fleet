@@ -22,7 +22,7 @@ piece of work — the tests, the inspections, the hand-off — is a press too.
 |---|---|
 | [`cart.py`](cart.py) | The app: a shopping cart's total, in cents |
 | [`test_cart.py`](test_cart.py) | Its tests. The discount test fails until the task is done |
-| [`Makefile`](Makefile) | `make test-fast`: the tests, as the agent and `/command` run them |
+| [`Makefile`](Makefile) | `make test-fast`: the tests, as the agent runs them. `/command` runs the same tests straight, so that their verdict is the last line |
 | [`TASK.md`](TASK.md) | The task: a discount on the total |
 | [`PROMPT.md`](PROMPT.md) | The task as the agent is sent it: make the change, then run `make test-fast` |
 | [`.gitignore`](.gitignore) | Keeps Python's `__pycache__/` out of your commits |
@@ -117,7 +117,7 @@ with `TELEGRAM_MENU: simple`, type it.
 
 ## What you will see
 
-- `▶️ Running make test-fast…`, then `✅ test-fast finished in 0s` or
+- `▶️ Running python3 -m unittest -q…`, then `✅ test-fast finished in 0s` or
   `🚫 test-fast failed after 0s`, with the end of what it printed.
 - `✍️ next-task takes task — send it as your next message here.`, then `next-task`
   running `to-main` and `new-branch`, one after the other. Had `to-main` failed,
@@ -169,7 +169,7 @@ task's labels — replace them with these, and add `labels:`:
 
 ```yaml
     commands:
-      test-fast: make test-fast
+      test-fast: python3 -m unittest -q
       test-only: python3 -m unittest -q -k {input.word}
       test-area: python3 -m unittest -q -k {label_groups.area}
       to-main: git switch main

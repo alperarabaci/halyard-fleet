@@ -17,7 +17,11 @@ projects:
     # Where you copied this sample to — not inside the Halyard checkout.
     path: ~/halyard-samples/cart-workflow
     commands:
-      test-fast: make test-fast
+      # The tests `make test-fast` runs, called straight. Through make, a
+      # failure would end on make's own `make: *** … Error 1`: the last line,
+      # the one Halyard shows and reads. Sample 08 does this for a whole
+      # project's checks.
+      test-fast: python3 -m unittest -q
     # Run over a reply as a one-shot, read-only model turn — sample 04. Each
     # here names a model and an effort of its own: the one whose answer the
     # navigator leans on most thinks hardest. Left out, an inspection runs on

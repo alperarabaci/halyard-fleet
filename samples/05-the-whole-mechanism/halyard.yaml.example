@@ -22,7 +22,11 @@ projects:
     # What `/command` offers, a button each. Halyard runs the one you press
     # itself, in `path`, and says how it went: no agent, and no card.
     commands:
-      test-fast: make test-fast
+      # The tests `make test-fast` runs, called straight. Through make, a
+      # failure would end on make's own `make: *** … Error 1`: the last line,
+      # the one Halyard shows and reads. Sample 08 does this for a whole
+      # project's checks.
+      test-fast: python3 -m unittest -q
       # A word you type: `/command test-only discount` runs the tests with
       # "discount" in their name.
       test-only: python3 -m unittest -q -k {input.word}
