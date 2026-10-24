@@ -338,7 +338,7 @@ def test_a_sample_s_commands_and_runs_go_in_whole(tmp_path: Path) -> None:
     ]
     assert code == 0
     assert cart.commands == {
-        "test-fast": "make test-fast",
+        "test-fast": "python3 -m unittest -q",
         "test-only": "python3 -m unittest -q -k {input.word}",
         "to-main": "git switch main",
         "new-branch": "git switch -c {input.task}",
@@ -363,7 +363,7 @@ def test_a_sample_s_transitions_go_in_with_the_command_they_run(tmp_path: Path) 
     projects = {p.name: p for p in projects_from_yaml(config.read_text(encoding="utf-8"))}
     cart = projects["cart-transitions"]
     assert code == 0
-    assert cart.commands == {"test-fast": "make test-fast"}
+    assert cart.commands == {"test-fast": "python3 -m unittest -q"}
     assert cart.transitions["develop"].to == "driver"
     assert cart.transitions["developed"].commands == ("test-fast",)
     assert cart.transitions["developed"].to == "navigator"

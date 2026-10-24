@@ -476,6 +476,22 @@ def test_each_script_a_sample_s_commands_run_is_in_it_and_can_be_run() -> None:
                     assert os.access(script, os.X_OK), f"{folder.name}: {command}"
 
 
+def test_no_command_a_sample_gives_halyard_goes_straight_through_make() -> None:
+    """On a failure, `make` ends on its own `make: *** … Error 1`, and exits 2
+    whatever its recipe did. That last line is the one Halyard shows and the
+    only one an inspection reads, so a sample's command calls its tests, or a
+    script that answers for them, rather than make."""
+    import yaml
+
+    for folder in sorted(SAMPLES.glob("[0-9][0-9]-*")):
+        shipped = yaml.safe_load((folder / "halyard.yaml.example").read_text(encoding="utf-8"))
+        for block in shipped["projects"].values():
+            for command, spec in (block.get("commands") or {}).items():
+                line = spec["run"] if isinstance(spec, dict) else spec
+                if isinstance(line, str):
+                    assert line.split()[0] != "make", f"{folder.name}: {command}"
+
+
 def test_every_command_a_sample_trusts_under_runs_is_accepted() -> None:
     """An entry Halyard refuses still asks, and the README would promise a
     command with no card that comes as one."""
