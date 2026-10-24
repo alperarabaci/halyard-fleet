@@ -1,7 +1,10 @@
 You did not write this plan, and your work is to find where it is wrong. It is
 the navigator's plan for the task in `TASK.md`; read it against `AGENTS.md` and
-the code it would change. Write findings, not a new plan — each with where it
-is (a file and line, or a line of the plan), what is wrong, and why:
+the code it would change. Above it are the answers of the `proof` and
+`over-engineering` inspections, which have read it already: weigh them, say
+where you disagree, and do not repeat what they found. Write findings, not a new
+plan — each with where it is (a file and line, or a line of the plan), what is
+wrong, and why:
 
 - BLOCKER — a wrong result, a broken invariant, or a decision the plan is
   missing. Say what it would cause, and in one sentence what would close it.

@@ -22,8 +22,10 @@ passes:
 | [`AGENTS.md`](AGENTS.md) | Five invariants, and no more | Read by every agent, every turn |
 | [`scripts/guard.py`](scripts/guard.py) | One context reaching inside another, or using one it may not — by file and line | Every `test-fast` |
 | [`contracts/`](contracts/) | The catalog changing what the cart relies on | Every `test-fast` |
-| The reviewer, on GPT | A plan that breaks an invariant, before any code exists | The `review` step |
-| The `bounded-context` inspection, on GPT | What no script sees: the cart keeping its own stock, a price worked out in the cart | The `close` step |
+| The `proof` inspection, on Sonnet, and `over-engineering`, on GPT | A premise in the plan the code does not bear out; more than the task needs | The `review` step, on the plan, before any code exists |
+| The reviewer, on GPT | A plan that breaks an invariant, weighing what the two inspections found | The `review` step |
+| The `test-reliability` inspection, on Opus | Tests that would not catch the task done wrong, or were bent to fit it | The `close` step, on the change |
+| The `bounded-context` inspection, on GPT | What no script sees: the cart keeping its own stock, a price worked out in the cart | The `close` step, on the change |
 
 A guard says yes or no about what can be checked mechanically, every time. A model
 reads for what cannot. Two kinds of model, Claude and GPT, look at the same work from
@@ -31,10 +33,10 @@ two sides — and none of it costs you more than a press on your phone.
 
 | At the desk | From your phone |
 |---|---|
-| Hand the plan to a second model for review, and its answer back to the navigator | `/workflow`, then **deliver**, then **review** |
+| Check the plan's premises and its scope, hand it to a second model for review, and take the answer back to the navigator | `/workflow`, then **deliver**, then **review** |
 | Send the revised plan back for a second round | Nothing: the review's `back` does it |
 | Hand each part of the plan to the driver, and run the guard, the contract and the tests after each | Nothing: `forward` and `next` do it, and `developed` runs `test-fast` |
-| Before closing, run every check again, and ask another model whether both contexts are whole | Nothing: `close` does it, and the navigator's `done` ends the run |
+| Before closing, run every check again, and have the tests and both contexts looked over | Nothing: `close` does it, and the navigator's `done` ends the run |
 
 ## What is here
 
@@ -51,9 +53,10 @@ two sides — and none of it costs you more than a press on your phone.
 | [`TASK.md`](TASK.md) | The task: stock, which crosses both contexts |
 | [`PROMPT.md`](PROMPT.md) | What the navigator is asked: a plan in two parts, one per context |
 | [`transitions/`](transitions/) | Each step's prompt: [`review.md`](transitions/review.md) and [`review-followup.md`](transitions/review-followup.md) for the reviewer; [`reviewed.md`](transitions/reviewed.md), [`developed.md`](transitions/developed.md) and [`close.md`](transitions/close.md) for the navigator; [`develop.md`](transitions/develop.md) for the driver |
-| [`inspections/bounded-context.md`](inspections/bounded-context.md) | The inspection at close, on GPT: what the guard cannot see |
+| [`inspections/`](inspections/) | Four inspections: [`proof.md`](inspections/proof.md) and [`over-engineering.md`](inspections/over-engineering.md) read the plan at review; [`test-reliability.md`](inspections/test-reliability.md) and [`bounded-context.md`](inspections/bounded-context.md) read the change at close |
+| [`compaction/`](compaction/) | The navigator's two: [`before.md`](compaction/before.md), what the record of its session keeps, and [`after.md`](compaction/after.md), what it is told once compacted |
 | [`.gitignore`](.gitignore) | Keeps Python's `__pycache__/` out of your commits |
-| [`halyard.yaml.example`](halyard.yaml.example) | What this sample adds to your `halyard.yaml`: the project, its command, inspection, five transitions, the workflow `deliver`, its three agents, and the prompt `/sample_08` — each part with a comment saying what it is for |
+| [`halyard.yaml.example`](halyard.yaml.example) | What this sample adds to your `halyard.yaml`: the project, its command, four inspections, five transitions, the workflow `deliver`, its three agents — the navigator with its compaction files — and the prompt `/sample_08` — each part with a comment saying what it is for |
 
 ## What the project gives Halyard
 
@@ -86,16 +89,41 @@ and the run stops. So every step's prompt here ends the same way: the decision a
 on the last line, nothing after it, the reason one line above a `back` or a `wait`,
 and `wait` when unsure.
 
+## The navigator keeps its place
+
+The navigator holds the run together: the plan, which part is done, what the review
+left open, what you turned down. When its session is compacted, half its context
+goes, and the half that goes is the expensive one — which numbers were measured
+rather than claimed, which BLOCKER is still open. What comes back is a confident
+navigator working from an older version of events.
+
+So the navigator, and only it, has two files:
+
+- [`compaction/before.md`](compaction/before.md) — what the record Halyard writes
+  about the session keeps, most important first: what is waiting, the step and the
+  part, what was checked and what only claimed, the review's open findings, your
+  decisions, its own corrections. A one-shot turn of its own reads the transcript and
+  writes it, on `HALYARD_DEFAULT_MODEL` — Sonnet unless set;
+  `HALYARD_COMPACTION_MODEL` chooses another for the record alone.
+- [`compaction/after.md`](compaction/after.md) — what the session is told once the
+  summary is done, under that record: answer what is waiting before anything else,
+  measure nothing again, and the few rules that always hold.
+
+The driver and the reviewer need neither: every step hands them what they need, in
+its own message. `halyard wire` puts the hooks this needs in place for Claude Code.
+None of it asks you anything, and a record that is late, or a file that is missing,
+costs the navigator its bearings, never the session.
+
 ## Before you start
 
 - **Everything [sample 01](../01-one-agent/README.md#before-you-start) needs,** with
   Halyard running: step 3 asks it something.
 - **Earlier samples cleaned up,** if you ran them — the navigator speaks in your
   default group, and step 3 refuses a group another agent already has.
-- **`claude` and `codex`** on this machine: Codex for the reviewer, and for the
-  inspection's GPT model. `codex debug models --bundled` lists what your CLI can run;
-  if it has no `gpt-6.1-sol`, put one it lists in `halyard.yaml` —
-  `uv run halyard doctor` fails a model the CLI cannot run.
+- **`claude` and `codex`** on this machine: Codex for the reviewer and for the two
+  inspections on GPT, Claude Code for the rest. `codex debug models --bundled` lists
+  what your CLI can run; if it has no `gpt-6.1-sol`, put one it lists in
+  `halyard.yaml` — `uv run halyard doctor` fails a model the CLI cannot run.
 - **`python3` and `make`.** The tests use Python's own `unittest`; nothing to install.
 - **`HALYARD_ALLOW_RISK_AT_OR_BELOW: low`** in your settings — sample 05. The reviewer
   and the inspection read a great deal, and each plain read inside the project would
@@ -173,9 +201,10 @@ service, or stop `uv run halyard` and start it again.
   It changes nothing.
 - In the same group, `/workflow`, then **deliver**, then **review** — the run starts
   there, carrying the plan to the reviewer. From here the run goes by itself:
-  - **review** — the reviewer reads the plan against `AGENTS.md` and the code, and
-    answers with its findings — each a BLOCKER, a FIX or a NOTE — and `forward` or
-    `back`;
+  - **review** — `proof` and `over-engineering` read the plan first; then the plan
+    and what they found go to the reviewer, who reads it against `AGENTS.md` and the
+    code, and answers with its findings — each a BLOCKER, a FIX or a NOTE — and
+    `forward` or `back`;
   - **reviewed** — the review reaches the navigator whichever way it went. After a
     `back`, the navigator answers each BLOCKER and the plan goes back to the
     reviewer, whose second round has `review-followup.md` in front and its own
@@ -187,8 +216,9 @@ service, or stop `uv run halyard` and start it again.
     here: they are the second part's work;
   - **phase 2, the cart** — the same two steps; now `test-fast` passes, and the
     navigator decides `forward`;
-  - **close** — `test-fast` again, and the `bounded-context` inspection on GPT; the
-    navigator decides `done`, or `back` to the driver.
+  - **close** — `test-fast` again, then the `test-reliability` and
+    `bounded-context` inspections; the navigator decides `done`, or `back` to the
+    driver.
 - Meanwhile, each agent's cards come to its own group: allow them. `/workflow` in any
   of the three groups says where the run is.
 - Once the run is done, `/commit` in the driver's group — a message for the change, on
@@ -197,15 +227,19 @@ service, or stop `uv run halyard` and start it again.
 ## What you will see
 
 - Every step's line in the navigator's group, where the run started, each with
-  **⏹ Stop the workflow** under it: `deliver 1/5 · 🤝 review → shop-rev (reviewer)…`,
-  and inside the phases `deliver 3/5 · phase 1 · 🤝 develop → shop-drv (driver)…`.
+  **⏹ Stop the workflow** under it: `deliver 1/5 · 🤝 review → shop-rev (reviewer),
+  inspecting proof, over-engineering first…`, then `proof: answered ·
+  over-engineering: answered`; inside the phases, `deliver 3/5 · phase 1 · 🤝
+  develop → shop-drv (driver)…`.
 - The reviewer's findings in its own group, starting `REVIEW · round 1/2`.
 - After each `developed` and at `close`, a line such as `test-fast: failed` — then the
   navigator reading why in the last line of `test-fast`, part by part.
 - `deliver 5/5 · 🤝 close → shop-nav (navigator), running test-fast then inspecting
-  bounded-context first…`, then `test-fast: passed · bounded-context: answered` — and
-  an **INSPECTION** card in the navigator's group for any read of the inspection's
-  that the gate does not pass on its own.
+  test-reliability, bounded-context first…`, then `test-fast: passed ·
+  test-reliability: answered · bounded-context: answered`.
+- An **INSPECTION** card for any read of an inspection's that the gate does not pass
+  on its own — in the group of the agent the step goes to: the reviewer's at
+  `review`, the navigator's at `close`.
 - At the end, in the navigator's group: `📋 deliver is done — shop#12 · run …`, when
   it started and finished, and the steps it took — `review · reviewed · phase 1:
   develop, developed · phase 2: develop, developed · close`.
@@ -224,6 +258,10 @@ service, or stop `uv run halyard` and start it again.
   run, `developed` or `close` stops there, and nothing reaches the navigator — checks
   that never ran are no result. Put the file back, and pick the step again from
   `/workflow`.
+- **Watch the navigator keep its place.** At the desk, `/compact` in the navigator's
+  session while a run is going: Halyard writes the record as the compaction starts,
+  and hands it back with `compaction/after.md` once it is done. Ask the navigator
+  where the work stands, and it answers from the record.
 - **Two rounds, then you.** A review that sends the plan back a second time would go
   round a third — past `rounds: 2` — so the run stops and asks; so does a `back` past
   any step's rounds. Rounds running out is not an approval.

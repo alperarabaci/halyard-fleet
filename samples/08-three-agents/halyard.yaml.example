@@ -26,21 +26,33 @@ projects:
     # straight, not through `make`, which exits 2 for any failure.
     commands:
       test-fast: {run: scripts/validate.sh test-fast, not_run: [2]}
-    # Read at close by another family of model, on Codex. `codex debug models
-    # --bundled` lists what your CLI can run, and `halyard doctor` fails a model
-    # it cannot.
+    # Four inspections, two at review on the plan and two at close on the
+    # change, each on the model that suits it. One written as a file alone runs
+    # on HALYARD_INSPECTION_MODEL — Sonnet unless set. A `gpt-…` model runs on
+    # Codex: `codex debug models --bundled` lists what your CLI can run, and
+    # `halyard doctor` fails a model it cannot.
     inspections:
+      proof: inspections/proof.md
+      over-engineering:
+        file: inspections/over-engineering.md
+        model: gpt-6.1-sol
+        effort: high
+      test-reliability:
+        file: inspections/test-reliability.md
+        model: opus
+        effort: high
       bounded-context:
         file: inspections/bounded-context.md
         model: gpt-6.1-sol
         effort: high
     transitions:
-      # The navigator's plan, to the reviewer. From the second round on,
-      # `followup_prompt:` goes in front instead, with the reviewer's own answer
-      # to the round before.
+      # The navigator's plan, to the reviewer, with what two inspections found
+      # in it first. From the second round on, `followup_prompt:` goes in front
+      # instead, with the reviewer's own answer to the round before.
       review:
         prompt: transitions/review.md
         followup_prompt: transitions/review-followup.md
+        inspect: [proof, over-engineering]
         to: reviewer
       reviewed:
         prompt: transitions/reviewed.md
@@ -55,7 +67,7 @@ projects:
       close:
         prompt: transitions/close.md
         commands: [test-fast]
-        inspect: [bounded-context]
+        inspect: [test-reliability, bounded-context]
         to: navigator
     workflows:
       steps:
@@ -83,6 +95,13 @@ projects:
         # lists the ones it can see.
         session: shop-nav
         role: navigator
+        # The navigator tracks the work, so its state is the one to carry across
+        # a compaction. `before_compaction:` says what the record Halyard writes
+        # about the session keeps; `after_compaction:` is what the session is
+        # told, under that record, once the summary is done. The driver and the
+        # reviewer need neither: each step hands them what they need.
+        before_compaction: compaction/before.md
+        after_compaction: compaction/after.md
         # Your default group: the same id as TELEGRAM_CHAT_ID. Quoted: unquoted,
         # YAML reads it as a number.
         chat: "-1001234567890"

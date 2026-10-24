@@ -409,8 +409,9 @@ def test_a_sample_s_workflow_goes_in_with_its_steps_and_their_rounds(tmp_path: P
 
 def test_three_agents_go_in_each_in_the_group_it_was_given(tmp_path: Path) -> None:
     """Sample 08: two groups of their own asked for and kept, the review the
-    navigator acts on, the phases, and an inspection on another runtime's
-    model — all as the sample wrote them."""
+    navigator acts on, the phases, the inspections on the plan and on the
+    change, and the navigator's compaction files — all as the sample wrote
+    them."""
     config = tmp_path / "halyard.yaml"
     config.write_text(THEIRS, encoding="utf-8")
     where = tmp_path / "shop"
@@ -435,5 +436,23 @@ def test_three_agents_go_in_each_in_the_group_it_was_given(tmp_path: Path) -> No
     assert steps["close"].works_on == "develop"
     assert shop.transitions["review"].followup_prompt == Path("transitions/review-followup.md")
     assert shop.commands_not_run == {"test-fast": (2,)}
-    choice = shop.inspection_models["bounded-context"]
-    assert (choice.model, choice.effort) == ("gpt-6.1-sol", "high")
+    # Two inspections on the plan at review, two on the change at close, each
+    # on its own model — `proof` on the machine's.
+    assert shop.transitions["review"].inspections == ("proof", "over-engineering")
+    assert shop.transitions["close"].inspections == ("test-reliability", "bounded-context")
+    assert {
+        name: (choice.model, choice.effort) for name, choice in shop.inspection_models.items()
+    } == {
+        "over-engineering": ("gpt-6.1-sol", "high"),
+        "test-reliability": ("opus", "high"),
+        "bounded-context": ("gpt-6.1-sol", "high"),
+    }
+    # The navigator's state is carried across a compaction; the others need not be.
+    compaction = {
+        seat.label: (seat.before_compaction, seat.after_compaction) for seat in shop.seats
+    }
+    assert compaction == {
+        "shop-nav": ("compaction/before.md", "compaction/after.md"),
+        "shop-drv": (None, None),
+        "shop-rev": (None, None),
+    }

@@ -424,6 +424,23 @@ def test_every_effort_a_sample_s_inspections_ask_of_claude_code_is_one_it_takes(
                     assert choice.effort in EFFORT_LEVELS, f"{folder.name}: {name}"
 
 
+def test_every_file_a_sample_s_configuration_names_is_in_it() -> None:
+    """What `halyard doctor` checks on a machine — every prompt, inspection
+    and compaction file a project names is where it says — checked here on
+    each sample as it ships, so a copy starts with all of them."""
+    import yaml
+
+    from halyard.core.config_file import missing_files, projects_from_yaml
+
+    for folder in sorted(SAMPLES.glob("[0-9][0-9]-*")):
+        shipped = yaml.safe_load((folder / "halyard.yaml.example").read_text(encoding="utf-8"))
+        placed = _placed(shipped["projects"], folder)
+        for name, block in shipped["projects"].items():
+            block["path"] = str(placed[name])
+        projects = projects_from_yaml(yaml.safe_dump(shipped, sort_keys=False))
+        assert missing_files(projects) == [], folder.name
+
+
 def test_each_transition_prompt_a_sample_names_is_in_it() -> None:
     """A transition reads its prompt from the project when it goes; one the
     sample does not ship would arrive with no prompt in front."""
