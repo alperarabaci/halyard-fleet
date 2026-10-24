@@ -52,7 +52,6 @@ halyard-fleet/
 │   ├── setup.md                        # installing it, wiring a project
 │   ├── telegram.md                     # the bot, agents, models
 │   ├── architecture.md                 # this file
-│   ├── mobile-agent-control-plane.md   # full design document
 │   ├── hook-payload-notes.md           # observed Claude Code hook behaviour
 │   └── session-io-notes.md             # writing into a live session
 ├── src/halyard/
