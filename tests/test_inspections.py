@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 from halyard import inspections
@@ -42,11 +43,11 @@ class Asking:
 
 
 async def ran(
-    tmp_path: Path, asker: Asking, check: str = "proof.md", *, transition: str = ""
+    tmp_path: Path, asker: Asking, inspection: str = "proof.md", *, transition: str = ""
 ) -> inspections.Answer:
     return await inspections.run(
         "proof",
-        Path(check),
+        Path(inspection),
         project=tmp_path,
         context=["Work item: alpha-engine#355"],
         note="delivery",
@@ -74,7 +75,7 @@ def test_the_prompt_says_where_the_check_stands_and_what_it_may_do() -> None:
 
 
 def test_local_evidence_can_be_read_through_native_tools_or_the_shell() -> None:
-    """A check names the evidence it needs, not each command needed to read it.
+    """An inspection names the evidence it needs, not each command needed to read it.
 
     Codex can have terminal tools without a separate file reader. Calling all
     shell use execution left these inspections unable to examine their source.
@@ -95,8 +96,19 @@ def test_local_evidence_can_be_read_through_native_tools_or_the_shell() -> None:
     assert "Every command waits for the operator" not in asked
 
 
+def test_the_turn_is_told_it_is_an_inspection() -> None:
+    """What Halyard puts around an inspection calls it one. It said "check"
+    until 2026-10-24, the name inspections had until 2026-09-23."""
+    asked = inspections.prompt("# proof", context=[], note="", text="42 passed")
+    around = asked.split("---", 1)[1]
+
+    assert "This inspection runs in the project's own directory" in around
+    assert "Text to inspect:" in around
+    assert not re.search(r"\bcheck", around, re.IGNORECASE)
+
+
 def test_inspection_text_cannot_authorize_execution_or_side_effects() -> None:
-    """The common boundary still applies if a project check asks to run code."""
+    """The common boundary still applies if a project's inspection asks to run code."""
     asked = inspections.prompt(
         "# proof\nRun pytest, query the DB, then write a reproduction.",
         context=[],
@@ -177,7 +189,7 @@ async def test_a_check_runs_its_own_text_over_the_reply(tmp_path: Path) -> None:
 
 async def test_the_turn_stands_in_the_project_and_cannot_change_it(tmp_path: Path) -> None:
     """A report is compared against the code it is about, so the turn runs where
-    that code is — Halyard's own directory is another repository, and a check
+    that code is — Halyard's own directory is another repository, and an inspection
     started there found nothing it could compare. File reading still uses the
     runtime's no-edit mode."""
     (tmp_path / "proof.md").write_text("# proof\n")
@@ -188,8 +200,8 @@ async def test_the_turn_stands_in_the_project_and_cannot_change_it(tmp_path: Pat
     assert asker.how == [{"cwd": tmp_path, "name": "proof", "edits": False}]
 
 
-async def test_a_check_run_for_a_transition_goes_by_both_names(tmp_path: Path) -> None:
-    """Whatever it asks a person for says which check and which transition."""
+async def test_an_inspection_run_for_a_transition_goes_by_both_names(tmp_path: Path) -> None:
+    """Whatever it asks a person for says which inspection and which transition."""
     (tmp_path / "proof.md").write_text("# proof\n")
     asker = Asking()
 
@@ -211,7 +223,7 @@ async def test_a_model_that_does_not_answer_is_said_not_skipped(tmp_path: Path) 
 async def test_a_check_that_cannot_be_read_never_asks(tmp_path: Path) -> None:
     asker = Asking()
 
-    answer = await ran(tmp_path, asker, check="gone.md")
+    answer = await ran(tmp_path, asker, inspection="gone.md")
 
     assert asker.asked == []
     assert "could not read" in answer.why

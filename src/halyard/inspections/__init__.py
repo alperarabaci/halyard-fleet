@@ -20,9 +20,9 @@ Tests, scripts, database and network operations are forbidden. The runtime's
 sandbox and the project's gate still apply: a read refused or unfinished leaves
 that part of the inspection unmeasured rather than clean.
 
-The prompt still says "check" where it speaks to the model, as it did before
-these were called inspections: what a model is told is kept the same, so that
-the answers before the name changed and after it can be compared.
+The prompt said "check" where it spoke to the model until 2026-10-24, so that
+answers from either side of the rename could be compared; it says "inspection"
+since. A kept run holds the words it was given, and a repeat gives them again.
 
 **Every run is kept.** What the model was given, word for word, and what it
 said, through `Keeper` into the table `record` writes — the one thing Halyard

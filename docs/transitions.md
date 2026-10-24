@@ -10,10 +10,10 @@ runs its commands and then its inspections, and delivers all of it together.
 
 The names are the ones a workflow standard uses. In BPMN, in a statechart or in
 a Jira workflow, work sits in a **stage** — a state, a status — and moves
-between stages by a **transition**, which can have checks of its own and
-something it does once taken. Here a workflow's step is a stage, a transition
-is how the work enters it, its commands and inspections are what it checks on
-the way, and delivering to the agent is what it does. The word a reply ends
+between stages by a **transition**, which can look the work over on the way and
+do something once taken. Here a workflow's step is a stage, a transition is how
+the work enters it, its commands and inspections are how it looks the work over,
+and delivering to the agent is what it does. The word a reply ends
 with — `forward`, `back` — is the event that picks the transition. See
 [Workflows](workflows.md).
 
@@ -21,7 +21,9 @@ Transitions were called handoffs and agents were called seats until
 2026-09-24, and inspections were called checks until 2026-09-23. A
 configuration that still says `handoffs:`, `seats:` or `checks:`, or a step
 that says `handoff:` or `seat:`, works as it did; `/handoff` and `/checks`
-still answer, and `halyard doctor` says what to rename.
+still answer, and `halyard doctor` says what to rename. What Halyard puts around
+an inspection's own text called it a check until 2026-10-24: a run kept before
+then holds those words, and a repeat of it is given them again.
 
 Everything here sits under the project in `halyard.yaml`, and every file it
 names is the project's own, read relative to its `path:`.
@@ -119,7 +121,7 @@ settings:
 projects:
   alpha-engine:
     inspections:
-      thin-bff: {file: NOTES/halyard/checks/thin-bff.md, model: gpt-6.1-sol, effort: high}
+      thin-bff: {file: NOTES/halyard/inspections/thin-bff.md, model: gpt-6.1-sol, effort: high}
 ```
 
 `codex debug models --bundled` lists the models the Codex CLI on a machine can
