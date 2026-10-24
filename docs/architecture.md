@@ -6,10 +6,10 @@ properties that follow from the shape.
 ## The shape
 
 ```
-Claude Code (PreToolUse hook, blocking)
-    │  stdin: JSON payload
+Claude Code, Codex, ZCode (PreToolUse hook, blocking)
+    │  stdin: JSON payload               # opencode: its plugin makes the same call
     ▼
-hook_bridge.py                          # standalone, minimal, stdlib only
+hook.sh → hook_bridge.py                # standalone, stdlib only
     │  POST /v1/approvals  (blocking, with timeout)
     ▼
 Halyard Core (FastAPI)
@@ -29,20 +29,21 @@ Halyard Core (FastAPI)
     ▲
     │  200 OK: {"decision":"allow"|"deny","reason":"..."}
 hook_bridge.py
-    │  stdout: translated into the hook output format
+    │  stdout: translated into the runtime's hook output format
     ▼
-Claude Code continues, or stops
+the agent continues, or stops
 ```
 
 Two separations carry the design:
 
-**Channels and agents are different things.** Telegram is a channel. Claude Code is an agent
-runtime. Both will be replaced. `core/` must know about neither — it speaks only in `AgentEvent`,
-`ApprovalRequest`, and the two adapter protocols.
+**Channels and agents are different things.** Telegram is a channel. Claude Code, Codex, opencode
+and ZCode are agent runtimes, and more of either can come. `core/` must know about neither — it
+speaks only in `AgentEvent`, `ApprovalRequest`, and the two adapter protocols.
 
 **The bridge is deliberately stupid.** `hook_bridge.py` reads stdin, makes one HTTP call, and
-translates the reply into the hook output format — roughly 60 lines of stdlib, no dependencies.
-All policy, risk classification, redaction, and routing live in core, where they can be tested.
+translates the reply into the runtime's hook output format — stdlib only, no dependencies. It has
+grown to speak each runtime's payload, but it decides nothing: all policy, risk classification,
+redaction, and routing live in core, where they can be tested.
 
 ## Layout
 

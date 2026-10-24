@@ -145,49 +145,36 @@ separate conversations means separate **groups**, not separate bots.
 1. Create two groups and add the same bot to both. A group of one is fine.
 2. Send `/status` in each. It has to be a command: a bot in a group only sees messages starting
    with `/` unless privacy mode is turned off, and leaving it on is the better default. With
-   Halyard running, its answer names the group — `This chat: -1001111111111` — and whose it is,
-   which is all step 3 is for.
-3. Without Halyard running yet, **keep it stopped**, and read the chat ids from Telegram. This
-   matters — `getUpdates` hands each update to whoever asks first, so a running poll loop will
-   swallow them before your `curl` sees anything:
+   Halyard running, its answer names the group — `This chat: -1001111111111` — and whose it is.
+3. Give each agent its group, and its role, under the project in `halyard.yaml`:
 
-   ```bash
-   # stop the control plane first
-   curl -s "https://api.telegram.org/bot<TOKEN>/getUpdates" | python3 -c "
-   import sys, json
-   for u in json.load(sys.stdin)['result']:
-       c = (u.get('message') or {}).get('chat') or {}
-       if c: print(c.get('id'), '→', c.get('title') or c.get('username'))"
+   ```yaml
+   projects:
+     alpha-engine:
+       path: ~/code/alpha-engine
+       agents:
+         nav:
+           runtime: claude-code
+           session: alpha-navigator
+           role: navigator
+           chat: "-1001111111111"
+         drv:
+           runtime: codex
+           session: alpha-driver
+           role: driver
+           chat: "-1002222222222"
    ```
 
-4. Put them in `halyard.yaml` under `settings:` and start again:
+   Quote the ids: unquoted, YAML reads them as numbers. A chat may be a forum topic instead of a
+   group of its own — `"-1001234567890:12"` sends to topic 12 in a shared group. Give each agent a
+   group or topic of its own: a message typed in one shared by two reaches only one of them.
 
-   ```bash
-   TELEGRAM_NAVIGATOR_CHAT_ID=-1001111111111
-   TELEGRAM_DRIVER_CHAT_ID=-1002222222222
-   ```
+An agent with no `chat:` speaks in `TELEGRAM_CHAT_ID`, the way it does with one session.
 
-   Either one may be a forum topic instead of a group of its own — `-1001234567890:12` sends to
-   topic 12 in a shared group.
-
-Then tell each session which agent it is when you launch it. There is no pairing step and no list to
-pick from: the environment a session was started with is the answer, and every hook it fires
-inherits it.
-
-```bash
-HALYARD_ROLE=navigator claude     # one terminal
-HALYARD_ROLE=driver    claude     # the other
-```
-
-Worth two aliases, since it is every launch:
-
-```bash
-alias nav='HALYARD_ROLE=navigator claude'
-alias drv='HALYARD_ROLE=driver claude'
-```
-
-Leave the two chat ids unset and none of this applies — everything goes to `TELEGRAM_CHAT_ID`, the
-way it does with one session.
+`TELEGRAM_NAVIGATOR_CHAT_ID` and `TELEGRAM_DRIVER_CHAT_ID`, with a session started as
+`HALYARD_ROLE=navigator claude`, are the shape this had before a second runtime existed. They are
+read only from the environment, when there is no `halyard.yaml`; with one, its agents are the
+whole answer.
 
 ### Use the app, not a browser tab
 

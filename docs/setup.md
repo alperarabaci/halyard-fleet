@@ -117,12 +117,34 @@ guarantees.
   "hooks": {
     "PreToolUse": [
       {
-        "matcher": "Bash",
+        "matcher": "Bash|AskUserQuestion|Write|Edit|MultiEdit|NotebookEdit|WebFetch|WebSearch|mcp__.*",
         "hooks": [
           {
             "type": "command",
             "command": "/absolute/path/to/halyard-fleet/bridge/hook.sh",
             "timeout": 600
+          }
+        ]
+      }
+    ],
+    "PreCompact": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/absolute/path/to/halyard-fleet/bridge/compaction.py",
+            "timeout": 180
+          }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/absolute/path/to/halyard-fleet/bridge/compaction.py",
+            "timeout": 15
           }
         ]
       }
@@ -164,7 +186,7 @@ gitignored, so a machine-specific path does not break a teammate's checkout.
 >
 > ```json
 > {
->   "hooks": { "PreToolUse": [ ... ], "Stop": [ ... ] },
+>   "hooks": { "PreToolUse": [ ... ], "PreCompact": [ ... ], "SessionStart": [ ... ], "Stop": [ ... ] },
 >   "permissions": { "allow": [ "Bash(uv run *)", "..." ] }
 > }
 > ```
@@ -179,6 +201,17 @@ change without another configuration edit.
 `hook_bridge.py`: the wrapper is what denies when the Python process cannot start at all — a
 missing interpreter, a bad path, an import error. Those exit non-zero with nothing on stdout, which
 Claude Code reads as *no opinion*, and it runs the command.
+
+The matcher is a list rather than everything: Bash, the file tools, the question tool, MCP calls
+and web fetches. `Read` and the client's own tool loading fire too, and gating them would put a
+card in front of every file read. Each of these needs Halyard running, as Bash does; `writes:` and
+`tools:` say which should not have to ask — see [Configuring a project](configuration.md).
+
+**`PreCompact` and `SessionStart` → `compaction.py`** keep a session's place across a compaction:
+the first has Halyard write a record about the session, the second hands it back once the summary
+is done. For an agent with neither `before_compaction:` nor `after_compaction:`, all they do is
+say in its group that the session is compacting — see
+[Configuring a project](configuration.md#when-a-session-is-compacted).
 
 **`Stop` → `relay.py`** sends the agent's replies to your phone. It is optional; approvals work
 without it.

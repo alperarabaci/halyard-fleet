@@ -8,9 +8,10 @@ None of these announce themselves at the moment they bite. A denied `ls` looks
 like a broken tool, a paused gate looks like a closed one, an expired approval
 looks like a command that hung. Nobody should discover them afterwards.
 
-**1. A wired project needs the control plane running.** From the moment the hook is in
-`settings.local.json`, a Bash command with Halyard down is *denied* — every one of them, `ls`
-included — and there is no terminal prompt to approve it with. Wiring is not something you do once
+**1. A wired project needs the control plane running.** From the moment a project is wired, an
+agent's command with Halyard down is *denied* — every one of them, `ls` included, and its edits and
+MCP calls with them — and there is no terminal prompt to approve it with. opencode is the
+exception: its question waits on its own screen for whoever is at the desk. Wiring is not something you do once
 and forget; it is something the project now depends on. Turning it back off is a command, and it
 keeps a backup:
 
@@ -39,8 +40,9 @@ Every line below was measured rather than read, usually after it caused a proble
 - **`settings.local.json` is not yours alone.** Claude Code appends every "don't ask again" to a
   `permissions.allow` list in the same file, and it is gitignored. Never write that file wholesale —
   use `halyard wire`, which merges.
-- **The gate covers what the matcher covers.** With `"matcher": "Bash"`, `Write` and `Edit` are not
-  gated at all.
+- **The gate covers what the matcher covers** — Bash, the file tools, the question tool, MCP calls
+  and web fetches; not `Read` or `Grep`. A project wired by an older release may have Bash alone,
+  with `Write` and `Edit` not gated at all: `halyard wire` again corrects the matcher.
 - **The project root is the git root.** A session opened in a subdirectory is gated by the `.claude/`
   at the top of its repository — and by nothing, if there is no repository above it.
 - **One bot token per machine.** Telegram's `getUpdates` has a single consumer; two control planes
