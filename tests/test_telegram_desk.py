@@ -13,6 +13,7 @@ from test_telegram import APPROVER, CHAT, FakeTelegramApi, an_approval, press
 from halyard.channels.telegram import cards
 from halyard.channels.telegram.adapter import TelegramChannel
 from halyard.channels.telegram.desk import STANDING, CardDesk, kind_of
+from halyard.channels.telegram.shelf import Kept, Shelf
 from halyard.core.approvals import ApprovalStore, ResolutionReason
 from halyard.core.audit import AuditAction, AuditLog, JsonlAuditSink
 from halyard.core.questions import Choice, QuestionStore
@@ -489,3 +490,124 @@ async def test_the_whole_way_a_request_nobody_answers_ends_with_its_card_closed(
     assert closed["text"].startswith("<b>⌛ EXPIRED — DENIED</b>")
     assert channel._desk.live() == []
     await audit.close()
+
+
+# --- across a restart -------------------------------------------------------------
+
+
+def shelved(path: Path, *cards_kept) -> Shelf:
+    shelf = Shelf(path)
+    for kept in cards_kept:
+        shelf.put(kept)
+    return shelf
+
+
+def kept_card(message_id: int, html: str = "<b>Which?</b>", *, at: datetime = NOW) -> Kept:
+    return Kept(CHAT, message_id, "label", "", html, at)
+
+
+def test_the_shelf_keeps_what_was_put_and_forgets_what_was_taken(tmp_path: Path) -> None:
+    shelf = shelved(tmp_path / "halyard.db", kept_card(7), kept_card(8))
+
+    shelf.take(CHAT, 7)
+
+    assert shelf.everything() == [kept_card(8)]
+
+
+def test_a_shelf_that_cannot_be_read_is_empty_rather_than_broken(tmp_path: Path) -> None:
+    unreadable = tmp_path / "halyard.db"
+    unreadable.write_text("not a database")
+
+    assert Shelf(tmp_path / "none.db").everything() == []
+    assert Shelf(unreadable).everything() == []
+    Shelf(unreadable).put(kept_card(7))  # said in the log, never raised
+
+
+async def test_a_card_is_written_down_as_it_opens_and_struck_off_as_it_closes(
+    tmp_path: Path,
+) -> None:
+    shelf = Shelf(tmp_path / "halyard.db")
+    desk = CardDesk(FakeTelegramApi(), Clock(), shelf=shelf)
+
+    card = await desk.open(CHAT, "<b>Which?</b>", picker())
+    [kept] = shelf.everything()
+    await desk.close_card(card, outcome="☑️ andon")
+
+    assert (kept.message_id, kept.html, kept.kind) == (card.message_id, "<b>Which?</b>", "label")
+    assert shelf.everything() == []
+
+
+async def test_what_the_last_process_left_open_is_closed_saying_so(tmp_path: Path) -> None:
+    """Its cards stayed in the chat, buttons and all, answering any press with
+    "no longer open" — the memory that knew them went with the process."""
+    shelf = shelved(tmp_path / "halyard.db", kept_card(7), kept_card(8, "Run which one?"))
+    api = FakeTelegramApi()
+    desk = CardDesk(api, Clock(), shelf=shelf, pace=0)
+
+    assert await desk.close_left_over(await desk.left_over()) == 2
+
+    assert [edit["text"] for edit in api.edits] == [
+        "<b>Which?</b>\n\n⏹ <i>Closed — Halyard restarted.</i>",
+        "Run which one?\n\n⏹ <i>Closed — Halyard restarted.</i>",
+    ]
+    assert all(edit["reply_markup"] is None for edit in api.edits)
+    assert shelf.everything() == []
+
+
+async def test_a_card_telegram_would_not_close_is_tried_again_for_a_while(tmp_path: Path) -> None:
+    """At the next start — unless it has been tried for long enough, when a
+    message deleted or out of the bot's reach would be tried forever."""
+    recent = kept_card(7, at=NOW - timedelta(hours=1))
+    old = kept_card(8, at=NOW - timedelta(days=3))
+    shelf = shelved(tmp_path / "halyard.db", recent, old)
+
+    class Unreachable(RefusingApi):
+        async def edit_message_reply_markup(self, *args, **kwargs):
+            raise RuntimeError("Bad Request: message to edit not found")
+
+    desk = CardDesk(Unreachable(), Clock(), shelf=shelf, pace=0)
+
+    assert await desk.close_left_over(await desk.left_over()) == 0
+    assert shelf.everything() == [recent]
+
+
+async def test_a_card_this_process_opened_is_never_taken_for_a_left_over_one(
+    tmp_path: Path,
+) -> None:
+    shelf = Shelf(tmp_path / "halyard.db")
+    api = FakeTelegramApi()
+    desk = CardDesk(api, Clock(), shelf=shelf, pace=0)
+    card = await desk.open(CHAT, "Which?", picker())
+
+    await desk.close_left_over(shelf.everything())
+
+    assert api.edits == []
+    assert desk.live() == [card]
+
+
+async def test_starting_closes_the_cards_the_last_run_left_open(tmp_path: Path) -> None:
+    database = tmp_path / "halyard.db"
+    shelved(database, kept_card(7, "<b>Allow?</b>"))
+    audit = AuditLog([JsonlAuditSink(tmp_path / "audit.jsonl")])
+    await audit.open()
+    api = FakeTelegramApi()
+    channel = TelegramChannel(
+        api=api,
+        store=ApprovalStore(ttl=timedelta(minutes=5)),
+        audit=audit,
+        chat_id=CHAT,
+        authorized_user_ids=frozenset({APPROVER}),
+        database=database,
+        poll_retry_seconds=0.01,
+    )
+    channel._desk._pace = 0
+
+    await channel.start()
+    await settled(channel)
+    await channel.stop()
+    await audit.close()
+
+    [closed] = api.edits
+    assert closed["message_id"] == 7
+    assert closed["text"] == "<b>Allow?</b>\n\n⏹ <i>Closed — Halyard restarted.</i>"
+    assert Shelf(database).everything() == []
