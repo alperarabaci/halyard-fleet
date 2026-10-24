@@ -17,7 +17,5 @@ the repository a folder is in — and each one says how.
 | 06 | [Transitions](06-transitions/) | A navigator and a driver handing work there and back with `/transition`, the tests run on the way |
 | 07 | [A workflow](07-a-workflow/) | The same transitions as steps, each reply's last line deciding what comes next |
 | 08 | [Three agents](08-three-agents/) | A navigator and a driver on Claude, a reviewer on GPT, and two bounded contexts kept apart by a guard, a contract and inspections, in a workflow with phases |
-| 09 | Fewer cards | What the project trusts, proposed from the cards it still asks: `halyard upkeep runs-advice` and `writes:` |
+| 09 | [Fewer cards](09-fewer-cards/) | What the project trusts, proposed from the cards it still asks: `halyard upkeep runs-advice`, `halyard rules add` and `writes:` |
 | 10 | [Measuring inspections](10-measuring-inspections/) | Every inspection run kept: the same input on another model, side by side with its tokens, and a prompt's revisions compared; `/doctor`, `/open` and `halyard export` around it |
-
-Samples without a link are planned, and come one at a time.
