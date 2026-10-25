@@ -394,23 +394,48 @@ class Settings(BaseSettings):
     #: The name is from when a low risk label was the test. That test let one
     #: read carry a whole command — `ls | xargs rm` — and it no longer decides:
     #: every part has to be understood, and a part that is not is a question.
+    #:
+    #: Anything but `low` is ignored, and the gate stays as strict as with
+    #: nothing set — never refused. Refused, it stopped the service from
+    #: starting: launchd started it again and again, every command on every
+    #: wired project was denied while it did, and none of it reached Telegram,
+    #: which is where the person who could fix it was. So it is said instead —
+    #: see `ignored` — in the log, in the navigator's chat and by doctor.
     allow_risk_at_or_below: str | None = Field(
         default=None, validation_alias="HALYARD_ALLOW_RISK_AT_OR_BELOW"
+    )
+    #: The same setting as it was written, kept only to say it was ignored.
+    #: Nothing decides anything by it: `allow_risk_at_or_below` above is what
+    #: the gate reads.
+    allow_risk_as_given: str | None = Field(
+        default=None, validation_alias="HALYARD_ALLOW_RISK_AT_OR_BELOW", repr=False
     )
 
     @field_validator("allow_risk_at_or_below")
     @classmethod
     def _only_low_may_be_skipped(cls, value: str | None) -> str | None:
-        if value is None or not str(value).strip():
-            return None
-        wanted = str(value).strip().lower()
-        if wanted != "low":
-            raise ValueError(
-                "HALYARD_ALLOW_RISK_AT_OR_BELOW takes `low` and nothing else. "
-                "Medium covers commits, moves and container starts; a gate that "
-                "skips those is not a gate."
+        """`low`, or nothing. Medium covers commits, moves and container
+        starts; a gate that skips those is not a gate — so a value it does not
+        take leaves the gate as it is with none."""
+        wanted = str(value or "").strip().lower()
+        return "low" if wanted == "low" else None
+
+    @property
+    def ignored(self) -> list[str]:
+        """Settings given a value Halyard does not take, each in a sentence:
+        which, what it was, and what happens instead. Said at startup, in the
+        navigator's chat and by `halyard doctor`, rather than refused — a
+        service that will not start denies everything and tells nobody."""
+        said = []
+        given = str(self.allow_risk_as_given or "").strip()
+        if given and self.allow_risk_at_or_below is None:
+            said.append(
+                f"HALYARD_ALLOW_RISK_AT_OR_BELOW is {given!r}, and it takes `low` and nothing "
+                "else: medium covers commits, moves and container starts, and a gate that "
+                "skips those is not a gate. It is ignored, so every command asks as if it "
+                "were not set — set it to `low`, or remove it."
             )
-        return wanted
+        return said
 
     @model_validator(mode="after")
     def _timeouts_must_be_ordered(self) -> Settings:

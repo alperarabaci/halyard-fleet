@@ -617,6 +617,12 @@ def create_app(settings: Settings, *, channel=None) -> FastAPI:
     # nothing. One machine ran that way for weeks.
     for line in missing_files(list(known_projects.values())):
         logger.warning("%s", line)
+    # A setting given a value it does not take is ignored rather than refused —
+    # refused, the service never started and denied everything, and said so
+    # nowhere anybody was looking. Said here at error level, and to the
+    # navigator once the channel is up.
+    for sentence in settings.ignored:
+        logger.error("%s", sentence)
 
     recorder = after_compaction.Recorder(
         seats=configured_seats,
@@ -649,6 +655,11 @@ def create_app(settings: Settings, *, channel=None) -> FastAPI:
             logger.warning("%s", aged.wording(_now()))
             with contextlib.suppress(Exception):
                 await resolved_channel.send_message("halyard", aged.wording(_now()), Role.NAVIGATOR)
+        # The same for a setting that was ignored: the person who can fix it
+        # is on the phone, not reading this machine's log.
+        for sentence in settings.ignored:
+            with contextlib.suppress(Exception):
+                await resolved_channel.send_message("halyard", f"⚠️ {sentence}", Role.NAVIGATOR)
         # The watcher's own loop, alongside the channel's. A best-effort courier,
         # so a failure to start it is logged and shrugged off rather than kept
         # from serving.

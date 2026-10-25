@@ -22,6 +22,12 @@ projects:
       - uv run pytest *               # a last `*`: options and paths inside the project
 ```
 
+`low` is the only value the setting takes. Anything else — `medium` would let commits,
+moves and container starts through — is ignored, and the gate stays as strict as with
+nothing set. The service still starts, and says so: in its log, in the navigator's chat
+and in `halyard doctor`. Refusing the value used to stop the service from starting,
+which denied every command on every wired project and told nobody on the phone.
+
 An entry that could run anything — `bash *`, `python3 -c *`, `make *` — is refused. Not
 sure what to trust? `halyard upkeep runs-advice <project>` reads the cards the project
 still asks, has a model propose entries, and shows how many cards each would have

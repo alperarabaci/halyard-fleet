@@ -69,25 +69,38 @@ def test_only_low_may_be_configured() -> None:
     """Medium covers `git commit`, `mv` and `docker compose up`. A setting that
     could be turned up to medium would be a switch for disabling the gate,
     written to look like a preference."""
-    assert (
-        Settings(
-            HALYARD_CHANNEL="stub_allow",
-            HALYARD_ALLOW_RISK_AT_OR_BELOW="low",
-            _env_file=None,
-        ).allow_risk_at_or_below
-        == "low"
+    low = Settings(
+        HALYARD_CHANNEL="stub_allow", HALYARD_ALLOW_RISK_AT_OR_BELOW=" Low ", _env_file=None
     )
-    with pytest.raises(ValueError, match="takes `low`"):
-        Settings(
-            HALYARD_CHANNEL="stub_allow",
-            HALYARD_ALLOW_RISK_AT_OR_BELOW="medium",
-            _env_file=None,
-        )
+
+    assert (low.allow_risk_at_or_below, low.ignored) == ("low", [])
+
+
+@pytest.mark.parametrize("given", ["medium", "high", "lwo", "critical"])
+def test_any_other_value_is_ignored_and_said_rather_than_refused(given: str) -> None:
+    """Refused, it stopped the service from starting: launchd started it
+    again and again, every command was denied, and nothing reached the phone.
+    Ignored, the gate is as strict as with nothing set, and it is said."""
+    settings = Settings(
+        HALYARD_CHANNEL="stub_allow", HALYARD_ALLOW_RISK_AT_OR_BELOW=given, _env_file=None
+    )
+
+    assert settings.allow_risk_at_or_below is None, "the gate stays strict"
+    [said] = settings.ignored
+    assert said.startswith(f"HALYARD_ALLOW_RISK_AT_OR_BELOW is {given!r}, and it takes `low`")
+    assert "It is ignored, so every command asks as if it were not set" in said
 
 
 def test_it_is_off_unless_somebody_asks() -> None:
-    """Nothing changes for anybody who has not turned it on."""
-    assert Settings(HALYARD_CHANNEL="stub_allow", _env_file=None).allow_risk_at_or_below is None
+    """Nothing changes for anybody who has not turned it on, and nothing is
+    said about a setting nobody gave."""
+    unset = Settings(HALYARD_CHANNEL="stub_allow", _env_file=None)
+    empty = Settings(
+        HALYARD_CHANNEL="stub_allow", HALYARD_ALLOW_RISK_AT_OR_BELOW=" ", _env_file=None
+    )
+
+    assert (unset.allow_risk_at_or_below, unset.ignored) == (None, [])
+    assert (empty.allow_risk_at_or_below, empty.ignored) == (None, [])
 
 
 @pytest.mark.parametrize(

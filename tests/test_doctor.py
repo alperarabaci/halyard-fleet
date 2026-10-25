@@ -781,3 +781,19 @@ def test_a_project_whose_remote_names_no_forge_is_left_alone() -> None:
         f"{doctor.WARN}b is on GitHub (git.example.com), and HALYARD_GITHUB_TOKEN is not set, "
         "so labels: who_worked writes nothing"
     ]
+
+
+def test_a_setting_that_was_ignored_is_a_warning_in_doctor() -> None:
+    """A warning, not a problem: what runs is the stricter gate."""
+    from halyard.config import Settings
+
+    medium = Settings(
+        _env_file=None, HALYARD_CHANNEL="stub_deny", HALYARD_ALLOW_RISK_AT_OR_BELOW="medium"
+    )
+    low = Settings(
+        _env_file=None, HALYARD_CHANNEL="stub_deny", HALYARD_ALLOW_RISK_AT_OR_BELOW="low"
+    )
+
+    [line] = doctor._ignored(medium)
+    assert line.startswith(f"{doctor.WARN}HALYARD_ALLOW_RISK_AT_OR_BELOW is 'medium'")
+    assert doctor._ignored(low) == []
