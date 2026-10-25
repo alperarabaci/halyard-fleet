@@ -110,17 +110,40 @@ def test_logging_still_starts_when_the_file_cannot_be_opened(tmp_path: Path) -> 
     assert logging.getLogger().handlers
 
 
-def test_an_unknown_level_is_refused_rather_than_quietly_ignored(monkeypatch) -> None:
-    """A typo would otherwise leave you reading an INFO log and trusting it.
-
-    Which is the worst shape for this mistake: you turn on debugging, see
-    nothing unusual, and conclude nothing unusual happened.
-    """
+@pytest.mark.parametrize("given", ["DEBUGG", "verbose", "10"])
+def test_an_unknown_level_is_ignored_and_said_rather_than_refused(monkeypatch, given) -> None:
+    """Refused, it kept the service from starting, and launchd started it
+    again and again while every command was denied. Quietly ignored, it would
+    leave you reading an INFO log and trusting it — you turn on debugging,
+    see nothing unusual, and conclude nothing unusual happened. So the log is
+    kept at INFO, and it is said."""
     monkeypatch.setenv("HALYARD_CHANNEL", "stub_deny")
-    monkeypatch.setenv("HALYARD_LOG_LEVEL", "DEBUGG")
+    monkeypatch.setenv("HALYARD_LOG_LEVEL", given)
 
-    with pytest.raises(ValueError, match="is not a level"):
-        Settings()
+    settings = Settings()
+
+    assert settings.log_level == "INFO"
+    [said] = settings.ignored
+    assert said.startswith(f"HALYARD_LOG_LEVEL is {given!r}, which is not a level")
+    assert "It is ignored, so the log is kept at INFO" in said
+
+
+def test_a_level_is_read_however_it_is_written(monkeypatch) -> None:
+    monkeypatch.setenv("HALYARD_CHANNEL", "stub_deny")
+    monkeypatch.setenv("HALYARD_LOG_LEVEL", " debug ")
+
+    settings = Settings()
+
+    assert (settings.log_level, settings.ignored) == ("DEBUG", [])
+
+
+def test_no_level_is_info_with_nothing_said(monkeypatch) -> None:
+    monkeypatch.setenv("HALYARD_CHANNEL", "stub_deny")
+    monkeypatch.delenv("HALYARD_LOG_LEVEL", raising=False)
+
+    settings = Settings()
+
+    assert (settings.log_level, settings.ignored) == ("INFO", [])
 
 
 def test_the_file_can_be_turned_off(monkeypatch) -> None:

@@ -33,6 +33,10 @@ from pydantic_settings import (
 logger = logging.getLogger(__name__)
 
 
+#: The levels `HALYARD_LOG_LEVEL` takes, loudest first.
+LOG_LEVELS = ("CRITICAL", "ERROR", "WARNING", "INFO", "DEBUG")
+
+
 class ChannelKind(StrEnum):
     """Which channel adapter resolves approvals."""
 
@@ -224,7 +228,15 @@ class Settings(BaseSettings):
     commit_model: str | None = Field(default=None, validation_alias="HALYARD_COMMIT_MODEL")
     commit_effort: str | None = Field(default=None, validation_alias="HALYARD_COMMIT_EFFORT")
 
+    #: One of CRITICAL, ERROR, WARNING, INFO, DEBUG. Anything else is ignored —
+    #: the log stays at INFO — and said, rather than refused: refused, the
+    #: service never started, and every command was denied while launchd
+    #: started it again and again. See `ignored`.
     log_level: str = Field(default="INFO", validation_alias="HALYARD_LOG_LEVEL")
+    #: The same setting as it was written, kept only to say it was ignored.
+    log_level_as_given: str | None = Field(
+        default=None, validation_alias="HALYARD_LOG_LEVEL", repr=False
+    )
     #: A ceiling on one week, so an always-on service cannot fill a disk before
     #: the next Monday. Reaching it rolls early and keeps both halves.
     log_max_bytes: int = Field(default=5_000_000, validation_alias="HALYARD_LOG_MAX_BYTES", gt=0)
@@ -427,6 +439,13 @@ class Settings(BaseSettings):
         navigator's chat and by `halyard doctor`, rather than refused — a
         service that will not start denies everything and tells nobody."""
         said = []
+        level = str(self.log_level_as_given or "").strip()
+        if level and level.upper() not in LOG_LEVELS:
+            said.append(
+                f"HALYARD_LOG_LEVEL is {level!r}, which is not a level: "
+                f"{', '.join(LOG_LEVELS)}. It is ignored, so the log is kept at INFO — set "
+                "one of those, or remove it."
+            )
         given = str(self.allow_risk_as_given or "").strip()
         if given and self.allow_risk_at_or_below is None:
             said.append(
@@ -467,21 +486,21 @@ class Settings(BaseSettings):
     @field_validator("log_level", mode="before")
     @classmethod
     def _known_level(cls, value: object) -> object:
-        """Refuse a level that does not exist rather than quietly using INFO.
+        """A level, or INFO for one that does not exist — never quietly.
 
         A typo here is invisible in the worst way: `HALYARD_LOG_LEVEL=DEBUGG`
         would leave you reading an INFO log while believing you had turned
         debugging on, and concluding from its silence that nothing happened.
+        So it is said, loudly — see `ignored`. It used to be refused, which
+        kept the service from starting at all: worse than a quiet log.
         """
-        if isinstance(value, str):
-            level = value.strip().upper()
-            if level not in ("CRITICAL", "ERROR", "WARNING", "INFO", "DEBUG"):
-                raise ValueError(
-                    f"HALYARD_LOG_LEVEL={value!r} is not a level. "
-                    "Use one of CRITICAL, ERROR, WARNING, INFO, DEBUG."
-                )
-            return level
-        return value
+        level = str(value if value is not None else "").strip().upper()
+        return level if level in LOG_LEVELS else "INFO"
+
+    @field_validator("log_level_as_given", mode="before")
+    @classmethod
+    def _as_written(cls, value: object) -> str | None:
+        return None if value is None else str(value)
 
     @field_validator("log_file", mode="before")
     @classmethod

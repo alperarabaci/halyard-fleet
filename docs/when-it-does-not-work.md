@@ -231,6 +231,11 @@ one place. Eight weeks are kept — `HALYARD_LOG_BACKUPS` changes that — and a
 week noisy enough to threaten the disk rolls early rather than growing until
 Monday.
 
+`HALYARD_LOG_LEVEL` takes `CRITICAL`, `ERROR`, `WARNING`, `INFO` or `DEBUG`. Anything
+else is ignored and the log stays at `INFO` — said in the log itself, in the
+navigator's chat and by `halyard doctor`, so a `DEBUGG` does not leave you reading an
+`INFO` log and trusting it. It used to keep the service from starting instead.
+
 If you are on an installation from before this, the old flat `halyard.log` and
 `bridge.log` stay exactly where they are; nothing is moved. New lines simply go
 to the folder, and the line the control plane prints at startup says where.

@@ -797,3 +797,12 @@ def test_a_setting_that_was_ignored_is_a_warning_in_doctor() -> None:
     [line] = doctor._ignored(medium)
     assert line.startswith(f"{doctor.WARN}HALYARD_ALLOW_RISK_AT_OR_BELOW is 'medium'")
     assert doctor._ignored(low) == []
+
+
+def test_a_log_level_that_was_ignored_is_a_warning_in_doctor() -> None:
+    from halyard.config import Settings
+
+    typo = Settings(_env_file=None, HALYARD_CHANNEL="stub_deny", HALYARD_LOG_LEVEL="DEBUGG")
+
+    [line] = doctor._ignored(typo)
+    assert line.startswith(f"{doctor.WARN}HALYARD_LOG_LEVEL is 'DEBUGG', which is not a level")

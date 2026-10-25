@@ -569,3 +569,37 @@ async def test_a_risk_setting_it_does_not_take_starts_the_service_with_the_gate_
     [(_, text, role)] = said
     assert text.startswith("⚠️ HALYARD_ALLOW_RISK_AT_OR_BELOW is 'medium'")
     assert role is Role.NAVIGATOR
+
+
+async def test_a_log_level_it_does_not_take_starts_the_service_and_is_said(
+    tmp_path: Path, caplog
+) -> None:
+    """As a risk setting it does not take is: the service starts, logging at
+    INFO, and the log and the navigator are told."""
+    import logging
+
+    from halyard.api.app import create_app
+
+    settings = Settings(
+        HALYARD_CHANNEL=ChannelKind.STUB_ALLOW.value,
+        HALYARD_DB_PATH=str(tmp_path / "halyard.db"),
+        HALYARD_AUDIT_LOG=str(tmp_path / "audit.jsonl"),
+        HALYARD_LOG_LEVEL="DEBUGG",
+        CLAUDE_PROJECT_NAME="alpha-engine",
+        _env_file=None,
+    )
+    caplog.set_level(logging.ERROR, logger="halyard.api.app")
+
+    app = create_app(settings)
+    said: list[str] = []
+
+    async def heard(session_id, text, role=None, **_):
+        said.append(text)
+
+    app.state.channel.send_message = heard
+    async with LifespanManager(app):
+        pass
+
+    assert settings.log_level == "INFO"
+    assert "HALYARD_LOG_LEVEL is 'DEBUGG'" in caplog.text
+    assert said == [f"⚠️ {settings.ignored[0]}"]
