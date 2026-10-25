@@ -150,19 +150,22 @@ with `TELEGRAM_MENU: simple`, type it.
 - `/stop` while a command runs — ends it. A long test run started from the phone can
   be stopped from it too.
 
-## With a GitLab project
+## With a GitLab or GitHub project
 
-Optional, for a copy whose remote is a GitLab project: Halyard reads and writes task
-labels on GitLab, and on no other tracker today. Everything above works without it.
+Optional, for a copy whose remote is a GitLab or GitHub project: Halyard reads and
+writes task labels on those two, and on no other tracker today. Everything above works
+without it.
 
-- Push the copy's `main` to a GitLab project — `git push -u origin main`, so
+- Push the copy's `main` to a GitLab or GitHub project — `git push -u origin main`, so
   `git pull` knows where to pull from — and open an issue for the task, say #12.
-  `gitlab.com` is recognised from the remote; on a GitLab of your own, add
-  `forge: gitlab` to the project.
-- Under `settings:`, `HALYARD_FORGE_TOKEN`: a token that may label issues. GitLab has
-  no scope narrower than `api` for that; a project access token keeps it to one
-  project.
-- Create the labels `area:total` and `area:discount` in the GitLab project.
+  `gitlab.com` and `github.com` are recognised from the remote; on a GitLab or a GitHub
+  Enterprise of your own, add `forge: gitlab` or `forge: github` to the project.
+- Under `settings:`, the token for that forge:
+  - `HALYARD_GITLAB_TOKEN`: GitLab has no scope narrower than `api` for labelling an
+    issue; a project access token keeps it to one project.
+  - `HALYARD_GITHUB_TOKEN`: a fine-grained token limited to the repository, with
+    Issues: read and write — what GitHub's documentation implies is needed.
+- Create the labels `area:total` and `area:discount` in the project.
 
 Then the project's `commands:` can pull before branching, and take a value from the
 task's labels — replace them with these, and add `labels:`:

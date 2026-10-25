@@ -262,6 +262,55 @@ def _older_spellings(projects) -> list[str]:
     ]
 
 
+def _forge_tokens(settings, projects, origin_of=None) -> list[str]:
+    """The token a project's forge needs, where the project asks for labels and
+    it is missing — and the old name for GitLab's, still in use.
+
+    Only a project that asks for labels — `labels: who_worked` writes them,
+    `labels: groups` reads them — is checked: with github.com and gitlab.com
+    both known, every project hosted on either would otherwise warn on every
+    run. `/label` says which token is missing when somebody uses it. The forge
+    is read the way `/label` reads it — the repository's remote, or `forge:` —
+    so a project whose remote names no forge is left alone.
+
+    Warnings, never problems: labels are optional, and every other command
+    works without a token. Without these, who_worked writes nothing and says so
+    only in the log, and the groups read nothing at all.
+    """
+    from halyard import tasks
+
+    origin_of = origin_of or tasks.origin_of
+    lines = []
+    if settings.forge_token:
+        lines.append(
+            f"{WARN}HALYARD_FORGE_TOKEN is now HALYARD_GITLAB_TOKEN, "
+            + (
+                "which is set, so the old one is not used and can go"
+                if settings.gitlab_token
+                else "and is still read as GitLab's; the old name still works"
+            )
+        )
+    tokens = settings.forge_tokens
+    for project in projects:
+        missing = [
+            *(["labels: who_worked writes nothing"] if project.label_work else []),
+            *(["labels: groups reads nothing from its tasks"] if project.label_groups else []),
+        ]
+        if not missing or project.path is None:
+            continue
+        origin = origin_of(project.path)
+        if origin is None:
+            continue
+        kind = tasks.kind_of(origin, project.forge)
+        if kind not in tasks.BUILDERS or tokens.get(kind):
+            continue
+        lines.append(
+            f"{WARN}{project.name} is on {tasks.BUILDERS[kind].name} ({origin.host}), and "
+            f"{tasks.TOKENS[kind]} is not set, so {' and '.join(missing)}"
+        )
+    return lines
+
+
 def _steps_astray(projects) -> list[str]:
     """Workflow steps sent to an agent of another role than their transition's.
 
@@ -908,6 +957,8 @@ def run() -> int:
         for line in said:
             print(line)
     for line in _runs(settings if settings_ok else None, described):
+        print(line)
+    for line in _forge_tokens(settings, described) if settings_ok else []:
         print(line)
     if seats:
         print()

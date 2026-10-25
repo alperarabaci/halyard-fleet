@@ -88,9 +88,35 @@ per project. Exit 0 is passed and any other code failed, unless the command list
 under `not_run:` — a transition stops at a command that did not run, rather than hand on
 a result that is not there. In a transition, a command's last line is the one shown and
 the only one its inspections read, so a command that ends on its own verdict reads
-better than one that ends on `make: *** … Error 1`. `/label` reads the task number off
-the branch and asks its issue tracker — `HALYARD_FORGE_TOKEN` is the only thing it
-needs, and only a host that cannot name itself needs `forge:` as well.
+better than one that ends on `make: *** … Error 1`.
+
+**`/label` reads the task number off the branch** — `320-rag-v4-pdf-report` as GitLab
+names a branch made from an issue, `42-label-tasks-on-github` as GitHub does — and asks
+the issue tracker the repository's remote points at. `gitlab.com` and `github.com` name
+themselves; a GitLab or a GitHub Enterprise of your own needs `forge: gitlab` or
+`forge: github` on the project. Each forge has a token of its own under `settings:`,
+used for that forge alone, so one machine can label a GitHub project and a GitLab one:
+
+```yaml
+settings:
+  HALYARD_GITHUB_TOKEN: "github_pat_…"    # github.com and GitHub Enterprise
+  HALYARD_GITLAB_TOKEN: "glpat-…"         # gitlab.com and a GitLab of your own
+```
+
+- **GitHub:** a fine-grained personal access token limited to the repository, with the
+  repository permission **Issues: read and write**. That is what GitHub's documentation
+  implies reading an issue, listing and creating labels, and labelling an issue need;
+  it was not measured. GitHub has no scoped labels, so a colon is part of a name, and a
+  label the repository lacks — one `labels: who_worked` writes, say — is created first.
+- **GitLab:** `api` scope, since GitLab has none narrower for writing a label onto an
+  issue; a project access token keeps it to one project.
+
+`HALYARD_FORGE_TOKEN`, the name GitLab's token had while it was the only forge, still
+works: it is read as GitLab's when `HALYARD_GITLAB_TOKEN` is unset, and never as
+GitHub's. `halyard doctor` says to rename it. For a project that asks for labels —
+`labels: who_worked` or `labels: groups` — it also names the token its forge needs
+when that is not set; for any other project, `/label` says which token is missing
+when somebody uses it.
 
 `/commit` takes the whole working tree, has a message written for it in this
 repository's own style, and shows what changed rather than only which files — and

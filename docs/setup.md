@@ -380,9 +380,11 @@ which role that is.
 **`labels: who_worked: true`** (written `label_work: true` before) puts each agent's label on the task its branch is for —
 `navigator:claude`, `reviewer:codex` — the first time that agent works on it.
 The task comes from the branch name (`347-power-gen-fixes` is task 347), and a
-label already on the task is never written again. It needs a forge token that
-may label issues, and it is off unless a project asks, because it writes to an
-issue tracker on its own. An agent without a role is labelled with its runtime
+label already on the task is never written again. It needs the token for the
+project's forge — `HALYARD_GITHUB_TOKEN` or `HALYARD_GITLAB_TOKEN`, see
+[configuration](configuration.md) — and it is off unless a project asks, because it
+writes to an issue tracker on its own. On GitHub a label the repository does not
+have yet is created first. An agent without a role is labelled with its runtime
 alone, `claude`; in a project that does give roles, a session without one is
 not labelled, since it could be any of them.
 
@@ -440,7 +442,8 @@ at the desk and changes under it, and a label naming one would go on naming it
 afterwards. Agents are told apart by runtime and role, so two agents in one
 project that share both must ask for the same label. One colon by default, because GitLab's paid tiers read `::`
 as a scoped label, where `driver::codex` would take `driver::claude` off a task
-both drivers worked on.
+both drivers worked on. GitHub has no scoped labels: there a colon is only part of
+the name.
 
 Copy `halyard.simple.yaml.example` for one project with one agent, or
 `halyard.yaml.example` for all of it, and edit the copy. It is gitignored — along with every

@@ -369,7 +369,7 @@ def _build_channel(
         # the channel so a malformed `projects:` block cannot take the gate
         # down — the same reason `prompts:` is loaded defensively above.
         repositories=configured_projects(),
-        forge_token=settings.forge_token,
+        forge_tokens=settings.forge_tokens,
         # What each runtime's own availability check needs, asked of each
         # runtime — so a seat that cannot be reached is told why from the phone,
         # truthfully, and nothing here has to know one runtime's settings.
@@ -592,18 +592,19 @@ def create_app(settings: Settings, *, channel=None) -> FastAPI:
     # Each seat's label on the task its branch is for — only in projects that
     # asked, and only with a token to write with. See `tasks.attribution`.
     labelled = {name: found for name, found in known_projects.items() if found.label_work}
-    if labelled and settings.forge_token:
+    if labelled and settings.forge_tokens:
         from halyard.tasks.attribution import Attribution
 
         registry.listen(
-            Attribution(token=settings.forge_token, projects=labelled, tag_of=_tag_of).seen
+            Attribution(tokens=settings.forge_tokens, projects=labelled, tag_of=_tag_of).seen
         )
         # Said once, because nothing else is until a label is written, and "is it
         # on in the process that is running" had no answer from outside it.
         logger.info("Labelling tasks in %s as agents work on them", ", ".join(sorted(labelled)))
     elif labelled:
         logger.warning(
-            "labels: work is on for %s, but there is no forge token to write labels with",
+            "labels: who_worked is on for %s, but there is no forge token to write labels "
+            "with — HALYARD_GITHUB_TOKEN or HALYARD_GITLAB_TOKEN",
             ", ".join(sorted(labelled)),
         )
     # Prompt files live in the codebase they describe, so they are looked for

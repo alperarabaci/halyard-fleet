@@ -863,7 +863,7 @@ class TelegramChannel:
         #: See `SIMPLE`. Anything else is `full`, said in the log.
         menu: str = "full",
         repositories: Mapping[str, Project] | None = None,
-        forge_token: str | None = None,
+        forge_tokens: Mapping[str, str] | None = None,
         #: Where the last thing said in each chat is kept, so `/forward`
         #: survives a restart. None disables it: nothing else depends on it.
         said_path: Path | None = None,
@@ -941,9 +941,10 @@ class TelegramChannel:
         self._recipients: dict[tuple[str, int | None, str], tuple[str, datetime]] = {}
         self._authorized = authorized_user_ids
         self._clock = clock
-        #: For reaching an issue tracker. Absent means `/label` says so and
-        #: nothing else notices.
-        self._forge_token = forge_token
+        #: For reaching an issue tracker: each forge's token, by forge name.
+        #: One absent means `/label` says so for that forge and nothing else
+        #: notices.
+        self._forge_tokens = dict(forge_tokens or {})
         #: Which command is running in which project, so a second one is
         #: refused rather than started on top of it.
         self._working: dict[str, str] = {}
@@ -2213,7 +2214,7 @@ class TelegramChannel:
             return None
 
         try:
-            forge = task_tracker.build(origin, self._forge_token or "", declared=found.forge)
+            forge = task_tracker.build(origin, self._forge_tokens, declared=found.forge)
         except task_tracker.ForgeError as refused:
             await self._say(f"\U0001f6ab {html.escape(str(refused))}", chat_id, thread_id)
             return None
@@ -3522,7 +3523,7 @@ class TelegramChannel:
             logger.info("%s#%d: the repository has no origin to ask", found.name, number)
             return None
         try:
-            forge = task_tracker.build(origin, self._forge_token or "", declared=found.forge)
+            forge = task_tracker.build(origin, self._forge_tokens, declared=found.forge)
         except task_tracker.ForgeError as refused:
             logger.info("%s#%d: %s", found.name, number, refused)
             return None
