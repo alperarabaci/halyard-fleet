@@ -253,7 +253,10 @@ and asks.
 
 **Rounds are the run's own.** Each step counts the times it reached its agent in this
 run — per phase, inside the phases — and the envelope's `Round: n/…` counts against the
-same number. A transition pressed by hand is not part of a run and counts nothing: it sends
+same number. A round is counted as the turn carrying the step starts, so an answer back in
+seconds marks its own round and is weighed with it counted. A step that reached nobody, or
+whose turn ended without an answer, gives its round back: sending it again is the same
+round. A transition pressed by hand is not part of a run and counts nothing: it sends
 its own prompt every time, and says no round. Two steps naming one transition do not share
 a count either.
 
@@ -270,6 +273,16 @@ offers the same button.
 message to an agent in the middle of a turn waits behind that turn. Until a turn carrying
 the step starts in the agent's session, the run says the step is *on its way to xdrv*, and
 what the agent says in the meantime answers something else: it moves nothing.
+
+**A step on its way can be called back.** **⏹ Stop the workflow** clears the run, as it
+always has. Steering it sends the run to another step instead: **🧭 Pick a step** on the
+card `/workflow` shows while a step is on its way, or a typed `/workflow level3 develop`.
+Either way the step on its way stops where it is — a command it is running ends as `/stop`
+ends one, with everything it started, and its inspections stop with any card they had
+open. Its message never goes: every runtime is asked, right before the turn that would
+carry it, whether the run still sends it. The chat says the step was stopped before it
+reached its agent. Once a step got there it is waited on: Stop still clears the run, and
+the agent's answer then moves nothing.
 
 **A run has one card with buttons at a time: its newest.** When the next step goes, the
 run stops, or `/workflow` is asked, the card before says *This run has a newer card* and
@@ -374,6 +387,16 @@ closes saying the run is kept, and `/workflow` gives it a card again.
 
 A step that reached nobody — Halyard paused, a session that could not be found, a
 runtime that refused the message — stops the run under the chat's own warning. So does a
-restart that caught a step on its way: its commands, its inspections and its message went
-with the process that stopped. Neither counts a round, and the card's
-**▶️ develop → xdrv** sends the step again.
+step whose turn started and then ended without an answer, out of usage halfway most
+often: *develop's turn in xdrv ended without an answer*. So does `/stop` in the agent's
+chat while the run waits on it: *develop's turn in xdrv was stopped by … before it
+answered* — or, for a step still waiting behind the turn it stopped, *develop was stopped
+by … before it reached xdrv*; a `/stop` after the answer came moves nothing. So does a restart that caught a
+step on its way: its commands, its inspections and its message went with the process that
+stopped. None of them counts a round, and the card's **▶️ develop → xdrv** sends the step
+again.
+
+A turn a restart took down after it started is not one of those. Halyard cannot tell it
+from a turn still running, so the run goes on waiting for its answer. When the agent's
+chat shows nothing came back, **⏹ Stop the workflow** clears the run, and
+`/workflow level3 develop` sends that step afresh.

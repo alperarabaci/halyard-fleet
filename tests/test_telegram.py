@@ -961,8 +961,8 @@ class FakeRunner:
         # Kept so a test can drive the after-acceptance path, which is the one
         # a real runtime reaches minutes later and nothing else can reach here.
         self.stopped_afterwards = when_done
-        if started is not None:
-            await started(session_id)
+        if started is not None and await started(session_id) is False:
+            return False
         return self._works
 
 

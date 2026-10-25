@@ -303,9 +303,9 @@ class CodexRunner:
         `agents/turns.py`. `when_done` is called if an accepted turn then fails,
         which is how running out of usage halfway through still gets reported.
         `started` is called as the turn carrying it begins, after any turn this
-        runner had going in the session. A thread held open by its app queues
-        the message there instead, behind whatever the app has going, which is
-        not something this can see.
+        runner had going in the session, and answering False keeps it out. A
+        thread held open by its app queues the message there instead, behind
+        whatever the app has going, which is not something this can see.
         """
         self._refused.pop(session_id, None)
         if not self._binary:

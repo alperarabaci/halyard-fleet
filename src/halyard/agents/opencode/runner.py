@@ -197,8 +197,8 @@ class OpencodeRunner:
         — and the runtime reports its own trouble through the plugin, which is
         the path a 429 already takes. Calling this on a guess would be worse
         than leaving it to the half that can see. `started` is called as the
-        message goes; a turn opencode already has going in the session is not
-        something this can see.
+        message goes, and answering False keeps it out; a turn opencode already
+        has going in the session is not something this can see.
         """
         if not session_id or not (text or "").strip():
             return False
@@ -222,7 +222,8 @@ class OpencodeRunner:
 
         self._busy.add(session_id)
         try:
-            await say_started(started, session_id)
+            if await say_started(started, session_id) is False:
+                return False
             return await asyncio.to_thread(self._post, where, body)
         finally:
             self._busy.discard(session_id)

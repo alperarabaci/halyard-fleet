@@ -55,8 +55,10 @@ And acceptance is late for one question: when did the message get there? A
 turn that answers inside the window has finished — its reply already relayed —
 before it is called accepted, and a message sent to a session that is busy
 waits behind the turn going there, whose reply arrives first. So a caller may
-hand in `started` as well, called once the turn carrying its message has begun:
-after any turn ahead of it, before anything it says.
+hand in `started` as well, called as the turn carrying its message begins:
+after any turn ahead of it, before anything it says. Its answer is asked for,
+because a message can wait a long time behind another turn: one whose sender
+has called it back since is not sent at all.
 """
 
 from __future__ import annotations
@@ -171,8 +173,10 @@ class Turns:
         as a failure, three reviews that each got an answer within two minutes
         read as three that never reached the reviewer.
 
-        `started` is called as the process starts: after any turn queued ahead
-        of it in this session, and before the window that decides acceptance.
+        `started` is called as the process is about to start: after any turn
+        queued ahead of it in this session, and before the window that decides
+        acceptance. Answering False keeps the message out — not sent, and not
+        accepted.
         """
         loop = asyncio.get_running_loop()
         accepted: asyncio.Future[bool] = loop.create_future()
@@ -246,6 +250,13 @@ class Turns:
         sent_under: int = 0,
         started: Callable[[str], object] | None = None,
     ) -> None:
+        # Said before the process starts, so nothing the turn says comes first —
+        # and asked: a message that waited behind another turn may have been
+        # called back by whoever sent it, and is then never sent.
+        if await say_started(started, session_id) is False:
+            logger.info("A message for %s was called back while it waited; not sent", session_id)
+            accepted.set_result(False)
+            return
         try:
             process = await asyncio.create_subprocess_exec(
                 *arguments,
@@ -266,7 +277,6 @@ class Turns:
             return
         self._processes[session_id] = process
         try:
-            await say_started(started, session_id)
             await self._follow(session_id, process, accepted, when_done, expected, sent_under)
         finally:
             if self._processes.get(session_id) is process:
@@ -373,19 +383,23 @@ class Turns:
         )
 
 
-async def say_started(started: Callable[[str], object] | None, session_id: str | None) -> None:
+async def say_started(started: Callable[[str], object] | None, session_id: str | None) -> object:
     """Tell whoever started a turn of its own the id it runs under, before the
-    turn begins — or whoever sent a message that its turn has begun, in that
-    session. Awaited when it answers with something to wait for; never raises,
-    because a turn that cannot be marked is still worth taking."""
+    turn begins — or whoever sent a message that its turn is beginning, in that
+    session. Awaited when it answers with something to wait for, and what it
+    answers is returned: a message's sender answers False once it has called
+    the message back. Never raises, because a turn that cannot be marked is
+    still worth taking — None for a sender that could not be told."""
     if started is None or not session_id:
-        return
+        return None
     try:
         told = started(session_id)
         if isinstance(told, Awaitable):
-            await told
+            told = await told
+        return told
     except Exception:
         logger.warning("Could not say that a turn in %s started", session_id, exc_info=True)
+        return None
 
 
 def end_group(process) -> None:

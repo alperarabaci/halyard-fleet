@@ -134,11 +134,13 @@ class AgentRunner(Protocol):
         running out of usage halfway through, most often. A runtime that
         decides before it answers never calls it, and says so.
 
-        `started` is called with the session's id once the message is going
-        into the session, before anything the session says to it: for a runtime
-        that queues a message behind a turn already going, when its own turn
-        begins rather than when it was queued — see `agents/turns.py`. A
-        runtime with no such queue calls it as it sends. Not called for a
-        message refused before then.
+        `started` is called with the session's id as the message is about to
+        go into the session, before anything the session says to it: for a
+        runtime that queues a message behind a turn already going, when its own
+        turn begins rather than when it was queued — see `agents/turns.py`. A
+        runtime with no such queue calls it as it sends. It answers whether the
+        message still goes: False — its sender called it back while it waited —
+        and it is not sent, and `send` returns False. Not called for a message
+        refused before then.
         """
         ...

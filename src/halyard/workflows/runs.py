@@ -12,9 +12,11 @@ hand is not part of any run, and counts nothing: the rounds that stop a loop
 are the loop's own. A run that is stopped and started again starts counting
 again, because starting one is somebody deciding to.
 
-**A round is a message that arrived.** It is counted when the seat's session
-takes it, so a step that reached nobody is not a round, and sending it again
-is the same round rather than the next.
+**A round is a message that arrived.** It is counted when a turn carrying it
+starts in the seat's session — before anything that turn says, so its answer
+marks its own round — and a step that reached nobody is not a round: one
+refused on the way, or whose turn ended without an answer, gives its round
+back, and sending it again is the same round rather than the next.
 
 **A step is on its way before it is waited on.** Its commands run and its
 inspections answer first, which can take minutes, and a message to a seat that
@@ -377,55 +379,66 @@ def save(where: Path, work: str, run: Run) -> None:
     _write(where, noted)
 
 
-def record(where: Path, work: str, key: str, *, to: str, now: datetime | None = None) -> int:
-    """Note that a step reached its seat, and say which round it was.
-
-    Written into the run as it is now, rather than the one the step was sent
-    from: the seat can take the message after the run has been saved again.
-    Nothing is counted for a run that is gone — somebody stopped it while its
-    step was on its way, and there is nothing left to count against.
-    """
-    run = current(where, work)
-    if run is None:
-        return 0
-    entries = (*run.rounds.get(key, ()), Round(at=now or datetime.now(UTC), to=to))
-    save(where, work, replace(run, rounds={**run.rounds, key: entries}))
-    return len(entries)
-
-
-def arrived(where: Path, work: str, sent: Run) -> bool:
+def arrived(where: Path, work: str, sent: Run, key: str, *, now: datetime | None = None) -> int:
     """Note that a step on its way got there — a turn carrying it started in
-    its seat's session — so the run waits for that seat's reply from now on.
-    `sent` is the run as it was when the step went. Whether this moved it: not
-    when the run is no longer on that step on its way, having got there
-    already, or been stopped, moved or started afresh in the meantime.
+    its seat's session — so its round counts, under `key`, and the run waits
+    for that seat's reply from now on: both in one write, before anything the
+    turn says. `sent` is the run as it was when the step went.
+
+    Which round it was, or 0 when the run is no longer on that step on its
+    way: it got there already, or was stopped, moved or started afresh in the
+    meantime, and nothing is counted.
     """
     run = current(where, work)
     if run is None or not sent.sending_to or not _on_the_step(run, sent):
-        return False
+        return 0
     if run.sending_to != sent.sending_to:
+        return 0
+    entries = (*run.rounds.get(key, ()), Round(at=now or datetime.now(UTC), to=sent.sending_to))
+    save(where, work, replace(run.waiting_on(sent.sending_to), rounds={**run.rounds, key: entries}))
+    return len(entries)
+
+
+def still_sending(where: Path, work: str, sent: Run) -> bool:
+    """Whether the run still sends the step `sent` went with: on its way to its
+    seat, or there and not answered yet. Not once it was stopped, moved or
+    started afresh — a step nothing sends any more is not delivered."""
+    run = current(where, work)
+    if run is None or not sent.sending_to or not _on_the_step(run, sent):
         return False
-    save(where, work, run.waiting_on(sent.sending_to))
-    return True
+    return run.sending_to == sent.sending_to or (run.waiting and run.waiting_for == sent.sending_to)
 
 
-def missed(where: Path, work: str, sent: Run, why: str) -> Run | None:
-    """The run stopped for `why`, when a step on its way never got there —
-    `sent` is the run as it was when the step went — or None when the run has
-    moved past it: its answer came, or it was stopped, moved or started afresh.
-    Not saved: saying so is the caller's.
+def missed(
+    where: Path, work: str, sent: Run, why: str, *, key: str = "", there: bool = False
+) -> Run | None:
+    """The run stopped for `why`, when a step never got an answer — it reached
+    nobody, or its turn ended without one — or None when the run has moved past
+    it: its answer came, or it was stopped, moved or started afresh. `sent` is
+    the run as it was when the step went. Not saved: saying so is the caller's.
+    `there` asks for a step that got there — its turn started, and the run
+    waits on its seat — and leaves one still on its way alone.
 
-    A turn can start and then be refused, so a step can be waited on already
-    and still have reached nobody. It is stopped as it was sent: whose reply it
-    carries, and whether it is a return, are what sending it again needs.
+    A turn can start and then be refused, or fail later, so a step can be
+    waited on already and still have reached nobody. It is stopped as it was
+    sent: whose reply it carries, and whether it is a return, are what sending
+    it again needs — and the round its turn counted under `key` is given back,
+    so sending it again is the same round.
     """
     run = current(where, work)
     if run is None or not sent.sending_to or not _on_the_step(run, sent):
         return None
     waited_on = run.waiting and run.waiting_for == sent.sending_to
-    if run.sending_to != sent.sending_to and not waited_on:
+    if (there or run.sending_to != sent.sending_to) and not waited_on:
         return None
-    return replace(run, waiting_for=sent.waiting_for, back=sent.back).held(why)
+    rounds = dict(run.rounds)
+    entries = rounds.get(key, ())
+    if waited_on and entries and entries[-1].to == sent.sending_to and not entries[-1].decision:
+        if entries[:-1]:
+            rounds[key] = entries[:-1]
+        else:
+            del rounds[key]
+    return replace(run, waiting_for=sent.waiting_for, back=sent.back, rounds=rounds).held(why)
 
 
 def _on_the_step(run: Run, sent: Run) -> bool:
