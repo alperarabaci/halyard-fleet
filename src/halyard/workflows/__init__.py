@@ -53,8 +53,8 @@ from halyard.workflows.runs import (
     going,
     missed,
     new_ident,
-    record,
     save,
+    still_sending,
 )
 
 __all__ = [
@@ -76,8 +76,8 @@ __all__ = [
     "missed",
     "new_ident",
     "read",
-    "record",
     "save",
+    "still_sending",
     "taken_as",
     "word_for",
 ]

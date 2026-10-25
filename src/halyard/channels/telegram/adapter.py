@@ -265,6 +265,10 @@ RUN_STOPPED = "⏹ <i>The run was stopped.</i>"
 #: replaced: nothing is done, and the card closes.
 RUN_EARLIER = "↪️ <i>From an earlier run — /workflow shows the one going now.</i>"
 RUN_OVER = "⏹ <i>That run is over.</i>"
+#: How long calling a step back waits for what was taking it to end: its command
+#: ends within a poll, its inspections when their turns are cancelled. Past this
+#: the run goes on, and a step after it finds the command still going.
+CALLED_BACK_WITHIN_SECONDS = 30.0
 #: What a run's card the last process left open says, closed as this one starts,
 #: when the run itself is kept: it goes on, and `/workflow` gives it a card again.
 RUN_KEPT = "⏹ <i>Closed — Halyard restarted. The run is kept: /workflow shows it.</i>"
@@ -367,17 +371,27 @@ class StepRounds:
 
     before: tuple[flowing.Round, ...]
     allowed: int
+    #: Counts the round when the step gets there — a turn carrying it starts in
+    #: the seat's session, or, for a runtime that never says so, the session
+    #: takes it — and from then the run waits on the seat. Which round, or 0
+    #: when it was counted already or the run no longer sends the step.
     count: Callable[[str], Awaitable[int]]
     #: The run, as `workflow_steps` knows it, the step's name, and its phase
     #: when it is one of a flow's phase steps.
     run: str = ""
     step: str = ""
     phase: int | None = None
-    #: What the run is told as the step goes: that it got there — a turn
-    #: carrying it started in the seat's session, so the seat's reply is the
-    #: step's answer from then on — or, with why, that it reached nobody.
-    arrived: Callable[[], Awaitable[None]] | None = None
+    #: Whether the run still sends the step — not once it was stopped or
+    #: steered elsewhere — and what the run is told, with why, when the step
+    #: reached nobody, or its turn ended without an answer — and, with who,
+    #: when somebody stopped its turn before it answered.
+    still: Callable[[], Awaitable[bool]] | None = None
     missed: Callable[[str], Awaitable[None]] | None = None
+    failed: Callable[[str], Awaitable[None]] | None = None
+    stopped: Callable[[str], Awaitable[None]] | None = None
+    #: With who, when the step was waiting behind a turn somebody stopped,
+    #: and went with it before it reached its seat.
+    dropped: Callable[[str], Awaitable[None]] | None = None
 
 
 @dataclass(frozen=True)
@@ -427,25 +441,64 @@ def parse_destination(value: str | None) -> tuple[str, int | None] | None:
 class _Landing:
     """What waits on one message reaching a seat: a workflow's step.
 
-    `started` is told when a turn carrying it starts in the seat's session —
-    the run waits on the seat from then — `accepted` when the session took it,
-    which is when a round counts, and `refused`, with why, when it reached
-    nobody. A message from anywhere else has nothing waiting on it.
+    `started` is asked as a turn carrying it starts in the seat's session —
+    its round counts, and the run waits on the seat from then — and answers
+    whether it still goes. `accepted` is told when the session took it, for a
+    runtime that never says when a turn starts. `refused` is told, with why,
+    when it reached nobody, `failed` when its turn ended without an answer,
+    `stopped`, with who, when somebody stopped its turn before it answered,
+    and `dropped`, with who, when it was waiting behind a turn somebody
+    stopped and went with it. `wanted` says whether the run still sends it. A
+    message from anywhere else has nothing waiting on it.
     """
 
-    started: Callable[[], Awaitable[None]] | None = None
-    accepted: Callable[[], Awaitable[None]] | None = None
+    started: Callable[[], Awaitable[bool]] | None = None
+    accepted: Callable[[], Awaitable[object]] | None = None
     refused: Callable[[str], Awaitable[None]] | None = None
+    failed: Callable[[str], Awaitable[None]] | None = None
+    stopped: Callable[[str], Awaitable[None]] | None = None
+    dropped: Callable[[str], Awaitable[None]] | None = None
+    wanted: Callable[[], Awaitable[bool]] | None = None
 
     async def missed(self, why: str) -> None:
         """Say it reached nobody, to whatever waits on it. Best-effort: the
         chat has been told already, and this must not stop that."""
-        if self.refused is None:
+        await self._tell(self.refused, why, "reached nobody")
+
+    async def ended(self, why: str) -> None:
+        """Say its turn ended without an answer, to whatever waits on it."""
+        await self._tell(self.failed, why, "ended without an answer")
+
+    async def halted(self, who: str) -> None:
+        """Say somebody stopped its turn before it answered."""
+        await self._tell(self.stopped, who, "was stopped")
+
+    async def dropped_by(self, who: str) -> None:
+        """Say it went with a turn somebody stopped, before it reached anyone."""
+        await self._tell(self.dropped, who, "was dropped")
+
+    async def still(self) -> bool:
+        """Whether whatever waits on it still wants it sent."""
+        return self.wanted is None or await self.wanted()
+
+    @staticmethod
+    async def _tell(told: Callable[[str], Awaitable[None]] | None, why: str, what: str) -> None:
+        if told is None:
             return
         try:
-            await self.refused(why)
+            await told(why)
         except Exception:
-            logger.exception("Could not say that a message reached nobody")
+            logger.exception("Could not say that a message %s", what)
+
+
+@dataclass
+class _Underway:
+    """A workflow step on its way: the task taking its transition — its
+    commands, its inspections, its message — and which step, to which seat."""
+
+    task: asyncio.Task
+    step: str
+    seat: str
 
 
 class _SeatDelivery:
@@ -472,6 +525,11 @@ class _SeatDelivery:
         self.handed = False
 
     async def to_seat(self, label: str, text: str) -> None:
+        if self._landing is not None and not await self._landing.still():
+            # The run stopped sending it while it was prepared: nothing goes,
+            # and whoever stopped it says so.
+            logger.info("A step for %s was not handed on: its run no longer sends it", label)
+            return
         self.handed = True
         await self._channel._forward_to_seat(
             f"{label} {text}",
@@ -512,6 +570,9 @@ class _Inspection:
     turn: asyncio.Future
     #: Who pressed Stop, once somebody has.
     stopped_by: str | None = None
+    #: What it runs for: a workflow run's card key, for a step's inspection —
+    #: so calling the step back can stop it. Empty for any other.
+    about: str = ""
 
 
 class _Inspecting:
@@ -530,10 +591,12 @@ class _Inspecting:
         channel: TelegramChannel,
         destination: tuple[str, int | None],
         project: str | None = None,
+        about: str = "",
     ) -> None:
         self._channel = channel
         self._destination = destination
         self._project = project
+        self._about = about
 
     async def ask(
         self,
@@ -586,6 +649,7 @@ class _Inspecting:
                     started=own,
                 )
             ),
+            about=self._about,
         )
         self._channel._inspecting[session] = running
         logger.info("Inspection %s runs as session %s", running.name, session)
@@ -808,6 +872,16 @@ class TelegramChannel:
         self._working: dict[str, str] = {}
         #: How to end the command running in each project — `/stop`.
         self._stops: dict[str, threading.Event] = {}
+        #: The workflow steps on their way, by their run's card key, so one can
+        #: be called back — see `_call_back`.
+        self._underway: dict[str, _Underway] = {}
+        #: The workflow step whose turn went into each session last, by session
+        #: id, so `/stop` there can stop that step's run too — see `_stop_turn`.
+        self._step_turns: dict[str, _Landing] = {}
+        #: How often `/stop` stopped a turn in each session, and who did last,
+        #: by session id — so a message dropped from behind that turn can say
+        #: who stopped it.
+        self._stopped_in: dict[str, tuple[int, str]] = {}
         #: Labels somebody picked for a command, by project and work item — the
         #: value it runs with when the task could not be given the label, or
         #: before the tracker says it has it. Gone on a restart: the task is
@@ -925,18 +999,17 @@ class TelegramChannel:
         """
         cut_short: set[str] = set()
         for found, work, run in runs:
-            if not run.sending_to:
+            where = self._kept_for(found.name, WORKFLOW_FILE)
+            if not run.sending_to or where is None:
                 continue
             flow = found.workflows.flows.get(run.workflow) or ()
             step = flow[run.step] if run.step < len(flow) else "its step"
-            await self._stopped(
-                found,
-                work,
-                run.held(
-                    f"{step} was interrupted before it reached {run.sending_to}: Halyard restarted"
-                ),
-                go=True,
-            )
+            reason = f"{step} was interrupted before it reached {run.sending_to}: Halyard restarted"
+            # Read again: somebody may have stopped or steered it since.
+            held = await asyncio.to_thread(flowing.missed, where, work, run, reason)
+            if held is None:
+                continue
+            await self._stopped(found, work, held, go=True)
             cut_short.add(self._run_key(found, work, run))
         kept = {self._run_key(found, work, run) for found, work, run in runs}
 
@@ -2297,13 +2370,24 @@ class TelegramChannel:
     async def _command_run(
         self, project: str, line: str, path: Path, **more
     ) -> commands_running.Result:
-        """Run a project command where `/stop`, in that project's chats, can end it."""
+        """Run a project command where `/stop`, in that project's chats, can end it.
+
+        Cancelled while it runs — a workflow's step called back — it is ended
+        the same way, and waited for: nothing started next finds it still
+        going in the same directory.
+        """
         stop = threading.Event()
         self._stops[project] = stop
+        running = asyncio.ensure_future(
+            asyncio.to_thread(partial(commands_running.run, line, path, stop=stop, **more))
+        )
         try:
-            return await asyncio.to_thread(
-                partial(commands_running.run, line, path, stop=stop, **more)
-            )
+            return await asyncio.shield(running)
+        except asyncio.CancelledError:
+            stop.set()
+            with contextlib.suppress(Exception):
+                await running
+            raise
         finally:
             if self._stops.get(project) is stop:
                 del self._stops[project]
@@ -3123,10 +3207,13 @@ class TelegramChannel:
         )
         return runner if hasattr(runner, "ask") else None
 
-    def _inspector(self, chat_id: str, destination: tuple[str, int | None]) -> _Inspecting:
+    def _inspector(
+        self, chat_id: str, destination: tuple[str, int | None], about: str = ""
+    ) -> _Inspecting:
         """Inspections whose answers go to `destination` — and so does anything
-        an inspection asks to run. Each takes its turn on its model's runtime."""
-        return _Inspecting(self, destination, project=self._project_name_for(chat_id))
+        an inspection asks to run. Each takes its turn on its model's runtime.
+        `about` is the run a workflow step's inspections are for."""
+        return _Inspecting(self, destination, project=self._project_name_for(chat_id), about=about)
 
     async def _keeper(self, found: Project, counted: StepRounds | None = None) -> _Keeping | None:
         """Where this project's inspection runs are kept, or None when they are
@@ -3198,6 +3285,11 @@ class TelegramChannel:
             stopped = stopping(found.session_id, cwd=found.cwd)
             if inspect.isawaitable(stopped):
                 stopped = await stopped
+        if stopped and found is not None:
+            # Noted before anything else is awaited: a message waiting behind
+            # the turn goes with it as the turn ends, and asks who stopped it.
+            times, _ = self._stopped_in.get(found.session_id, (0, ""))
+            self._stopped_in[found.session_id] = (times + 1, actor)
         if not command and not stopped:
             if found is None:
                 said = "No agent session is tied to this chat, and no command is running here."
@@ -3222,6 +3314,12 @@ class TelegramChannel:
             )
             parts.append(f"The agent's turn: what it already did stays done.{cards_said}")
         await self._say(f"⏹ <b>Stopped.</b> {' '.join(parts)}", chat_id, thread_id)
+        landing = self._step_turns.pop(found.session_id, None) if stopped and found else None
+        if landing is not None:
+            # A workflow's step was that turn's: stopped before its answer, the
+            # run would wait for one nothing is writing. It stops instead, while
+            # it still waits on that step — not once the answer came.
+            await landing.halted(actor)
 
     def _stop_command(self, chat_id: str, actor: str) -> str | None:
         """End the project command running for this chat's project, if one is.
@@ -3691,14 +3789,20 @@ class TelegramChannel:
         expected = counted.allowed if counted is not None else None
         previous = self._answer_since(done[-1], number) if done and number else None
 
-        async def reached() -> None:
-            """The round counts: the seat's session took the message."""
+        async def reached() -> bool:
+            """The step got to the seat's session — its turn is starting, or,
+            for a runtime that never says so, the session took it — so its
+            round counts, once, and the run waits on the seat. Whether it still
+            goes: not once its run stopped sending it."""
             if counted is None:
-                return
+                return True
             which = await counted.count(seat.label)
-            logger.info(
-                "Round %s of %s reached %s", rounds.shown(which, expected), name, seat.label
-            )
+            if which:
+                logger.info(
+                    "Round %s of %s reached %s", rounds.shown(which, expected), name, seat.label
+                )
+                return True
+            return counted.still is None or await counted.still()
 
         steps = [
             *([f"running {', '.join(transition.commands)}"] if transition.commands else []),
@@ -3719,7 +3823,15 @@ class TelegramChannel:
         else:
             await self._say(line, chat_id, thread_id, reply_markup=buttons)
         landing = (
-            _Landing(started=counted.arrived, accepted=reached, refused=counted.missed)
+            _Landing(
+                started=reached,
+                accepted=reached,
+                refused=counted.missed,
+                failed=counted.failed,
+                stopped=counted.stopped,
+                dropped=counted.dropped,
+                wanted=counted.still,
+            )
             if counted is not None
             else None
         )
@@ -3739,7 +3851,7 @@ class TelegramChannel:
                 )
             )
             inspector = (
-                self._inspector(chat_id, self._destination_of(seat))
+                self._inspector(chat_id, self._destination_of(seat), about=card_key)
                 if transition.inspections
                 else None
             )
@@ -3782,6 +3894,11 @@ class TelegramChannel:
             # marked busy would refuse every command after it.
             if transition.commands:
                 self._working.pop(found.name, None)
+        if landing is not None and not delivery.handed and not await landing.still():
+            # Its run stopped sending it while it was prepared, and it never
+            # went: whatever came of its commands and inspections is nobody's
+            # now, and whoever stopped the run has said so.
+            return handed
         if handed.stopped:
             # Nothing went, and nothing is counted: a round is the seat
             # taking a message. Fixed and pressed again is the way on.
@@ -3827,7 +3944,9 @@ class TelegramChannel:
         A run that stopped is not left behind by this: naming a step of the
         same workflow sends the stopped run on from there, its rounds and its
         phase kept, which is how somebody steers a run without taking the work
-        out of it. Stopping it with the button is what starts afresh.
+        out of it. Stopping it with the button is what starts afresh. A step
+        still on its way is called back for the one named; one that reached
+        its agent is waited on.
         """
         found = self._repository_for(chat_id)
         if found is None:
@@ -3879,7 +3998,7 @@ class TelegramChannel:
             )
             await self._run_workflow("", chat_id, thread_id, actor)
             return
-        if run is not None and (run.waiting or run.sending_to):
+        if run is not None and run.waiting:
             await self._say_about_run(
                 self._run_key(found, work, run),
                 self._where_the_run_is(found, run),
@@ -3959,6 +4078,12 @@ class TelegramChannel:
                 entered=start if inside else -1,
                 ident=flowing.new_ident(),
             )
+        if run is not None and run.sending_to:
+            # The step on its way is called back first: the run written down as
+            # going where it was steered, so nothing delivers that step, then
+            # whatever is taking it stopped where it is.
+            await asyncio.to_thread(flowing.save, kept, work, going)
+            await self._call_back(found, work, run, actor)
         kept_said = self._kept(chat_id, SAID_FILE)
         await self._take_step(
             found,
@@ -4094,67 +4219,106 @@ class TelegramChannel:
             seat.label,
         )
 
-        async def arrived() -> None:
-            """A turn carrying the step started: the seat's reply is its answer."""
-            if await asyncio.to_thread(flowing.arrived, kept, work, sent):
-                logger.info(
-                    "Workflow %s for %s: %s reached %s, waiting for its reply",
-                    _named(run),
-                    work,
-                    step.name,
-                    seat.label,
-                )
+        async def count(_label: str) -> int:
+            # Counted once, as it gets there, and waited on from then.
+            return await asyncio.to_thread(flowing.arrived, kept, work, sent, key)
+
+        async def still() -> bool:
+            return await asyncio.to_thread(flowing.still_sending, kept, work, sent)
+
+        async def stop_as(reason: str, *, go: bool, there: bool = False) -> None:
+            """Stopped as it was sent, any round its turn counted given back —
+            unless the run has moved past the step, when it is left alone, and
+            `there` asks for a step whose turn started."""
+            held = await asyncio.to_thread(
+                partial(flowing.missed, kept, work, sent, reason, key=key, there=there)
+            )
+            if held is not None:
+                await self._stopped(found, work, held, go=go)
 
         async def missed(why: str) -> None:
-            """It reached nobody: stopped, with the step ready to send again."""
-            reason = f"{step.name} did not reach {seat.label}: {why.rstrip('.')}"
-            held = await asyncio.to_thread(flowing.missed, kept, work, sent, reason)
-            if held is not None:
-                await self._stopped(found, work, held, go=True)
+            await stop_as(f"{step.name} did not reach {seat.label}: {why.rstrip('.')}", go=True)
 
-        async def count(label: str) -> int:
-            # Taken, so it got there — whether or not its runtime said so first.
-            await arrived()
-            return await asyncio.to_thread(flowing.record, kept, work, key, to=label)
+        async def failed(why: str) -> None:
+            await stop_as(
+                f"{step.name}'s turn in {seat.label} ended without an answer: {why.rstrip('.')}",
+                go=True,
+                there=True,
+            )
 
-        handed = await self._take_transition(
-            found,
-            step.transition,
-            transition,
-            seat,
-            said,
-            note=note,
-            chat_id=run.chat,
-            thread_id=run.thread,
-            actor=run.by or "workflow",
-            sender=sender,
-            extra=extra,
-            lead=(
-                f"<b>{html.escape(run.workflow)}</b> {run.step + 1}/{len(flow)}"
-                f"{self._phase_of(found, run)} · "
+        async def halted(who: str) -> None:
+            await stop_as(
+                f"{step.name}'s turn in {seat.label} was stopped by {who} before it answered",
+                go=True,
+                there=True,
+            )
+
+        async def dropped(who: str) -> None:
+            await stop_as(
+                f"{step.name} was stopped by {who} before it reached {seat.label}", go=True
+            )
+
+        # Its own task, known by the run, so stopping or steering the run can
+        # call it back while it is on its way — see `_call_back`.
+        card_key = self._run_key(found, work, run)
+        going = asyncio.create_task(
+            self._take_transition(
+                found,
+                step.transition,
+                transition,
+                seat,
+                said,
+                note=note,
+                chat_id=run.chat,
+                thread_id=run.thread,
+                actor=run.by or "workflow",
+                sender=sender,
+                extra=extra,
+                lead=(
+                    f"<b>{html.escape(run.workflow)}</b> {run.step + 1}/{len(flow)}"
+                    f"{self._phase_of(found, run)} · "
+                ),
+                buttons=cards.workflow_keyboard(run.workflow),
+                card_key=card_key,
+                command_lines=lines.lines,
+                step_line=f"{_named(run)}, step {run.step + 1} of {len(flow)}: {step.name}",
+                counted=StepRounds(
+                    before=run.rounds.get(key, ()),
+                    allowed=step.rounds,
+                    count=count,
+                    run=flowing.journal.run_id(run, work),
+                    step=step.name,
+                    phase=run.phase if "@" in key else None,
+                    still=still,
+                    missed=missed,
+                    failed=failed,
+                    stopped=halted,
+                    dropped=dropped,
+                ),
             ),
-            buttons=cards.workflow_keyboard(run.workflow),
-            card_key=self._run_key(found, work, run),
-            command_lines=lines.lines,
-            step_line=f"{_named(run)}, step {run.step + 1} of {len(flow)}: {step.name}",
-            counted=StepRounds(
-                before=run.rounds.get(key, ()),
-                allowed=step.rounds,
-                count=count,
-                run=flowing.journal.run_id(run, work),
-                step=step.name,
-                phase=run.phase if "@" in key else None,
-                arrived=arrived,
-                missed=missed,
-            ),
+            name=f"workflow step {step.name}",
         )
+        underway = _Underway(going, step.name, seat.label)
+        self._underway[card_key] = underway
+        try:
+            await asyncio.wait({going})
+        except asyncio.CancelledError:
+            going.cancel()
+            raise
+        finally:
+            if self._underway.get(card_key) is underway:
+                del self._underway[card_key]
+        if going.cancelled():
+            # Called back on its way: whoever called it back has said so.
+            return
+        handed = going.result()
         if handed is not None and handed.stopped:
             # Held where it is, as for any other stop: fixed, the step is
             # picked again and the run goes on with its rounds as they were.
             # A transition that ran commands stopped at one that did not run;
             # one that ran nothing could not have reached the seat at all.
             why = "a command did not run" if handed.ran else handed.stopped.rstrip(".")
-            await self._stopped(found, work, run.held(f"{step.name}: {why}"))
+            await stop_as(f"{step.name}: {why}", go=False)
 
     @staticmethod
     def _phase_of(found: Project, run: flowing.Run) -> str:
@@ -4240,6 +4404,39 @@ class TelegramChannel:
             self._run_key(found, work, run), said, run.chat, run.thread, keyboard
         )
 
+    async def _call_back(self, found: Project, work: str, run: flowing.Run, actor: str) -> None:
+        """Call back the step `run` had on its way, now that the run no longer
+        sends it — stopped, or steered to another step. The run is written down
+        that way first, so nothing delivers the step after: every runtime asks,
+        right before the turn that would carry it, whether it still goes.
+
+        What is still taking it is ended where it is: a command it was running
+        as `/stop` ends one, with everything it started, its inspections with
+        any card they had open, and the transition itself. The chat says the
+        step never reached its agent.
+        """
+        if not run.sending_to:
+            return
+        key = self._run_key(found, work, run)
+        underway = self._underway.get(key)
+        if underway is not None:
+            for session, inspection in list(self._inspecting.items()):
+                if inspection.about == key:
+                    await self._stop_inspection(session, actor or "the workflow")
+            underway.task.cancel()
+            done, _ = await asyncio.wait({underway.task}, timeout=CALLED_BACK_WITHIN_SECONDS)
+            if not done:
+                logger.warning("Step %s for %s was still winding down", underway.step, work)
+        flow = found.workflows.flows.get(run.workflow) or ()
+        step = flow[run.step] if run.step < len(flow) else "Its step"
+        logger.info("Workflow %s for %s: %s called back on its way", _named(run), work, step)
+        await self._say(
+            f"⏹ <b>{html.escape(step)}</b> was stopped before it reached "
+            f"<b>{html.escape(run.sending_to)}</b>.",
+            run.chat,
+            run.thread,
+        )
+
     def _run_card(
         self,
         found: Project,
@@ -4262,7 +4459,10 @@ class TelegramChannel:
         words are what to send it on with.
         """
         said = self._where_the_run_is(found, run)
-        if run.waiting or run.sending_to:
+        if run.sending_to:
+            # On its way, it can still be called back for a step picked instead.
+            return said, cards.workflow_keyboard(run.workflow, pick=True)
+        if run.waiting:
             return said, cards.workflow_keyboard(run.workflow)
         flow = found.workflows.flows.get(run.workflow) or ()
         stretch = found.workflows.stretches.get(run.workflow)
@@ -4674,16 +4874,18 @@ class TelegramChannel:
         back: bool = False,
         speaker: str = "",
         card: Card | None = None,
+        actor: str = "",
     ) -> None:
         """The buttons on a run: send the step it stopped before (`go`), send
         the step at `place` its agent's own words would have (`to`), leave its
         phases instead (`on`), offer its steps to go on from (`pick`), or stop
-        it (`stop`).
+        it (`stop`). A step on its way can be stopped, or a step picked to go in
+        its place; the others wait until the run stops.
 
         `card` is the one pressed, when the desk sent it. Its buttons name only
         the workflow, so a card of a run that is over or was replaced is not
         acted on: it would steer the run going now — an old Stop stopping a run
-        started since. It closes instead, saying so."""
+        started since. It closes instead, saying so. `actor` is who pressed."""
         found = self._repository_for(chat_id)
         if found is None:
             await self._say(self._no_repository(chat_id), chat_id, thread_id)
@@ -4702,6 +4904,7 @@ class TelegramChannel:
             return
         if action == "stop":
             await self._finished(found, work, run, "stopped")
+            await self._call_back(found, work, run, actor)
             await self._say(
                 f"⏹ <b>{html.escape(run.workflow)}</b> stopped at step {run.step + 1}. "
                 "Its transitions can still be pressed by hand.",
@@ -4709,7 +4912,7 @@ class TelegramChannel:
                 thread_id,
             )
             return
-        if run.waiting or run.sending_to:
+        if run.waiting or (run.sending_to and action != "pick"):
             # Going: a step on its way sent again would reach its seat twice.
             await self._say(self._where_the_run_is(found, run), chat_id, thread_id)
             return
@@ -5055,7 +5258,17 @@ class TelegramChannel:
         # Asked only by what waits on its turn starting: everything else sends
         # as it always has.
         started = landing.started if landing is not None else None
-        told = {"started": lambda _: started()} if started is not None else {}
+
+        async def begun() -> bool:
+            """Its turn is beginning, unless it was called back — and is then
+            the one `/stop` in that session stops."""
+            assert started is not None and landing is not None
+            if not await started():
+                return False
+            self._step_turns[session_id] = landing
+            return True
+
+        told = {"started": lambda _: begun()} if started is not None else {}
 
         async def stopped_afterwards(reason: str) -> None:
             """Say so when a turn that *was* accepted then fell over.
@@ -5072,7 +5285,14 @@ class TelegramChannel:
                 chat_id,
                 thread_id,
             )
+            if landing is not None:
+                # A workflow's step whose turn ended without its answer: the
+                # run would wait for a reply nothing is writing.
+                if self._step_turns.get(session_id) is landing:
+                    del self._step_turns[session_id]
+                await landing.ended(_last_line(reason) or "it stopped")
 
+        stops_before, _ = self._stopped_in.get(session_id, (0, ""))
         delivered = False
         try:
             delivered = await session.runner.send(session_id, text, cwd, stopped_afterwards, **told)
@@ -5096,6 +5316,22 @@ class TelegramChannel:
                 await landing.accepted()
             except Exception:
                 logger.exception("Could not note that a message reached %s", session_id)
+            if started is None:
+                # A runtime that never says a turn started: its turn is the one
+                # going in the session from acceptance.
+                self._step_turns[session_id] = landing
+        if not delivered and landing is not None and not await landing.still():
+            # Called back while it waited behind a turn: nothing reached the
+            # session, and whoever called it back has said so.
+            logger.info("A step for %s was called back before it was sent", session_id)
+            return
+        stops_after, stopped_by = self._stopped_in.get(session_id, (0, ""))
+        if not delivered and landing is not None and stops_after != stops_before:
+            # It waited behind a turn somebody stopped, and went with it: what
+            # they stopped is what happened, not a message that reached nobody.
+            logger.info("A step for %s went with a turn %s stopped", session_id, stopped_by)
+            await landing.dropped_by(stopped_by)
+            return
         if not delivered:
             # Name what was tried. "Check the log" is the message this project
             # keeps having to replace: the person reading it is on a phone,
@@ -5503,6 +5739,7 @@ class TelegramChannel:
                         here or "",
                         message.get("message_thread_id"),
                         card=self._desk.find(here, message.get("message_id")),
+                        actor=f"tg:{user_id}",
                     ),
                     "/workflow",
                 )

@@ -423,7 +423,7 @@ class ClaudeCodeRunner:
         collecting is what turned a healthy fifteen-minute turn into a killed
         one. `when_done` covers the rest: it is called if an accepted turn then
         fails. `started` is called as the turn carrying it begins, after any
-        turn this session had going.
+        turn this session had going, and answering False keeps it out.
         """
         if not self._binary:
             logger.error(

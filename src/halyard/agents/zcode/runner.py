@@ -114,7 +114,8 @@ class ZCodeRunner:
         """Put one message into a session, and hold its gate while it answers.
 
         Nothing queues here — a session still answering is refused — so
-        `started` is called as the message goes.
+        `started` is called as the message goes, and answering False keeps it
+        out.
         """
         if not session_id or not (text or "").strip():
             return False
@@ -140,6 +141,8 @@ class ZCodeRunner:
         name = known.name if known is not None else ""
         cwd = cwd or (known.cwd if known is not None else None)
 
+        if await say_started(started, session_id) is False:
+            return False
         found = trust.app()
         assert found is not None  # `_unready` said so
         bridge = Bridge(
@@ -155,7 +158,6 @@ class ZCodeRunner:
             about={"cwd": cwd or "", "session_name": name or ""},
         )
         try:
-            await say_started(started, session_id)
             accepted = await self._open(bridge, shown, session_id, text, provider, model)
         except (OSError, RuntimeError, TimeoutError, ValueError) as failed:
             logger.warning("The ZCode bridge failed for session %s: %s", session_id, failed)

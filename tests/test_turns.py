@@ -215,14 +215,44 @@ async def test_a_turn_over_inside_the_window_is_said_to_start_before_it_is_accep
     assert order == ["started", "accepted"]
 
 
-async def test_a_message_that_never_started_is_never_said_to(monkeypatch) -> None:
-    async def refuses(*_arguments, **_kwargs):
-        raise OSError("no such file")
+async def test_a_message_called_back_while_it_waited_never_starts(monkeypatch) -> None:
+    """It waited behind another turn, and whoever sent it no longer wants it:
+    asked as its turn would begin, it answers so, and nothing is started."""
+    first = asyncio.Event()
+    started = starting(monkeypatch, FakeProcess(until=first), FakeProcess())
+    turning = turns()
 
-    monkeypatch.setattr(asyncio, "create_subprocess_exec", refuses)
+    async def called_back(_session_id: str) -> bool:
+        return False
+
+    await turning.start("s-1", ["claude", "-p", "first"])
+    queued = asyncio.ensure_future(
+        turning.start("s-1", ["claude", "-p", "second"], started=called_back)
+    )
+    await settles()
+    first.set()
+
+    assert await asyncio.wait_for(queued, timeout=1) is False
+    assert len(started) == 1, "the message called back was started anyway"
+
+
+async def test_a_message_dropped_behind_a_stopped_turn_is_never_said_to_start(
+    monkeypatch,
+) -> None:
+    working = asyncio.Event()
+    starting(monkeypatch, FakeProcess(returncode=-9, until=working), FakeProcess())
+    ending(monkeypatch, working)
+    turning = turns()
     told: list[str] = []
 
-    assert await turns().start("s-1", ["claude", "-p"], started=told.append) is False
+    await turning.start("s-1", ["claude", "-p", "first"])
+    queued = asyncio.ensure_future(
+        turning.start("s-1", ["claude", "-p", "second"], started=told.append)
+    )
+    await settles()
+    turning.stop("s-1")
+
+    assert await asyncio.wait_for(queued, timeout=1) is False
     assert told == []
 
 

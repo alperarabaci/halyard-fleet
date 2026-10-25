@@ -5,6 +5,7 @@ across a restart.
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -23,8 +24,8 @@ from halyard.workflows import (
     lines_for,
     missed,
     read,
-    record,
     save,
+    still_sending,
     taken_as,
 )
 
@@ -854,24 +855,25 @@ def test_a_last_step_that_ended_without_done_stays_in_its_phase() -> None:
 
 
 def test_a_round_is_counted_into_the_run_as_it_is_now(tmp_path: Path) -> None:
-    """The seat can take the message after the run was saved again, so the
-    round goes into what is on disk, not into the run it was sent from."""
+    """The run can be saved again while its step is on its way, so the round
+    goes into what is on disk, not into the run the step was sent from."""
     kept = tmp_path / "workflow-runs.json"
-    save(kept, "alpha-engine#386", a_run(1).waiting_on("xdrv"))
+    earlier = Round(at=AT, to="xdrv", decision="back", decided_by="discover")
+    sent = a_run(1, rounds={"discover@1": (earlier,)}).sending("xdrv")
+    save(kept, "alpha-engine#386", replace(sent, carried="back"))
 
-    assert record(kept, "alpha-engine#386", "discover@1", to="xdrv", now=AT) == 1
-    assert record(kept, "alpha-engine#386", "discover@1", to="xdrv", now=AT) == 2
+    assert arrived(kept, "alpha-engine#386", sent, "discover@1", now=AT) == 2
 
     found = current(kept, "alpha-engine#386")
-    assert found is not None and found.waiting_for == "xdrv"
-    assert found.taken() == {"discover@1": 2}
+    assert found is not None and found.carried == "back"
+    assert found.rounds["discover@1"] == (earlier, Round(at=AT, to="xdrv"))
 
 
 def test_nothing_is_counted_for_a_run_that_is_gone(tmp_path: Path) -> None:
     """Somebody stopped it while its step was on its way."""
     kept = tmp_path / "workflow-runs.json"
 
-    assert record(kept, "alpha-engine#386", "discover@1", to="xdrv") == 0
+    assert arrived(kept, "alpha-engine#386", a_run(1).sending("xdrv"), "discover@1") == 0
     assert current(kept, "alpha-engine#386") is None
 
 
@@ -981,13 +983,15 @@ def test_a_run_written_before_steps_were_on_their_way_is_waiting_still(tmp_path:
     assert (found.waiting, found.waiting_for, found.sending_to) == (True, "xdrv", "")
 
 
-def test_a_step_that_got_there_is_waited_on(tmp_path: Path) -> None:
+def test_a_step_that_got_there_is_waited_on_and_counted_once(tmp_path: Path) -> None:
+    """In one write, before anything its turn says: the answer then marks the
+    round it answers."""
     kept = tmp_path / "workflow-runs.json"
     sent = a_run(1, back=True).sending("xdrv")
     save(kept, "alpha-engine#470", sent)
 
-    assert arrived(kept, "alpha-engine#470", sent) is True
-    assert arrived(kept, "alpha-engine#470", sent) is False, "it got there once"
+    assert arrived(kept, "alpha-engine#470", sent, "discover", now=AT) == 1
+    assert arrived(kept, "alpha-engine#470", sent, "discover", now=AT) == 0, "it got there once"
 
     found = current(kept, "alpha-engine#470")
     assert found is not None
@@ -997,6 +1001,7 @@ def test_a_step_that_got_there_is_waited_on(tmp_path: Path) -> None:
         "",
         False,
     )
+    assert found.rounds == {"discover": (Round(at=AT, to="xdrv"),)}
 
 
 def test_getting_there_moves_nothing_once_the_run_is_not_that_step_on_its_way(
@@ -1010,33 +1015,84 @@ def test_getting_there_moves_nothing_once_the_run_is_not_that_step_on_its_way(
 
     for since in (sent.held("stopped by hand"), sent.at(2).sending("nav"), afresh):
         save(kept, "alpha-engine#470", since)
-        assert arrived(kept, "alpha-engine#470", sent) is False
+        assert arrived(kept, "alpha-engine#470", sent, "discover") == 0
         assert current(kept, "alpha-engine#470") == since
 
     clear(kept, "alpha-engine#470")
-    assert arrived(kept, "alpha-engine#470", sent) is False
+    assert arrived(kept, "alpha-engine#470", sent, "discover") == 0
     assert current(kept, "alpha-engine#470") is None
 
 
 def test_a_step_that_reached_nobody_stops_the_run_as_it_was_sent(tmp_path: Path) -> None:
-    """Refused on the way, or refused once its turn had started and the run was
-    waiting on it: either way it stops, carrying what it carried."""
+    """Refused on the way, or refused — or failed — once its turn had started
+    and the run was waiting on it: either way it stops, carrying what it
+    carried, and the round its turn counted is given back."""
     kept = tmp_path / "workflow-runs.json"
-    sent = a_run(1, back=True).sending("xdrv")
+    earlier = Round(at=AT, to="xdrv", decision="back", decided_by="discover")
+    sent = a_run(1, back=True, rounds={"discover": (earlier,)}).sending("xdrv")
 
     save(kept, "alpha-engine#470", sent)
-    on_the_way = missed(kept, "alpha-engine#470", sent, "discover did not reach xdrv")
-    arrived(kept, "alpha-engine#470", sent)
-    once_started = missed(kept, "alpha-engine#470", sent, "discover did not reach xdrv")
+    on_the_way = missed(kept, "alpha-engine#470", sent, "it stopped", key="discover")
+    arrived(kept, "alpha-engine#470", sent, "discover")
+    once_started = missed(kept, "alpha-engine#470", sent, "it stopped", key="discover")
 
     for held in (on_the_way, once_started):
         assert held is not None
-        assert (held.stopped, held.waiting, held.sending_to) == (
-            "discover did not reach xdrv",
-            False,
-            "",
-        )
+        assert (held.stopped, held.waiting, held.sending_to) == ("it stopped", False, "")
         assert (held.step, held.waiting_for, held.back) == (1, "xreview", True)
+        assert held.rounds == {"discover": (earlier,)}, "only the round its turn counted goes"
+
+
+def test_a_stop_that_asks_for_a_step_that_got_there_leaves_one_on_its_way(
+    tmp_path: Path,
+) -> None:
+    """A turn stopped, or failed, is a turn that started: a step still on its
+    way had none."""
+    kept = tmp_path / "workflow-runs.json"
+    sent = a_run(1).sending("xdrv")
+    save(kept, "alpha-engine#470", sent)
+
+    assert missed(kept, "alpha-engine#470", sent, "it stopped", key="discover", there=True) is None
+    arrived(kept, "alpha-engine#470", sent, "discover")
+    held = missed(kept, "alpha-engine#470", sent, "it stopped", key="discover", there=True)
+
+    assert held is not None and held.stopped == "it stopped"
+    assert held.taken() == {}
+
+
+def test_a_step_s_only_round_given_back_leaves_it_none(tmp_path: Path) -> None:
+    kept = tmp_path / "workflow-runs.json"
+    sent = a_run(1).sending("xdrv")
+    save(kept, "alpha-engine#470", sent)
+    arrived(kept, "alpha-engine#470", sent, "discover")
+
+    held = missed(kept, "alpha-engine#470", sent, "it stopped", key="discover")
+
+    assert held is not None and held.taken() == {}
+
+
+def test_a_run_still_sends_its_step_on_its_way_and_once_there_until_answered(
+    tmp_path: Path,
+) -> None:
+    kept = tmp_path / "workflow-runs.json"
+    sent = a_run(1, ident="3f2a9c1e").sending("xdrv")
+    save(kept, "alpha-engine#470", sent)
+
+    assert still_sending(kept, "alpha-engine#470", sent) is True
+    arrived(kept, "alpha-engine#470", sent, "discover")
+    assert still_sending(kept, "alpha-engine#470", sent) is True
+    waited = current(kept, "alpha-engine#470")
+    assert waited is not None
+
+    for since in (
+        waited.at(2).sending("nav"),
+        waited.held("it was asked to wait", waited=1),
+        a_run(1, ident="aa11bb22").sending("xdrv"),
+    ):
+        save(kept, "alpha-engine#470", since)
+        assert still_sending(kept, "alpha-engine#470", sent) is False
+    clear(kept, "alpha-engine#470")
+    assert still_sending(kept, "alpha-engine#470", sent) is False
 
 
 def test_a_step_whose_answer_came_is_not_stopped_by_its_turn_failing_later(
@@ -1047,7 +1103,7 @@ def test_a_step_whose_answer_came_is_not_stopped_by_its_turn_failing_later(
     kept = tmp_path / "workflow-runs.json"
     sent = a_run(1, ident="3f2a9c1e").sending("xdrv")
     save(kept, "alpha-engine#470", sent)
-    arrived(kept, "alpha-engine#470", sent)
+    arrived(kept, "alpha-engine#470", sent, "discover")
     waited = current(kept, "alpha-engine#470")
     assert waited is not None
 

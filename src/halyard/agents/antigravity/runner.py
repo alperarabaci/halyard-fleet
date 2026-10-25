@@ -46,6 +46,7 @@ other runtime's rather than being read from this call.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import re
@@ -280,7 +281,8 @@ class AntigravityRunner:
         `when_done` is accepted and never called, and here that is not a gap:
         `send-message` files the wake and returns a verdict, so acceptance and
         completion are the same moment. There is no "later" to report.
-        `started` is called as the wake goes, after any message ahead of it.
+        `started` is called as the wake goes, after any message ahead of it,
+        and answering False keeps it out.
         """
         if not text.strip():
             return False
@@ -323,7 +325,12 @@ class AntigravityRunner:
 
         self._pending[session_id].append(text)
         async with self._locks[session_id]:
-            await say_started(started, session_id)
+            if await say_started(started, session_id) is False:
+                # Called back while it waited: taken off the queue too, or the
+                # next turn would collect it anyway.
+                with contextlib.suppress(ValueError):
+                    self._pending[session_id].remove(text)
+                return False
             for endpoint in ordered:
                 if await self._run(session_id, WAKE, endpoint):
                     self._endpoint = endpoint

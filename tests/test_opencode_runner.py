@@ -55,6 +55,17 @@ async def test_a_message_is_said_to_start_as_it_goes(sent) -> None:
     assert len(sent) == 1
 
 
+async def test_a_message_called_back_as_it_goes_is_not_posted(sent) -> None:
+    async def called_back(_session_id: str) -> bool:
+        return False
+
+    runner = OpencodeRunner()
+
+    assert await runner.send("ses_1", "carry on", started=called_back) is False
+    assert sent == []
+    assert runner.busy("ses_1") is False
+
+
 async def test_no_model_is_sent_when_none_was_chosen(sent) -> None:
     """Somebody who has not chosen from the phone has chosen at the desk, and
     overriding that silently is the opposite of what they did."""
