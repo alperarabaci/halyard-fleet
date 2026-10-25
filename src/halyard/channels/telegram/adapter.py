@@ -41,6 +41,7 @@ from halyard.channels.telegram import cards, commit_card
 from halyard.channels.telegram.api import TelegramApi
 from halyard.channels.telegram.desk import STANDING, Card, CardDesk
 from halyard.channels.telegram.shelf import Kept, Shelf
+from halyard.channels.telegram.step_status import StepStatus
 from halyard.commands import catalogue as commands_offered
 from halyard.commands import inputs as command_inputs
 from halyard.commands import labels as command_labels
@@ -517,12 +518,15 @@ class _SeatDelivery:
         chat_id: str,
         thread_id: int | None,
         landing: _Landing | None = None,
+        status: StepStatus | None = None,
     ) -> None:
         self._channel = channel
         self._actor = actor
         self._chat_id = chat_id
         self._thread_id = thread_id
         self._landing = landing
+        #: A workflow step's line on its run's card — see `StepStatus`.
+        self._status = status
         self.handed = False
 
     async def to_seat(self, label: str, text: str) -> None:
@@ -532,6 +536,8 @@ class _SeatDelivery:
             logger.info("A step for %s was not handed on: its run no longer sends it", label)
             return
         self.handed = True
+        if self._status is not None:
+            await self._status.on_its_way(label)
         await self._channel._forward_to_seat(
             f"{label} {text}",
             self._actor,
@@ -649,11 +655,15 @@ class _Inspecting:
         destination: tuple[str, int | None],
         project: str | None = None,
         about: str = "",
+        status: StepStatus | None = None,
     ) -> None:
         self._channel = channel
         self._destination = destination
         self._project = project
         self._about = about
+        #: A workflow step's line on its run's card, counting the inspections
+        #: that have answered — see `StepStatus`.
+        self._status = status
         #: What each finished turn read, by the id the turn was asked under,
         #: until `trace` hands it over.
         self._traces: dict[str, inspecting.Trace] = {}
@@ -673,6 +683,36 @@ class _Inspecting:
         edits: bool = True,
         session_id: str | None = None,
         effort: str | None = None,
+    ) -> str | None:
+        if self._status is not None:
+            await self._status.inspecting()
+        try:
+            return await self._asked(
+                text,
+                timeout=timeout,
+                model=model,
+                cwd=cwd,
+                name=name,
+                edits=edits,
+                session_id=session_id,
+                effort=effort,
+            )
+        finally:
+            # Answered, unmeasured, stopped: it is one fewer to wait for.
+            if self._status is not None:
+                await self._status.inspection_answered()
+
+    async def _asked(
+        self,
+        text: str,
+        *,
+        timeout: float,
+        model: str | None,
+        cwd: Path | None,
+        name: str | None,
+        edits: bool,
+        session_id: str | None,
+        effort: str | None,
     ) -> str | None:
         # On the runtime the inspection's model belongs to, asked per turn: one
         # transition's inspections can each name a model of their own.
@@ -804,17 +844,28 @@ class _Running:
         chat_id: str,
         thread_id: int | None,
         project: str = "",
+        status: StepStatus | None = None,
     ) -> None:
         self._channel = channel
         self._project = project
         self._path = path
         self._chat_id = chat_id
         self._thread_id = thread_id
+        #: A workflow step's line on its run's card. With one, how the command
+        #: is getting on is said there — its time even when it prints nothing —
+        #: rather than in a message of its own every 45 seconds.
+        self._status = status
 
     async def run(self, command: commands_offered.Command) -> commands_running.Result:
         loop = asyncio.get_running_loop()
+        status = self._status
+        if status is not None:
+            await status.running(command.name)
 
         def progress(seconds: float, latest: str) -> None:
+            if status is not None:
+                status.printed(latest)
+                return
             asyncio.run_coroutine_threadsafe(
                 self._channel._say(
                     f"… <b>{html.escape(command.name)}</b> "
@@ -935,6 +986,9 @@ class TelegramChannel:
             logger.warning("TELEGRAM_MENU %r is not one of %s; using full", menu, ", ".join(MENUS))
         self._menu_kind = menu if menu in MENUS else "full"
         self._sending: set[asyncio.Task] = set()
+        #: Each run's step line, by the run's card key — one at a time, the
+        #: step it is on. See `StepStatus`.
+        self._statuses: dict[str, StepStatus] = {}
         # Who pressed a seat button and has not yet said what to send. Keyed by
         # the person as well as the chat: in a group, somebody else typing must
         # not be swept into a hand-off they did not ask for.
@@ -1105,6 +1159,9 @@ class TelegramChannel:
             await self._desk.close_left_over(left, saying=saying)
 
     async def stop(self) -> None:
+        for status in self._statuses.values():
+            status.stop()
+        self._statuses.clear()
         if self._poller is not None:
             self._poller.cancel()
             # Awaiting the cancelled task is what makes stop() actually wait for
@@ -3378,12 +3435,23 @@ class TelegramChannel:
         return runner if hasattr(runner, "ask") else None
 
     def _inspector(
-        self, chat_id: str, destination: tuple[str, int | None], about: str = ""
+        self,
+        chat_id: str,
+        destination: tuple[str, int | None],
+        about: str = "",
+        status: StepStatus | None = None,
     ) -> _Inspecting:
         """Inspections whose answers go to `destination` — and so does anything
         an inspection asks to run. Each takes its turn on its model's runtime.
-        `about` is the run a workflow step's inspections are for."""
-        return _Inspecting(self, destination, project=self._project_name_for(chat_id), about=about)
+        `about` is the run a workflow step's inspections are for, and `status`
+        its line on the run's card."""
+        return _Inspecting(
+            self,
+            destination,
+            project=self._project_name_for(chat_id),
+            about=about,
+            status=status,
+        )
 
     async def _keeper(self, found: Project, counted: StepRounds | None = None) -> _Keeping | None:
         """Where this project's inspection runs are kept, or None when they are
@@ -3973,8 +4041,11 @@ class TelegramChannel:
                 logger.info(
                     "Round %s of %s reached %s", rounds.shown(which, expected), name, seat.label
                 )
-                return True
-            return counted.still is None or await counted.still()
+            going = bool(which) or counted.still is None or await counted.still()
+            if going and status is not None:
+                # Its agent has it: the run's card says the run waits on it.
+                await status.waiting(seat.label)
+            return going
 
         steps = [
             *([f"running {', '.join(transition.commands)}"] if transition.commands else []),
@@ -3990,8 +4061,17 @@ class TelegramChannel:
             f"{lead}\U0001f91d <b>{html.escape(name)}</b>{which} → "
             f"<b>{html.escape(_seat_name(seat))}</b>{html.escape(first)}…"
         )
+        status = None
         if card_key:
-            await self._say_about_run(card_key, line, chat_id, thread_id, buttons)
+            card = await self._say_about_run(card_key, line, chat_id, thread_id, buttons)
+            if card is not None:
+                # The run's one card says what its step is doing from here on:
+                # its commands, its inspections, and its agent.
+                status = StepStatus(self._desk, card, name, inspections=len(transition.inspections))
+                if (before := self._statuses.pop(card_key, None)) is not None:
+                    before.stop()
+                self._statuses[card_key] = status
+                status.start()
         else:
             await self._say(line, chat_id, thread_id, reply_markup=buttons)
         landing = (
@@ -4007,7 +4087,7 @@ class TelegramChannel:
             if counted is not None
             else None
         )
-        delivery = _SeatDelivery(self, actor, chat_id, thread_id, landing)
+        delivery = _SeatDelivery(self, actor, chat_id, thread_id, landing, status)
         if transition.commands:
             self._working[found.name] = f"transition {name}"
         try:
@@ -4023,7 +4103,7 @@ class TelegramChannel:
                 )
             )
             inspector = (
-                self._inspector(chat_id, self._destination_of(seat), about=card_key)
+                self._inspector(chat_id, self._destination_of(seat), about=card_key, status=status)
                 if transition.inspections
                 else None
             )
@@ -4047,7 +4127,7 @@ class TelegramChannel:
                 delivery=delivery,
                 project_commands={**found.commands, **(command_lines or {})},
                 project_not_run=found.commands_not_run,
-                runner=_Running(self, found.path, chat_id, thread_id, found.name),
+                runner=_Running(self, found.path, chat_id, thread_id, found.name, status),
                 round_number=number,
                 expected=expected,
                 previous=previous,

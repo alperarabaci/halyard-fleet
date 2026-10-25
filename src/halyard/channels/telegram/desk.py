@@ -131,6 +131,9 @@ class CardDesk:
         #: this one leaves open. None keeps them in memory only.
         self._shelf = shelf
         self._pace = pace
+        #: One per card being rewritten or closed, so the two never cross: a
+        #: rewrite that landed after the close would put the buttons back.
+        self._editing: dict[tuple[str, int], asyncio.Lock] = {}
 
     # --- opening -------------------------------------------------------------
 
@@ -210,6 +213,37 @@ class CardDesk:
                     return str(button.get("text") or "")
         return ""
 
+    # --- rewriting -----------------------------------------------------------
+
+    async def update(self, card: Card, text: str) -> bool:
+        """Rewrite an open card's text and keep its buttons — a run's card
+        saying what its step is doing. Whether it is still open: a card closed
+        already, or closing, is left as its closing left it.
+
+        Nothing is sent when the text is what the card says already: Telegram
+        refuses an edit that changes nothing.
+        """
+        where = (card.chat, card.message_id)
+        async with self._lock(where):
+            if self._cards.get(where) is not card:
+                return False
+            if text == card.html:
+                return True
+            try:
+                await self._api.edit_message_text(
+                    card.chat, card.message_id, text, reply_markup=card.keyboard or None
+                )
+            except Exception:
+                logger.debug(
+                    "Could not rewrite card %s in %s", card.message_id, card.chat, exc_info=True
+                )
+                return True
+            card.html = text
+            return True
+
+    def _lock(self, where: tuple[str, int]) -> asyncio.Lock:
+        return self._editing.setdefault(where, asyncio.Lock())
+
     # --- closing -------------------------------------------------------------
 
     async def close(
@@ -240,11 +274,15 @@ class CardDesk:
         self._remember(where)
         if self._shelf is not None:
             await asyncio.to_thread(self._shelf.take, *where)
-        if text is None:
-            said = card.html if card is not None else html.escape(shown.strip())
-            line = outcome or "✖️ Closed"
-            text = f"{said}\n\n{line}" if said else line
-        await self._edit(where, text)
+        # After any rewrite already on its way, and with what it left the card
+        # saying.
+        async with self._lock(where):
+            if text is None:
+                said = card.html if card is not None else html.escape(shown.strip())
+                line = outcome or "✖️ Closed"
+                text = f"{said}\n\n{line}" if said else line
+            await self._edit(where, text)
+        self._editing.pop(where, None)
         return True
 
     async def close_card(self, card: Card, **closing) -> bool:

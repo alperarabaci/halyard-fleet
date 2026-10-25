@@ -5212,3 +5212,77 @@ def test_both_commands_are_registered_and_telegram_will_accept_them() -> None:
     for name, description in COMMANDS:
         assert re.fullmatch(r"[a-z0-9_]{1,32}", name), name
         assert len(description) <= 256, name
+
+
+async def test_a_workflow_step_says_on_its_run_card_what_it_is_doing(
+    tmp_path: Path, wired, monkeypatch
+) -> None:
+    """The run's one card says what its step is doing — its command with its
+    time, its inspections counted, then its agent — rather than a message of
+    its own every 45 seconds while the command prints."""
+    from halyard.channels.telegram import adapter as under_test
+    from halyard.commands import Result
+
+    channel, api, runner, repo = wired
+    flow_in(channel, repo, tmp_path, runner, **TWO_STEPS)
+    inspections_in(channel, repo, tmp_path, proof="# proof")
+    found = channel._repositories["alpha-engine"]
+    review = replace(found.transitions["review"], commands=("test-fast",), inspections=("proof",))
+    channel._repositories["alpha-engine"] = replace(
+        found,
+        commands={"test-fast": "make test-fast"},
+        transitions={**found.transitions, "review": review},
+    )
+
+    def running(line, path, *, timeout, on_progress=None, stop=None):
+        on_progress(60.0, "collected 12 items")
+        return Result(ok=True, output="12 passed", seconds=61.0, exit_code=0)
+
+    monkeypatch.setattr(under_test.commands_running, "run", running)
+
+    await started(channel)
+
+    [card] = [sent for sent in api.sent if "🤝 <b>review</b>" in sent["text"]]
+    lines = [
+        edit["text"].removeprefix(card["text"] + "\n\n")
+        for edit in api.edits
+        if edit["text"].startswith(card["text"] + "\n\n⏳")
+    ]
+    assert lines[0] == "⏳ review — running test-fast · under a minute"
+    assert "⏳ review — inspecting · 0 of 1 · under a minute" in lines
+    assert "⏳ review — inspecting · 1 of 1 · under a minute" in lines
+    assert "⏳ review — on its way to xrev · under a minute" in lines
+    assert lines[-1] == "⏳ review — waiting for xrev · under a minute"
+    assert not any(sent["text"].startswith("… <b>test-fast</b>") for sent in api.sent)
+    assert runner.sent, "and the step went"
+
+
+async def test_a_command_from_transition_by_hand_still_says_how_it_is_getting_on(
+    tmp_path: Path, wired, monkeypatch
+) -> None:
+    """A transition pressed by hand has no run card: its command says how it
+    is getting on in a message of its own, as before."""
+    from halyard.channels.telegram import adapter as under_test
+    from halyard.commands import Result
+
+    channel, api, runner, repo = wired
+    transitions_in(
+        channel, repo, tmp_path, runner, close={"commands": ("test-fast",), "to": "xrev"}
+    )
+    found = channel._repositories["alpha-engine"]
+    channel._repositories["alpha-engine"] = replace(found, commands={"test-fast": "make test-fast"})
+
+    def running(line, path, *, timeout, on_progress=None, stop=None):
+        on_progress(60.0, "collected 12 items")
+        return Result(ok=True, output="12 passed", seconds=61.0, exit_code=0)
+
+    monkeypatch.setattr(under_test.commands_running, "run", running)
+
+    await channel._run_transition("close", CHAT, None, f"tg:{APPROVER}")
+    await settled(channel)
+
+    assert any(
+        sent["text"].startswith("… <b>test-fast</b>") and "collected 12 items" in sent["text"]
+        for sent in api.sent
+    )
+    assert not any("⏳" in (edit["text"] or "") for edit in api.edits)
