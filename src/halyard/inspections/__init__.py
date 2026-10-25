@@ -18,7 +18,10 @@ the code a report is about is: it searches and reads files and inspects diffs,
 through native reading tools or read-only shell commands, and edits nothing.
 Tests, scripts, database and network operations are forbidden. The runtime's
 sandbox and the project's gate still apply: a read refused or unfinished leaves
-that part of the inspection unmeasured rather than clean.
+that part of the inspection unmeasured rather than clean. A read that waits for
+a person's approval may never run — the card denied, expired, or still open
+when the turn ends — and a model may answer without it, so Halyard says which
+reads did not run under the answer, in its own words (`not_run_block`).
 
 The prompt said "check" where it spoke to the model until 2026-10-24, so that
 answers from either side of the rename could be compared; it says "inspection"
@@ -36,16 +39,19 @@ that way.
 """
 
 from halyard.inspections import record
-from halyard.inspections.spec import Answer, Asker, Keeper, Kept, StoppedError
-from halyard.inspections.turn import handed_on, prompt, run, unfenced
+from halyard.inspections.spec import Answer, Asker, Gated, Keeper, Kept, NotRun, StoppedError
+from halyard.inspections.turn import handed_on, not_run_block, prompt, run, unfenced
 
 __all__ = [
     "Answer",
     "Asker",
+    "Gated",
     "Keeper",
     "Kept",
+    "NotRun",
     "StoppedError",
     "handed_on",
+    "not_run_block",
     "prompt",
     "record",
     "run",

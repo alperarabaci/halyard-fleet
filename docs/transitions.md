@@ -89,6 +89,32 @@ recognizes can pass without a card. **Deny** refuses the read; **Stop the
 inspection** ends the inspection. A refused or unfinished read leaves the
 affected part unmeasured rather than clean, and must not be worked around.
 
+**A read that waits for a card may never run.** Claude Code waits for it until
+the card is answered or expires. Codex may not: its model can go on with other
+reads and answer while the card is still open, and the read then never runs.
+The inspection is told to wait for a command to return and never to answer as if
+it had read what one that has not returned would show, but only its own words
+say whether it did.
+
+So when an inspection's turn ends — answered, out of time, failed or stopped —
+every card it still has open is denied and closed, saying the inspection ended
+before it was answered and nothing ran. Allowing it later would do nothing. And
+when any read it asked for did not run, Halyard adds a block of its own under
+the answer:
+
+```
+Halyard: 1 read this inspection asked for did not run — `cat /tmp/x.log` (still
+waiting for approval when the inspection ended). Anything that rests on it is not
+measured.
+```
+
+Each read says what became of its card: denied, and by whom; expired before
+anybody answered; or still waiting when the inspection ended. An allowed read
+ran, and is not listed. The block goes wherever the answer goes: the
+transition's message, the `/inspect` reply, the kept run (`not_run` in
+`inspection_runs`), and the chat's outcome line —
+`claims: answered · 1 read did not run`.
+
 An inspection's turn is Halyard's own, not an agent's, and it is marked so
 before it begins. Its answer arrives as the inspection's; the raw reply its
 runtime reports is kept out of the chat, and it is never seen working on a task
@@ -177,8 +203,9 @@ Then each run — by `/inspect`, by a transition, by a workflow's step — is a 
 `inspection_runs`, in Halyard's database beside the tokens the turns Halyard
 starts use: the inspection, its file and the revision of it, the model, what the
 model was given word for word, what it said, how long it took, whether it
-answered, the finding phrase it said if any, and where the files stood — `HEAD`
-and the content id from the envelope. A run stopped or left unanswered is kept
+answered, the finding phrase it said if any, what Halyard said under it about
+reads that did not run, and where the files stood — `HEAD` and the content id
+from the envelope. A run stopped or left unanswered is kept
 too, with why. This is the one place Halyard keeps text: the input holds the
 reply that was inspected, and an inspection cannot be compared or run again
 without it.

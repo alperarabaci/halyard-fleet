@@ -415,3 +415,133 @@ def test_a_kept_run_joins_the_tokens_it_used(tmp_path: Path) -> None:
             "FROM inspection_runs r JOIN turn_usage u ON u.session_id = r.id"
         ).fetchall()
     assert row == ("proof", "2cdcab9c", "5df40c87", "answered", "developed", 2, 1, 0, 3400)
+
+
+# --- reads that did not run ------------------------------------------------------
+
+
+def test_the_turn_is_told_to_wait_for_a_command_and_not_to_answer_past_it() -> None:
+    asked = inspections.prompt("# proof", context=[], note="", text="42 passed")
+
+    assert (
+        "A command may wait minutes for the operator's approval: wait for it to "
+        "return before answering, and never answer as if you read what a command "
+        "that has not returned would have shown."
+    ) in asked
+
+
+def test_reads_that_did_not_run_are_said_in_halyard_s_words() -> None:
+    one = (inspections.NotRun("cat /tmp/x.log", "denied by tg:4242"),)
+    two = (*one, inspections.NotRun("sed -n 1,5p a.py", "expired before anybody answered"))
+
+    assert inspections.not_run_block(()) == ""
+    assert inspections.not_run_block(one) == (
+        "Halyard: 1 read this inspection asked for did not run — `cat /tmp/x.log` "
+        "(denied by tg:4242). Anything that rests on it is not measured."
+    )
+    assert inspections.not_run_block(two) == (
+        "Halyard: 2 reads this inspection asked for did not run — `cat /tmp/x.log` "
+        "(denied by tg:4242); `sed -n 1,5p a.py` (expired before anybody answered). "
+        "Anything that rests on them is not measured."
+    )
+
+
+class Gating(Asking):
+    """An `Asker` whose turn asked for reads a person never let run."""
+
+    def __init__(self, *not_run: inspections.NotRun, says: str | None = "proof · no finding"):
+        super().__init__(says)
+        self.left = not_run
+
+    def not_run(self, session_id: str) -> tuple[inspections.NotRun, ...]:
+        return self.left if session_id == self.sessions[-1] else ()
+
+
+async def test_an_answer_carries_the_reads_that_did_not_run_and_so_does_its_record(
+    tmp_path: Path,
+) -> None:
+    read = inspections.NotRun(
+        "cat /tmp/x.log", "still waiting for approval when the inspection ended"
+    )
+    asker, keeper = Gating(read), Keeping()
+
+    answer = await kept_run(tmp_path, asker, keeper)
+
+    assert isinstance(asker, inspections.Gated)
+    assert answer.text == "proof · no finding"
+    assert answer.not_run == (read,)
+    [kept] = keeper.kept
+    assert kept.answer == "proof · no finding", "the model's answer is kept as it came"
+    assert kept.not_run == inspections.not_run_block((read,))
+
+
+async def test_an_unanswered_inspection_still_carries_its_reads_that_did_not_run(
+    tmp_path: Path,
+) -> None:
+    read = inspections.NotRun("cat a", "denied by tg:4242")
+
+    answer = await kept_run(tmp_path, Gating(read, says=None), Keeping())
+
+    assert not answer.measured
+    assert answer.not_run == (read,)
+
+
+async def test_an_asker_that_cannot_tell_adds_nothing(tmp_path: Path) -> None:
+    keeper = Keeping()
+
+    answer = await kept_run(tmp_path, Asking(), keeper)
+
+    assert answer.not_run == ()
+    assert keeper.kept[0].not_run == ""
+
+
+def test_what_halyard_said_under_an_answer_is_kept_in_a_column_of_its_own(
+    tmp_path: Path,
+) -> None:
+    """Beside the answer, not in it: the model's words stay comparable. A table
+    made before the column gets it, empty for the rows it had."""
+    import sqlite3
+    from datetime import UTC, datetime
+
+    database = tmp_path / "halyard.db"
+    with sqlite3.connect(database) as db:
+        db.execute(
+            "CREATE TABLE inspection_runs (id TEXT PRIMARY KEY, at TEXT NOT NULL, "
+            "project TEXT NOT NULL, work TEXT, inspection TEXT NOT NULL, file TEXT NOT NULL, "
+            "file_version TEXT NOT NULL, transition TEXT, workflow_run TEXT, step TEXT, "
+            "phase INTEGER, round INTEGER, runtime TEXT, model TEXT NOT NULL, effort TEXT, "
+            "head TEXT, content TEXT, context TEXT NOT NULL, note TEXT NOT NULL, "
+            "input TEXT NOT NULL, answer TEXT, outcome TEXT NOT NULL, why TEXT NOT NULL, "
+            "finding TEXT, took REAL NOT NULL, experimental INTEGER NOT NULL DEFAULT 0, "
+            "repeat_of TEXT)"
+        )
+        db.execute(
+            "INSERT INTO inspection_runs (id, at, project, inspection, file, file_version, "
+            "model, context, note, input, outcome, why, took) VALUES ('old', '2026-10-01', "
+            "'alpha-engine', 'proof', 'NOTES/proof.md', 'abc', 'sonnet', '', '', '', "
+            "'answered', '', 1.0)"
+        )
+    said = "Halyard: 1 read this inspection asked for did not run — `cat a` (denied)."
+    kept = inspections.Kept(
+        session="sess-2",
+        at=datetime(2026, 10, 25, 9, 0, tzinfo=UTC),
+        name="proof",
+        path=Path("NOTES/proof.md"),
+        version="3e8c847",
+        transition="",
+        model="sonnet",
+        asked="# proof",
+        context=(),
+        note="",
+        answer="proof · no finding",
+        why="",
+        finding=None,
+        took=12.0,
+        not_run=said,
+    )
+
+    inspections.record.keep(database, kept, project="alpha-engine", work=None, runtime="codex")
+
+    with sqlite3.connect(database) as db:
+        rows = db.execute("SELECT id, answer, not_run FROM inspection_runs ORDER BY id").fetchall()
+    assert rows == [("old", None, None), ("sess-2", "proof · no finding", said)]

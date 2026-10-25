@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 
-from halyard import frame
+from halyard import frame, inspections
 from halyard.commands import Command, Result
 from halyard.inspections import Answer
 from halyard.transitions.spec import Previous
@@ -63,6 +63,10 @@ def compose(
     for answer in answers:
         parts += ["", f"Inspection {answer.name} — {answer.path} @ {answer.version}:", ""]
         parts.append(answer.text if answer.measured else f"unmeasured — {answer.why}")
+        if answer.not_run:
+            # Halyard's, under the model's: a read the model may have answered
+            # without, because it never came back.
+            parts += ["", inspections.not_run_block(answer.not_run)]
     if previous is not None and previous.text is not None:
         parts += ["", f"{previous.seat}'s answer to round {previous.number}:", "", previous.text]
     if reply is not None:

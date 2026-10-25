@@ -404,3 +404,30 @@ async def test_a_code_the_command_declares_stops_it_and_undeclared_it_is_red(
     assert nothing_sent.sent == []
     assert undeclared.stopped == ""
     assert "exit 2 (failed)" in sent.sent[0][1]
+
+
+async def test_reads_an_inspection_could_not_run_are_said_under_its_answer(
+    tmp_path: Path,
+) -> None:
+    """In Halyard's words, between the inspection's answer and the next one."""
+    from halyard import inspections
+
+    a_project(tmp_path)
+
+    class Gating(Asking):
+        def not_run(self, session_id: str) -> tuple[inspections.NotRun, ...]:
+            return (inspections.NotRun("cat /tmp/x.log", "denied by tg:4242"),)
+
+    discovery = Transition(
+        name="discovery", prompt=Path("NOTES/discovery.md"), inspections=("proof",), to="nav"
+    )
+
+    handed, delivery = await hand(tmp_path, discovery, asker=Gating())
+
+    [(_, text)] = delivery.sent
+    [answer] = handed.answers
+    assert (
+        "no finding\n\nHalyard: 1 read this inspection asked for did not run — "
+        "`cat /tmp/x.log` (denied by tg:4242). Anything that rests on it is not measured."
+    ) in text
+    assert answer.not_run

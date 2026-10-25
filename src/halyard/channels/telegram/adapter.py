@@ -25,7 +25,7 @@ import threading
 import time
 import uuid
 from collections.abc import Awaitable, Callable, Mapping, Sequence
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from functools import partial
 from pathlib import Path
@@ -540,6 +540,23 @@ class _SeatDelivery:
         )
 
 
+def _reads(count: int) -> str:
+    """`1 read`, `2 reads`."""
+    return f"{count} read{'s' if count != 1 else ''}"
+
+
+def _why_it_did_not_run(resolution: ApprovalResolution) -> str:
+    """What became of the card of a read that did not run, in a few words."""
+    if resolution.reason is ResolutionReason.ENDED:
+        return "still waiting for approval when the inspection ended"
+    if resolution.reason in (ResolutionReason.TIMEOUT, ResolutionReason.EXPIRED):
+        return "expired before anybody answered"
+    if resolution.reason is ResolutionReason.SHUTDOWN:
+        return "denied as Halyard stopped"
+    by = resolution.decided_by
+    return f"denied by {by}" if by else "denied"
+
+
 def _last_line(said: str | None, most: int = 200) -> str:
     """The last line with something on it, cut to fit in a sentence: why a
     message reached nobody, as the run it stops says it."""
@@ -573,6 +590,13 @@ class _Inspection:
     #: What it runs for: a workflow run's card key, for a step's inspection —
     #: so calling the step back can stop it. Empty for any other.
     about: str = ""
+    #: Every id its turn runs under: the one chosen here, and the one its
+    #: runtime gave it, where that is another — a Codex thread, an opencode
+    #: session. A card's request carries the runtime's.
+    sessions: set[str] = field(default_factory=set)
+    #: The cards it opened, in order, so what became of each can be said when
+    #: it ends.
+    cards: list[ApprovalRequest] = field(default_factory=list)
 
 
 class _Inspecting:
@@ -584,6 +608,11 @@ class _Inspecting:
     in the chat the answer is headed for — rather than one from a session nobody
     has seen, in whichever chat an unknown session falls to. The card can stop
     the inspection.
+
+    When the turn ends, however it ends, every card it still has open is denied
+    and closed: what it asked for can no longer run. What became of each read
+    that did not run is kept for `not_run`, which makes this
+    `inspections.Gated`.
     """
 
     def __init__(
@@ -597,6 +626,13 @@ class _Inspecting:
         self._destination = destination
         self._project = project
         self._about = about
+        #: The reads each finished turn asked for that did not run, by the id
+        #: the turn was asked under, until `not_run` hands them over.
+        self._not_run: dict[str, tuple[inspecting.NotRun, ...]] = {}
+
+    def not_run(self, session_id: str) -> tuple[inspecting.NotRun, ...]:
+        """The reads the turn asked under `session_id` asked for that did not run."""
+        return self._not_run.pop(session_id, ())
 
     async def ask(
         self,
@@ -623,11 +659,14 @@ class _Inspecting:
         session = session_id or str(uuid.uuid4())
         label = name or "inspection"
         registry = self._channel._registry
+        sessions = {session}
 
         def own(ident: str) -> None:
             # Marked before the turn begins, so nothing it says is taken for
             # an agent's — under the id the runtime runs it by, which is not
-            # always the one chosen here.
+            # always the one chosen here. Kept with the inspection too: its
+            # cards carry that id.
+            sessions.add(ident)
             if registry is not None:
                 registry.mark_own(ident, label)
 
@@ -650,6 +689,7 @@ class _Inspecting:
                 )
             ),
             about=self._about,
+            sessions=sessions,
         )
         self._channel._inspecting[session] = running
         logger.info("Inspection %s runs as session %s", running.name, session)
@@ -661,6 +701,12 @@ class _Inspecting:
             raise inspecting.StoppedError(f"stopped by {running.stopped_by}") from None
         finally:
             self._channel._inspecting.pop(session, None)
+            # Answered, out of time, failed or stopped: a card still open asks
+            # for a read nothing will run now.
+            try:
+                self._not_run[session] = await self._channel._inspection_ended(running)
+            except Exception:
+                logger.exception("Could not close the cards of inspection %s", running.name)
 
 
 class _Keeping:
@@ -1094,6 +1140,55 @@ class TelegramChannel:
                     return parse_destination(seat.chat) or (self._chat_id, None)
         return (role and self._routes.get(role)) or (self._chat_id, None)
 
+    def _inspection_of(self, session_id: str) -> _Inspection | None:
+        """The running inspection a session is, by the id chosen for its turn
+        or one its runtime ran it under."""
+        running = self._inspecting.get(session_id)
+        if running is not None:
+            return running
+        return next((r for r in self._inspecting.values() if session_id in r.sessions), None)
+
+    async def _inspection_ended(self, running: _Inspection) -> tuple[inspecting.NotRun, ...]:
+        """Close every card an inspection that has ended still has open, and
+        say what became of each read it asked for that did not run.
+
+        A card still open is denied — nothing can run for a turn that is over —
+        and closed saying so: left, it stayed on the phone until it expired,
+        and allowing it then did nothing. A read allowed ran, and is not said.
+        """
+        not_run: list[inspecting.NotRun] = []
+        for request in running.cards:
+            resolution = await self._store.resolution_of(request.request_id)
+            if resolution is None:
+                try:
+                    resolution = await self._store.deny(
+                        request.request_id,
+                        reason=ResolutionReason.ENDED,
+                        note=(
+                            f"The inspection {running.name} ended before anybody answered, "
+                            "so this did not run."
+                        ),
+                    )
+                except UnknownApprovalError:
+                    continue
+                if resolution.reason is ResolutionReason.ENDED:
+                    entry = self._open.get(cards.handle_of(request))
+                    if entry is not None:
+                        _, message_id, chat_id, _ = entry
+                        await self._settle_card(request, message_id, chat_id, "ended", None)
+            if not resolution.allowed:
+                not_run.append(
+                    inspecting.NotRun(request.command_summary, _why_it_did_not_run(resolution))
+                )
+        if not_run:
+            logger.info(
+                "Inspection %s ended with %d read%s that did not run",
+                running.name,
+                len(not_run),
+                "s" if len(not_run) != 1 else "",
+            )
+        return tuple(not_run)
+
     def _inspection_named(self, session_id: str) -> str | None:
         """Which inspection a session is running, when it is one: an inspection
         this channel started, or a turn Halyard started for itself elsewhere
@@ -1147,6 +1242,10 @@ class TelegramChannel:
         assert card is not None, "an approval is always kept"
         message_id = card.message_id
         self._open[cards.handle_of(request)] = (request, message_id, chat_id, thread_id)
+        if (asking := self._inspection_of(request.session_id)) is not None:
+            # Kept with the inspection, under whichever id its runtime gave
+            # the turn, so it is closed when the inspection ends.
+            asking.cards.append(request)
         # Where a card went, said once per card. "It arrived in the wrong
         # group" is otherwise a question only the person holding the phone can
         # answer, and the answer decays as soon as they scroll.
@@ -3120,14 +3219,17 @@ class TelegramChannel:
                 f"from {said.agent_id or '?'} {said.session_id or '?'}"
             ),
         )
+        # Halyard's own words about reads that never ran, under the model's.
+        halyard_said = inspecting.not_run_block(answer.not_run)
         if not answer.measured:
             await self._say(
-                f"<b>{html.escape(name)}</b> · unmeasured — {html.escape(answer.why)}",
+                f"<b>{html.escape(name)}</b> · unmeasured — {html.escape(answer.why)}"
+                + (f"\n\n{html.escape(halyard_said)}" if halyard_said else ""),
                 chat_id,
                 thread_id,
             )
             return
-        findings = answer.text
+        findings = answer.text + (f"\n\n{halyard_said}" if halyard_said else "")
         # Kept whole — what ran, on what, what it found, and the reply itself —
         # so a button under the answer hands a seat something it can read cold,
         # not just the piece of the answer the button sits under.
@@ -3146,16 +3248,24 @@ class TelegramChannel:
                     reply=said.text,
                 ),
             )
-        pieces = cards.split_for_telegram(findings)
+        pieces = cards.split_for_telegram(answer.text)
         onward = cards.result_choices(name, tuple(seat.label for seat in self._seats))
+        # Outside the model's block, so it reads as Halyard's — under the last
+        # piece when it fits there, after it otherwise.
+        tail = html.escape(halyard_said)
+        alone = bool(tail) and len(pieces[-1]) + len(tail) > cards.CHUNK_LIMIT
         for index, chunk in enumerate(pieces):
             head = f"<b>{html.escape(name)}</b>\n" if index == 0 else ""
+            last = index == len(pieces) - 1
+            said = f"\n\n{tail}" if last and tail and not alone else ""
             await self._say(
-                f"{head}<pre>{html.escape(chunk)}</pre>",
+                f"{head}<pre>{html.escape(chunk)}</pre>{said}",
                 chat_id,
                 thread_id,
-                reply_markup=onward if index == len(pieces) - 1 else None,
+                reply_markup=onward if last else None,
             )
+        if alone:
+            await self._say(tail, chat_id, thread_id)
 
     async def _send_result(
         self, value: str, actor: str, chat_id: str, thread_id: int | None
@@ -3241,7 +3351,9 @@ class TelegramChannel:
         if running is None:
             return
         running.stopped_by = actor
-        await self._close_cards_of(session, actor, "the inspection")
+        # Under every id its turn ran by: a Codex thread's cards carry its own.
+        for ident in sorted(running.sessions):
+            await self._close_cards_of(ident, actor, "the inspection")
         logger.info("Inspection %s stopped by %s", running.name, actor)
         running.turn.cancel()
 
@@ -3915,6 +4027,7 @@ class TelegramChannel:
             *(f"<b>{html.escape(c.name)}</b>: {_ended(r, c)}" for c, r in handed.ran),
             *(
                 f"<b>{html.escape(a.name)}</b>: {'answered' if a.measured else 'unmeasured'}"
+                + (f" · {_reads(len(a.not_run))} did not run" if a.not_run else "")
                 for a in handed.answers
             ),
         ]

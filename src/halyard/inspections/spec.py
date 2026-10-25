@@ -8,6 +8,17 @@ from pathlib import Path
 from typing import Protocol, runtime_checkable
 
 
+@dataclass(frozen=True)
+class NotRun:
+    """A read an inspection asked for that never ran: the command, and why not
+    — what became of the card that asked a person to allow it."""
+
+    command: str
+    #: "denied by …", "expired before anybody answered", "still waiting for
+    #: approval when the inspection ended".
+    why: str
+
+
 @runtime_checkable
 class Asker(Protocol):
     """A turn apart from any session: text in, an answer out, or None.
@@ -39,6 +50,20 @@ class Asker(Protocol):
         session_id: str | None = None,
         effort: str | None = None,
     ) -> str | None: ...
+
+
+@runtime_checkable
+class Gated(Protocol):
+    """An `Asker` whose turns can stop a read to ask a person first.
+
+    A read whose card was denied, expired or still open when the turn ended
+    never ran, and a model may answer without it: Codex goes on with other
+    reads and answers while a card is still open. Once a turn is over, this
+    says which reads did not run, so the answer can carry it in Halyard's own
+    words rather than leave it to the model's.
+    """
+
+    def not_run(self, session_id: str) -> tuple[NotRun, ...]: ...
 
 
 @dataclass(frozen=True)
@@ -77,6 +102,9 @@ class Kept:
     #: How hard the model was asked to think, or None when that was left to the
     #: runtime — whose default is not the same for every model.
     effort: str | None = None
+    #: What Halyard said under the answer about reads that did not run — see
+    #: `not_run_block` — or empty when every read it asked for ran.
+    not_run: str = ""
 
 
 @runtime_checkable
@@ -112,6 +140,8 @@ class Answer:
     why: str = ""
     #: How long the model took, in seconds.
     took: float = 0.0
+    #: The reads it asked for that did not run, in the order it asked.
+    not_run: tuple[NotRun, ...] = ()
 
     @property
     def measured(self) -> bool:
