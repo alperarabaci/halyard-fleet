@@ -274,6 +274,24 @@ message to an agent in the middle of a turn waits behind that turn. Until a turn
 the step starts in the agent's session, the run says the step is *on its way to xdrv*, and
 what the agent says in the meantime answers something else: it moves nothing.
 
+**A run's card says what its step is doing.** Under the line the step started with, the
+card keeps one more, rewritten as the step moves:
+
+```
+⏳ close_x — running test-fast · 12 min
+⏳ close_x — inspecting · 4 of 6 · 3 min
+⏳ close_x — on its way to xnav · under a minute
+⏳ close_x — waiting for xnav · 25 min
+```
+
+The time is how long the step has been at what the line says, from a clock — so a command
+that prints nothing still shows how long it has run — and a command that does print has
+its newest line under its time. Its inspections are counted as they answer, since they
+run side by side. The time moves once a minute, and once every ten after the first hour.
+The line stops when the card closes: the next step's card, or the one the run stops with,
+says the rest. A step's command no longer posts a message of its own every 45 seconds;
+a transition pressed by hand, which has no run card, still does.
+
 **A step on its way can be called back.** **⏹ Stop the workflow** clears the run, as it
 always has. Steering it sends the run to another step instead: **🧭 Pick a step** on the
 card `/workflow` shows while a step is on its way, or a typed `/workflow level3 develop`.
