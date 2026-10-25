@@ -511,3 +511,21 @@ async def test_asking_without_a_token_says_so_and_writes_nothing(
 
     assert app.state.registry._listeners == []
     assert "no forge token" in caplog.text
+
+
+async def test_labels_are_written_with_each_forge_s_token(tmp_path: Path, monkeypatch) -> None:
+    """A GitHub token alone is enough to start, and every forge's token is
+    handed on — the old name standing in for GitLab's."""
+    from halyard.api import app as module
+
+    monkeypatch.setattr(
+        module, "configured_projects", lambda: _one_project(tmp_path, label_work=True)
+    )
+    settings = make_settings(tmp_path, ChannelKind.STUB_ALLOW).model_copy(
+        update={"github_token": "github_pat_x", "forge_token": "glpat-old"}
+    )
+
+    app = module.create_app(settings)
+
+    [listening] = app.state.registry._listeners
+    assert listening.__self__._tokens == {"github": "github_pat_x", "gitlab": "glpat-old"}

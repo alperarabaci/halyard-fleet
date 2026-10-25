@@ -1,9 +1,9 @@
 """What a forge has to be able to answer.
 
 `Forge` is to issue trackers what `RuntimeSpec` is to agents: the one place
-that says what differs, so that adding GitHub is adding a module rather than
+that says what differs, so that adding GitHub was adding a module rather than
 finding every branch on a provider name. Nothing outside this package should
-learn what a GitLab is.
+learn what a GitLab or a GitHub is.
 
 Three questions and no more, because that is all `/label` asks. A forge that
 could also close issues, or comment, or open merge requests would be a nicer

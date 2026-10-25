@@ -67,9 +67,9 @@ def wired(
 ):
     monkeypatch.setattr(attribution, "current_branch", lambda path: branch)
     monkeypatch.setattr(attribution, "origin_of", lambda path: object())
-    monkeypatch.setattr(attribution, "build", lambda origin, token, declared=None: forge)
+    monkeypatch.setattr(attribution, "build", lambda origin, tokens, declared=None: forge)
     labeller = Attribution(
-        token="a-token",
+        tokens={"gitlab": "a-token"},
         projects={"alpha-engine": Opted(path=repo, seats=tuple(seats))},
         tag_of={"claude-code": "claude", "codex": "codex", "opencode": "opencode"}.get,
     )
@@ -355,3 +355,18 @@ async def test_a_session_that_is_no_seat_is_said_once_and_not_labelled(
 
     assert forge.asked == 0
     assert sum("matches no agent" in record.getMessage() for record in caplog.records) == 1
+
+
+async def test_the_forge_is_built_with_every_forge_s_token(monkeypatch, repo) -> None:
+    """The registry takes the one for the forge it builds."""
+    forge = FakeForge()
+    asked: list = []
+    registry, labeller = wired(monkeypatch, repo, forge)
+    monkeypatch.setattr(
+        attribution, "build", lambda origin, tokens, declared=None: asked.append(tokens) or forge
+    )
+
+    await work(registry, repo / "src")
+    await settled(labeller)
+
+    assert asked == [{"gitlab": "a-token"}]

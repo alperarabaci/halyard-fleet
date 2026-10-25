@@ -347,14 +347,21 @@ class Settings(BaseSettings):
     #: How hard those turns think — ZCode refuses a send that carries no
     #: reasoning level at all.
     zcode_reasoning: str = Field(default="max", validation_alias="ZCODE_REASONING")
-    #: For reaching an issue tracker — today only to add a label to the task a
-    #: branch is for. Named for the idea rather than for GitLab, because the
-    #: provider is chosen by the repository's remote and a second one is a
-    #: module rather than a rename. Absent means `/label` says so and every
-    #: other command is unaffected.
+    #: For reaching an issue tracker — to read the task a branch is for and
+    #: put a label on it. One token per forge, each used for its own forge
+    #: alone, so one machine can label a GitHub project and a GitLab one; which
+    #: forge a project is on, its repository's remote says. Absent means
+    #: `/label` says so for that forge and every other command is unaffected.
     #:
+    #: GitHub's is a fine-grained token limited to the repository, with
+    #: Issues: read and write.
+    github_token: str | None = Field(default=None, validation_alias="HALYARD_GITHUB_TOKEN")
     #: GitLab has no scope narrower than `api` for writing a label onto an
     #: issue, so a *project* access token is the way to make that mean less.
+    gitlab_token: str | None = Field(default=None, validation_alias="HALYARD_GITLAB_TOKEN")
+    #: The name `HALYARD_GITLAB_TOKEN` had while GitLab was the only forge,
+    #: until 2026-10-25. Still read, as GitLab's token when the new name is
+    #: unset; `halyard doctor` says to rename it.
     forge_token: str | None = Field(default=None, validation_alias="HALYARD_FORGE_TOKEN")
     #: When true, an agent's own `git commit` or `git push` is refused before
     #: anybody is asked. Off by default, so nothing changes for anybody who has
@@ -486,6 +493,17 @@ class Settings(BaseSettings):
             # can approve anything or, worse, that the check was skipped.
             raise ValueError(f"HALYARD_CHANNEL=telegram requires {', '.join(missing)} to be set")
         return self
+
+    @property
+    def forge_tokens(self) -> dict[str, str]:
+        """Each forge's token, by the name `halyard.tasks` gives the forge —
+        the old `HALYARD_FORGE_TOKEN` standing in for GitLab's when its own is
+        unset. A forge with no token is left out."""
+        tokens = {
+            "github": self.github_token,
+            "gitlab": self.gitlab_token or self.forge_token,
+        }
+        return {forge: token for forge, token in tokens.items() if token}
 
     @property
     def host(self) -> str:

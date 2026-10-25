@@ -693,3 +693,91 @@ def test_telegram_values_left_as_an_example_wrote_them_are_failures() -> None:
     assert any(line.startswith("TELEGRAM_BOT_TOKEN") for line in said)
     assert any("agent dev's chat" in line for line in said)
     assert example_values(real, [SimpleNamespace(label="dev", chat="-1009876543210")]) == []
+
+
+def _forge_settings(**tokens: str):
+    from halyard.config import Settings
+
+    return Settings(_env_file=None, HALYARD_CHANNEL="stub_deny", **tokens)
+
+
+def _on(host: str):
+    """Every project's remote, as `origin_of` would read it."""
+    from halyard.tasks import Origin
+
+    return lambda path: Origin(host=host, path="team/thing")
+
+
+def test_the_old_forge_token_is_a_warning_that_says_what_to_rename() -> None:
+    """As a renamed key in `halyard.yaml` is: it still works, so this only
+    says what to rename."""
+    lines = doctor._forge_tokens(_forge_settings(HALYARD_FORGE_TOKEN="glpat-old"), [])
+
+    assert lines == [
+        f"{doctor.WARN}HALYARD_FORGE_TOKEN is now HALYARD_GITLAB_TOKEN, and is still read "
+        "as GitLab's; the old name still works"
+    ]
+    both = doctor._forge_tokens(
+        _forge_settings(HALYARD_FORGE_TOKEN="glpat-old", HALYARD_GITLAB_TOKEN="glpat-new"), []
+    )
+    assert both == [
+        f"{doctor.WARN}HALYARD_FORGE_TOKEN is now HALYARD_GITLAB_TOKEN, which is set, so "
+        "the old one is not used and can go"
+    ]
+
+
+def test_a_project_that_asks_for_labels_is_told_the_token_its_forge_needs() -> None:
+    from halyard.core.config_file import projects_from_yaml
+
+    [writes, reads, both] = projects_from_yaml(
+        "projects:\n"
+        "  alpha-engine:\n    path: /x\n    labels:\n      who_worked: true\n"
+        "  halyard:\n    path: /y\n    labels:\n      groups:\n        level: [level:1]\n"
+        "  fleet:\n    path: /z\n    labels:\n      who_worked: true\n"
+        "      groups:\n        level: [level:1]\n"
+    )
+    settings = _forge_settings(HALYARD_GITLAB_TOKEN="glpat-x")
+
+    lines = doctor._forge_tokens(settings, [writes, reads, both], origin_of=_on("github.com"))
+
+    assert lines == [
+        f"{doctor.WARN}alpha-engine is on GitHub (github.com), and HALYARD_GITHUB_TOKEN is not "
+        "set, so labels: who_worked writes nothing",
+        f"{doctor.WARN}halyard is on GitHub (github.com), and HALYARD_GITHUB_TOKEN is not "
+        "set, so labels: groups reads nothing from its tasks",
+        f"{doctor.WARN}fleet is on GitHub (github.com), and HALYARD_GITHUB_TOKEN is not "
+        "set, so labels: who_worked writes nothing and labels: groups reads nothing from its "
+        "tasks",
+    ]
+    assert doctor._forge_tokens(settings, [writes], origin_of=_on("gitlab.com")) == []
+
+
+def test_a_project_that_asks_for_no_labels_is_not_told_about_tokens() -> None:
+    """A GitHub project with no `labels:` block and no token: `/label` says
+    which token is missing if somebody uses it, and doctor says nothing — or
+    every project on github.com would warn on every run."""
+    from halyard.core.config_file import projects_from_yaml
+
+    [plain] = projects_from_yaml("projects:\n  alpha-engine:\n    path: /x\n")
+
+    assert doctor._forge_tokens(_forge_settings(), [plain], origin_of=_on("github.com")) == []
+
+
+def test_a_project_whose_remote_names_no_forge_is_left_alone() -> None:
+    """Unless it says `forge:` — then its token is the one asked for."""
+    from halyard.core.config_file import projects_from_yaml
+
+    [unknown, declared] = projects_from_yaml(
+        "projects:\n"
+        "  a:\n    path: /x\n    labels:\n      who_worked: true\n"
+        "  b:\n    path: /y\n    forge: github\n    labels:\n      who_worked: true\n"
+    )
+
+    lines = doctor._forge_tokens(
+        _forge_settings(), [unknown, declared], origin_of=_on("git.example.com")
+    )
+
+    assert lines == [
+        f"{doctor.WARN}b is on GitHub (git.example.com), and HALYARD_GITHUB_TOKEN is not set, "
+        "so labels: who_worked writes nothing"
+    ]

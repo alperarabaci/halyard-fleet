@@ -3906,7 +3906,7 @@ def behind_a_tracker(channel: TelegramChannel, monkeypatch, tracker: Tracker) ->
         lambda path: tasks.Origin(host="gitlab.com", path="a/b"),
     )
     monkeypatch.setattr(under_test.task_tracker, "build", lambda *a, **k: tracker)
-    channel._forge_token = "glpat-x"
+    channel._forge_tokens = {"gitlab": "glpat-x"}
     return tracker
 
 

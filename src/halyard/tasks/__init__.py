@@ -9,13 +9,13 @@ code that uses it.
 The pieces: `spec` says what a forge must answer, `remotes` reads where a
 repository points, `branches` says which task a branch is for, `registry` turns
 a host into a forge, `labelling` decides what is worth offering, and `gitlab`
-is the one implementation there is today.
+and `github` are the two implementations, each with a token of its own.
 """
 
 from halyard.tasks.branches import current as current_branch
 from halyard.tasks.branches import number_of
 from halyard.tasks.labelling import Choice, picked, put_on, to_offer, worth_offering
-from halyard.tasks.registry import BUILDERS, KNOWN_HOSTS, build, kind_of
+from halyard.tasks.registry import BUILDERS, KNOWN_HOSTS, TOKENS, build, kind_of
 from halyard.tasks.remotes import Origin, origin_of
 from halyard.tasks.remotes import read as read_remote
 from halyard.tasks.spec import Forge, ForgeError, Task
@@ -23,6 +23,7 @@ from halyard.tasks.spec import Forge, ForgeError, Task
 __all__ = [
     "BUILDERS",
     "KNOWN_HOSTS",
+    "TOKENS",
     "Choice",
     "Forge",
     "ForgeError",

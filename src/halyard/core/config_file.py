@@ -270,9 +270,9 @@ class Project:
     #: `{run: …, not_run: [2]}`. A transition stops at one; see
     #: `commands.running.outcome`.
     commands_not_run: dict[str, tuple[int, ...]] = field(default_factory=dict)
-    #: Which kind of issue tracker this project's remote points at. Only needed
-    #: for a host that does not name itself — `gitlab.com` does, and
-    #: `git.example.com` cannot.
+    #: Which kind of issue tracker this project's remote points at — `gitlab`
+    #: or `github`. Only needed for a host that does not name itself:
+    #: `gitlab.com` and `github.com` do, and `git.example.com` cannot.
     forge: str | None = None
     #: Which labels `/label` offers. Empty means every label the project has,
     #: which is the right default until a project has more of them than a phone

@@ -417,7 +417,7 @@ def on_a_task(channel: TelegramChannel, monkeypatch, forge: FakeForge, *, branch
         lambda path: tracker.Origin(host="gitlab.com", path="a/b"),
     )
     monkeypatch.setattr(under_test.task_tracker, "build", lambda *a, **k: forge)
-    channel._forge_token = "glpat-x"
+    channel._forge_tokens = {"gitlab": "glpat-x"}
     return forge
 
 
@@ -590,11 +590,31 @@ async def test_no_token_configured_says_which_problem_that_is(wired, monkeypatch
         "origin_of",
         lambda path: tracker.Origin(host="gitlab.com", path="a/b"),
     )
-    channel._forge_token = None
+    channel._forge_tokens = {}
 
     await deliver(channel, typed("/label"))
 
-    assert "No token" in api.sent[-1]["text"]
+    assert "No GitLab token for gitlab.com: set HALYARD_GITLAB_TOKEN" in api.sent[-1]["text"]
+
+
+async def test_a_gitlab_token_is_not_used_for_a_github_project(wired, monkeypatch) -> None:
+    """Each forge's token for its own forge alone: one machine can label a
+    GitHub project and a GitLab one, and neither token reaches the other."""
+    from halyard import tasks as tracker
+    from halyard.channels.telegram import adapter as under_test
+
+    channel, api, _ = wired
+    monkeypatch.setattr(under_test.task_tracker, "current_branch", lambda path: "320-thing")
+    monkeypatch.setattr(
+        under_test.task_tracker,
+        "origin_of",
+        lambda path: tracker.Origin(host="github.com", path="a/b"),
+    )
+    channel._forge_tokens = {"gitlab": "glpat-x"}
+
+    await deliver(channel, typed("/label"))
+
+    assert "No GitHub token for github.com: set HALYARD_GITHUB_TOKEN" in api.sent[-1]["text"]
 
 
 # --- /doctor -----------------------------------------------------------------
