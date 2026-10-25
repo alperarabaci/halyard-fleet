@@ -529,3 +529,43 @@ async def test_labels_are_written_with_each_forge_s_token(tmp_path: Path, monkey
 
     [listening] = app.state.registry._listeners
     assert listening.__self__._tokens == {"github": "github_pat_x", "gitlab": "glpat-old"}
+
+
+async def test_a_risk_setting_it_does_not_take_starts_the_service_with_the_gate_strict(
+    tmp_path: Path, caplog
+) -> None:
+    """`medium` used to stop the service from starting, and launchd started it
+    again and again while every command was denied and nothing reached the
+    phone. Now the service starts, every read still asks, and it is said: in
+    the log, and to the navigator."""
+    import logging
+
+    from halyard.api.app import create_app
+    from halyard.core.events import Role
+
+    settings = Settings(
+        HALYARD_CHANNEL=ChannelKind.STUB_ALLOW.value,
+        HALYARD_DB_PATH=str(tmp_path / "halyard.db"),
+        HALYARD_AUDIT_LOG=str(tmp_path / "audit.jsonl"),
+        HALYARD_ALLOW_RISK_AT_OR_BELOW="medium",
+        CLAUDE_PROJECT_NAME="alpha-engine",
+        _env_file=None,
+    )
+    caplog.set_level(logging.ERROR, logger="halyard.api.app")
+
+    app = create_app(settings)
+    said: list[tuple[str, str, object]] = []
+
+    async def heard(session_id, text, role=None, **_):
+        said.append((session_id, text, role))
+
+    app.state.channel.send_message = heard
+    async with LifespanManager(app):
+        pass
+
+    assert app.state.service._rules.reads is False, "no read goes through without a card"
+    assert "HALYARD_ALLOW_RISK_AT_OR_BELOW is 'medium'" in caplog.text
+    assert [record.levelname for record in caplog.records] == ["ERROR"]
+    [(_, text, role)] = said
+    assert text.startswith("⚠️ HALYARD_ALLOW_RISK_AT_OR_BELOW is 'medium'")
+    assert role is Role.NAVIGATOR

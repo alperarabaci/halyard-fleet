@@ -262,6 +262,14 @@ def _older_spellings(projects) -> list[str]:
     ]
 
 
+def _ignored(settings) -> list[str]:
+    """Settings given a value Halyard does not take. Ignored rather than
+    refused, so the service still starts, and said here as well as in its log
+    and the navigator's chat — a warning, since what runs is the stricter
+    gate, not a looser one."""
+    return [f"{WARN}{sentence}" for sentence in settings.ignored]
+
+
 def _forge_tokens(settings, projects, origin_of=None) -> list[str]:
     """The token a project's forge needs, where the project asks for labels and
     it is missing — and the old name for GitLab's, still in use.
@@ -794,6 +802,8 @@ def run() -> int:
         )
         if settings.channel.decides_without_a_human:
             print(f"{WARN}channel {settings.channel.value} answers by itself — nobody is asked")
+        for line in _ignored(settings):
+            print(line)
         if settings.channel.value == "telegram":
             from halyard.core.config_file import load as configured_seats
 
