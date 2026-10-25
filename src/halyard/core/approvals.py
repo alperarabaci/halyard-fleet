@@ -78,6 +78,10 @@ class ResolutionReason(StrEnum):
     #: Answered where the agent runs — its own prompt, at the desk — before
     #: anybody answered here. Recorded; never an approval Halyard gave.
     ELSEWHERE = "elsewhere"
+    #: The turn that asked ended before anybody answered — an inspection that
+    #: answered, timed out or failed without it — so what it asked for can no
+    #: longer run for anyone.
+    ENDED = "ended"
 
 
 class ApprovalRequest(BaseModel):

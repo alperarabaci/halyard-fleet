@@ -10,7 +10,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from halyard import frame
-from halyard.inspections.spec import Answer, Asker, Keeper, Kept, StoppedError
+from halyard.inspections.spec import Answer, Asker, Gated, Keeper, Kept, NotRun, StoppedError
 
 logger = logging.getLogger(__name__)
 
@@ -21,7 +21,8 @@ def prompt(instructions: str, *, context: list[str], note: str, text: str) -> st
     It said "check" to the model until 2026-10-24, a month after these were
     renamed inspections, so that answers from either side of the rename could
     be compared. A run kept before then was given that wording, and a repeat of
-    it is given it again, word for word.
+    it is given it again, word for word. The sentence about a command waiting
+    for the operator's approval came on 2026-10-25.
     """
     parts = [
         instructions,
@@ -52,6 +53,10 @@ def prompt(instructions: str, *, context: list[str], note: str, text: str) -> st
         "is refused or cannot finish, identify that source as unmeasured, not "
         "clean or missing evidence. Do not work around a denied read.",
         "",
+        "A command may wait minutes for the operator's approval: wait for it to "
+        "return before answering, and never answer as if you read what a command "
+        "that has not returned would have shown.",
+        "",
         "It is inspecting, not changing: read what this inspection needs. The project's "
         "own instructions, and the files they point to, are background here "
         "rather than a reading list.",
@@ -63,6 +68,25 @@ def prompt(instructions: str, *, context: list[str], note: str, text: str) -> st
         text,
     ]
     return "\n".join(parts)
+
+
+def not_run_block(not_run: tuple[NotRun, ...]) -> str:
+    """Halyard's own words under an inspection's answer, about the reads it
+    asked for that never ran — empty when every one ran.
+
+    Said by Halyard, and marked so: the model may not know a read was refused
+    or never came back, and only Halyard saw what became of its card.
+    """
+    if not not_run:
+        return ""
+    count = len(not_run)
+    reads = f"{count} read{'s' if count != 1 else ''}"
+    which = "; ".join(f"`{read.command}` ({read.why})" for read in not_run)
+    them = "them" if count != 1 else "it"
+    return (
+        f"Halyard: {reads} this inspection asked for did not run — {which}. "
+        f"Anything that rests on {them} is not measured."
+    )
 
 
 def unfenced(answer: str) -> str:
@@ -153,6 +177,10 @@ async def run(
     model was given, word for word, and what it said — under the id the turn ran
     under, which is the one its tokens are recorded by. An inspection whose file
     could not be read never reached a model, and is not kept.
+
+    A read the turn asked a person for and never got is said under the answer,
+    in Halyard's words — see `not_run_block` — when `asker` can tell: it is
+    `Gated`.
     """
     instructions = frame.read(path, project)
     version = await asyncio.to_thread(frame.version, path, project)
@@ -175,7 +203,17 @@ async def run(
     session = str(uuid.uuid4())
     at = datetime.now(UTC)
 
-    async def kept(answer: str | None, why: str, took: float) -> None:
+    def not_run() -> tuple[NotRun, ...]:
+        """The reads the turn asked for that did not run, once it is over."""
+        if not isinstance(asker, Gated):
+            return ()
+        try:
+            return tuple(asker.not_run(session))
+        except Exception:
+            logger.warning("Inspection %s could not say which reads ran", name, exc_info=True)
+            return ()
+
+    async def kept(answer: str | None, why: str, took: float, missed: tuple[NotRun, ...]) -> None:
         if keeper is None:
             return
         record = Kept(
@@ -194,6 +232,7 @@ async def run(
             finding=None,
             took=took,
             effort=effort,
+            not_run=not_run_block(missed),
         )
         try:
             await keeper.keep(record)
@@ -214,17 +253,23 @@ async def run(
         )
     except StoppedError as stopped:
         took = time.monotonic() - started
+        missed = not_run()
         logger.info("Inspection %s %s after %.1fs", name, stopped, took)
-        await kept(None, str(stopped), took)
-        return Answer(name, path, version, why=str(stopped), took=took)
+        await kept(None, str(stopped), took, missed)
+        return Answer(name, path, version, why=str(stopped), took=took, not_run=missed)
     except Exception:
         logger.warning("Inspection %s failed", name, exc_info=True)
         said = None
     took = time.monotonic() - started
+    missed = not_run()
+    if missed:
+        logger.info("Inspection %s: %s", name, not_run_block(missed))
     if not said:
         logger.info("Inspection %s got no answer in %.1fs", name, took)
-        await kept(None, "the model did not answer", took)
-        return Answer(name, path, version, why="the model did not answer", took=took)
+        await kept(None, "the model did not answer", took, missed)
+        return Answer(
+            name, path, version, why="the model did not answer", took=took, not_run=missed
+        )
     logger.info("Inspection %s answered in %.1fs:\n%s", name, took, said)
-    await kept(said, "", took)
-    return Answer(name, path, version, text=unfenced(said), took=took)
+    await kept(said, "", took, missed)
+    return Answer(name, path, version, text=unfenced(said), took=took, not_run=missed)

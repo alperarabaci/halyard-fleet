@@ -436,11 +436,19 @@ def render_resolved(
         "expired": "⌛ EXPIRED — DENIED",
         # Halyard stopped while the card was open; denied, so nothing runs unasked.
         "shutdown": "⏹ DENIED — HALYARD STOPPED",
+        # The inspection that asked ended first; nothing can run for it now.
+        "ended": "⏹ DENIED — THE INSPECTION ENDED",
     }.get(decision, "⛔ DENIED")
     who = f" by {html.escape(by)}" if by else ""
+    why = (
+        ["The inspection ended before this was answered, so nothing ran."]
+        if decision == "ended"
+        else []
+    )
     return _fit(
         [
             f"<b>{mark}</b>{who}",
+            *why,
             "",
             *_inspected_by(inspection),
             f"Project: <code>{html.escape(request.project)}</code>",

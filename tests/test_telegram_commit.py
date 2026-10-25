@@ -3411,7 +3411,14 @@ async def test_stop_on_a_checks_card_ends_the_check_and_says_who(tmp_path: Path,
     assert resolution.decision is Decision.DENY
     assert any(edit["text"].startswith(f"<b>⏹ STOPPED</b> by tg:{APPROVER}") for edit in api.edits)
     said = [sent["text"] for sent in api.sent]
-    assert f"<b>proof</b> · unmeasured — stopped by tg:{APPROVER}" in said
+    assert (
+        f"<b>proof</b> · unmeasured — stopped by tg:{APPROVER}\n\n"
+        + (
+            "Halyard: 1 read this inspection asked for did not run — `make test-fast` "
+            f"(denied by tg:{APPROVER}). Anything that rests on it is not measured."
+        )
+        in said
+    )
     assert channel._inspecting == {}
 
 
@@ -3435,6 +3442,250 @@ async def test_a_transition_goes_on_without_a_check_somebody_stopped(tmp_path: P
     [(session, text)] = runner.sent
     assert session == "id-rev"
     assert f"stopped by tg:{APPROVER}" in text
+
+
+# --- reads an inspection asked for that never ran -------------------------------------
+
+
+class ReadsAsked:
+    """An inspection's turn that asks for reads, each a card the way the gate
+    brings one in — under the id its runtime runs the turn by, when that is
+    another — and then answers, whatever became of its cards, the way a Codex
+    model can. `meanwhile` is what happens to the cards before it answers."""
+
+    def __init__(
+        self,
+        channel: TelegramChannel,
+        runner: FakeRunner,
+        *reads: str,
+        under: str = "",
+        meanwhile=None,
+    ) -> None:
+        self.channel = channel
+        self.reads = reads
+        self.under = under
+        self.meanwhile = meanwhile
+        self.asked: list = []
+        runner.ask = self.ask
+
+    async def ask(self, text: str, *, model: str | None = None, **kwargs) -> str | None:
+        from halyard.core.events import RiskLevel
+
+        ident = kwargs["session_id"]
+        if self.under:
+            # The runtime says the id it runs the turn by, as Codex does.
+            kwargs["started"](self.under)
+            ident = self.under
+        for command in self.reads:
+            request = await self.channel._store.create(
+                session_id=ident,
+                agent_id="codex",
+                project="alpha-engine",
+                tool="Bash",
+                command_summary=command,
+                command_full=command,
+                risk=RiskLevel.HIGH,
+            )
+            await self.channel.send_approval_request(request)
+            self.asked.append(request)
+        if self.meanwhile is not None:
+            await self.meanwhile(self.asked)
+        return "claims · no finding"
+
+
+async def decided(channel: TelegramChannel, request, decision: str) -> None:
+    """A card answered with its own button, by somebody allowed to."""
+    from halyard.channels.telegram import cards
+
+    await channel._handle_callback(
+        {
+            "id": "cbq-2",
+            "from": {"id": int(APPROVER)},
+            "data": cards.callback_data(request, decision),
+        }
+    )
+
+
+ENDED_X = (
+    "Halyard: 1 read this inspection asked for did not run — `cat /tmp/x.log` "
+    "(still waiting for approval when the inspection ended). "
+    "Anything that rests on it is not measured."
+)
+
+
+async def test_an_inspection_that_answers_with_a_card_open_closes_it_and_says_so(
+    tmp_path: Path, wired
+) -> None:
+    """Measured on Codex: the model went on and answered while its card was
+    still open, the read never ran, and the card stayed on the phone until it
+    expired — allowing it then did nothing. The card here carries the id the
+    runtime ran the turn under, not the one Halyard chose."""
+    from halyard.core.approvals import Decision, ResolutionReason
+
+    channel, api, runner, repo = wired
+    inspections_in(channel, repo, tmp_path, proof="# proof")
+    asking = ReadsAsked(channel, runner, "cat /tmp/x.log", under="codex-thread-1")
+
+    await channel._handle_callback(pressed_inspection("proof"))
+    await settled(channel)
+    [request] = asking.asked
+    resolution = await channel._store.resolution_of(request.request_id)
+
+    assert request.session_id == "codex-thread-1"
+    assert resolution is not None
+    assert (resolution.decision, resolution.reason) == (Decision.DENY, ResolutionReason.ENDED)
+    [closed] = [edit for edit in api.edits if "THE INSPECTION ENDED" in edit["text"]]
+    assert "The inspection ended before this was answered, so nothing ran." in closed["text"]
+    answered = [sent["text"] for sent in api.sent if sent["text"].startswith("<b>proof</b>\n")]
+    assert answered and answered[-1].endswith(f"</pre>\n\n{ENDED_X}")
+
+
+async def test_a_denied_card_and_an_expired_one_are_said_with_what_happened(
+    tmp_path: Path, wired
+) -> None:
+    """And an allowed one ran, so it is not said at all."""
+    from halyard.channels.telegram import cards
+    from halyard.core.approvals import ResolutionReason
+
+    async def meanwhile(asked) -> None:
+        denied, expired, allowed = asked
+        await decided(channel, denied, cards.DENY)
+        await channel._store.deny(
+            expired.request_id, reason=ResolutionReason.TIMEOUT, note="Nobody answered."
+        )
+        await decided(channel, allowed, cards.ALLOW)
+
+    channel, api, runner, repo = wired
+    inspections_in(channel, repo, tmp_path, proof="# proof")
+    ReadsAsked(channel, runner, "cat a", "cat b", "cat c", meanwhile=meanwhile)
+
+    await channel._handle_callback(pressed_inspection("proof"))
+    await settled(channel)
+
+    said = "\n".join(sent["text"] for sent in api.sent)
+    assert (
+        "Halyard: 2 reads this inspection asked for did not run — "
+        f"`cat a` (denied by tg:{APPROVER}); `cat b` (expired before anybody answered). "
+        "Anything that rests on them is not measured."
+    ) in said
+    assert "`cat c`" not in said
+
+
+async def test_an_inspection_whose_reads_were_all_allowed_adds_nothing(
+    tmp_path: Path, wired
+) -> None:
+    from halyard.channels.telegram import cards
+
+    async def meanwhile(asked) -> None:
+        for request in asked:
+            await decided(channel, request, cards.ALLOW)
+
+    channel, api, runner, repo = wired
+    inspections_in(channel, repo, tmp_path, proof="# proof")
+    ReadsAsked(channel, runner, "cat a", meanwhile=meanwhile)
+
+    await channel._handle_callback(pressed_inspection("proof"))
+    await settled(channel)
+
+    assert not any("Halyard:" in sent["text"] for sent in api.sent)
+    assert not any("THE INSPECTION ENDED" in edit["text"] for edit in api.edits)
+
+
+async def test_reads_that_did_not_run_reach_the_transition_s_message_and_outcome_line(
+    tmp_path: Path, wired
+) -> None:
+    channel, api, runner, repo = wired
+    transitions_in(
+        channel, repo, tmp_path, runner, discovery={"inspections": ("proof",), "to": "xrev"}
+    )
+    ReadsAsked(channel, runner, "cat /tmp/x.log", under="codex-thread-2")
+
+    await channel._run_transition("discovery", CHAT, None, f"tg:{APPROVER}")
+    await settled(channel)
+
+    [(_, text)] = runner.sent
+    assert f"claims · no finding\n\n{ENDED_X}" in text
+    assert any("<b>proof</b>: answered · 1 read did not run" in sent["text"] for sent in api.sent)
+
+
+async def test_reads_that_did_not_run_are_kept_with_the_run(tmp_path: Path, wired) -> None:
+    """In a column of their own, beside the model's answer as it came."""
+    import sqlite3
+
+    channel, _, runner, repo = wired
+    channel._database = tmp_path / "halyard.db"
+    channel._keep_inspections = True
+    inspections_in(channel, repo, tmp_path, proof="# proof")
+    ReadsAsked(channel, runner, "cat /tmp/x.log")
+
+    await channel._run_inspection("proof", CHAT, None)
+    await settled(channel)
+
+    with sqlite3.connect(channel._database) as db:
+        [(answer, not_run)] = db.execute("SELECT answer, not_run FROM inspection_runs").fetchall()
+    assert (answer, not_run) == ("claims · no finding", ENDED_X)
+
+
+async def test_stop_closes_a_card_its_runtime_s_own_id_carries(tmp_path: Path, wired) -> None:
+    """Stop said so only on the cards under the id Halyard chose; one under
+    the id its runtime ran the turn by — a Codex thread — stayed open."""
+    from halyard.core.approvals import Decision
+
+    async def meanwhile(asked) -> None:
+        [chosen] = [s for s, i in channel._inspecting.items() if i.name == "proof"]
+        await channel._stop_inspection(chosen, f"tg:{APPROVER}")
+        await asyncio.sleep(1)
+
+    channel, api, runner, repo = wired
+    inspections_in(channel, repo, tmp_path, proof="# proof")
+    asking = ReadsAsked(
+        channel, runner, "cat /tmp/x.log", under="codex-thread-3", meanwhile=meanwhile
+    )
+
+    await channel._handle_callback(pressed_inspection("proof"))
+    await settled(channel)
+    [request] = asking.asked
+    resolution = await channel._store.resolution_of(request.request_id)
+
+    assert resolution is not None and resolution.decision is Decision.DENY
+    assert any(edit["text"].startswith("<b>⏹ STOPPED</b>") for edit in api.edits)
+    assert not any("THE INSPECTION ENDED" in edit["text"] for edit in api.edits)
+
+
+async def test_a_card_of_another_session_is_left_alone_when_an_inspection_ends(
+    tmp_path: Path, wired
+) -> None:
+    """An agent's own card, open while the inspection ran, is not the
+    inspection's to close."""
+    from halyard.core.events import RiskLevel
+
+    others: list = []
+
+    async def meanwhile(_asked) -> None:
+        agents = await channel._store.create(
+            session_id="id-nav",
+            agent_id="claude-code",
+            project="alpha-engine",
+            tool="Bash",
+            command_summary="make e2e",
+            command_full="make e2e",
+            risk=RiskLevel.HIGH,
+        )
+        await channel.send_approval_request(agents)
+        others.append(agents)
+
+    channel, api, runner, repo = wired
+    inspections_in(channel, repo, tmp_path, proof="# proof")
+    ReadsAsked(channel, runner, "cat /tmp/x.log", meanwhile=meanwhile)
+
+    await channel._handle_callback(pressed_inspection("proof"))
+    await settled(channel)
+    [agents] = others
+
+    assert await channel._store.resolution_of(agents.request_id) is None
+    said = "\n".join(sent["text"] for sent in api.sent)
+    assert "`make e2e`" not in said
+    assert len([edit for edit in api.edits if "THE INSPECTION ENDED" in edit["text"]]) == 1
 
 
 async def test_a_check_is_told_whether_the_files_moved_since_the_reply(

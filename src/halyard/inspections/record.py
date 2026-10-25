@@ -60,6 +60,7 @@ CREATE TABLE IF NOT EXISTS inspection_runs (
     outcome      TEXT NOT NULL,
     why          TEXT NOT NULL,
     finding      TEXT,
+    not_run      TEXT,
     took         REAL NOT NULL,
     experimental INTEGER NOT NULL DEFAULT 0,
     repeat_of    TEXT
@@ -71,7 +72,8 @@ CREATE INDEX IF NOT EXISTS inspection_runs_work_idx ON inspection_runs (work);
 
 #: Columns added after the table was first made, and what they hold. A table
 #: made before one of them gets it added, empty for the rows it already has.
-_ADDED = {"effort": "TEXT"}
+#: `not_run` is what Halyard said under the answer about reads that never ran.
+_ADDED = {"effort": "TEXT", "not_run": "TEXT"}
 
 #: Columns renamed since, by the name they had: a transition was a handoff
 #: until 2026-09-24.
@@ -157,6 +159,7 @@ def keep(
         "outcome": "answered" if kept.answer is not None else "unmeasured",
         "why": kept.why,
         "finding": kept.finding,
+        "not_run": kept.not_run or None,
         "took": kept.took,
         "experimental": int(experimental),
         "repeat_of": repeat_of,
