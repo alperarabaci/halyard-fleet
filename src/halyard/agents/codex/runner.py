@@ -25,6 +25,7 @@ import contextlib
 import json
 import logging
 import os
+import shlex
 import shutil
 import subprocess
 from collections.abc import Callable
@@ -38,6 +39,7 @@ from halyard.agents.turns import (
     end_group,
     say_started,
 )
+from halyard.core import calls as reported
 from halyard.core import usage
 
 logger = logging.getLogger(__name__)
@@ -154,6 +156,40 @@ def find_codex_binary(configured: str | None = None) -> str | None:
         if candidate.exists():
             return str(candidate)
     return None
+
+
+def _unwrapped(command: str) -> str:
+    """The command as it was asked for, out of the shell Codex runs it in:
+    `/bin/zsh -lc 'cat other.txt'` is `cat other.txt`. Anything else as it is."""
+    try:
+        words = shlex.split(command)
+    except ValueError:
+        return command
+    if len(words) == 3 and words[1] in ("-c", "-lc") and Path(words[0]).name.endswith("sh"):
+        return words[2]
+    return command
+
+
+def ran(calls: reported.Calls, kind: str | None, item: dict) -> None:
+    """One `command_execution` event of `codex exec --json`, into `calls`.
+
+    Measured on 0.160.0: `item.started` with `status` "in_progress", then
+    `item.completed` with "completed" and its `exit_code`. A command that
+    exits with something other than 0 ran — `grep` finding nothing exits 1 —
+    and only one Codex itself declined did not. Called `Bash`, as Codex's
+    hook calls it, so it reads the same as what the gate decided.
+    """
+    ident = str(item.get("id") or "")
+    command = _unwrapped(str(item.get("command") or ""))
+    if kind == "item.started":
+        calls.asked(ident, "Bash", command)
+    elif kind == "item.completed":
+        if item.get("status") == "declined":
+            calls.came_back(ident, reported.DENIED, "declined", tool="Bash", what=command)
+            return
+        code = item.get("exit_code")
+        detail = f"exit {code}" if isinstance(code, int) and code != 0 else ""
+        calls.came_back(ident, reported.RAN, detail, tool="Bash", what=command)
 
 
 class CodexRunner:
@@ -463,6 +499,7 @@ class CodexRunner:
         system: str | None = None,
         effort: str | None = None,
         started: Callable[[str], object] | None = None,
+        calls: reported.Calls | None = None,
     ) -> str | None:
         """One turn in a thread of its own — `codex exec` — and nothing kept.
 
@@ -482,6 +519,11 @@ class CodexRunner:
         own id for the turn. Codex counts cached input inside `input_tokens`
         and reasoning inside `output_tokens`; the row keeps them the way the
         other runtimes' rows do.
+
+        Each command the turn runs is in that stream too, and goes into `calls`
+        when it is given — the command, its exit code, never its output. A
+        command the gate denied, or one still waiting on it, is never there:
+        Codex reports what ran, and only the gate knows what did not.
 
         Returns the last thing the model said, or None on any failure.
         """
@@ -522,7 +564,7 @@ class CodexRunner:
         said_aside = asyncio.ensure_future(process.stderr.read()) if process.stderr else None
         try:
             said, used, thread = await asyncio.wait_for(
-                self._read(process, started), timeout=timeout
+                self._read(process, started, calls), timeout=timeout
             )
             await process.wait()
         except TimeoutError:
@@ -558,9 +600,14 @@ class CodexRunner:
             )
         return said
 
-    async def _read(self, process, started) -> tuple[str | None, dict | None, str | None]:
+    async def _read(
+        self, process, started, calls: reported.Calls | None = None
+    ) -> tuple[str | None, dict | None, str | None]:
         """The turn's events as they come: the thread it runs as, the last
-        thing the model said, and what it used — or no answer when it failed."""
+        thing the model said, and what it used — or no answer when it failed.
+        Each command it runs goes into `calls`, as it starts and as it ends."""
+        if calls is not None:
+            calls.reported = True
         said: str | None = None
         used: dict | None = None
         thread: str | None = None
@@ -576,6 +623,8 @@ class CodexRunner:
             if kind == "thread.started" and not thread:
                 thread = event.get("thread_id")
                 await say_started(started, thread)
+            elif calls is not None and item.get("type") == "command_execution":
+                ran(calls, kind, item)
             elif kind == "item.completed" and item.get("type") == "agent_message":
                 said = item.get("text") or said
             elif kind == "turn.completed":

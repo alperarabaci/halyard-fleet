@@ -534,3 +534,67 @@ def test_inspect_is_a_command_of_its_own(monkeypatch: pytest.MonkeyPatch, capsys
     assert exit_info.value.code == 2
     assert started == []
     assert "usage: halyard inspect" in capsys.readouterr().err
+
+
+def test_show_prints_a_run_s_status_and_every_read_it_asked_for(
+    here: SimpleNamespace, capsys
+) -> None:
+    """From the record — the stream and the gate — not from the answer."""
+    from halyard.inspections import Outcome, Read, Trace
+
+    trace = Trace(
+        (
+            Read("Bash", "rg -n seed src", Outcome.RAN, "exit 1"),
+            Read("Read", "src/loader.py", Outcome.RAN),
+            Read("Bash", "cat /tmp/x.log", Outcome.DENIED, "denied by tg:4242"),
+        ),
+        reported=True,
+    )
+    missed = inspections.not_run_block(trace.not_run)
+    inspections.record.keep(
+        here.database,
+        inspections.Kept(
+            session="c0ffee00-2222",
+            at=AT + timedelta(hours=1),
+            name="proof",
+            path=Path("NOTES/proof.md"),
+            version="3e8c847",
+            transition="close",
+            model="sonnet",
+            asked=INPUT,
+            context=(),
+            note="",
+            answer="proof · no finding",
+            why="",
+            finding=None,
+            took=41.5,
+            not_run=missed,
+            status="incomplete",
+            trace=trace,
+        ),
+        project="alpha-engine",
+        work="alpha-engine#386",
+        runtime="codex",
+    )
+
+    assert inspect_cli.main(["show", "c0ffee"]) == 0
+
+    out = capsys.readouterr().out.splitlines()
+    assert out[0].startswith("c0ffee00  ") and out[0].endswith("  incomplete")
+    assert out[1] == "Status: incomplete · 3 reads, 1 did not run"
+    assert out[3] == "Reads, as the runtime reported them and the gate decided:"
+    assert out[4:7] == [
+        "  ran     Bash  rg -n seed src — exit 1",
+        "  ran     Read  src/loader.py",
+        "  denied  Bash  cat /tmp/x.log — denied by tg:4242",
+    ]
+    assert out[8] == missed
+    assert out[-1] == "proof · no finding"
+
+
+def test_show_says_when_a_run_was_kept_without_a_status(here: SimpleNamespace, capsys) -> None:
+    assert inspect_cli.main(["show", "5f0c9"]) == 0
+
+    out = capsys.readouterr().out.splitlines()
+    assert out[1] == "Status: not kept — a run from before inspections had one, or a repeat"
+    assert "Reads" not in "\n".join(out)

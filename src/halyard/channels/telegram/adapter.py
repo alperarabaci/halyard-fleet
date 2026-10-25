@@ -66,6 +66,7 @@ from halyard.core.audit import (
     unauthorized_callback,
     user_message,
 )
+from halyard.core.calls import Calls
 from halyard.core.config_file import ModelChoice, Project, Transition
 from halyard.core.events import Role
 from halyard.core.gate import Gate
@@ -557,6 +558,29 @@ def _why_it_did_not_run(resolution: ApprovalResolution) -> str:
     return f"denied by {by}" if by else "denied"
 
 
+def _card_decided(request: ApprovalRequest, resolution: ApprovalResolution) -> inspecting.Decided:
+    """What the gate made of a read an inspection asked for, from its card."""
+    if resolution.allowed:
+        by = resolution.decided_by
+        stopped, detail = None, f"allowed by {by}" if by else "allowed"
+    else:
+        stopped = (
+            inspecting.Outcome.ENDED
+            if resolution.reason is ResolutionReason.ENDED
+            else inspecting.Outcome.EXPIRED
+            if resolution.reason in (ResolutionReason.TIMEOUT, ResolutionReason.EXPIRED)
+            else inspecting.Outcome.DENIED
+        )
+        detail = _why_it_did_not_run(resolution)
+    return inspecting.Decided(
+        ref=request.tool_use_id or "",
+        tool=request.tool,
+        what=request.command_full,
+        stopped=stopped,
+        detail=detail,
+    )
+
+
 def _last_line(said: str | None, most: int = 200) -> str:
     """The last line with something on it, cut to fit in a sentence: why a
     message reached nobody, as the run it stops says it."""
@@ -597,6 +621,10 @@ class _Inspection:
     #: The cards it opened, in order, so what became of each can be said when
     #: it ends.
     cards: list[ApprovalRequest] = field(default_factory=list)
+    #: The calls the gate let through or refused with nobody asked, in order.
+    uncarded: list[inspecting.Decided] = field(default_factory=list)
+    #: What its runtime reports it called, as the turn goes.
+    calls: Calls = field(default_factory=Calls)
 
 
 class _Inspecting:
@@ -610,9 +638,9 @@ class _Inspecting:
     the inspection.
 
     When the turn ends, however it ends, every card it still has open is denied
-    and closed: what it asked for can no longer run. What became of each read
-    that did not run is kept for `not_run`, which makes this
-    `inspections.Gated`.
+    and closed: what it asked for can no longer run. What it read is kept for
+    `trace` — what its runtime reported, merged with what the gate made of each
+    call — which makes this `inspections.Gated`.
     """
 
     def __init__(
@@ -626,13 +654,13 @@ class _Inspecting:
         self._destination = destination
         self._project = project
         self._about = about
-        #: The reads each finished turn asked for that did not run, by the id
-        #: the turn was asked under, until `not_run` hands them over.
-        self._not_run: dict[str, tuple[inspecting.NotRun, ...]] = {}
+        #: What each finished turn read, by the id the turn was asked under,
+        #: until `trace` hands it over.
+        self._traces: dict[str, inspecting.Trace] = {}
 
-    def not_run(self, session_id: str) -> tuple[inspecting.NotRun, ...]:
-        """The reads the turn asked under `session_id` asked for that did not run."""
-        return self._not_run.pop(session_id, ())
+    def trace(self, session_id: str) -> inspecting.Trace:
+        """What the turn asked under `session_id` read, and what became of each read."""
+        return self._traces.pop(session_id, None) or inspecting.Trace()
 
     async def ask(
         self,
@@ -671,6 +699,7 @@ class _Inspecting:
                 registry.mark_own(ident, label)
 
         own(session)
+        calls = Calls()
         running = _Inspection(
             label,
             self._destination,
@@ -686,10 +715,12 @@ class _Inspecting:
                     project=self._project,
                     effort=effort,
                     started=own,
+                    calls=calls,
                 )
             ),
             about=self._about,
             sessions=sessions,
+            calls=calls,
         )
         self._channel._inspecting[session] = running
         logger.info("Inspection %s runs as session %s", running.name, session)
@@ -704,7 +735,7 @@ class _Inspecting:
             # Answered, out of time, failed or stopped: a card still open asks
             # for a read nothing will run now.
             try:
-                self._not_run[session] = await self._channel._inspection_ended(running)
+                self._traces[session] = await self._channel._inspection_ended(running)
             except Exception:
                 logger.exception("Could not close the cards of inspection %s", running.name)
 
@@ -1148,15 +1179,16 @@ class TelegramChannel:
             return running
         return next((r for r in self._inspecting.values() if session_id in r.sessions), None)
 
-    async def _inspection_ended(self, running: _Inspection) -> tuple[inspecting.NotRun, ...]:
+    async def _inspection_ended(self, running: _Inspection) -> inspecting.Trace:
         """Close every card an inspection that has ended still has open, and
-        say what became of each read it asked for that did not run.
+        say what it read: what its runtime reported, merged with what the
+        gate made of each call — see `inspections.trace`.
 
         A card still open is denied — nothing can run for a turn that is over —
         and closed saying so: left, it stayed on the phone until it expired,
-        and allowing it then did nothing. A read allowed ran, and is not said.
+        and allowing it then did nothing.
         """
-        not_run: list[inspecting.NotRun] = []
+        decided: list[inspecting.Decided] = []
         for request in running.cards:
             resolution = await self._store.resolution_of(request.request_id)
             if resolution is None:
@@ -1176,18 +1208,44 @@ class TelegramChannel:
                     if entry is not None:
                         _, message_id, chat_id, _ = entry
                         await self._settle_card(request, message_id, chat_id, "ended", None)
-            if not resolution.allowed:
-                not_run.append(
-                    inspecting.NotRun(request.command_summary, _why_it_did_not_run(resolution))
-                )
-        if not_run:
+            decided.append(_card_decided(request, resolution))
+        trace = inspecting.merged(
+            running.calls, [*decided, *running.uncarded], reported=running.calls.reported
+        )
+        if missed := trace.not_run:
             logger.info(
-                "Inspection %s ended with %d read%s that did not run",
+                "Inspection %s ended with %s that did not run",
                 running.name,
-                len(not_run),
-                "s" if len(not_run) != 1 else "",
+                _reads(len(missed)),
             )
-        return tuple(not_run)
+        return trace
+
+    def decided_without_a_card(
+        self,
+        *,
+        session_id: str,
+        tool: str,
+        command: str,
+        tool_use_id: str | None,
+        allowed: bool,
+        why: str,
+        request_id: str | None = None,
+    ) -> None:
+        """A call the gate let through or refused with nobody asked — kept
+        with the inspection it is, when it is one, for its trace. One whose
+        card this channel carried is the card's already."""
+        running = self._inspection_of(session_id)
+        if running is None or any(r.request_id == request_id for r in running.cards):
+            return
+        running.uncarded.append(
+            inspecting.Decided(
+                ref=tool_use_id or "",
+                tool=tool,
+                what=command,
+                stopped=None if allowed else inspecting.Outcome.DENIED,
+                detail=why,
+            )
+        )
 
     def _inspection_named(self, session_id: str) -> str | None:
         """Which inspection a session is running, when it is one: an inspection
@@ -3223,7 +3281,7 @@ class TelegramChannel:
         halyard_said = inspecting.not_run_block(answer.not_run)
         if not answer.measured:
             await self._say(
-                f"<b>{html.escape(name)}</b> · unmeasured — {html.escape(answer.why)}"
+                f"<b>{html.escape(name)}</b> · {html.escape(inspecting.said(answer))}"
                 + (f"\n\n{html.escape(halyard_said)}" if halyard_said else ""),
                 chat_id,
                 thread_id,
@@ -3254,8 +3312,9 @@ class TelegramChannel:
         # piece when it fits there, after it otherwise.
         tail = html.escape(halyard_said)
         alone = bool(tail) and len(pieces[-1]) + len(tail) > cards.CHUNK_LIMIT
+        status = html.escape(inspecting.said(answer))
         for index, chunk in enumerate(pieces):
-            head = f"<b>{html.escape(name)}</b>\n" if index == 0 else ""
+            head = f"<b>{html.escape(name)}</b> · {status}\n" if index == 0 else ""
             last = index == len(pieces) - 1
             said = f"\n\n{tail}" if last and tail and not alone else ""
             await self._say(
@@ -4025,9 +4084,10 @@ class TelegramChannel:
             return handed
         outcomes = [
             *(f"<b>{html.escape(c.name)}</b>: {_ended(r, c)}" for c, r in handed.ran),
+            # Complete, incomplete or unmeasured, from what each read — an
+            # incomplete one is marked, and the transition goes on.
             *(
-                f"<b>{html.escape(a.name)}</b>: {'answered' if a.measured else 'unmeasured'}"
-                + (f" · {_reads(len(a.not_run))} did not run" if a.not_run else "")
+                f"<b>{html.escape(a.name)}</b>: {html.escape(inspecting.said(a))}"
                 for a in handed.answers
             ),
         ]

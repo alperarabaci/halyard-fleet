@@ -785,6 +785,14 @@ class ApprovalService:
                     act=act,
                 )
             )
+            self._uncarded(
+                session_id=session_id,
+                tool=tool,
+                command=self._redactor.prepare(command).full,
+                tool_use_id=tool_use_id,
+                allowed=False,
+                why=f"refused: agents do not {act} here",
+            )
             return ApprovalOutcome(decision=BridgeDecision.DENY, reason=refusals.why(act))
 
         if self._gate.paused:
@@ -863,6 +871,14 @@ class ApprovalService:
             command=prepared.full,
             cwd=cwd or project_dir or "",
         ):
+            self._uncarded(
+                session_id=session_id,
+                tool=tool,
+                command=prepared.full,
+                tool_use_id=tool_use_id,
+                allowed=True,
+                why=f"pre-authorized ({grant.kind})",
+            )
             return ApprovalOutcome(
                 decision=BridgeDecision.ALLOW, reason=grant.reason, risk=classification.risk
             )
@@ -904,6 +920,39 @@ class ApprovalService:
             )
         )
         return await asyncio.shield(waiting)
+
+    def _uncarded(
+        self,
+        *,
+        session_id: str,
+        tool: str,
+        command: str,
+        tool_use_id: str | None,
+        allowed: bool,
+        why: str,
+        request_id: str | None = None,
+    ) -> None:
+        """Tell the channel a call went through, or was refused, with nobody
+        asked — what an inspection's trace needs of the gate beside its cards:
+        a read Codex was denied is in no record of its own. A channel without
+        the hook hears nothing; one that fails changes nothing."""
+        hearing = getattr(self._channel, "decided_without_a_card", None)
+        if hearing is None:
+            return
+        try:
+            hearing(
+                session_id=session_id,
+                tool=tool,
+                command=command,
+                tool_use_id=tool_use_id,
+                allowed=allowed,
+                why=why,
+                request_id=request_id,
+            )
+        except Exception:
+            logger.warning(
+                "Could not tell the channel about a call in %s", session_id, exc_info=True
+            )
 
     def _forget_waiting(self, tool_use_id: str, done: asyncio.Task[ApprovalOutcome]) -> None:
         if self._waiting.get(tool_use_id) is done:
@@ -1001,6 +1050,15 @@ class ApprovalService:
             # Already resolved, or already gone. Either way the answer below is
             # the safe one, so there is nothing to do about it.
             logger.debug("Could not close out %s", request.request_id, exc_info=True)
+        self._uncarded(
+            session_id=request.session_id,
+            tool=request.tool,
+            command=request.command_full,
+            tool_use_id=request.tool_use_id,
+            allowed=False,
+            why="denied: it could not be put to anybody",
+            request_id=request.request_id,
+        )
         return ApprovalOutcome(
             decision=BridgeDecision.DENY,
             reason=message,

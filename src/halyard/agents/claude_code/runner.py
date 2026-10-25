@@ -40,6 +40,7 @@ from halyard.agents.turns import (
     end_group,
     say_started,
 )
+from halyard.core import calls as reported
 from halyard.core import usage
 
 logger = logging.getLogger(__name__)
@@ -64,6 +65,19 @@ DEFAULT_MODELS = ("opus", "sonnet", "haiku", "fable")
 #: edit granted by `writes:` would go through without one. Passed with `=`, so
 #: the list cannot swallow the prompt that follows it.
 READING_TOOLS = "Read,Grep,Glob,Bash"
+
+#: How long one line of `--output-format stream-json` may be. A tool's whole
+#: result is on the line that reports it, and a file read is easily more than
+#: the 64 KiB a stream reader allows by default. The same bound as Codex's.
+LINE_LIMIT = 32 * 1024 * 1024
+
+#: How Claude Code says its `PreToolUse` hook refused a call, at the start of
+#: the `tool_result`: "PreToolUse:Bash hook error: <reason>". Measured on
+#: 2.1.303.
+_HOOK_REFUSED = re.compile(r"^PreToolUse:\S+ hook error:\s*")
+
+#: Where each tool says what it read, in its `input`.
+_READ_FROM = {"Read": ("file_path",), "Grep": ("pattern", "path"), "Glob": ("pattern", "path")}
 
 #: No model override by default. Measured on a live Desktop-owned session:
 #: `--resume` with no `--model` continued on that session's opus model. The
@@ -259,6 +273,95 @@ def turns_used(
             cost_usd=_dollars(answer.get("total_cost_usd")),
         )
     ]
+
+
+def _what(tool: str, given: object) -> str:
+    """What a call read, from its `input`: a path, a pattern — `pattern in
+    path` when it names one — or a command. Nothing else of the input."""
+    if not isinstance(given, dict):
+        return ""
+    if tool in _READ_FROM:
+        first, *rest = (str(given.get(key) or "") for key in _READ_FROM[tool])
+        where = next((place for place in rest if place), "")
+        return f"{first} in {where}" if where else first
+    command = given.get("command")
+    return command if isinstance(command, str) else ""
+
+
+def _text_of(content: object) -> str:
+    """A tool result's text, whether it came as a string or as blocks."""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return "\n".join(str(b.get("text") or "") for b in content if isinstance(b, dict))
+    return ""
+
+
+def heard(calls: reported.Calls, event: dict) -> None:
+    """One event of a `stream-json` turn, into the calls it made: a `tool_use`
+    in what the model said, and its `tool_result` in what came back next.
+
+    A result marked `is_error` is a call that ran and failed — a file that is
+    not there, a command that exited 1 — unless it is the hook refusing it,
+    which the CLI says in so many words. Measured on 2.1.303.
+    """
+    message = event.get("message")
+    content = message.get("content") if isinstance(message, dict) else None
+    if not isinstance(content, list):
+        return
+    for block in content:
+        if not isinstance(block, dict):
+            continue
+        if event.get("type") == "assistant" and block.get("type") == "tool_use":
+            tool = str(block.get("name") or "?")
+            calls.asked(str(block.get("id") or ""), tool, _what(tool, block.get("input")))
+        elif event.get("type") == "user" and block.get("type") == "tool_result":
+            ident = str(block.get("tool_use_id") or "")
+            if not block.get("is_error"):
+                calls.came_back(ident, reported.RAN)
+            elif _HOOK_REFUSED.match(_text_of(block.get("content"))):
+                calls.came_back(ident, reported.DENIED)
+            else:
+                calls.came_back(ident, reported.ERROR)
+
+
+async def _streamed(process, calls: reported.Calls) -> tuple[bytes, bytes]:
+    """A `stream-json` turn, read as it comes.
+
+    Each call it makes goes into `calls` as it is heard, so a turn that runs
+    out of time keeps what it did before. Its `result` event is handed back
+    the way `--output-format json` printed the whole answer — the same fields,
+    measured — so the answer is read from it exactly as before. With no
+    `result`, whatever was not JSON is handed back instead, as the CLI
+    answered before it was asked for JSON.
+    """
+    assert process.stdout is not None
+    # Drained alongside, or a CLI with plenty to say on stderr fills the pipe
+    # and stops writing to stdout.
+    said_aside = asyncio.ensure_future(process.stderr.read()) if process.stderr else None
+    result = b""
+    other: list[bytes] = []
+    try:
+        async for line in process.stdout:
+            try:
+                event = json.loads(line)
+            except ValueError:
+                other.append(line)
+                continue
+            if not isinstance(event, dict):
+                continue
+            calls.reported = True
+            if event.get("type") == "result":
+                result = line
+            else:
+                heard(calls, event)
+        await process.wait()
+        aside = await said_aside if said_aside is not None else b""
+    except BaseException:
+        if said_aside is not None:
+            said_aside.cancel()
+        raise
+    return result.strip() or b"".join(other), aside
 
 
 #: Ends a one-shot turn and everything it started — see `agents.turns`.
@@ -464,6 +567,7 @@ class ClaudeCodeRunner:
         system: str | None = None,
         effort: str | None = None,
         started: Callable[[str], object] | None = None,
+        calls: reported.Calls | None = None,
     ) -> str | None:
         """Run one prompt in a session of its own and return what came back.
 
@@ -497,6 +601,12 @@ class ClaudeCodeRunner:
         see `halyard.core.usage`. Output that is not JSON is taken as the answer
         itself, as it was before.
 
+        `calls` is for a turn whose reads have to be accounted for — an
+        inspection's. It is asked for as `stream-json` instead, which says
+        every tool call and how it came back as the turn goes, and each one is
+        put in `calls`; the answer is still read from the `result` that ends
+        it. Every other turn is left as it was.
+
         Returns None on every failure. The caller is producing a convenience —
         a record of what a session knew before it was compacted — and a session
         must not be held up, or changed, because that could not be produced.
@@ -512,7 +622,10 @@ class ClaudeCodeRunner:
             return None
         if not text.strip():
             return None
-        arguments = [binary, "-p", "--output-format", "json"]
+        arguments = [binary, "-p", "--output-format", "json" if calls is None else "stream-json"]
+        if calls is not None:
+            # The CLI streams in print mode only with it.
+            arguments.append("--verbose")
         if chosen := model or self._default_model:
             arguments += ["--model", chosen]
         if effort in EFFORT_LEVELS:
@@ -542,16 +655,27 @@ class ClaudeCodeRunner:
                 cwd=cwd,
                 env=self._environment(),
                 start_new_session=True,
+                **({} if calls is None else {"limit": LINE_LIMIT}),
             )
         except OSError:
             logger.warning("Could not start the claude CLI for a one-shot turn", exc_info=True)
             return None
         try:
-            stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=timeout)
+            stdout, stderr = await asyncio.wait_for(
+                process.communicate() if calls is None else _streamed(process, calls),
+                timeout=timeout,
+            )
         except TimeoutError:
             _end(process)
             await process.wait()
             logger.warning("A one-shot turn ran past %.0fs; giving up on it", timeout)
+            return None
+        except ValueError:
+            # A line longer than even `LINE_LIMIT`: the stream cannot be read
+            # past it.
+            _end(process)
+            await process.wait()
+            logger.warning("A one-shot turn said more on one line than can be read", exc_info=True)
             return None
         except asyncio.CancelledError:
             # Stopped by somebody. What the turn started is a process of its

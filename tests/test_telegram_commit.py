@@ -3295,7 +3295,7 @@ async def test_a_transition_runs_its_checks_before_it_goes(tmp_path: Path, wired
     assert "Inspection proof — NOTES/proof.md" in text
     assert runner.says in text
     assert "Said by whoever asked: delivery" in text
-    assert any("<b>proof</b>: answered" in sent["text"] for sent in api.sent)
+    assert any("<b>proof</b>: complete" in sent["text"] for sent in api.sent)
 
 
 class CheckAsking:
@@ -3460,15 +3460,22 @@ class ReadsAsked:
         *reads: str,
         under: str = "",
         meanwhile=None,
+        ran: tuple[tuple[str, int], ...] = (),
+        says: str | None = "claims · no finding",
     ) -> None:
         self.channel = channel
         self.reads = reads
         self.under = under
         self.meanwhile = meanwhile
+        #: Commands its runtime reports it ran, with their exit codes — in
+        #: the shape `codex exec --json` says them.
+        self.ran = ran
+        self.says = says
         self.asked: list = []
         runner.ask = self.ask
 
     async def ask(self, text: str, *, model: str | None = None, **kwargs) -> str | None:
+        from halyard.agents.codex.runner import ran
         from halyard.core.events import RiskLevel
 
         ident = kwargs["session_id"]
@@ -3476,6 +3483,20 @@ class ReadsAsked:
             # The runtime says the id it runs the turn by, as Codex does.
             kwargs["started"](self.under)
             ident = self.under
+        if self.ran:
+            calls = kwargs["calls"]
+            calls.reported = True
+            for number, (command, code) in enumerate(self.ran):
+                item = {
+                    "id": f"item_{number}",
+                    "type": "command_execution",
+                    "command": f"/bin/zsh -lc '{command}'",
+                    "aggregated_output": "what it printed",
+                    "exit_code": code,
+                    "status": "completed",
+                }
+                ran(calls, "item.started", {**item, "exit_code": None, "status": "in_progress"})
+                ran(calls, "item.completed", item)
         for command in self.reads:
             request = await self.channel._store.create(
                 session_id=ident,
@@ -3490,7 +3511,7 @@ class ReadsAsked:
             self.asked.append(request)
         if self.meanwhile is not None:
             await self.meanwhile(self.asked)
-        return "claims · no finding"
+        return self.says
 
 
 async def decided(channel: TelegramChannel, request, decision: str) -> None:
@@ -3536,7 +3557,7 @@ async def test_an_inspection_that_answers_with_a_card_open_closes_it_and_says_so
     assert (resolution.decision, resolution.reason) == (Decision.DENY, ResolutionReason.ENDED)
     [closed] = [edit for edit in api.edits if "THE INSPECTION ENDED" in edit["text"]]
     assert "The inspection ended before this was answered, so nothing ran." in closed["text"]
-    answered = [sent["text"] for sent in api.sent if sent["text"].startswith("<b>proof</b>\n")]
+    answered = [sent["text"] for sent in api.sent if sent["text"].startswith("<b>proof</b> · ")]
     assert answered and answered[-1].endswith(f"</pre>\n\n{ENDED_X}")
 
 
@@ -3605,7 +3626,10 @@ async def test_reads_that_did_not_run_reach_the_transition_s_message_and_outcome
 
     [(_, text)] = runner.sent
     assert f"claims · no finding\n\n{ENDED_X}" in text
-    assert any("<b>proof</b>: answered · 1 read did not run" in sent["text"] for sent in api.sent)
+    assert any(
+        "<b>proof</b>: incomplete · 1 read seen at the gate, 1 did not run" in sent["text"]
+        for sent in api.sent
+    )
 
 
 async def test_reads_that_did_not_run_are_kept_with_the_run(tmp_path: Path, wired) -> None:
@@ -3686,6 +3710,128 @@ async def test_a_card_of_another_session_is_left_alone_when_an_inspection_ends(
     said = "\n".join(sent["text"] for sent in api.sent)
     assert "`make e2e`" not in said
     assert len([edit for edit in api.edits if "THE INSPECTION ENDED" in edit["text"]]) == 1
+
+
+async def test_an_inspection_s_status_and_reads_reach_its_reply_and_its_record(
+    tmp_path: Path, wired
+) -> None:
+    """Measured on Codex: two commands that ran — one a `grep` that found
+    nothing — are in its stream, and the read still waiting on its card is
+    not. The trace has all three, each once; the answer is incomplete."""
+    import json
+    import sqlite3
+
+    from halyard.inspect_cli import shown
+    from halyard.inspections import repeat as repeating
+
+    channel, api, runner, repo = wired
+    channel._database = tmp_path / "halyard.db"
+    channel._keep_inspections = True
+    inspections_in(channel, repo, tmp_path, proof="# proof")
+    ReadsAsked(
+        channel,
+        runner,
+        "cat /tmp/x.log",
+        under="codex-thread-7",
+        ran=(("cat other.txt", 0), ("rg -n seed src", 1)),
+    )
+
+    await channel._handle_callback(pressed_inspection("proof"))
+    await settled(channel)
+
+    [answered] = [s["text"] for s in api.sent if s["text"].startswith("<b>proof</b> · ")]
+    assert answered.startswith("<b>proof</b> · incomplete · 3 reads, 1 did not run\n<pre>")
+    assert answered.endswith(f"</pre>\n\n{ENDED_X}"), "the note from before, as it was"
+    with sqlite3.connect(channel._database) as db:
+        [(ident, status, trace)] = db.execute(
+            "SELECT id, status, trace FROM inspection_runs"
+        ).fetchall()
+    assert status == "incomplete"
+    assert [(r["what"], r["outcome"], r["detail"]) for r in json.loads(trace)["reads"]] == [
+        ("cat other.txt", "ran", ""),
+        ("rg -n seed src", "ran", "exit 1"),
+        ("cat /tmp/x.log", "ended", "still waiting for approval when the inspection ended"),
+    ]
+    assert "what it printed" not in trace
+    printed = shown(repeating.find(channel._database, ident))
+    assert printed[1] == "Status: incomplete · 3 reads, 1 did not run"
+    assert (
+        "  ended  Bash  cat /tmp/x.log — still waiting for approval when the inspection ended"
+        in printed
+    )
+
+
+async def test_a_transition_s_inspection_says_it_is_complete_in_its_message_and_the_chat(
+    tmp_path: Path, wired
+) -> None:
+    channel, api, runner, repo = wired
+    transitions_in(
+        channel, repo, tmp_path, runner, discovery={"inspections": ("proof",), "to": "xrev"}
+    )
+    ReadsAsked(channel, runner, under="codex-thread-4", ran=(("cat other.txt", 0),))
+
+    await channel._run_transition("discovery", CHAT, None, f"tg:{APPROVER}")
+    await settled(channel)
+
+    [(_, text)] = runner.sent
+    assert "Inspection proof — NOTES/proof.md @ uncommitted · complete · 1 read:" in text
+    assert any("<b>proof</b>: complete · 1 read" in sent["text"] for sent in api.sent)
+
+
+async def test_a_transition_s_inspection_with_no_answer_says_it_is_unmeasured(
+    tmp_path: Path, wired
+) -> None:
+    """And the transition goes on, as it did."""
+    channel, api, runner, repo = wired
+    transitions_in(
+        channel, repo, tmp_path, runner, discovery={"inspections": ("proof",), "to": "xrev"}
+    )
+    ReadsAsked(channel, runner, under="codex-thread-5", ran=(("cat other.txt", 0),), says=None)
+
+    await channel._run_transition("discovery", CHAT, None, f"tg:{APPROVER}")
+    await settled(channel)
+
+    [(_, text)] = runner.sent
+    assert "Inspection proof — NOTES/proof.md @ uncommitted · unmeasured:" in text
+    assert any(
+        "<b>proof</b>: unmeasured — the model did not answer" in sent["text"] for sent in api.sent
+    )
+
+
+async def test_a_read_the_gate_decided_with_no_card_is_in_the_trace_once(
+    tmp_path: Path, wired
+) -> None:
+    """A read let through is the stream's, said once; one refused is the
+    gate's alone. Another session's is not the inspection's."""
+
+    async def meanwhile(_asked) -> None:
+        for session, command, allowed, why in (
+            ("codex-thread-6", "git status", True, "pre-authorized (reads)"),
+            ("codex-thread-6", "git commit -m x", False, "refused: agents do not commit here"),
+            ("id-nav", "make e2e", False, "refused: agents do not commit here"),
+        ):
+            channel.decided_without_a_card(
+                session_id=session,
+                tool="Bash",
+                command=command,
+                tool_use_id=None,
+                allowed=allowed,
+                why=why,
+            )
+
+    channel, api, runner, repo = wired
+    inspections_in(channel, repo, tmp_path, proof="# proof")
+    ReadsAsked(
+        channel, runner, under="codex-thread-6", ran=(("git status", 0),), meanwhile=meanwhile
+    )
+
+    await channel._handle_callback(pressed_inspection("proof"))
+    await settled(channel)
+
+    said = "\n".join(sent["text"] for sent in api.sent)
+    assert "<b>proof</b> · incomplete · 2 reads, 1 did not run" in said
+    assert "`git commit -m x` (refused: agents do not commit here)" in said
+    assert "make e2e" not in said
 
 
 async def test_a_check_is_told_whether_the_files_moved_since_the_reply(

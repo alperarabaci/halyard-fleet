@@ -415,8 +415,10 @@ async def test_reads_an_inspection_could_not_run_are_said_under_its_answer(
     a_project(tmp_path)
 
     class Gating(Asking):
-        def not_run(self, session_id: str) -> tuple[inspections.NotRun, ...]:
-            return (inspections.NotRun("cat /tmp/x.log", "denied by tg:4242"),)
+        def trace(self, session_id: str) -> inspections.Trace:
+            denied = inspections.Outcome.DENIED
+            read = inspections.Read("Bash", "cat /tmp/x.log", denied, "denied by tg:4242")
+            return inspections.Trace((read,), reported=True)
 
     discovery = Transition(
         name="discovery", prompt=Path("NOTES/discovery.md"), inspections=("proof",), to="nav"

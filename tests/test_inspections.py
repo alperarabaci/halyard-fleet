@@ -447,14 +447,18 @@ def test_reads_that_did_not_run_are_said_in_halyard_s_words() -> None:
 
 
 class Gating(Asking):
-    """An `Asker` whose turn asked for reads a person never let run."""
+    """An `Asker` that can say what its turn read, and what became of each read."""
 
-    def __init__(self, *not_run: inspections.NotRun, says: str | None = "proof · no finding"):
+    def __init__(self, *reads: inspections.Read, says: str | None = "proof · no finding"):
         super().__init__(says)
-        self.left = not_run
+        self.reads = reads
 
-    def not_run(self, session_id: str) -> tuple[inspections.NotRun, ...]:
-        return self.left if session_id == self.sessions[-1] else ()
+    def trace(self, session_id: str) -> inspections.Trace:
+        reads = self.reads if session_id == self.sessions[-1] else ()
+        return inspections.Trace(reads, reported=True)
+
+
+RAN = inspections.Read("Read", "src/app.py", inspections.Outcome.RAN)
 
 
 async def test_an_answer_carries_the_reads_that_did_not_run_and_so_does_its_record(
@@ -463,7 +467,8 @@ async def test_an_answer_carries_the_reads_that_did_not_run_and_so_does_its_reco
     read = inspections.NotRun(
         "cat /tmp/x.log", "still waiting for approval when the inspection ended"
     )
-    asker, keeper = Gating(read), Keeping()
+    ended = inspections.Read("Bash", read.command, inspections.Outcome.ENDED, read.why)
+    asker, keeper = Gating(RAN, ended), Keeping()
 
     answer = await kept_run(tmp_path, asker, keeper)
 
@@ -479,8 +484,9 @@ async def test_an_unanswered_inspection_still_carries_its_reads_that_did_not_run
     tmp_path: Path,
 ) -> None:
     read = inspections.NotRun("cat a", "denied by tg:4242")
+    denied = inspections.Read("Bash", "cat a", inspections.Outcome.DENIED, read.why)
 
-    answer = await kept_run(tmp_path, Gating(read, says=None), Keeping())
+    answer = await kept_run(tmp_path, Gating(denied, says=None), Keeping())
 
     assert not answer.measured
     assert answer.not_run == (read,)
@@ -545,3 +551,84 @@ def test_what_halyard_said_under_an_answer_is_kept_in_a_column_of_its_own(
     with sqlite3.connect(database) as db:
         rows = db.execute("SELECT id, answer, not_run FROM inspection_runs ORDER BY id").fetchall()
     assert rows == [("old", None, None), ("sess-2", "proof · no finding", said)]
+
+
+async def test_a_run_s_status_comes_from_what_it_read_and_is_kept_with_its_trace(
+    tmp_path: Path,
+) -> None:
+    ended = inspections.Read("Bash", "cat /tmp/x.log", inspections.Outcome.ENDED, "still waiting")
+
+    complete = Keeping()
+    answer = await kept_run(tmp_path, Gating(RAN), complete)
+    assert answer.status is inspections.Status.COMPLETE
+    assert (complete.kept[0].status, complete.kept[0].trace) == (
+        "complete",
+        inspections.Trace((RAN,), reported=True),
+    )
+
+    incomplete = Keeping()
+    answer = await kept_run(tmp_path, Gating(RAN, ended), incomplete)
+    assert answer.status is inspections.Status.INCOMPLETE
+    assert answer.text == "proof · no finding", "marked, and the answer stands"
+    assert incomplete.kept[0].status == "incomplete"
+
+    unmeasured = Keeping()
+    answer = await kept_run(tmp_path, Gating(RAN, ended, says=None), unmeasured)
+    assert answer.status is inspections.Status.UNMEASURED
+    assert unmeasured.kept[0].status == "unmeasured"
+    assert unmeasured.kept[0].trace == inspections.Trace((RAN, ended), reported=True)
+
+
+def test_a_table_made_before_statuses_gets_the_columns(tmp_path: Path) -> None:
+    """Added the way `effort` and `not_run` were: empty for the rows it had."""
+    import json
+    import sqlite3
+    from datetime import UTC, datetime
+
+    database = tmp_path / "halyard.db"
+    with sqlite3.connect(database) as db:
+        db.execute(
+            "CREATE TABLE inspection_runs (id TEXT PRIMARY KEY, at TEXT NOT NULL, "
+            "project TEXT NOT NULL, work TEXT, inspection TEXT NOT NULL, file TEXT NOT NULL, "
+            "file_version TEXT NOT NULL, transition TEXT, workflow_run TEXT, step TEXT, "
+            "phase INTEGER, round INTEGER, runtime TEXT, model TEXT NOT NULL, effort TEXT, "
+            "head TEXT, content TEXT, context TEXT NOT NULL, note TEXT NOT NULL, "
+            "input TEXT NOT NULL, answer TEXT, outcome TEXT NOT NULL, why TEXT NOT NULL, "
+            "finding TEXT, not_run TEXT, took REAL NOT NULL, "
+            "experimental INTEGER NOT NULL DEFAULT 0, repeat_of TEXT)"
+        )
+        db.execute(
+            "INSERT INTO inspection_runs (id, at, project, inspection, file, file_version, "
+            "model, context, note, input, outcome, why, took) VALUES ('old', '2026-10-01', "
+            "'alpha-engine', 'proof', 'NOTES/proof.md', 'abc', 'sonnet', '', '', '', "
+            "'answered', '', 1.0)"
+        )
+    kept = inspections.Kept(
+        session="sess-3",
+        at=datetime(2026, 10, 25, 9, 0, tzinfo=UTC),
+        name="proof",
+        path=Path("NOTES/proof.md"),
+        version="3e8c847",
+        transition="",
+        model="sonnet",
+        asked="# proof",
+        context=(),
+        note="",
+        answer="proof · no finding",
+        why="",
+        finding=None,
+        took=12.0,
+        status="complete",
+        trace=inspections.Trace((RAN,), reported=True),
+    )
+
+    inspections.record.keep(database, kept, project="alpha-engine", work=None, runtime="codex")
+
+    with sqlite3.connect(database) as db:
+        rows = db.execute("SELECT id, status, trace FROM inspection_runs ORDER BY id").fetchall()
+    assert rows[0] == ("old", None, None)
+    assert rows[1][:2] == ("sess-3", "complete")
+    assert json.loads(rows[1][2]) == {
+        "reported": True,
+        "reads": [{"tool": "Read", "what": "src/app.py", "outcome": "ran", "detail": ""}],
+    }

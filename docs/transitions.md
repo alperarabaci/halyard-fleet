@@ -108,12 +108,75 @@ waiting for approval when the inspection ended). Anything that rests on it is no
 measured.
 ```
 
-Each read says what became of its card: denied, and by whom; expired before
-anybody answered; or still waiting when the inspection ended. An allowed read
-ran, and is not listed. The block goes wherever the answer goes: the
-transition's message, the `/inspect` reply, the kept run (`not_run` in
-`inspection_runs`), and the chat's outcome line —
-`claims: answered · 1 read did not run`.
+Each read says what became of it: denied, and by whom; expired before anybody
+answered; still waiting when the inspection ended; or started and not back
+when it ended. A read that ran is not listed. The block goes wherever the
+answer goes: the transition's message, the `/inspect` reply, and the kept run
+(`not_run` in `inspection_runs`).
+
+## Every inspection answer has a status
+
+Whether an answer rests on everything it asked to read is decided from what was
+recorded, never from the model's words:
+
+- **complete** — every read it asked for ran;
+- **incomplete** — at least one did not, and it answered without it;
+- **unmeasured** — there is no answer: out of time, failed, or stopped.
+
+An incomplete inspection is marked, and the transition or workflow step goes on
+as it would have. The status is on the chat's outcome line —
+`claims: complete · 12 reads`, `claims: incomplete · 12 reads, 1 did not run`,
+`claims: unmeasured — the model did not answer` — beside the inspection's name
+in the `/inspect` reply, and in the heading of its answer in the transition's
+message: `Inspection claims — NOTES/claims.md @ 3e8c847 · complete · 12 reads:`.
+
+It comes from the inspection's **trace**: every read the turn asked for, once,
+with what became of it — ran (an `error` from the tool, or a command that exits
+1 because `grep` found nothing, ran), denied and by whom, expired, still waiting
+for its card when the inspection ended, or started and not back when it ended.
+It is built from two records of the turn:
+
+- **What the runtime reports.** An inspection on Claude Code runs with
+  `--output-format stream-json --verbose`, which says every tool call and how it
+  came back — `Read` with its path, `Grep` and `Glob` with their pattern, `Bash`
+  with its command — a call the hook refused among them; the answer is still the
+  `result` that ends the stream. On Codex, `codex exec --json` says each command
+  it ran, with its exit code, and says nothing at all of one the gate denied or
+  one still waiting on it. What each read is kept — a path, a pattern, a
+  command — never what came back.
+- **What the gate decided**, for each call that met it: a card and its answer,
+  or a call let through by `tools:`, `writes:` or the read rules, or refused,
+  with nobody asked. So a Codex read the gate denied, absent from its stream, is
+  in the trace from its card.
+
+A read both name is one read; Claude Code's hook carries the id its stream does.
+opencode reports neither, so only the reads that met the gate are known, and its
+count says `seen at the gate`. Every other one-shot turn — a commit message, a
+compaction record, upkeep — runs as it did, and has no trace.
+
+Each kept run holds its status and its trace — `status` and `trace` in
+`inspection_runs` — and `halyard inspect show` prints one:
+
+```
+$ uv run halyard inspect show 5f0c9a2e
+5f0c9a2e  10-25 14:02  alpha-engine  claims · discovery  gpt-6.1-sol@high  96s  incomplete
+Status: incomplete · 4 reads, 1 did not run
+
+Reads, as the runtime reported them and the gate decided:
+  ran    Bash  git diff --no-ext-diff --stat
+  ran    Bash  rg -n "seed" src — exit 1
+  ran    Bash  sed -n 1,80p src/loader.py
+  ended  Bash  cat /tmp/x.log — still waiting for approval when the inspection ended
+
+Halyard: 1 read this inspection asked for did not run — `cat /tmp/x.log` (still
+waiting for approval when the inspection ended). Anything that rests on it is not
+measured.
+
+Answer:
+…
+```
+
+A repeat, and a run kept before statuses, has neither, and says so.
 
 An inspection's turn is Halyard's own, not an agent's, and it is marked so
 before it begins. Its answer arrives as the inspection's; the raw reply its
@@ -204,7 +267,8 @@ Then each run — by `/inspect`, by a transition, by a workflow's step — is a 
 starts use: the inspection, its file and the revision of it, the model, what the
 model was given word for word, what it said, how long it took, whether it
 answered, the finding phrase it said if any, what Halyard said under it about
-reads that did not run, and where the files stood — `HEAD` and the content id
+reads that did not run, its status and every read it asked for — see above —
+and where the files stood — `HEAD` and the content id
 from the envelope. A run stopped or left unanswered is kept
 too, with why. This is the one place Halyard keeps text: the input holds the
 reply that was inspected, and an inspection cannot be compared or run again
@@ -241,6 +305,7 @@ repeats.
 
 ```sh
 uv run halyard inspect recent                          # the last runs, with their ids
+uv run halyard inspect show 5f0c9a2e                   # one run: its status, its reads, its answer
 uv run halyard inspect repeat 5f0c9a2e --model opus    # the same input, another model
 uv run halyard inspect repeat 5f0c9a2e --effort max    # the same model, thinking harder
 uv run halyard inspect repeat 5f0c9a2e --times 3       # the same again, three times

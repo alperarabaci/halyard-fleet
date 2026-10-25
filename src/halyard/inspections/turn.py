@@ -10,7 +10,16 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from halyard import frame
-from halyard.inspections.spec import Answer, Asker, Gated, Keeper, Kept, NotRun, StoppedError
+from halyard.inspections.spec import (
+    Answer,
+    Asker,
+    Gated,
+    Keeper,
+    Kept,
+    NotRun,
+    StoppedError,
+    Trace,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -178,9 +187,10 @@ async def run(
     under, which is the one its tokens are recorded by. An inspection whose file
     could not be read never reached a model, and is not kept.
 
-    A read the turn asked a person for and never got is said under the answer,
-    in Halyard's words — see `not_run_block` — when `asker` can tell: it is
-    `Gated`.
+    When `asker` can say what the turn read — it is `Gated` — the answer
+    carries its trace, and a status from it: complete when every read it asked
+    for ran, incomplete when one did not, said under the answer in Halyard's
+    words — see `not_run_block`. Unmeasured when there is no answer.
     """
     instructions = frame.read(path, project)
     version = await asyncio.to_thread(frame.version, path, project)
@@ -203,17 +213,17 @@ async def run(
     session = str(uuid.uuid4())
     at = datetime.now(UTC)
 
-    def not_run() -> tuple[NotRun, ...]:
-        """The reads the turn asked for that did not run, once it is over."""
+    def traced() -> Trace:
+        """What the turn read, once it is over."""
         if not isinstance(asker, Gated):
-            return ()
+            return Trace()
         try:
-            return tuple(asker.not_run(session))
+            return asker.trace(session)
         except Exception:
-            logger.warning("Inspection %s could not say which reads ran", name, exc_info=True)
-            return ()
+            logger.warning("Inspection %s could not say what it read", name, exc_info=True)
+            return Trace()
 
-    async def kept(answer: str | None, why: str, took: float, missed: tuple[NotRun, ...]) -> None:
+    async def kept(answer: Answer, said: str | None) -> None:
         if keeper is None:
             return
         record = Kept(
@@ -227,12 +237,14 @@ async def run(
             asked=asked,
             context=tuple(context),
             note=note,
-            answer=answer,
-            why=why,
+            answer=said,
+            why=answer.why,
             finding=None,
-            took=took,
+            took=answer.took,
             effort=effort,
-            not_run=not_run_block(missed),
+            not_run=not_run_block(answer.not_run),
+            status=answer.status.value,
+            trace=answer.trace,
         )
         try:
             await keeper.keep(record)
@@ -253,23 +265,28 @@ async def run(
         )
     except StoppedError as stopped:
         took = time.monotonic() - started
-        missed = not_run()
         logger.info("Inspection %s %s after %.1fs", name, stopped, took)
-        await kept(None, str(stopped), took, missed)
-        return Answer(name, path, version, why=str(stopped), took=took, not_run=missed)
+        answer = Answer(name, path, version, why=str(stopped), took=took, trace=traced())
+        await kept(answer, None)
+        return answer
     except Exception:
         logger.warning("Inspection %s failed", name, exc_info=True)
         said = None
     took = time.monotonic() - started
-    missed = not_run()
-    if missed:
-        logger.info("Inspection %s: %s", name, not_run_block(missed))
+    trace = traced()
     if not said:
         logger.info("Inspection %s got no answer in %.1fs", name, took)
-        await kept(None, "the model did not answer", took, missed)
-        return Answer(
-            name, path, version, why="the model did not answer", took=took, not_run=missed
-        )
-    logger.info("Inspection %s answered in %.1fs:\n%s", name, took, said)
-    await kept(said, "", took, missed)
-    return Answer(name, path, version, text=unfenced(said), took=took, not_run=missed)
+        answer = Answer(name, path, version, why="the model did not answer", took=took, trace=trace)
+    else:
+        logger.info("Inspection %s answered in %.1fs:\n%s", name, took, said)
+        answer = Answer(name, path, version, text=unfenced(said), took=took, trace=trace)
+    logger.info(
+        "Inspection %s is %s%s",
+        name,
+        answer.status.value,
+        "".join(f"\n  {read.outcome.value} {read.tool} {read.what}" for read in trace.reads),
+    )
+    if answer.not_run:
+        logger.info("Inspection %s: %s", name, not_run_block(answer.not_run))
+    await kept(answer, said or None)
+    return answer

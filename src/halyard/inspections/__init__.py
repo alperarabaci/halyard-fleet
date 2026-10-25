@@ -23,6 +23,12 @@ a person's approval may never run — the card denied, expired, or still open
 when the turn ends — and a model may answer without it, so Halyard says which
 reads did not run under the answer, in its own words (`not_run_block`).
 
+**Every answer has a status.** What the turn read is traced from what the
+runtime reported and what the gate decided, never from what the model says it
+read (`trace`): complete when every read it asked for ran, incomplete when one
+did not, unmeasured when there is no answer. An incomplete answer is marked,
+and whatever runs it goes on.
+
 The prompt said "check" where it spoke to the model until 2026-10-24, so that
 answers from either side of the rename could be compared; it says "inspection"
 since. A kept run holds the words it was given, and a repeat gives them again.
@@ -38,22 +44,44 @@ inspections; nothing here hands anything on. `tests/test_layering.py` keeps it
 that way.
 """
 
-from halyard.inspections import record
-from halyard.inspections.spec import Answer, Asker, Gated, Keeper, Kept, NotRun, StoppedError
+from halyard.inspections import record, trace
+from halyard.inspections.spec import (
+    Answer,
+    Asker,
+    Decided,
+    Gated,
+    Keeper,
+    Kept,
+    NotRun,
+    Outcome,
+    Read,
+    Status,
+    StoppedError,
+    Trace,
+)
+from halyard.inspections.trace import merged, said
 from halyard.inspections.turn import handed_on, not_run_block, prompt, run, unfenced
 
 __all__ = [
     "Answer",
     "Asker",
+    "Decided",
     "Gated",
     "Keeper",
     "Kept",
     "NotRun",
+    "Outcome",
+    "Read",
+    "Status",
     "StoppedError",
+    "Trace",
     "handed_on",
+    "merged",
     "not_run_block",
     "prompt",
     "record",
     "run",
+    "said",
+    "trace",
     "unfenced",
 ]
