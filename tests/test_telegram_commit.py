@@ -10,6 +10,7 @@ The repository is real, so a passing test here means a commit actually landed.
 from __future__ import annotations
 
 import asyncio
+import logging
 import re
 import subprocess
 from dataclasses import replace
@@ -56,6 +57,10 @@ class FakeApi:
     async def answer_callback_query(self, callback_query_id, *, text=None):
         self.answers.append({"text": text})
 
+    async def get_updates(self, *, offset=None, timeout=30) -> list[dict]:
+        await asyncio.sleep(0.01)
+        return []
+
 
 class FakeRunner:
     """Writes a fixed subject line, and remembers what it was asked."""
@@ -78,6 +83,9 @@ class FakeRunner:
         self.sessions: dict[str, object] = {}
         #: Whether a session takes what is sent to it, as `send` answers.
         self.accepting = True
+        #: What happens between a message going in and `send` answering, when a
+        #: test says: a turn queued behind another, or one that answers fast.
+        self.turn = None
 
     async def ask(self, text: str, *, model: str | None = None, **kwargs) -> str | None:
         self.asked.append(text)
@@ -105,9 +113,14 @@ class FakeRunner:
         text: str,
         cwd: str | None = None,
         when_done=None,
+        started=None,
     ) -> bool:
         """What reaches a session, as against what reaches the chat."""
         self.sent.append((session_id, text))
+        if self.turn is not None:
+            return await self.turn(session_id, started)
+        if started is not None:
+            await started(session_id)
         return self.accepting
 
 
@@ -2351,6 +2364,387 @@ async def test_a_step_outside_the_phases_has_no_phase_to_start_in(tmp_path: Path
 
     assert runner.sent == []
     assert "no phase to start in" in api.sent[-1]["text"]
+
+
+# --- a step on its way: taken, and not in its seat's session yet ------------------
+
+
+async def run_of(channel: TelegramChannel):
+    """The run the checkout's work has, as it is on disk."""
+    from halyard import workflows as flowing
+    from halyard.channels.telegram.adapter import WORKFLOW_FILE
+
+    work = await channel._work_item(channel._repositories["alpha-engine"])
+    return flowing.current(channel._kept_for("alpha-engine", WORKFLOW_FILE), work)
+
+
+async def heard(channel: TelegramChannel, seat: str, text: str) -> None:
+    """A seat's reply arriving while a step is still on its way: what the reply
+    moves is waited for, and the step is left where it is."""
+    session_id, name = SESSIONS[seat]
+    await channel.send_message(
+        session_id, text, agent_id="claude-code", session_name=name, project="alpha-engine"
+    )
+    moving = [task for task in channel._sending if task.get_name() == "/workflow"]
+    await asyncio.wait_for(asyncio.gather(*moving), timeout=5)
+
+
+def inspected(channel: TelegramChannel) -> None:
+    """The review step's transition with an inspection to run first."""
+    found = channel._repositories["alpha-engine"]
+    review = replace(found.transitions["review"], inspections=("proof",))
+    channel._repositories["alpha-engine"] = replace(
+        found, transitions={**found.transitions, "review": review}
+    )
+
+
+class Held:
+    """An inspection that answers when it is told to — the minutes a step's
+    inspections take, held open so a test can act inside them."""
+
+    def __init__(self, runner: FakeRunner) -> None:
+        self.asked = asyncio.Event()
+        self.answer = asyncio.Event()
+        runner.ask = self.ask
+
+    async def ask(self, text: str, *, model: str | None = None, **kwargs) -> str | None:
+        self.asked.set()
+        await self.answer.wait()
+        return "proof · no finding"
+
+
+async def test_a_reply_while_a_step_is_being_prepared_is_not_its_answer(
+    tmp_path: Path, wired, caplog
+) -> None:
+    """The run used to wait on the seat from the moment the step was taken, so
+    a reply that came while its inspections ran was taken as the step's answer
+    and moved the run on before the step had gone anywhere."""
+    caplog.set_level(logging.INFO, logger="halyard.channels.telegram.adapter")
+    channel, _, runner, repo = wired
+    flow_in(channel, repo, tmp_path, runner, **TWO_STEPS)
+    inspected(channel)
+    held = Held(runner)
+    going = asyncio.create_task(
+        channel._run_workflow("level3", CHAT, None, f"tg:{APPROVER}", start=0)
+    )
+    await asyncio.wait_for(held.asked.wait(), timeout=5)
+
+    await heard(channel, "xrev", "The earlier work is done.\nDECISION: forward")
+    run = await run_of(channel)
+
+    assert runner.sent == [], "nothing went anywhere before the step did"
+    assert run is not None
+    assert (run.step, run.sending_to, run.waiting) == (0, "xrev", False)
+    assert "xrev replied before step 1 reached it; not its answer" in caplog.text
+
+    held.answer.set()
+    await going
+    await settled(channel)
+    assert [session for session, _ in runner.sent] == ["id-rev"]
+    run = await run_of(channel)
+    assert run is not None and (run.waiting, run.waiting_for) == (True, "xrev")
+
+    await answered(channel, "xrev", "DECISION: forward")
+    assert runner.sent[-1][0] == "id-nav"
+
+
+async def test_a_step_on_its_way_says_so_and_is_not_sent_twice(tmp_path: Path, wired) -> None:
+    channel, api, runner, repo = wired
+    flow_in(channel, repo, tmp_path, runner, **TWO_STEPS)
+    inspected(channel)
+    held = Held(runner)
+    going = asyncio.create_task(
+        channel._run_workflow("level3", CHAT, None, f"tg:{APPROVER}", start=0)
+    )
+    await asyncio.wait_for(held.asked.wait(), timeout=5)
+
+    await asyncio.wait_for(
+        channel._run_workflow("level3 review", CHAT, None, f"tg:{APPROVER}"), timeout=5
+    )
+    asked_where = api.sent[-1]["text"]
+    await channel._handle_callback(pressed_transition("flowgo", "level3"))
+    pressed = api.sent[-1]["text"]
+    held.answer.set()
+    await going
+    await settled(channel)
+
+    assert "review — on its way to <b>xrev</b>." in asked_where
+    assert "on its way to <b>xrev</b>" in pressed
+    assert [session for session, _ in runner.sent] == ["id-rev"]
+
+
+async def test_a_step_behind_a_turn_its_seat_is_in_is_not_answered_by_that_turn(
+    tmp_path: Path, wired
+) -> None:
+    """A message to a busy session waits behind the turn going there, and that
+    turn's reply arrives first: it answers what started it, not the step."""
+    channel, _, runner, repo = wired
+    flow_in(channel, repo, tmp_path, runner, **TWO_STEPS)
+    free = asyncio.Event()
+
+    async def behind(session_id: str, began) -> bool:
+        await free.wait()
+        await began(session_id)
+        return True
+
+    runner.turn = behind
+    await channel._run_workflow("level3", CHAT, None, f"tg:{APPROVER}", start=0)
+    for _ in range(200):
+        if runner.sent:
+            break
+        await asyncio.sleep(0.01)
+
+    await heard(channel, "xrev", "What the turn ahead of it was for.\nDECISION: forward")
+    run = await run_of(channel)
+
+    assert [session for session, _ in runner.sent] == ["id-rev"]
+    assert run is not None and (run.sending_to, run.waiting) == ("xrev", False)
+
+    free.set()
+    await settled(channel)
+    run = await run_of(channel)
+    assert run is not None and (run.waiting, run.waiting_for) == (True, "xrev")
+
+    await answered(channel, "xrev", "DECISION: forward")
+    assert runner.sent[-1][0] == "id-nav"
+
+
+async def test_a_turn_that_answers_before_it_counts_as_accepted_still_moves_the_run(
+    tmp_path: Path, wired
+) -> None:
+    """A turn over inside the acceptance window has relayed its reply before it
+    is called accepted: waiting from acceptance would ignore that reply, and
+    the run would wait on a seat that had already answered."""
+    channel, _, runner, repo = wired
+    flow_in(channel, repo, tmp_path, runner, **TWO_STEPS)
+
+    async def quick(session_id: str, began) -> bool:
+        runner.turn = None
+        await began(session_id)
+        session, name = SESSIONS["xrev"]
+        await channel.send_message(
+            session,
+            "Nothing to add.\nDECISION: forward",
+            agent_id="claude-code",
+            session_name=name,
+            project="alpha-engine",
+        )
+        return True
+
+    runner.turn = quick
+    await started(channel)
+
+    assert [session for session, _ in runner.sent] == ["id-rev", "id-nav"]
+
+
+async def test_a_step_its_runtime_took_without_saying_so_first_is_waited_on(
+    tmp_path: Path, wired
+) -> None:
+    """Taken is there, whether or not the runtime said when its turn started."""
+    channel, _, runner, repo = wired
+    flow_in(channel, repo, tmp_path, runner, **TWO_STEPS)
+
+    async def silent(_session_id: str, _began) -> bool:
+        return True
+
+    runner.turn = silent
+    await started(channel)
+    run = await run_of(channel)
+
+    assert run is not None
+    assert (run.waiting, run.waiting_for, run.sending_to) == (True, "xrev", "")
+    assert run.taken() == {"review": 1}
+
+
+async def test_a_step_that_reached_nobody_stops_the_run_ready_to_send_again(
+    tmp_path: Path, wired
+) -> None:
+    """It used to leave the run waiting, under the chat's warning, for a reply
+    nothing had been asked for."""
+    channel, api, runner, repo = wired
+    flow_in(channel, repo, tmp_path, runner, **TWO_STEPS)
+    runner.accepting = False
+
+    await started(channel)
+    run = await run_of(channel)
+
+    assert run is not None
+    assert run.stopped == "review did not reach xrev: nothing was printed"
+    assert (run.waiting, run.sending_to) == (False, "")
+    keys = [key["text"] for row in api.sent[-1]["reply_markup"]["inline_keyboard"] for key in row]
+    assert "▶️ review → xrev" in keys
+
+    runner.accepting = True
+    await tap(channel, pressed_transition("flowgo", "level3"))
+    session, text = runner.sent[-1]
+    assert session == "id-rev"
+    assert "- Round: 1/2" in text, "the same round: the first reached nobody"
+
+
+async def test_pausing_while_a_step_is_prepared_stops_it_where_it_would_have_gone(
+    tmp_path: Path, wired
+) -> None:
+    channel, _, runner, repo = wired
+    flow_in(channel, repo, tmp_path, runner, **TWO_STEPS)
+    inspected(channel)
+    held = Held(runner)
+    going = asyncio.create_task(
+        channel._run_workflow("level3", CHAT, None, f"tg:{APPROVER}", start=0)
+    )
+    await asyncio.wait_for(held.asked.wait(), timeout=5)
+
+    await channel._gate.pause(f"tg:{APPROVER}")
+    held.answer.set()
+    await going
+    await settled(channel)
+    run = await run_of(channel)
+
+    assert runner.sent == []
+    assert run is not None and run.stopped == "review did not reach xrev: Halyard is paused"
+
+
+async def test_a_step_a_command_still_running_holds_back_stops_the_run(
+    tmp_path: Path, wired
+) -> None:
+    """One command at a time per project: the step did not go, so its run is
+    stopped rather than left waiting on it."""
+    channel, _, runner, repo = wired
+    flow_in(channel, repo, tmp_path, runner, **TWO_STEPS)
+    found = channel._repositories["alpha-engine"]
+    review = replace(found.transitions["review"], commands=("test-fast",))
+    channel._repositories["alpha-engine"] = replace(
+        found,
+        commands={"test-fast": "make test-fast"},
+        transitions={**found.transitions, "review": review},
+    )
+    channel._working["alpha-engine"] = "transition close"
+
+    await started(channel)
+    run = await run_of(channel)
+
+    assert runner.sent == []
+    assert run is not None
+    assert run.stopped == "review: transition close is still running, one at a time"
+
+
+async def test_a_step_that_broke_before_it_was_sent_stops_the_run(tmp_path: Path, wired) -> None:
+    channel, _, runner, repo = wired
+    flow_in(channel, repo, tmp_path, runner, **TWO_STEPS)
+
+    async def broken(_found):
+        raise RuntimeError("the tracker answered nonsense")
+
+    channel._task_labels = broken
+
+    with pytest.raises(RuntimeError):
+        await channel._run_workflow("level3", CHAT, None, f"tg:{APPROVER}", start=0)
+    run = await run_of(channel)
+
+    assert runner.sent == []
+    assert run is not None
+    assert run.stopped == (
+        "review did not reach xrev: it broke before it was sent — the log says why"
+    )
+
+
+def left_open(tmp_path: Path, channel: TelegramChannel, *cards_left) -> None:
+    """What the last process left open, written down as it would have been."""
+    from halyard.channels.telegram.shelf import Shelf
+
+    shelf = Shelf(tmp_path / "halyard.db")
+    for kept in cards_left:
+        shelf.put(kept)
+    channel._desk._shelf = shelf
+    channel._desk._pace = 0
+
+
+async def test_a_step_a_restart_caught_on_its_way_stops_ready_to_send_again(
+    tmp_path: Path, wired
+) -> None:
+    """Its commands, its inspections and the message went with the process, so
+    nothing reached the seat — and the run used to wait on it for good."""
+    from datetime import UTC, datetime
+
+    from halyard import workflows as flowing
+    from halyard.channels.telegram.adapter import WORKFLOW_FILE
+    from halyard.channels.telegram.shelf import Kept
+
+    channel, api, runner, repo = wired
+    flow_in(channel, repo, tmp_path, runner, **TWO_STEPS)
+    work = await channel._work_item(channel._repositories["alpha-engine"])
+    since = datetime(2026, 10, 25, 9, 0, tzinfo=UTC)
+    sent = flowing.Run(
+        workflow="level3", step=0, since=since, chat=CHAT, waiting=False, ident="3f2a9c1e"
+    ).sending("xrev")
+    flowing.save(channel._kept_for("alpha-engine", WORKFLOW_FILE), work, sent)
+    left_open(tmp_path, channel, Kept(CHAT, 77, "run", "3f2a9c1e", "🤝 review → xrev…", since))
+
+    await channel.start()
+    await settled(channel)
+    await channel.stop()
+    run = await run_of(channel)
+
+    assert run is not None
+    assert run.stopped == "review was interrupted before it reached xrev: Halyard restarted"
+    [closed] = api.edits
+    assert closed["message_id"] == 77
+    assert closed["text"] == "🤝 review → xrev…\n\n↪️ <i>This run has a newer card.</i>"
+    keys = [key["text"] for row in api.sent[-1]["reply_markup"]["inline_keyboard"] for key in row]
+    assert "▶️ review → xrev" in keys
+
+    await tap(channel, pressed_transition("flowgo", "level3"))
+    assert [session for session, _ in runner.sent] == ["id-rev"]
+
+
+async def test_a_run_waiting_when_halyard_restarted_waits_on_and_its_card_says_so(
+    tmp_path: Path, wired
+) -> None:
+    """Written as the last release wrote it, before steps were on their way:
+    still waiting, and its card closes saying the run is kept, not that it ended."""
+    import json
+    from datetime import UTC, datetime
+
+    from halyard.channels.telegram.adapter import WORKFLOW_FILE
+    from halyard.channels.telegram.shelf import Kept
+
+    channel, api, runner, repo = wired
+    flow_in(channel, repo, tmp_path, runner, **TWO_STEPS)
+    work = await channel._work_item(channel._repositories["alpha-engine"])
+    kept = channel._kept_for("alpha-engine", WORKFLOW_FILE)
+    assert kept is not None and work is not None
+    kept.parent.mkdir(parents=True, exist_ok=True)
+    kept.write_text(
+        json.dumps(
+            {
+                work: {
+                    "workflow": "level3",
+                    "step": 0,
+                    "since": "2026-10-25T09:00:00+00:00",
+                    "chat": CHAT,
+                    "waiting_for": "xrev",
+                    "waiting": True,
+                    "ident": "3f2a9c1e",
+                }
+            }
+        )
+    )
+    since = datetime(2026, 10, 25, 9, 0, tzinfo=UTC)
+    left_open(tmp_path, channel, Kept(CHAT, 77, "run", "3f2a9c1e", "🤝 review → xrev…", since))
+
+    await channel.start()
+    await settled(channel)
+    await channel.stop()
+    run = await run_of(channel)
+
+    [closed] = api.edits
+    assert closed["text"] == (
+        "🤝 review → xrev…\n\n"
+        "⏹ <i>Closed — Halyard restarted. The run is kept: /workflow shows it.</i>"
+    )
+    assert run is not None and (run.waiting, run.waiting_for, run.stopped) == (True, "xrev", "")
+
+    await answered(channel, "xrev", "DECISION: forward")
+    assert runner.sent[-1][0] == "id-nav"
 
 
 async def test_a_transition_runs_its_checks_before_it_goes(tmp_path: Path, wired) -> None:

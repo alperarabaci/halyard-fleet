@@ -187,7 +187,8 @@ says what became of it:
   or out of time (*⌛ Expired — denied*); a commit made, cancelled or reworded;
 - **at its deadline,** if nothing else closed it first;
 - **after a restart:** what the last run of Halyard left open closes as it starts
-  (*Closed — Halyard restarted*).
+  (*Closed — Halyard restarted*). A workflow run's card adds that the run is kept: the
+  run goes on, and `/workflow` gives it a card again.
 
 A workflow run keeps one card with buttons, its newest — see
 [Workflows](workflows.md#stopping-steering-and-asking-where-it-is).

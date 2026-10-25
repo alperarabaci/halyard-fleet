@@ -332,6 +332,19 @@ async def test_a_session_with_no_recorded_directory_is_refused(monkeypatch) -> N
     assert "no working directory was found" in (runner.last_error("abc") or "")
 
 
+async def test_a_message_s_turn_says_when_it_started(monkeypatch) -> None:
+    calls = spying(monkeypatch)
+    told: list[str] = []
+
+    assert (
+        await runner_with_catalog().send("abc", "carry on", cwd="/repo", started=told.append)
+        is True
+    )
+
+    assert len(calls) == 1
+    assert told == ["abc"]
+
+
 async def test_two_messages_to_one_session_are_serialised(monkeypatch) -> None:
     """One measured pair of overlapping resumes survived. One trial is not a
     guarantee, the equivalent on Claude Code forks silently, and the cost of

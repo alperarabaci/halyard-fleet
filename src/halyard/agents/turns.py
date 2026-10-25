@@ -50,6 +50,13 @@ route: `last_error` is too late to help — nobody asks — and "did not reach" 
 now a lie. Codex running out of usage mid-turn is the case that matters, and
 the reason it prints (with the time the limit resets) is worth carrying. So a
 caller may hand in `when_done`, called only when an accepted turn ends badly.
+
+And acceptance is late for one question: when did the message get there? A
+turn that answers inside the window has finished — its reply already relayed —
+before it is called accepted, and a message sent to a session that is busy
+waits behind the turn going there, whose reply arrives first. So a caller may
+hand in `started` as well, called once the turn carrying its message has begun:
+after any turn ahead of it, before anything it says.
 """
 
 from __future__ import annotations
@@ -154,6 +161,7 @@ class Turns:
         env: Mapping[str, str] | None = None,
         when_done: LateFailure | None = None,
         expected: Callable[[str], bool] | None = None,
+        started: Callable[[str], object] | None = None,
     ) -> bool:
         """Run `arguments` as a turn, returning once the message is accepted.
 
@@ -162,13 +170,24 @@ class Turns:
         its app is refused here and reached by queueing a second later; logged
         as a failure, three reviews that each got an answer within two minutes
         read as three that never reached the reviewer.
+
+        `started` is called as the process starts: after any turn queued ahead
+        of it in this session, and before the window that decides acceptance.
         """
         loop = asyncio.get_running_loop()
         accepted: asyncio.Future[bool] = loop.create_future()
         sent_under = self._stops[session_id]
         turn = loop.create_task(
             self._turn(
-                session_id, list(arguments), cwd, env, accepted, when_done, expected, sent_under
+                session_id,
+                list(arguments),
+                cwd,
+                env,
+                accepted,
+                when_done,
+                expected,
+                sent_under,
+                started,
             ),
             name=f"{self._runtime}-turn-{session_id}",
         )
@@ -186,6 +205,7 @@ class Turns:
         when_done: LateFailure | None,
         expected: Callable[[str], bool] | None = None,
         sent_under: int = 0,
+        started: Callable[[str], object] | None = None,
     ) -> None:
         try:
             async with self._locks[session_id]:
@@ -195,7 +215,15 @@ class Turns:
                     logger.info("A message for %s was dropped: the session was stopped", session_id)
                     return
                 await self._run(
-                    session_id, arguments, cwd, env, accepted, when_done, expected, sent_under
+                    session_id,
+                    arguments,
+                    cwd,
+                    env,
+                    accepted,
+                    when_done,
+                    expected,
+                    sent_under,
+                    started,
                 )
         except Exception:
             logger.exception("A turn in %s ended badly", session_id)
@@ -216,6 +244,7 @@ class Turns:
         when_done: LateFailure | None,
         expected: Callable[[str], bool] | None = None,
         sent_under: int = 0,
+        started: Callable[[str], object] | None = None,
     ) -> None:
         try:
             process = await asyncio.create_subprocess_exec(
@@ -237,6 +266,7 @@ class Turns:
             return
         self._processes[session_id] = process
         try:
+            await say_started(started, session_id)
             await self._follow(session_id, process, accepted, when_done, expected, sent_under)
         finally:
             if self._processes.get(session_id) is process:
@@ -345,8 +375,9 @@ class Turns:
 
 async def say_started(started: Callable[[str], object] | None, session_id: str | None) -> None:
     """Tell whoever started a turn of its own the id it runs under, before the
-    turn begins. Awaited when it answers with something to wait for; never
-    raises, because a turn that cannot be marked is still worth taking."""
+    turn begins — or whoever sent a message that its turn has begun, in that
+    session. Awaited when it answers with something to wait for; never raises,
+    because a turn that cannot be marked is still worth taking."""
     if started is None or not session_id:
         return
     try:
@@ -354,7 +385,7 @@ async def say_started(started: Callable[[str], object] | None, session_id: str |
         if isinstance(told, Awaitable):
             await told
     except Exception:
-        logger.warning("Could not say which session %s is", session_id, exc_info=True)
+        logger.warning("Could not say that a turn in %s started", session_id, exc_info=True)
 
 
 def end_group(process) -> None:

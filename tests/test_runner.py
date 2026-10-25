@@ -96,6 +96,18 @@ async def test_a_turn_inherits_the_resumed_session_model_by_default(monkeypatch)
     assert "--model" not in calls[0]
 
 
+async def test_a_message_s_turn_says_when_it_started(monkeypatch) -> None:
+    """As its process starts, after any turn ahead of it: from then on, what the
+    session says answers this message. See `agents/turns.py`."""
+    calls = spying(monkeypatch)
+    told: list[str] = []
+
+    assert await runner().send("session-1", "carry on", started=told.append) is True
+
+    assert len(calls) == 1
+    assert told == ["session-1"]
+
+
 async def test_a_model_override_can_be_configured_from_the_environment(monkeypatch) -> None:
     calls = spying(monkeypatch)
 

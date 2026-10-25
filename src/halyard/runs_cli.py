@@ -118,11 +118,12 @@ def _print_steps(steps: Sequence[journal.Delivery]) -> None:
 
 def _going(work: str, run: going_runs.Run) -> str:
     """A run not finished yet: where it is, as the chat's line says it."""
-    state = (
-        f"waiting for {run.waiting_for}"
-        if run.waiting
-        else f"stopped: {run.stopped or 'not started'}"
-    )
+    if run.waiting:
+        state = f"waiting for {run.waiting_for}"
+    elif run.sending_to:
+        state = f"on its way to {run.sending_to}"
+    else:
+        state = f"stopped: {run.stopped or 'not started'}"
     named = f" · run {run.ident}" if run.ident else ""
     return f"{work} · {run.workflow} · {state}\n{run.since.astimezone():%m-%d %H:%M} → now{named}"
 

@@ -44,6 +44,17 @@ async def test_a_message_lands_in_the_session_it_was_addressed_to(sent) -> None:
     assert body["parts"] == [{"type": "text", "text": "carry on"}]
 
 
+async def test_a_message_is_said_to_start_as_it_goes(sent) -> None:
+    """Nothing here queues it, so it starts as it is posted — and is said to
+    first, so nothing the session answers can come before."""
+    told: list[tuple[str, int]] = []
+
+    await OpencodeRunner().send("ses_1", "carry on", started=lambda s: told.append((s, len(sent))))
+
+    assert told == [("ses_1", 0)]
+    assert len(sent) == 1
+
+
 async def test_no_model_is_sent_when_none_was_chosen(sent) -> None:
     """Somebody who has not chosen from the phone has chosen at the desk, and
     overriding that silently is the opposite of what they did."""

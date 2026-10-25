@@ -149,6 +149,14 @@ def test_a_run_still_going_is_shown_by_its_work(database: Path, capsys) -> None:
     assert "review" in out and "reviewed" in out
 
 
+def test_a_step_on_its_way_is_shown_on_its_way(database: Path, capsys) -> None:
+    """Its commands and inspections first: nothing waits on its agent yet."""
+    going(database, replace(REVIEWED, ident="3f2a9c1e", waiting=False).sending("xnav"))
+
+    assert runs_cli.main(["#453"]) == 0
+    assert "alpha-engine#453 · level3 · on its way to xnav" in capsys.readouterr().out
+
+
 def test_a_run_is_found_by_its_own_name(database: Path, capsys) -> None:
     going(
         database,

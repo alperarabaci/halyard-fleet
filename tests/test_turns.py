@@ -170,6 +170,62 @@ async def test_a_cli_that_cannot_be_started_is_not_delivered(monkeypatch) -> Non
     assert await turns().start("s-1", ["claude", "-p"]) is False
 
 
+# --- when a message's turn starts ---------------------------------------------
+
+
+async def test_a_message_behind_a_turn_is_said_to_start_when_that_turn_is_over(
+    monkeypatch,
+) -> None:
+    """Until then, what the session says is the turn ahead of it talking."""
+    first = asyncio.Event()
+    starting(monkeypatch, FakeProcess(until=first), FakeProcess())
+    turning = turns()
+    told: list[str] = []
+
+    async def started(session_id: str) -> None:
+        told.append(session_id)
+
+    await turning.start("s-1", ["claude", "-p", "first"])
+    queued = asyncio.ensure_future(
+        turning.start("s-1", ["claude", "-p", "second"], started=started)
+    )
+    await settles()
+
+    assert told == [], "said to start while the turn ahead of it was still going"
+
+    first.set()
+    assert await asyncio.wait_for(queued, timeout=1) is True
+    assert told == ["s-1"]
+
+
+async def test_a_turn_over_inside_the_window_is_said_to_start_before_it_is_accepted(
+    monkeypatch,
+) -> None:
+    """Its reply has been relayed by the time it counts as accepted, so
+    acceptance is too late to say the message got there."""
+    starting(monkeypatch, FakeProcess())
+    order: list[str] = []
+
+    async def started(_session_id: str) -> None:
+        order.append("started")
+
+    assert await turns().start("s-1", ["claude", "-p"], started=started) is True
+    order.append("accepted")
+
+    assert order == ["started", "accepted"]
+
+
+async def test_a_message_that_never_started_is_never_said_to(monkeypatch) -> None:
+    async def refuses(*_arguments, **_kwargs):
+        raise OSError("no such file")
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", refuses)
+    told: list[str] = []
+
+    assert await turns().start("s-1", ["claude", "-p"], started=told.append) is False
+    assert told == []
+
+
 # --- what happens after the answer --------------------------------------------
 
 

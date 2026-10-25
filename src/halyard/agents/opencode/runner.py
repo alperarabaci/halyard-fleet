@@ -184,6 +184,7 @@ class OpencodeRunner:
         text: str,
         cwd: str | None = None,
         when_done: LateFailure | None = None,
+        started: Callable[[str], object] | None = None,
     ) -> bool:
         """Put `text` into the session as if it had been typed there.
 
@@ -195,7 +196,9 @@ class OpencodeRunner:
         answers is not visible from here — no process to wait on, no exit code
         — and the runtime reports its own trouble through the plugin, which is
         the path a 429 already takes. Calling this on a guess would be worse
-        than leaving it to the half that can see.
+        than leaving it to the half that can see. `started` is called as the
+        message goes; a turn opencode already has going in the session is not
+        something this can see.
         """
         if not session_id or not (text or "").strip():
             return False
@@ -219,6 +222,7 @@ class OpencodeRunner:
 
         self._busy.add(session_id)
         try:
+            await say_started(started, session_id)
             return await asyncio.to_thread(self._post, where, body)
         finally:
             self._busy.discard(session_id)

@@ -295,13 +295,16 @@ class CardDesk:
             return []
         return await asyncio.to_thread(self._shelf.everything)
 
-    async def close_left_over(self, kept: list[Kept]) -> int:
+    async def close_left_over(
+        self, kept: list[Kept], *, saying: Callable[[Kept], str | None] | None = None
+    ) -> int:
         """Close the cards the last process left open. How many.
 
         An approval was denied as that process stopped, and anything else is
         better asked again than answered from a card left over from before. Each
-        says so and loses its buttons. One Telegram would not let go of is tried
-        again at the next start, for a while — see `KEPT_FOR`.
+        says so and loses its buttons — or says what `saying` has for it, for a
+        card whose subject outlived the process. One Telegram would not let go
+        of is tried again at the next start, for a while — see `KEPT_FOR`.
         """
         closed = 0
         for card in kept:
@@ -309,7 +312,8 @@ class CardDesk:
             if where in self._cards or where in self._closed:
                 continue
             self._remember(where)
-            said = f"{card.html}\n\n{RESTARTED}" if card.html else RESTARTED
+            line = (saying(card) if saying is not None else None) or RESTARTED
+            said = f"{card.html}\n\n{line}" if card.html else line
             done = await self._edit(where, said)
             if done or self._clock() - card.opened_at > KEPT_FOR:
                 await asyncio.to_thread(self._shelf.take, *where)
