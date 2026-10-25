@@ -36,7 +36,9 @@ def compose(
     what Halyard can see for itself — the task, the machine, the tree, which
     round this is and which revision of the prompt — one fact to a line,
     because the project's prompts refuse to guess at any of it. Then what its
-    commands printed, and the inspections' answers, measured or not. Then, on a
+    commands printed, and the inspections' answers, measured or not — each
+    headed with its status, from what it read: complete, incomplete or
+    unmeasured. Then, on a
     round after the first, what the seat said back to the round before. Then
     the reply itself, last, where the prompt said it would be.
     """
@@ -61,7 +63,11 @@ def compose(
         parts += ["", f"Command {command.name} — {command.line}:", ""]
         parts.append(result.output or "(it printed nothing)")
     for answer in answers:
-        parts += ["", f"Inspection {answer.name} — {answer.path} @ {answer.version}:", ""]
+        # Its status from what it read, not from what it says it read: an
+        # incomplete answer goes on, marked.
+        status = inspections.said(answer, why=False)
+        heading = f"Inspection {answer.name} — {answer.path} @ {answer.version} · {status}:"
+        parts += ["", heading, ""]
         parts.append(answer.text if answer.measured else f"unmeasured — {answer.why}")
         if answer.not_run:
             # Halyard's, under the model's: a read the model may have answered

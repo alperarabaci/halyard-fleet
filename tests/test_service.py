@@ -1582,3 +1582,103 @@ async def test_a_turn_of_halyard_s_own_is_never_left_to_anyone(tmp_path: Path) -
     asking.cancel()
 
     assert card.session_id == "ses_own"
+
+
+# --- what an inspection's trace needs of the gate ---------------------------
+
+
+class Hearing(StubChannel):
+    """A channel that hears every call decided without a card."""
+
+    def __init__(self, store: ApprovalStore, decision: Decision = Decision.ALLOW) -> None:
+        super().__init__(store, decision)
+        self.heard: list[dict] = []
+
+    def decided_without_a_card(self, **told) -> None:
+        self.heard.append(told)
+
+
+class HearingExploding(ExplodingChannel):
+    def __init__(self) -> None:
+        self.heard: list[dict] = []
+
+    def decided_without_a_card(self, **told) -> None:
+        self.heard.append(told)
+
+
+async def test_a_read_let_through_without_a_card_is_told_to_the_channel(tmp_path: Path) -> None:
+    """An inspection's trace needs it: a Codex read the gate let through is in
+    no other record the channel sees."""
+    project = a_project(tmp_path)
+    store = ApprovalStore(ttl=timedelta(minutes=5))
+    channel = Hearing(store)
+    service, _, sink = build_service(
+        tmp_path, channel=channel, store=store, allow_risk_at_or_below=RiskLevel.LOW
+    )
+    await sink.open()
+
+    outcome = await ask(
+        service,
+        "git status",
+        session_id="codex-thread",
+        tool_use_id="call_1",
+        project_dir=str(project),
+        cwd=str(project),
+    )
+
+    assert outcome.allowed
+    assert channel.heard == [
+        {
+            "session_id": "codex-thread",
+            "tool": "Bash",
+            "command": "git status",
+            "tool_use_id": "call_1",
+            "allowed": True,
+            "why": "pre-authorized (reads)",
+            "request_id": None,
+        }
+    ]
+    await sink.close()
+
+
+async def test_a_call_refused_outright_is_told_to_the_channel(tmp_path: Path) -> None:
+    store = ApprovalStore(ttl=timedelta(minutes=5))
+    channel = Hearing(store)
+    service, _, sink = build_service(
+        tmp_path, channel=channel, store=store, refuse_agent_commits=True
+    )
+    await sink.open()
+
+    await ask(service, "git commit -m x", tool_use_id="toolu_9")
+
+    [told] = channel.heard
+    assert (told["allowed"], told["tool_use_id"]) == (False, "toolu_9")
+    assert told["why"] == "refused: agents do not commit here"
+    await sink.close()
+
+
+async def test_a_call_with_a_card_is_the_card_s_and_is_not_told_again(tmp_path: Path) -> None:
+    store = ApprovalStore(ttl=timedelta(minutes=5))
+    channel = Hearing(store, Decision.DENY)
+    service, _, sink = build_service(tmp_path, channel=channel, store=store)
+    await sink.open()
+
+    await ask(service, "cat /tmp/x.log")
+
+    assert channel.heard == []
+    await sink.close()
+
+
+async def test_a_call_whose_card_could_not_be_sent_is_told_as_denied(tmp_path: Path) -> None:
+    """With its request, so a channel that did carry the card can tell."""
+    channel = HearingExploding()
+    service, _, sink = build_service(tmp_path, channel=channel)
+    await sink.open()
+
+    outcome = await ask(service, "cat /tmp/x.log")
+
+    [told] = channel.heard
+    assert told["allowed"] is False
+    assert told["request_id"] == outcome.request_id
+    assert told["why"] == "denied: it could not be put to anybody"
+    await sink.close()

@@ -39,7 +39,7 @@ TIMEOUT_SECONDS = 600.0
 _COLUMNS = (
     "id, at, project, work, inspection, file, file_version, transition, workflow_run, step, "
     "phase, round, runtime, model, head, content, context, note, input, answer, outcome, "
-    "why, finding, took, experimental, repeat_of, effort"
+    "why, finding, took, experimental, repeat_of, effort, not_run, status, trace"
 )
 
 
@@ -76,6 +76,13 @@ class Row:
     #: None when the runtime was left to choose — every run kept before
     #: effort was, among them.
     effort: str | None
+    #: What Halyard said under the answer about reads that did not run.
+    not_run: str | None = None
+    #: Complete, incomplete or unmeasured — None for a run kept before
+    #: inspections had a status, and for a repeat.
+    status: str | None = None
+    #: What it read, as `trace.to_json` keeps it — None where nothing could say.
+    trace: str | None = None
 
 
 def _read(path: Path, query: str, params: Sequence[object] = ()) -> list[tuple]:
@@ -94,7 +101,7 @@ def _read(path: Path, query: str, params: Sequence[object] = ()) -> list[tuple]:
 
 def _rows(path: Path, where: str, params: Sequence[object] = ()) -> list[Row]:
     return [
-        Row(row[0], datetime.fromisoformat(row[1]), *row[2:24], bool(row[24]), *row[25:27])
+        Row(row[0], datetime.fromisoformat(row[1]), *row[2:24], bool(row[24]), *row[25:30])
         for row in _read(path, f"SELECT {_COLUMNS} FROM inspection_runs {where}", params)
     ]
 

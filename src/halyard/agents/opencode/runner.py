@@ -39,6 +39,7 @@ from urllib.parse import quote
 from halyard.agents.base import SessionRef
 from halyard.agents.turns import LateFailure, say_started
 from halyard.core import usage
+from halyard.core.calls import Calls
 
 logger = logging.getLogger(__name__)
 
@@ -269,6 +270,7 @@ class OpencodeRunner:
         system: str | None = None,
         effort: str | None = None,
         started: Callable[[str], object] | None = None,
+        calls: Calls | None = None,
     ) -> str | None:
         """One turn in a session of its own, in the opencode already running here.
 
@@ -288,6 +290,9 @@ class OpencodeRunner:
 
         `started` is told the session's own id before the message goes: its
         questions and its reply arrive under that id, not the caller's.
+
+        `calls` is left as it is given: what the turn read is not read back
+        from opencode here, so only the gate knows the reads that met it.
 
         Returns the text of the last reply, or None on any failure.
         """

@@ -720,3 +720,74 @@ async def test_a_turn_that_failed_is_no_answer(monkeypatch) -> None:
     )
 
     assert await CodexRunner().ask("look", model="gpt-5.4-mini") is None
+
+
+def _command(ident: str, command: str, *, exit_code: int | None, status: str, output: str = ""):
+    """A `command_execution` item, as `codex exec --json` gives one on 0.160.0."""
+    return {
+        "id": ident,
+        "type": "command_execution",
+        "command": f"/bin/zsh -lc '{command}'",
+        "aggregated_output": output,
+        "exit_code": exit_code,
+        "status": status,
+    }
+
+
+#: Measured on 0.160.0 (2026-10-25): each command that ran is `item.started`
+#: then `item.completed`; one the hook denied, or one still waiting on it, is
+#: not there at all. The last one here was still running when the turn ended.
+READS = [
+    {"type": "thread.started", "thread_id": "019a-thread"},
+    {"type": "turn.started"},
+    {
+        "type": "item.started",
+        "item": _command("item_0", "cat other.txt", exit_code=None, status="in_progress"),
+    },
+    {
+        "type": "item.completed",
+        "item": _command(
+            "item_0", "cat other.txt", exit_code=0, status="completed", output="the other file\n"
+        ),
+    },
+    {
+        "type": "item.started",
+        "item": _command("item_1", "rg -n seed src", exit_code=None, status="in_progress"),
+    },
+    {
+        "type": "item.completed",
+        "item": _command("item_1", "rg -n seed src", exit_code=1, status="completed"),
+    },
+    {
+        "type": "item.started",
+        "item": _command("item_2", "sed -n 1,5p a.py", exit_code=None, status="in_progress"),
+    },
+    {"type": "item.completed", "item": {"type": "agent_message", "text": "claims · no finding"}},
+    {"type": "turn.completed", "usage": {"input_tokens": 10, "output_tokens": 2}},
+]
+
+
+async def test_an_inspection_s_commands_are_kept_without_their_output(monkeypatch) -> None:
+    """The command, as it was asked for rather than in the shell it ran in,
+    and its exit code — a `grep` that found nothing ran. Never its output."""
+    from halyard.core.calls import Call, Calls
+
+    _executing(monkeypatch, READS)
+    calls = Calls()
+
+    said = await CodexRunner().ask("inspect", edits=False, calls=calls)
+
+    assert said == "claims · no finding"
+    assert calls.reported
+    assert list(calls) == [
+        Call("item_0", "Bash", "cat other.txt", "ran"),
+        Call("item_1", "Bash", "rg -n seed src", "ran", "exit 1"),
+        Call("item_2", "Bash", "sed -n 1,5p a.py", None),
+    ]
+    assert "the other file" not in repr(list(calls))
+
+
+async def test_a_turn_with_nothing_to_account_for_reads_as_it_did(monkeypatch) -> None:
+    _executing(monkeypatch, READS)
+
+    assert await CodexRunner().ask("inspect", edits=False) == "claims · no finding"
