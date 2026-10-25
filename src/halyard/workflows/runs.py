@@ -16,6 +16,13 @@ again, because starting one is somebody deciding to.
 takes it, so a step that reached nobody is not a round, and sending it again
 is the same round rather than the next.
 
+**A step is on its way before it is waited on.** Its commands run and its
+inspections answer first, which can take minutes, and a message to a seat that
+is busy waits behind the turn it is in. The seat has not seen the step in that
+time, so nothing it says is the step's answer: the run waits for its reply only
+once a turn carrying the step has started in the seat's session. A step that
+reached nobody stops the run, and so does a restart that caught one on its way.
+
 Kept the way `last_said` is: a small file beside the database, written whole
 each time, and never raising on the path that is delivering something. One run
 per piece of work, because a project has one working tree and its branch says
@@ -110,6 +117,12 @@ class Run:
     #: When it stopped, for a run that is stopped: what its agents said after
     #: that is what a person may want to send it on with. None while it goes.
     stopped_at: datetime | None = None
+    #: The seat a step is on its way to: taken, and not yet in that seat's
+    #: session — its commands running, its inspections asked, or the message
+    #: queued behind a turn the seat is in. Empty once it got there, when the
+    #: run is `waiting`, and whenever it is not going. `waiting_for` is still
+    #: the seat the step carries the reply of until then.
+    sending_to: str = ""
 
     def held(self, why: str, *, leaving: int = -1, waited: int = -1) -> Run:
         """The same run, stopped for this reason — `waited` is the step whose
@@ -118,7 +131,9 @@ class Run:
         The seat it last dealt with is kept: what it carries on with, if
         somebody sends the step it stopped before, is that seat's reply.
         """
-        return replace(self, waiting=False, stopped=why, leaving=leaving, waited=waited)
+        return replace(
+            self, waiting=False, stopped=why, leaving=leaving, waited=waited, sending_to=""
+        )
 
     def as_it_stood(self, stretch: tuple[int, int] | None) -> Run:
         """The run as it stood when its seat's reply stopped it: on that
@@ -141,6 +156,21 @@ class Run:
             entered=stretch[0] if stretch is not None and parked_ahead else self.entered,
             leaving=-1,
             waited=-1,
+            sending_to="",
+        )
+
+    def sending(self, label: str) -> Run:
+        """The same run, its step on its way to that seat: taken, and not in
+        the seat's session yet. Whose reply it carries, and whether it is a
+        return, are kept for sending it again if it never gets there."""
+        return replace(
+            self,
+            waiting=False,
+            sending_to=label,
+            stopped="",
+            leaving=-1,
+            waited=-1,
+            stopped_at=None,
         )
 
     def waiting_on(self, label: str) -> Run:
@@ -154,6 +184,7 @@ class Run:
             leaving=-1,
             waited=-1,
             stopped_at=None,
+            sending_to="",
         )
 
     def at(
@@ -182,6 +213,7 @@ class Run:
             leaving=-1,
             waited=-1,
             stopped_at=None,
+            sending_to="",
         )
 
     def taken(self) -> dict[str, int]:
@@ -284,6 +316,9 @@ def current(where: Path, work: str) -> Run | None:
         waited=waited if isinstance(waited, int) else -1,
         ident=str(entry.get("ident") or ""),
         stopped_at=_moment(entry.get("stopped_at")),
+        # Absent from a run written before steps were on their way: one that
+        # was waiting is waiting still.
+        sending_to=str(entry.get("sending_to") or ""),
     )
 
 
@@ -319,6 +354,7 @@ def save(where: Path, work: str, run: Run) -> None:
         "waited": run.waited,
         "ident": run.ident,
         "stopped_at": run.stopped_at.isoformat() if run.stopped_at else None,
+        "sending_to": run.sending_to,
         "rounds": {
             key: [
                 {
@@ -355,6 +391,51 @@ def record(where: Path, work: str, key: str, *, to: str, now: datetime | None = 
     entries = (*run.rounds.get(key, ()), Round(at=now or datetime.now(UTC), to=to))
     save(where, work, replace(run, rounds={**run.rounds, key: entries}))
     return len(entries)
+
+
+def arrived(where: Path, work: str, sent: Run) -> bool:
+    """Note that a step on its way got there — a turn carrying it started in
+    its seat's session — so the run waits for that seat's reply from now on.
+    `sent` is the run as it was when the step went. Whether this moved it: not
+    when the run is no longer on that step on its way, having got there
+    already, or been stopped, moved or started afresh in the meantime.
+    """
+    run = current(where, work)
+    if run is None or not sent.sending_to or not _on_the_step(run, sent):
+        return False
+    if run.sending_to != sent.sending_to:
+        return False
+    save(where, work, run.waiting_on(sent.sending_to))
+    return True
+
+
+def missed(where: Path, work: str, sent: Run, why: str) -> Run | None:
+    """The run stopped for `why`, when a step on its way never got there —
+    `sent` is the run as it was when the step went — or None when the run has
+    moved past it: its answer came, or it was stopped, moved or started afresh.
+    Not saved: saying so is the caller's.
+
+    A turn can start and then be refused, so a step can be waited on already
+    and still have reached nobody. It is stopped as it was sent: whose reply it
+    carries, and whether it is a return, are what sending it again needs.
+    """
+    run = current(where, work)
+    if run is None or not sent.sending_to or not _on_the_step(run, sent):
+        return None
+    waited_on = run.waiting and run.waiting_for == sent.sending_to
+    if run.sending_to != sent.sending_to and not waited_on:
+        return None
+    return replace(run, waiting_for=sent.waiting_for, back=sent.back).held(why)
+
+
+def _on_the_step(run: Run, sent: Run) -> bool:
+    """Whether `run` is the run `sent` is, still on the step it was sent from."""
+    return (
+        run.ident == sent.ident
+        and run.since == sent.since
+        and run.step == sent.step
+        and run.phase == sent.phase
+    )
 
 
 def answered(run: Run, key: str, *, decision: str, decided_by: str) -> Run:

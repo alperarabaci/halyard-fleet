@@ -266,6 +266,11 @@ Every step's line in the chat carries **⏹ Stop the workflow**. `/workflow` wit
 going says where it is — `level3 5/8 · develop · phase 2 — waiting for xdrv` — and
 offers the same button.
 
+**A step is waited on once it gets there.** Its commands and inspections run first, and a
+message to an agent in the middle of a turn waits behind that turn. Until a turn carrying
+the step starts in the agent's session, the run says the step is *on its way to xdrv*, and
+what the agent says in the meantime answers something else: it moves nothing.
+
 **A run has one card with buttons at a time: its newest.** When the next step goes, the
 run stops, or `/workflow` is asked, the card before says *This run has a newer card* and
 loses its buttons. They name only the workflow, so left live they would act on whatever
@@ -275,7 +280,8 @@ closes, saying it is from an earlier run.
 
 A run stops, and says why, when a step would go past its rounds, when the phases would
 go past theirs, when a reply decides nothing, when an agent decides to wait, when the last
-step ends without `done`, and when a step's agent could be more than one agent. The card
+step ends without `done`, when a step's agent could be more than one agent, when a step
+reaches nobody, and when Halyard restarts while a step is on its way. The card
 it stops with — and the same card again whenever `/workflow` is asked — keeps the work in
 the run:
 
@@ -335,8 +341,8 @@ empty for an answer that decided nothing or never came, and for steps kept befor
 
 `halyard runs` reads them back without SQL: the latest runs a line each, or one piece of
 work's runs step by step — named by the work or by the run's own name. A run not finished
-yet, waiting on an agent or stopped for you, is read from its project's file, so it shows
-before it ends.
+yet, waiting on an agent, on its way to one or stopped for you, is read from its project's
+file, so it shows before it ends.
 
 ```
 $ halyard runs #386
@@ -363,6 +369,11 @@ What an agent said is not kept, as the audit log does not keep it.
 
 A run is kept per project beside Halyard's database, so a restart picks it up where it
 was, and there is one run per piece of work: a project has one working tree, and its
-branch says which work that is. A message that reached nobody leaves the run waiting
-under the chat's own warning, and counts no round; `/workflow` shows it, and **⏹ Stop
-the workflow** clears it.
+branch says which work that is. A run waiting on an agent goes on waiting: its card
+closes saying the run is kept, and `/workflow` gives it a card again.
+
+A step that reached nobody — Halyard paused, a session that could not be found, a
+runtime that refused the message — stops the run under the chat's own warning. So does a
+restart that caught a step on its way: its commands, its inspections and its message went
+with the process that stopped. Neither counts a round, and the card's
+**▶️ develop → xdrv** sends the step again.

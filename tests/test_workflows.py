@@ -16,10 +16,12 @@ from halyard.workflows import (
     Run,
     after,
     answered,
+    arrived,
     clear,
     current,
     decided,
     lines_for,
+    missed,
     read,
     record,
     save,
@@ -946,3 +948,115 @@ def test_when_a_run_stopped_is_kept_and_forgotten_once_it_moves(tmp_path: Path) 
     assert current(kept, "alpha-engine#454").stopped_at == AT + timedelta(minutes=5)
     assert stopped.at(3).stopped_at is None
     assert stopped.waiting_on("xnav").stopped_at is None
+
+
+# --- a step on its way, and one that got there ---------------------------------
+
+
+def test_a_step_on_its_way_is_not_waited_on_and_survives_a_restart(tmp_path: Path) -> None:
+    """Whose reply it carries, and whether it is a return, stay with it: sending
+    it again needs them if it never gets there."""
+    kept = tmp_path / "workflow-runs.json"
+
+    save(kept, "alpha-engine#470", a_run(1, back=True).sending("xdrv"))
+
+    found = current(kept, "alpha-engine#470")
+    assert found is not None
+    assert (found.sending_to, found.waiting, found.stopped) == ("xdrv", False, "")
+    assert (found.waiting_for, found.back) == ("xreview", True)
+
+
+def test_a_run_written_before_steps_were_on_their_way_is_waiting_still(tmp_path: Path) -> None:
+    """Read as interrupted, every run waiting at the upgrade would stop at once."""
+    kept = tmp_path / "workflow-runs.json"
+    kept.write_text(
+        '{"alpha-engine#470": {"workflow": "level3", "step": 1, '
+        '"since": "2026-09-16T18:21:00+00:00", "chat": "-100777", '
+        '"waiting_for": "xdrv", "waiting": true}}'
+    )
+
+    found = current(kept, "alpha-engine#470")
+
+    assert found is not None
+    assert (found.waiting, found.waiting_for, found.sending_to) == (True, "xdrv", "")
+
+
+def test_a_step_that_got_there_is_waited_on(tmp_path: Path) -> None:
+    kept = tmp_path / "workflow-runs.json"
+    sent = a_run(1, back=True).sending("xdrv")
+    save(kept, "alpha-engine#470", sent)
+
+    assert arrived(kept, "alpha-engine#470", sent) is True
+    assert arrived(kept, "alpha-engine#470", sent) is False, "it got there once"
+
+    found = current(kept, "alpha-engine#470")
+    assert found is not None
+    assert (found.waiting, found.waiting_for, found.sending_to, found.back) == (
+        True,
+        "xdrv",
+        "",
+        False,
+    )
+
+
+def test_getting_there_moves_nothing_once_the_run_is_not_that_step_on_its_way(
+    tmp_path: Path,
+) -> None:
+    """Stopped, moved or started afresh while the message waited behind a turn,
+    the run is not the one the step went from."""
+    kept = tmp_path / "workflow-runs.json"
+    sent = a_run(1, ident="3f2a9c1e").sending("xdrv")
+    afresh = a_run(1, ident="aa11bb22").sending("xdrv")
+
+    for since in (sent.held("stopped by hand"), sent.at(2).sending("nav"), afresh):
+        save(kept, "alpha-engine#470", since)
+        assert arrived(kept, "alpha-engine#470", sent) is False
+        assert current(kept, "alpha-engine#470") == since
+
+    clear(kept, "alpha-engine#470")
+    assert arrived(kept, "alpha-engine#470", sent) is False
+    assert current(kept, "alpha-engine#470") is None
+
+
+def test_a_step_that_reached_nobody_stops_the_run_as_it_was_sent(tmp_path: Path) -> None:
+    """Refused on the way, or refused once its turn had started and the run was
+    waiting on it: either way it stops, carrying what it carried."""
+    kept = tmp_path / "workflow-runs.json"
+    sent = a_run(1, back=True).sending("xdrv")
+
+    save(kept, "alpha-engine#470", sent)
+    on_the_way = missed(kept, "alpha-engine#470", sent, "discover did not reach xdrv")
+    arrived(kept, "alpha-engine#470", sent)
+    once_started = missed(kept, "alpha-engine#470", sent, "discover did not reach xdrv")
+
+    for held in (on_the_way, once_started):
+        assert held is not None
+        assert (held.stopped, held.waiting, held.sending_to) == (
+            "discover did not reach xdrv",
+            False,
+            "",
+        )
+        assert (held.step, held.waiting_for, held.back) == (1, "xreview", True)
+
+
+def test_a_step_whose_answer_came_is_not_stopped_by_its_turn_failing_later(
+    tmp_path: Path,
+) -> None:
+    """Moved on — to another agent, or to a later step of the same one — or
+    stopped by the answer, or started afresh: it is not that step any more."""
+    kept = tmp_path / "workflow-runs.json"
+    sent = a_run(1, ident="3f2a9c1e").sending("xdrv")
+    save(kept, "alpha-engine#470", sent)
+    arrived(kept, "alpha-engine#470", sent)
+    waited = current(kept, "alpha-engine#470")
+    assert waited is not None
+
+    for since in (
+        waited.at(2).sending("nav"),
+        waited.at(3).sending("xdrv"),
+        waited.at(3).waiting_on("xdrv"),
+        waited.held("it was asked to wait", waited=1),
+        a_run(1, ident="aa11bb22").sending("xdrv"),
+    ):
+        save(kept, "alpha-engine#470", since)
+        assert missed(kept, "alpha-engine#470", sent, "it stopped") is None

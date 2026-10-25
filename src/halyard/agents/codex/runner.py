@@ -289,6 +289,7 @@ class CodexRunner:
         text: str,
         cwd: str | None = None,
         when_done: LateFailure | None = None,
+        started: Callable[[str], object] | None = None,
     ) -> bool:
         """Resume the session with `text` as the next thing the user said.
 
@@ -301,6 +302,10 @@ class CodexRunner:
         Returns on acceptance rather than on completion — see
         `agents/turns.py`. `when_done` is called if an accepted turn then fails,
         which is how running out of usage halfway through still gets reported.
+        `started` is called as the turn carrying it begins, after any turn this
+        runner had going in the session. A thread held open by its app queues
+        the message there instead, behind whatever the app has going, which is
+        not something this can see.
         """
         self._refused.pop(session_id, None)
         if not self._binary:
@@ -363,6 +368,7 @@ class CodexRunner:
             # Not a failure: it is answered below. Logged as one, it made three
             # reviews that each got an answer read as three that never arrived.
             expected=held_by_another,
+            started=started,
         )
         if accepted or not held_by_another(self._turns.last_error(session_id)):
             return accepted

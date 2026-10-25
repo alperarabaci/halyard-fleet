@@ -554,6 +554,26 @@ async def test_what_the_last_process_left_open_is_closed_saying_so(tmp_path: Pat
     assert shelf.everything() == []
 
 
+async def test_a_left_over_card_whose_subject_outlived_the_process_says_so(
+    tmp_path: Path,
+) -> None:
+    """A workflow run is kept across a restart: its card says the run is kept,
+    and every other card closes as before."""
+    shelf = shelved(tmp_path / "halyard.db", kept_card(7), kept_card(8, "Run which one?"))
+    api = FakeTelegramApi()
+    desk = CardDesk(api, Clock(), shelf=shelf, pace=0)
+
+    await desk.close_left_over(
+        await desk.left_over(),
+        saying=lambda card: "⏹ <i>Kept.</i>" if card.message_id == 8 else None,
+    )
+
+    assert [edit["text"] for edit in api.edits] == [
+        "<b>Which?</b>\n\n⏹ <i>Closed — Halyard restarted.</i>",
+        "Run which one?\n\n⏹ <i>Kept.</i>",
+    ]
+
+
 async def test_a_card_telegram_would_not_close_is_tried_again_for_a_while(tmp_path: Path) -> None:
     """At the next start — unless it has been tried for long enough, when a
     message deleted or out of the bot's reach would be tried forever."""

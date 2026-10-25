@@ -407,6 +407,7 @@ class ClaudeCodeRunner:
         text: str,
         cwd: str | None = None,
         when_done: LateFailure | None = None,
+        started: Callable[[str], object] | None = None,
     ) -> bool:
         """Resume the session with `text` as the next thing the user said.
 
@@ -421,7 +422,8 @@ class ClaudeCodeRunner:
         typed at the desk arrive by one path — and waiting for work nobody was
         collecting is what turned a healthy fifteen-minute turn into a killed
         one. `when_done` covers the rest: it is called if an accepted turn then
-        fails.
+        fails. `started` is called as the turn carrying it begins, after any
+        turn this session had going.
         """
         if not self._binary:
             logger.error(
@@ -445,6 +447,7 @@ class ClaudeCodeRunner:
             cwd=cwd,
             env=self._environment(),
             when_done=when_done,
+            started=started,
         )
 
     async def ask(

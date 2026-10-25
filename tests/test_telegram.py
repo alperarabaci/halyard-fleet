@@ -954,12 +954,15 @@ class FakeRunner:
         text: str,
         cwd: str | None = None,
         when_done=None,
+        started=None,
     ) -> bool:
         self.sent.append((session_id, text))
         self.directories.append(cwd)
         # Kept so a test can drive the after-acceptance path, which is the one
         # a real runtime reaches minutes later and nothing else can reach here.
         self.stopped_afterwards = when_done
+        if started is not None:
+            await started(session_id)
         return self._works
 
 

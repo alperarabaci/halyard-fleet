@@ -51,10 +51,11 @@ import logging
 import re
 import subprocess
 from collections import defaultdict
+from collections.abc import Callable
 from pathlib import Path
 
 from halyard.agents.antigravity.sessions import find_session, is_cli
-from halyard.agents.turns import LateFailure
+from halyard.agents.turns import LateFailure, say_started
 
 logger = logging.getLogger(__name__)
 
@@ -254,6 +255,7 @@ class AntigravityRunner:
         text: str,
         cwd: str | None = None,
         when_done: LateFailure | None = None,
+        started: Callable[[str], object] | None = None,
     ) -> bool:
         """Put `text` into the conversation. Returns whether it was accepted.
 
@@ -278,6 +280,7 @@ class AntigravityRunner:
         `when_done` is accepted and never called, and here that is not a gap:
         `send-message` files the wake and returns a verdict, so acceptance and
         completion are the same moment. There is no "later" to report.
+        `started` is called as the wake goes, after any message ahead of it.
         """
         if not text.strip():
             return False
@@ -320,6 +323,7 @@ class AntigravityRunner:
 
         self._pending[session_id].append(text)
         async with self._locks[session_id]:
+            await say_started(started, session_id)
             for endpoint in ordered:
                 if await self._run(session_id, WAKE, endpoint):
                     self._endpoint = endpoint
