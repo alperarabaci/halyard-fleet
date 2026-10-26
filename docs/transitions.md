@@ -399,11 +399,10 @@ a button per label, and the one pressed goes on the task, so the next time — o
 the other machine — is not asked again. A branch that names no task has nothing
 to put it on, and the label pressed is kept for that work until Halyard restarts.
 The same happens wherever the command runs: `/command`, a transition, a workflow's
-step, which waits for the tap.
+step, which waits for the tap, and a commit option.
 
 A command naming a group the project does not define, or one with no labels, is
-refused when the file is read; so is `validate:` naming one, since a commit has
-nowhere to ask.
+refused when the file is read.
 
 ## A command can be a list, and take a value you type
 
@@ -428,8 +427,8 @@ business.
 
 `/command` offers a list beside the commands, and only `/command` runs one. A
 transition names commands themselves, so naming a list there is refused when the
-file is read, and so is a transition or `validate:` naming a command that asks for
-a typed value: neither has anybody to ask.
+file is read, and so is a transition or a commit option naming a command that asks
+for a typed value: neither has anybody to ask.
 
 ## Rounds are a workflow's
 

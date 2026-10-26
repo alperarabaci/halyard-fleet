@@ -490,6 +490,20 @@ def test_a_name_from_before_a_rename_is_a_warning_that_says_what_to_rename() -> 
     assert doctor._older_spellings(projects_from_yaml("projects:\n  a:\n    path: /x\n")) == []
 
 
+def test_validate_is_said_as_the_commit_option_it_is_read_as() -> None:
+    from halyard.core.config_file import projects_from_yaml
+
+    [project] = projects_from_yaml(
+        "projects:\n  alpha-engine:\n    commands: {test-fast: make test-fast}\n"
+        "    validate: test-fast\n"
+    )
+
+    assert doctor._older_spellings([project]) == [
+        f"{doctor.WARN}alpha-engine — the project: `validate: test-fast` is now "
+        "`commit_options: review: commands: [test-fast]`; the old name still works"
+    ]
+
+
 def test_an_effort_the_runtime_does_not_take_is_named_where_it_was_written() -> None:
     """Such an inspection still runs, at the model's own effort, and says so in
     a log nobody reads. The doctor is where somebody looks."""

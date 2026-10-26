@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Mapping, Sequence
+from collections.abc import Collection, Mapping, Sequence
 from pathlib import Path
 
 from halyard import frame, inspections
@@ -76,77 +76,37 @@ async def take(
     Each inspection runs on `model` at `effort`, unless `models` — the
     project's own, by inspection — names another for it.
     """
-    ran: list[tuple[Command, Result]] = []
-    for name in transition.commands:
-        command = Command(
-            name=name,
-            line=(project_commands or {}).get(name, ""),
-            not_run=tuple((project_not_run or {}).get(name, ())),
-        )
-        if runner is None:
-            result = Result(ok=False, output="nothing here can run a command", seconds=0.0)
-        else:
-            try:
-                result = await runner.run(command)
-            except Exception:
-                logger.warning(
-                    "Transition %s could not run %s", transition.name, name, exc_info=True
-                )
-                result = Result(ok=False, output="it could not be run", seconds=0.0)
-        ran.append((command, result))
-        if outcome(result, command.not_run) == NOT_RUN:
-            last = result.output.splitlines()[-1] if result.output else ""
-            logger.warning(
-                "Not run %s · exit %s · %.0fs · %s",
-                name,
-                result.exit_code,
-                result.seconds,
-                last or "(nothing printed)",
-            )
-            return Handed(
-                "", (), tuple(ran), stopped=summary(name, command.line, result, command.not_run)
-            )
+    ran, stopped = await run_commands(
+        transition.commands,
+        lines=project_commands or {},
+        not_run=project_not_run or {},
+        runner=runner,
+        about=f"Transition {transition.name}",
+    )
+    if stopped is not None:
+        return Handed("", (), ran, stopped=stopped)
     envelope = [
         *context,
         *([f"Round: {rounds.shown(round_number, expected)}"] if round_number else []),
         *(summary(c.name, c.line, r, c.not_run) for c, r in ran),
     ]
 
-    answers: tuple[inspections.Answer, ...] = ()
-    if transition.inspections and (asker is None or reply is None):
-        why = "no runtime here can take a one-shot turn" if asker is None else "there was no reply"
-        answers = tuple(
-            inspections.Answer(name, project_inspections[name], "not run", why=why)
-            for name in transition.inspections
-        )
-    elif transition.inspections:
-        broader = ModelChoice(model, effort)
-        chosen = {
-            name: (models or {}).get(name, ModelChoice()).over(broader)
-            for name in transition.inspections
-        }
-        answers = tuple(
-            await asyncio.gather(
-                *(
-                    inspections.run(
-                        name,
-                        project_inspections[name],
-                        project=project,
-                        context=envelope,
-                        note=note,
-                        reply=reply,
-                        asker=asker,
-                        model=chosen[name].model or model,
-                        effort=chosen[name].effort,
-                        timeout=timeout,
-                        about=f"transition {transition.name}, {sender}'s reply from {arrived}",
-                        transition=transition.name,
-                        keeper=keeper,
-                    )
-                    for name in transition.inspections
-                )
-            )
-        )
+    answers = await run_inspections(
+        transition.inspections,
+        project_inspections=project_inspections,
+        project=project,
+        context=envelope,
+        note=note,
+        reply=reply,
+        asker=asker,
+        model=model,
+        effort=effort,
+        models=models,
+        timeout=timeout,
+        about=f"transition {transition.name}, {sender}'s reply from {arrived}",
+        transition=transition.name,
+        keeper=keeper,
+    )
 
     written = transition.prompt
     if round_number is not None and round_number > 1 and transition.followup_prompt:
@@ -184,3 +144,106 @@ async def take(
         " · ".join(envelope),
     )
     return Handed(text, answers, tuple(ran))
+
+
+async def run_commands(
+    names: Sequence[str],
+    *,
+    lines: Mapping[str, str],
+    not_run: Mapping[str, Sequence[int]],
+    runner: Runner | None,
+    about: str,
+    stop_at: Collection[str] = (NOT_RUN,),
+) -> tuple[tuple[tuple[Command, Result], ...], str | None]:
+    """Run commands one after another, where the project is, through `runner`.
+
+    What each did, and — when one ended in `stop_at` — the line saying what it
+    did, after which nothing more runs; None when they all ran. A transition
+    stops only at a command that did not run: one that failed is a result its
+    seat has to see. A commit option stops at a failure too, since a failed
+    check is a fact with nothing in it to weigh. `about` says whose commands
+    these are, in the log.
+    """
+    ran: list[tuple[Command, Result]] = []
+    for name in names:
+        command = Command(name=name, line=lines.get(name, ""), not_run=tuple(not_run.get(name, ())))
+        if runner is None:
+            result = Result(ok=False, output="nothing here can run a command", seconds=0.0)
+        else:
+            try:
+                result = await runner.run(command)
+            except Exception:
+                logger.warning("%s could not run %s", about, name, exc_info=True)
+                result = Result(ok=False, output="it could not be run", seconds=0.0)
+        ran.append((command, result))
+        ended = outcome(result, command.not_run)
+        if ended in stop_at:
+            last = result.output.splitlines()[-1] if result.output else ""
+            logger.warning(
+                "%s %s · exit %s · %.0fs · %s",
+                ended.capitalize(),
+                name,
+                result.exit_code,
+                result.seconds,
+                last or "(nothing printed)",
+            )
+            return tuple(ran), summary(name, command.line, result, command.not_run)
+    return tuple(ran), None
+
+
+async def run_inspections(
+    names: Sequence[str],
+    *,
+    project_inspections: Mapping[str, Path],
+    project: Path,
+    context: list[str],
+    note: str,
+    reply: str | None,
+    asker: inspections.Asker | None,
+    model: str,
+    timeout: float,
+    about: str,
+    effort: str | None = None,
+    models: Mapping[str, ModelChoice] | None = None,
+    transition: str = "",
+    keeper: inspections.Keeper | None = None,
+) -> tuple[inspections.Answer, ...]:
+    """Run inspections side by side over `reply`, each a turn of its own.
+
+    Each on `model` at `effort`, unless `models` — the project's own, by
+    inspection — names another for it. With nothing to take a turn, or nothing
+    to read, each comes back not run, saying why, rather than being left out:
+    a missing answer reads exactly like a clean one.
+    """
+    if not names:
+        return ()
+    if asker is None or reply is None:
+        why = "no runtime here can take a one-shot turn" if asker is None else "there was no reply"
+        return tuple(
+            inspections.Answer(name, project_inspections[name], "not run", why=why)
+            for name in names
+        )
+    broader = ModelChoice(model, effort)
+    chosen = {name: (models or {}).get(name, ModelChoice()).over(broader) for name in names}
+    return tuple(
+        await asyncio.gather(
+            *(
+                inspections.run(
+                    name,
+                    project_inspections[name],
+                    project=project,
+                    context=context,
+                    note=note,
+                    reply=reply,
+                    asker=asker,
+                    model=chosen[name].model or model,
+                    effort=chosen[name].effort,
+                    timeout=timeout,
+                    about=about,
+                    transition=transition,
+                    keeper=keeper,
+                )
+                for name in names
+            )
+        )
+    )

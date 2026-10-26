@@ -433,3 +433,35 @@ async def test_reads_an_inspection_could_not_run_are_said_under_its_answer(
         "`cat /tmp/x.log` (denied by tg:4242). Anything that rests on it is not measured."
     ) in text
     assert answer.not_run
+
+
+async def test_commands_can_stop_at_a_failure_as_well(tmp_path: Path) -> None:
+    """A commit option's are facts: one that fails means nothing after it runs."""
+    from halyard.commands.running import FAILED, NOT_RUN
+
+    broke = Result(ok=False, output="collected\n2 failed", seconds=31.0, exit_code=1)
+    runner = Running(**{"test-fast": broke})
+
+    ran, stopped = await transitions.run_commands(
+        ("test-fast", "lint"),
+        lines=COMMANDS,
+        not_run={},
+        runner=runner,
+        about="Commit option fast",
+        stop_at=(FAILED, NOT_RUN),
+    )
+
+    assert runner.ran == ["test-fast"]
+    assert [command.name for command, _ in ran] == ["test-fast"]
+    assert stopped == "Ran test-fast: make test-fast · exit 1 (failed) · 31s · last line: 2 failed"
+
+
+async def test_commands_that_all_ran_stop_at_nothing(tmp_path: Path) -> None:
+    runner = Running()
+
+    ran, stopped = await transitions.run_commands(
+        ("test-fast", "lint"), lines=COMMANDS, not_run={}, runner=runner, about="Transition close"
+    )
+
+    assert (runner.ran, stopped) == (["test-fast", "lint"], None)
+    assert [result.exit_code for _, result in ran] == [0, 0]

@@ -58,6 +58,8 @@ _PROJECT_FIELDS = {
     # The name `agents:` had until 2026-09-24, still read.
     "seats",
     "name",
+    "commit_options",
+    # What a commit's one check was before `commit_options:`, still read.
     "validate",
     "warn_if",
     "commands",
@@ -106,6 +108,26 @@ class Confirmation:
     inquiry: Path | None = None
     #: What the navigator is sent when the round is asked for.
     review: Path | None = None
+
+
+@dataclass(frozen=True)
+class CommitOption:
+    """A way to commit that checks the change first: a button on `/commit`'s
+    card beside the plain Commit.
+
+    Its commands run first, in order, where the project is; one that fails or
+    does not run means no card. Then its inspections read the change side by
+    side, and their answers go beside the card for a person to weigh: they
+    refuse nothing. Both are names from the project's own lists, so what
+    Halyard runs for a project is written in one place. See
+    `docs/configuration.md`.
+    """
+
+    name: str
+    #: Names from `commands:`, run in order.
+    commands: tuple[str, ...] = ()
+    #: Names from `inspections:`, run over the change once the commands passed.
+    inspections: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -247,12 +269,12 @@ class Project:
     #: anybody decides to gate it.
     path: Path | None
     seats: list[Seat]
-    #: What has to pass before `/review_and_commit` offers a commit: the name
-    #: of one of `commands:` — `test-fast` — so that everything Halyard runs for
-    #: a project is in that one list. Optional, and absent means no check runs
-    #: rather than some guessed default: a command invented for somebody's
-    #: repository would fail on every commit.
-    validate: str | None = None
+    #: The ways `/commit` offers to check a change before committing it, by
+    #: name — see `CommitOption`. Empty unless configured, and then `/commit`
+    #: proposes at once and runs nothing: a command invented for somebody's
+    #: repository would fail on every commit. A `validate:` is read as one of
+    #: these, named `review`.
+    commit_options: dict[str, CommitOption] = field(default_factory=dict)
     #: Which of the named warnings apply here. `None` means the default set;
     #: an empty list means none, which is how somebody who does not share this
     #: project's conventions turns them all off. See `commits.validation`.
@@ -293,8 +315,9 @@ class Project:
     #: time that seat works on it — `navigator:claude`. Off unless asked for:
     #: it writes to somebody's issue tracker on its own. See `tasks.attribution`.
     label_work: bool = False
-    #: The extra round this project asks for before closing a piece of work.
-    #: `None` means no such round exists here, and `/commit` is unchanged.
+    #: The extra round this project asks for before closing a piece of work,
+    #: offered on the card a commit option makes. `None` means no such round
+    #: exists here, and `/commit` is unchanged.
     confirmation: Confirmation | None = None
     #: What `/inspect` runs over the last reply in a chat, by name — `proof:
     #: NOTES/inspections/proof.md`. Each is the project's own file, read relative
@@ -542,6 +565,102 @@ def _transitions_from(
             to=to.lower() if to and to.lower() in roles else to,
         )
     return found
+
+
+#: What a commit option may say: the words a transition uses for the same two.
+_COMMIT_OPTION_FIELDS = {"commands", "inspect"}
+
+#: The commit option a `validate:` is read as.
+VALIDATE_OPTION = "review"
+
+
+def _names_in(where: str, value: Any, key: str, what: str) -> list[str]:
+    """A list of names under `key:`, each stripped; none when it is absent."""
+    value = value or []
+    if not isinstance(value, list) or not all(isinstance(n, str) and n.strip() for n in value):
+        raise ValueError(f"{where}: `{key}:` must be a list of {what} names.")
+    return [n.strip() for n in value]
+
+
+def _commit_options_from(
+    project: str,
+    value: Any,
+    *,
+    commands: dict[str, str],
+    command_lists: dict[str, tuple[str, ...]],
+    inspections: dict[str, Path],
+) -> dict[str, CommitOption]:
+    """`commit_options:` as a mapping of name to what that option runs.
+
+    Checked against the project here, as a transition is: an option naming a
+    command or an inspection nobody defined would otherwise fail only when
+    somebody pressed it, with a commit waiting on it.
+    """
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        raise ValueError(
+            f"Project {project!r}: `commit_options:` must be a mapping of name to option."
+        )
+    found: dict[str, CommitOption] = {}
+    for raw, spec in value.items():
+        name = str(raw).strip()
+        where = f"Project {project!r}: commit option {name!r}"
+        if not _TRANSITION_NAME.match(name):
+            raise ValueError(
+                f"{where} needs a name of lowercase letters, digits, `-` or `_`, "
+                "up to 32 characters."
+            )
+        spec = spec or {}
+        if not isinstance(spec, dict):
+            raise ValueError(f"{where} must be a mapping.")
+        if unknown := set(spec) - _COMMIT_OPTION_FIELDS:
+            raise ValueError(
+                f"{where} has unknown field(s) {', '.join(sorted(map(str, unknown)))} — it "
+                "takes `commands:` and `inspect:`."
+            )
+        ran = _names_in(where, spec.get("commands"), "commands", "command")
+        named = _names_in(where, spec.get("inspect"), "inspect", "inspection")
+        if listed := [n for n in ran if n in command_lists]:
+            raise ValueError(
+                f"{where} names {listed[0]!r}, which is a list of commands — name the "
+                "commands in it instead."
+            )
+        if missing := [n for n in ran if n not in commands]:
+            raise ValueError(
+                f"{where} names commands this project does not define: {', '.join(missing)}"
+            )
+        if missing := [n for n in named if n not in inspections]:
+            raise ValueError(
+                f"{where} names inspections this project does not define: {', '.join(missing)}"
+            )
+        if not ran and not named:
+            raise ValueError(
+                f"{where} runs nothing: give it `commands:`, `inspect:` or both. A commit "
+                "that checks nothing is the plain Commit, which is always offered."
+            )
+        found[name] = CommitOption(name=name, commands=tuple(ran), inspections=tuple(named))
+    return found
+
+
+def _with_validate(
+    project: str, options: dict[str, CommitOption], validate: str | None, older: list[str]
+) -> dict[str, CommitOption]:
+    """The options, with `validate:` among them as `review` — said to `doctor`
+    as a rename, since it works."""
+    if validate is None:
+        return options
+    if VALIDATE_OPTION in options:
+        raise ValueError(
+            f"Project {project!r}: `validate:` is read as the commit option "
+            f"{VALIDATE_OPTION!r}, and `commit_options:` has one by that name already. "
+            f"Put {validate!r} in its `commands:` and drop `validate:`."
+        )
+    older.append(
+        f"the project: `validate: {validate}` is now "
+        f"`commit_options: {VALIDATE_OPTION}: commands: [{validate}]`"
+    )
+    return {VALIDATE_OPTION: CommitOption(name=VALIDATE_OPTION, commands=(validate,)), **options}
 
 
 #: What a step may say, the words a decision can be given, and the names under
@@ -884,17 +1003,17 @@ def _placeholders_checked(
     commands: dict[str, str],
     label_groups: dict[str, tuple[str, ...]],
     *,
-    validate: str | None,
     transitions: dict[str, Transition],
+    commit_options: dict[str, CommitOption],
 ) -> None:
     """What a command line fills in is something that can be filled in.
 
     `{label_groups.<group>}` names a group this project has, with labels in
     it. `{input.<name>}` is typed by somebody, so only `/command` can run it: a
-    transition has nobody to ask, and neither does a commit's `validate:`, which
-    takes no label either. Refused here rather than when the command runs,
-    where the line would reach the shell with its braces still in it. See
-    `halyard.commands.labels` and `halyard.commands.inputs`.
+    transition has nobody to ask, and neither does a commit option. Refused
+    here rather than when the command runs, where the line would reach the
+    shell with its braces still in it. See `halyard.commands.labels` and
+    `halyard.commands.inputs`.
     """
     from halyard.commands.inputs import names_in
     from halyard.commands.labels import groups_in
@@ -907,12 +1026,6 @@ def _placeholders_checked(
                 raise ValueError(f"{where}, but `labels: groups:` has no group {group!r}{defined}.")
             if not label_groups[group]:
                 raise ValueError(f"{where}, and that group lists no labels to take one from.")
-        if name == validate and (groups_in(line) or names_in(line)):
-            raise ValueError(
-                f"Project {project!r}: `validate:` names {name!r}, which takes a value — a "
-                "task's label or something typed — and a commit has nowhere to ask for one. "
-                "Give `validate:` a command of its own."
-            )
     for transition in transitions.values():
         for name in transition.commands:
             if typed := names_in(commands.get(name, "")):
@@ -921,10 +1034,19 @@ def _placeholders_checked(
                     f"which takes {{input.{typed[0]}}} — typed by somebody, and a transition "
                     "has nobody to ask. Run it with /command."
                 )
+    for option in commit_options.values():
+        for name in option.commands:
+            if typed := names_in(commands.get(name, "")):
+                raise ValueError(
+                    f"Project {project!r}: commit option {option.name!r} runs {name!r}, "
+                    f"which takes {{input.{typed[0]}}} — typed by somebody, and a commit "
+                    "has nobody to ask. Run it with /command."
+                )
 
 
 def _validate_from(project: str, value: Any, commands: dict[str, str]) -> str | None:
-    """`validate:` as the name of one of the project's `commands:`.
+    """`validate:` as the name of one of the project's `commands:`, which is
+    read as the commit option `review` — see `_with_validate`.
 
     Not a command line of its own: what Halyard runs for a project is what
     `commands:` lists, and a line written anywhere else is one nobody reading
@@ -1240,9 +1362,24 @@ def projects_from_yaml(text: str) -> list[Project]:
         )
         tagged = _labels_block(project, body, older)
         label_groups = _label_groups_from(project, tagged["groups"])
-        validate = _validate_from(project, body.get("validate"), commands)
+        commit_options = _with_validate(
+            project,
+            _commit_options_from(
+                project,
+                body.get("commit_options"),
+                commands=commands,
+                command_lists=command_lists,
+                inspections=inspections,
+            ),
+            _validate_from(project, body.get("validate"), commands),
+            older,
+        )
         _placeholders_checked(
-            project, commands, label_groups, validate=validate, transitions=transitions
+            project,
+            commands,
+            label_groups,
+            transitions=transitions,
+            commit_options=commit_options,
         )
         runs, runs_refused = _runs_from(project, body.get("runs"))
         projects.append(
@@ -1250,7 +1387,7 @@ def projects_from_yaml(text: str) -> list[Project]:
                 name=project,
                 path=Path(path).expanduser() if path else None,
                 seats=seats,
-                validate=validate,
+                commit_options=commit_options,
                 warn_if=_warnings_from(project, body.get("warn_if")),
                 commands=commands,
                 command_lists=command_lists,

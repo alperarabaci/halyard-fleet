@@ -212,8 +212,8 @@ projects:
   alpha-engine:
     # Where `halyard wire` puts the gate.
     path: ~/code/alpha-engine
-    # What `/command` offers, by name. `validate:` and a transition's `commands:`
-    # name entries from here rather than a command line of their own.
+    # What `/command` offers, by name. A commit option's and a transition's
+    # `commands:` name entries from here rather than a command line of their own.
     # commands:
     #   test-fast: make test-fast
     #   lint: {run: scripts/check.sh lint, not_run: [2]}   # its exit 2 means "did not run": a transition stops
@@ -221,7 +221,13 @@ projects:
     #   cleanup: make cleanup
     #   pull-branch: make pull-branch TASK={input.task}   # typed when /command runs it
     #   next-task: [cleanup, pull-branch]              # a list: one after another, stops at a failure
-    # validate: test-fast             # run first by /review_and_commit
+    # What `/commit` can check first: a button each, beside the plain Commit. The
+    # commands run in order and one failing means no card; the inspections then
+    # read the change — its `git diff --stat`, and what is untracked — and their
+    # answers go above the card. Nothing runs when only documentation changed.
+    # commit_options:
+    #   fast: {commands: [test-fast]}
+    #   wide: {commands: [test-fast, e2e], inspect: [destructive]}   # names from inspections:
     # Commands an agent may run here without a card, written as they are typed.
     # They run this project's code, so they are never taken for reads; this says
     # you trust them. A last `*` takes further arguments — options, and paths

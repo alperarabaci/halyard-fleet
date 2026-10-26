@@ -79,7 +79,9 @@ projects:
       test-all: make test-all
       test-fast: make test-fast
       bootstrap: make bootstrap-up
-    validate: test-fast               # one of commands:, run first by /review_and_commit
+    commit_options:                   # what /commit can check first, a button each
+      fast: {commands: [test-fast]}
+      wide: {commands: [test-all], inspect: [destructive]}   # from inspections:
     labels:                           # everything about task labels
       offer: [andon, rework]          # narrows /label; empty means all of them
       exclude: [wontfix]              # never offered by /label, as patterns
@@ -125,15 +127,47 @@ when that is not set; for any other project, `/label` says which token is missin
 when somebody uses it.
 
 `/commit` takes the whole working tree, has a message written for it in this
-repository's own style, and shows what changed rather than only which files — and
-stops there, which is what most changes want. `/review_and_commit` is the same command
-with everything the project asked for: the command `validate:` names runs, the warnings
-apply, and the round is offered. A failing one means no card at all.
+repository's own style, and shows what changed rather than only which files. A project
+without `commit_options:` gets that card at once, which is what most changes want. A
+project with them is asked first: the plain **Commit**, which checks nothing, or one of
+its options. `/commit wide` names the option outright.
+
+**A commit option checks the change before there is a card.** Its `commands:` run first,
+in order, as a transition's do: one project command at a time, `/stop` ends one, and a
+task label is filled in or asked for. One that fails or does not run means no card, and
+the end of what it printed. Then its `inspect:` inspections run side by side over the
+change. What they are given to read is what Halyard can say of it — `git diff --stat
+HEAD` and the untracked files `git add -A` would take, not the diff, which can be huge;
+they run `git diff` themselves — with the envelope a transition's inspections have. Each
+answer is posted above the card and refuses nothing, and the card says how each came
+out. That card carries the project's warnings and offers its round.
+
+**An inspection that judges a report does not belong in a commit option.** One that
+checks what an agent claimed — that its tests passed, that the proof is there — has no
+report to read at commit time, only the change. Name the inspections that read the code.
+
+**What is committed is what was checked.** A commit takes the tree as it is at the tap,
+so an option holds it to the files it checked, by the tree id `git write-tree` gives
+them. Files that change while the option runs mean no card; files that change after it
+mean the tap commits nothing and says so. A command that rewrites files — a formatter —
+changes them too: that run gets no card, and the next, with nothing left to rewrite,
+does. The plain Commit checks nothing and is held to nothing.
+
+**Documentation alone runs nothing.** When every changed file is prose — `*.md`,
+`docs/`, `NOTES/` and the like — an option runs neither its commands nor its
+inspections, and the card says so. The warnings still apply, and the files are held as
+above, so code that arrives afterwards is not committed unchecked.
+
+`validate: test-fast`, the one check a project had before options, is read as
+`commit_options: review: commands: [test-fast]`, and `halyard doctor` says so.
+`/review_and_commit` is answered when typed and is off the menu: it runs a project's one
+option, offers its options without the plain Commit when there are several, and in a
+project without any gives the warnings and the round alone.
 
 **`confirmation:` buys a round that a guard cannot.** A test proves what it tests and a
 file of invariants proves nothing at all — an agent's attention is finite, and past a
-point more written rules are noise competing with the work. So the commit card offers a
-third answer beside committing and not committing: send the round. `inquiry` is put in
+point more written rules are noise competing with the work. So the card a commit option
+makes offers a third answer beside committing and not committing: send the round. `inquiry` is put in
 front of the model while it writes the message and asks it one more thing — is *this*
 change worth another look? — and any flag it raises is lifted out of the message and
 shown above the card. `review` is the round itself, and goes to the project's navigator

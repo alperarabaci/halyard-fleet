@@ -76,7 +76,7 @@ halyard-fleet/
 │   ├── channels/      # the channel protocol, a stub for tests, and Telegram
 │   ├── api/           # the FastAPI app the bridges call
 │   ├── commands/      # a project's own commands: /command, and a transition's
-│   ├── commits/       # /commit and /review_and_commit: the message, validation, the round
+│   ├── commits/       # /commit: the message, the warnings, the round, what an option reads
 │   ├── tasks/         # /label: the task a branch is for, and its issue tracker
 │   ├── inspections/   # a project's own inspections: the turn, kept runs, repeats
 │   ├── transitions/   # the work taken to its next stage: prompt, commands, inspections

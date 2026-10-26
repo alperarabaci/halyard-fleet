@@ -20,11 +20,12 @@ on it.
   code and stage nothing, so a control plane that answered "nothing is staged"
   would be refusing the only thing it was asked for. What `.gitignore` excludes
   is excluded, and the card names the files that are new.
-- **The project's own validation belongs to `/review_and_commit`, not `/commit`.**
-  `validate:` names one of the project's `commands:` — `test-fast` — and it runs
-  there; a failing one means no card at all rather than a question nobody can
-  usefully answer. Plain `/commit` writes a message and stops, which is what
-  most changes want.
+- **The project's own checks belong to its commit options, not to the plain
+  Commit.** `commit_options:` names commands and inspections from the project's
+  own lists, and `/commit` offers each option as a button; a failing command
+  means no card at all rather than a question nobody can usefully answer. The
+  plain Commit writes a message and stops, which is what most changes want, and
+  it commits the tree as it is at the tap rather than the one the card showed.
 - **Agents can be stopped from committing at all.** `HALYARD_REFUSE_AGENT_COMMITS`
   refuses an agent's own `git commit` or `git push` before anybody is asked. Off
   by default. Unlike everything else the gate does, `/pause` does not lift it: a

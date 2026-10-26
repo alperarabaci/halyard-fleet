@@ -129,6 +129,8 @@ _CHOOSABLE = frozenset(
         # `/prompts`: each pressed is that command typed.
         "do",
         "prompt",
+        # How to commit: plainly, or with one of the project's commit options.
+        "commit",
     }
 )
 
@@ -656,11 +658,37 @@ def workflow_steps(workflow: str, flow: tuple[str, ...]) -> dict | None:
     return _keyboard([buttons[i : i + 3] for i in range(0, len(buttons), 3)])
 
 
-#: What a label picked for a command goes on to do: the transition, the command, or
-#: the workflow step that needed it, pressed again.
+#: What `/commit`'s card sends for the plain commit, beside the options: no
+#: option's name can be it.
+PLAIN_COMMIT = "."
+
+
+def commit_choices(options: tuple[str, ...], *, plain: bool = True) -> dict | None:
+    """`/commit`'s card: the plain Commit, then a button per commit option.
+
+    The plain one first and on its own row, because it checks nothing and
+    every change can take it; `plain=False` leaves it out, for
+    `/review_and_commit`, which asks for the checks.
+    """
+    rows: list[list[dict]] = []
+    if plain:
+        rows.append([{"text": "✅ Commit", "callback_data": choice_data("commit", PLAIN_COMMIT)}])
+    buttons = []
+    for name in options:
+        try:
+            buttons.append({"text": f"🧪 {name}", "callback_data": choice_data("commit", name)})
+        except ValueError:
+            continue
+    rows += [buttons[i : i + 3] for i in range(0, len(buttons), 3)]
+    return _keyboard(rows) if rows else None
+
+
+#: What a label picked for a command goes on to do: the transition, the command,
+#: the workflow step or the commit option that needed it, pressed again.
 PICKED_FOR_TRANSITION = "h"
 PICKED_FOR_COMMAND = "c"
 PICKED_FOR_WORKFLOW = "w"
+PICKED_FOR_COMMIT = "m"
 
 
 def label_picks(
