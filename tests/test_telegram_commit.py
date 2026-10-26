@@ -668,7 +668,9 @@ async def test_a_press_on_a_proposal_that_is_gone_closes_its_card(wired) -> None
 def test_commit_is_registered_so_it_appears_when_you_type_a_slash() -> None:
     from halyard.channels.telegram.adapter import COMMANDS
 
-    assert ("commit", "Commit this branch's work, with a message to approve") in COMMANDS
+    assert ("commit", "Commit this branch's work, plainly or after this project's own checks") in (
+        COMMANDS
+    )
 
 
 # --- saying it happened, and pushing ----------------------------------------
@@ -4806,12 +4808,14 @@ async def test_the_card_says_what_changed_not_only_which_files(wired) -> None:
 
 def demands(channel: TelegramChannel, command: str | None) -> None:
     """Give the project a check to run, as `halyard.yaml` would: a line under
-    `commands:`, and `validate:` naming it."""
+    `commands:`, and `validate:` naming it — read as the commit option `review`."""
+    from halyard.core.config_file import CommitOption
+
     found = channel._repositories["alpha-engine"]
     channel._repositories["alpha-engine"] = replace(
         found,
         commands={**found.commands, "check": command} if command else found.commands,
-        validate="check" if command else None,
+        commit_options={"review": CommitOption("review", commands=("check",))} if command else {},
     )
 
 
@@ -4853,8 +4857,7 @@ async def test_it_says_the_check_is_running_before_it_starts(wired) -> None:
 
     await deliver(channel, typed("/review_and_commit"))
 
-    assert "Running" in api.sent[0]["text"]
-    assert "true" in api.sent[0]["text"]
+    assert "<b>review</b> — running <code>true</code>" in api.sent[0]["text"]
 
 
 async def test_a_passing_check_leads_to_an_ordinary_card(wired) -> None:
@@ -5147,20 +5150,24 @@ async def test_a_slow_commit_does_not_stop_anything_else_being_answered(wired) -
 async def test_a_plain_commit_runs_no_checks_at_all(wired) -> None:
     """What most changes want, and what a change to `scripts/` wants every time.
 
-    Split by command rather than by a list of exceptions: a rule naming the
+    Split by button rather than by a list of exceptions: a rule naming the
     paths that skip the gate has to be maintained against a repository that
-    keeps growing, and gets it wrong quietly. A second command is chosen at the
-    moment somebody already knows which of the two they meant.
+    keeps growing, and gets it wrong quietly. A button is pressed at the moment
+    somebody already knows which they meant.
     """
+    from halyard.channels.telegram import cards
+
     channel, api, _, repo = wired
-    demands(channel, "echo ran >> " + str(repo / "ran.txt"))
+    demands(channel, "echo ran >> " + str(repo.parent / "ran.txt"))
     wrote(repo, "loader.py", "x = 1\n")
 
     await deliver(channel, typed("/commit"))
+    await tap(channel, pressed_transition("commit", cards.PLAIN_COMMIT))
 
-    assert not (repo / "ran.txt").exists()
-    assert "Running" not in " ".join(m["text"] for m in api.sent)
+    assert not (repo.parent / "ran.txt").exists()
+    assert "running" not in " ".join(m["text"] for m in api.sent)
     assert len(channel._proposals) == 1
+    assert any(e["message_id"] == 5 and e["text"] == "☑️ Commit" for e in api.edits)
 
 
 async def test_a_plain_commit_still_proposes_and_commits(wired) -> None:
@@ -5202,13 +5209,385 @@ async def test_rewording_a_plain_commit_does_not_grow_a_round_button(wired) -> N
     assert not any("Confirmation" in one for one in buttons)
 
 
-def test_both_commands_are_registered_and_telegram_will_accept_them() -> None:
+# --- commit options: a project's own checks, from /commit's card -------------
+
+
+def offers(channel: TelegramChannel, tmp_path: Path, **options) -> None:
+    """Give the project commands, inspections and commit options, as
+    `halyard.yaml` would. A command writes where it ran outside the repository,
+    so running it changes no file a commit would take."""
+    from halyard.core.config_file import CommitOption
+
+    log = tmp_path / "ran.log"
+    found = channel._repositories["alpha-engine"]
+    channel._repositories["alpha-engine"] = replace(
+        found,
+        commands={
+            "test-fast": f"echo test-fast >> {log} && echo '12 passed'",
+            "lint": f"echo lint >> {log}",
+            "broken": f"echo broken >> {log} && echo 'FAIL: two tests broke' && exit 1",
+            "skipped": f"echo skipped >> {log} && exit 2",
+            "writes": "echo made > made.py",
+            **found.commands,
+        },
+        commands_not_run={"skipped": (2,)},
+        commit_options={
+            name: CommitOption(name, commands=tuple(ran), inspections=tuple(looked))
+            for name, (ran, looked) in options.items()
+        },
+    )
+
+
+def ran_here(tmp_path: Path) -> list[str]:
+    log = tmp_path / "ran.log"
+    return log.read_text().split() if log.exists() else []
+
+
+def buttons_of(sent: dict) -> list[str]:
+    return [key["text"] for row in sent["reply_markup"]["inline_keyboard"] for key in row]
+
+
+async def test_commit_offers_the_plain_commit_and_each_option(tmp_path: Path, wired) -> None:
+    """Nothing runs before somebody has said which."""
+    channel, api, runner, repo = wired
+    inspections_in(channel, repo, tmp_path, destructive="# destructive")
+    offers(
+        channel, tmp_path, fast=(["test-fast"], ["destructive"]), wide=(["test-fast", "lint"], [])
+    )
+    wrote(repo, "loader.py", "x = 1\n")
+
+    await deliver(channel, typed("/commit"))
+
+    card = api.sent[-1]
+    assert buttons_of(card) == ["✅ Commit", "🧪 fast", "🧪 wide", "✖️ Cancel"]
+    assert "✅ <b>Commit</b> — checks nothing" in card["text"]
+    assert "🧪 <b>fast</b> — runs test-fast · inspects destructive" in card["text"]
+    assert "🧪 <b>wide</b> — runs test-fast, lint" in card["text"]
+    assert (ran_here(tmp_path), runner.asked, len(channel._proposals)) == ([], [], 0)
+
+
+async def test_a_project_without_options_is_proposed_a_commit_at_once(wired) -> None:
+    channel, api, _, repo = wired
+    wrote(repo, "loader.py", "x = 1\n")
+
+    await deliver(channel, typed("/commit"))
+
+    assert len(channel._proposals) == 1
+    assert "how?" not in " ".join(m["text"] for m in api.sent)
+
+
+async def test_an_option_runs_its_commands_then_inspects_the_change(tmp_path: Path, wired) -> None:
+    """In order, and the inspections read the change about to be committed —
+    not the chat's last reply, which may be about something else."""
+    channel, api, runner, repo = wired
+    inspections_in(channel, repo, tmp_path, destructive="# destructive")
+    offers(channel, tmp_path, fast=(["test-fast", "lint"], ["destructive"]))
+    wrote(repo, "loader.py", "x = 1\n")
+    wrote(repo, "seed.txt", "b\n")
+
+    await deliver(channel, typed("/commit"))
+    await tap(channel, pressed_transition("commit", "fast"))
+
+    assert any(e["message_id"] == 5 and e["text"] == "☑️ fast" for e in api.edits)
+    assert ran_here(tmp_path) == ["test-fast", "lint"]
+    inspected, written = runner.asked
+    assert "# destructive" in inspected
+    text = inspected.split("Text to inspect:", 1)[1]
+    assert "Tracked files, from `git diff --stat HEAD`:" in text
+    assert " seed.txt | 2 +-" in text
+    assert (
+        "Untracked files, which `git add -A` takes with them:\nNOTES/destructive.md\nloader.py"
+        in text
+    )
+    assert "All 42 tests passed." not in inspected, "the chat's last reply is not what it reads"
+    envelope = inspected.split("Envelope:", 1)[1].split("Text to inspect:", 1)[0]
+    assert "- Project: alpha-engine" in envelope
+    assert "- Ran test-fast: " in envelope and "last line: 12 passed" in envelope
+    assert "Text to inspect" not in written, "then the message is written"
+
+    said = [m["text"] for m in api.sent]
+    assert any(text.startswith("<b>destructive</b> · ") for text in said), "its answer is said"
+    card = api.sent[-1]["text"]
+    assert "✅ fast · test-fast passed · " in card
+    assert "✅ fast · lint passed · " in card
+    assert "🔎 fast · destructive complete" in card
+    assert card.index("🔎 fast") < card.index("<pre>alpha-engine#281")
+    assert len(channel._proposals) == 1
+
+
+async def test_an_option_can_be_named_when_commit_is_typed(tmp_path: Path, wired) -> None:
+    channel, _, _, repo = wired
+    offers(channel, tmp_path, fast=(["test-fast"], []))
+    wrote(repo, "loader.py", "x = 1\n")
+
+    await deliver(channel, typed("/commit FAST"))
+
+    assert ran_here(tmp_path) == ["test-fast"]
+    assert len(channel._proposals) == 1
+
+
+async def test_an_option_nobody_defined_is_said_and_the_card_offered(tmp_path: Path, wired) -> None:
+    channel, api, _, repo = wired
+    offers(channel, tmp_path, fast=(["test-fast"], []))
+    wrote(repo, "loader.py", "x = 1\n")
+
+    await deliver(channel, typed("/commit wide"))
+
+    assert "has no commit option called <b>wide</b>" in api.sent[-2]["text"]
+    assert buttons_of(api.sent[-1]) == ["✅ Commit", "🧪 fast", "✖️ Cancel"]
+    assert ran_here(tmp_path) == []
+
+
+async def test_review_and_commit_offers_only_the_options(tmp_path: Path, wired) -> None:
+    """It asks for the checks, so the plain Commit is not among them."""
+    channel, api, _, repo = wired
+    offers(channel, tmp_path, fast=(["test-fast"], []), wide=(["lint"], []))
+    wrote(repo, "loader.py", "x = 1\n")
+
+    await deliver(channel, typed("/review_and_commit"))
+
+    assert buttons_of(api.sent[-1]) == ["🧪 fast", "🧪 wide", "✖️ Cancel"]
+    assert ran_here(tmp_path) == []
+
+
+async def test_an_option_mistyped_is_never_taken_for_the_one_there_is(
+    tmp_path: Path, wired
+) -> None:
+    """`/review_and_commit` runs a project's one option — but not in place of
+    another name somebody typed."""
+    channel, api, _, repo = wired
+    offers(channel, tmp_path, fast=(["test-fast"], []))
+    wrote(repo, "loader.py", "x = 1\n")
+
+    await deliver(channel, typed("/review_and_commit wide"))
+
+    assert "has no commit option called <b>wide</b>" in api.sent[-2]["text"]
+    assert buttons_of(api.sent[-1]) == ["🧪 fast", "✖️ Cancel"]
+    assert ran_here(tmp_path) == []
+
+
+async def test_a_project_without_options_says_so_for_a_name(wired) -> None:
+    channel, api, _, repo = wired
+    wrote(repo, "loader.py", "x = 1\n")
+
+    await deliver(channel, typed("/commit fast"))
+
+    assert "has no commit option called <b>fast</b>" in api.sent[-1]["text"]
+    assert len(channel._proposals) == 0
+
+
+async def test_a_failing_command_stops_the_option_before_its_inspections(
+    tmp_path: Path, wired
+) -> None:
+    """A failed check is a fact with nothing in it to weigh: no card, and
+    nothing after it runs."""
+    channel, api, runner, repo = wired
+    inspections_in(channel, repo, tmp_path, destructive="# destructive")
+    offers(channel, tmp_path, fast=(["broken", "lint"], ["destructive"]))
+    wrote(repo, "loader.py", "x = 1\n")
+
+    await deliver(channel, typed("/commit fast"))
+
+    assert ran_here(tmp_path) == ["broken"]
+    assert runner.asked == []
+    said = api.sent[-1]["text"]
+    assert said.startswith("🚫 <b>broken</b> failed after ")
+    assert "so <b>fast</b> stopped there. Nothing was committed." in said
+    assert "FAIL: two tests broke" in said
+    assert len(channel._proposals) == 0
+
+
+async def test_a_command_that_did_not_run_stops_the_option(tmp_path: Path, wired) -> None:
+    channel, api, runner, repo = wired
+    offers(channel, tmp_path, fast=(["skipped", "lint"], []))
+    wrote(repo, "loader.py", "x = 1\n")
+
+    await deliver(channel, typed("/commit fast"))
+
+    assert ran_here(tmp_path) == ["skipped"]
+    assert api.sent[-1]["text"].startswith("🚫 <b>skipped</b> did not run (exit 2), so")
+    assert (runner.asked, len(channel._proposals)) == ([], 0)
+
+
+async def test_documentation_alone_runs_nothing_and_says_so(tmp_path: Path, wired) -> None:
+    """No test suite or inspection of code has anything to say about prose. The
+    warnings still read what was written."""
+    channel, api, runner, repo = wired
+    inspections_in(channel, repo, tmp_path, destructive="# destructive")
+    offers(channel, tmp_path, fast=(["test-fast"], ["destructive"]))
+    wrote(repo, "README.md", "# notes\n")
+
+    await deliver(channel, typed("/commit fast"))
+
+    assert ran_here(tmp_path) == []
+    assert all("Text to inspect" not in asked for asked in runner.asked)
+    assert "📄 Documentation only — <b>fast</b> runs nothing for it." in api.sent[-2]["text"]
+    card = api.sent[-1]["text"]
+    assert "📄 fast · documentation only, nothing run" in card
+    assert "281 appears nowhere" in card
+    assert len(channel._proposals) == 1
+
+
+async def test_files_changed_after_the_check_are_not_committed(tmp_path: Path, wired) -> None:
+    """A commit takes the tree as it is at the tap. One that moved since its
+    option checked it would commit what nobody checked."""
+    channel, api, _, repo = wired
+    offers(channel, tmp_path, fast=(["test-fast"], []))
+    wrote(repo, "loader.py", "x = 1\n")
+    await deliver(channel, typed("/commit fast"))
+    wrote(repo, "later.py", "y = 2\n")
+
+    await tap(channel, press(only_handle(channel), commit_card.MAKE))
+
+    assert commit_count(repo) == 1
+    assert len(channel._proposals) == 0, "spent: a fresh /commit checks the files as they are"
+    assert api.sent[-1]["text"].startswith(
+        "🚫 The files changed since they were checked, so nothing was committed."
+    )
+    assert "NOT COMMITTED — the files changed since they were checked" in api.edits[-1]["text"]
+
+
+async def test_files_left_as_they_were_checked_are_committed(tmp_path: Path, wired) -> None:
+    channel, _, _, repo = wired
+    offers(channel, tmp_path, fast=(["test-fast"], []))
+    wrote(repo, "loader.py", "x = 1\n")
+    await deliver(channel, typed("/commit fast"))
+
+    await tap(channel, press(only_handle(channel), commit_card.MAKE))
+
+    assert commit_count(repo) == 2
+    assert subject(repo) == "alpha-engine#281 loader stub and seed tweak"
+
+
+async def test_a_change_the_files_had_after_documentation_alone_is_not_committed(
+    tmp_path: Path, wired
+) -> None:
+    """Nothing ran for the prose, and code arriving afterwards would be
+    committed unchecked."""
+    channel, _, _, repo = wired
+    offers(channel, tmp_path, fast=(["test-fast"], []))
+    wrote(repo, "README.md", "# notes\n")
+    await deliver(channel, typed("/commit fast"))
+    wrote(repo, "loader.py", "x = 1\n")
+
+    await tap(channel, press(only_handle(channel), commit_card.MAKE))
+
+    assert commit_count(repo) == 1
+
+
+async def test_a_plain_commit_is_not_held_to_the_files_it_showed(wired) -> None:
+    """Nothing checked them, so the tap commits the branch as it is, as it
+    always has."""
+    channel, _, _, repo = wired
+    wrote(repo, "loader.py", "x = 1\n")
+    await deliver(channel, typed("/commit"))
+    wrote(repo, "later.py", "y = 2\n")
+
+    await tap(channel, press(only_handle(channel), commit_card.MAKE))
+
+    assert commit_count(repo) == 2
+
+
+async def test_files_changed_while_they_were_checked_get_no_card(tmp_path: Path, wired) -> None:
+    """A command that writes into the tree — a formatter — or an agent writing
+    meanwhile: what was checked is not what a commit would take."""
+    channel, api, _, repo = wired
+    offers(channel, tmp_path, fast=(["writes"], []))
+    wrote(repo, "loader.py", "x = 1\n")
+
+    await deliver(channel, typed("/commit fast"))
+
+    assert api.sent[-1]["text"].startswith("🚫 The files changed while <b>fast</b> checked them")
+    assert len(channel._proposals) == 0
+
+
+async def test_rewording_keeps_what_the_option_checked_on_the_card(tmp_path: Path, wired) -> None:
+    channel, api, _, repo = wired
+    offers(channel, tmp_path, fast=(["test-fast"], []))
+    wrote(repo, "loader.py", "x = 1\n")
+    await deliver(channel, typed("/commit fast"))
+    handle = only_handle(channel)
+    await tap(channel, press(handle, commit_card.REWRITE))
+
+    await deliver(channel, replying("power gen fixes", api.sent[-1]["text"]))
+
+    assert "✅ fast · test-fast passed · " in api.sent[-1]["text"]
+    assert channel._proposals.peek(handle).checked_content is not None
+
+
+async def test_one_project_command_at_a_time_counts_an_option(tmp_path: Path, wired) -> None:
+    channel, api, _, repo = wired
+    offers(channel, tmp_path, fast=(["test-fast"], []))
+    wrote(repo, "loader.py", "x = 1\n")
+    channel._working["alpha-engine"] = "test-all"
+
+    await deliver(channel, typed("/commit fast"))
+
+    assert "<b>test-all</b> is still running in <b>alpha-engine</b>" in api.sent[-1]["text"]
+    assert (ran_here(tmp_path), len(channel._proposals)) == ([], 0)
+    assert channel._working == {"alpha-engine": "test-all"}, "left as it was"
+
+
+async def test_an_option_s_commands_hold_the_project_while_they_run(tmp_path: Path, wired) -> None:
+    """So `/stop` can end one, and nothing else runs beside it."""
+    channel, _, _, repo = wired
+    offers(channel, tmp_path, fast=(["test-fast"], []))
+    seen: list[dict] = []
+    real = channel._command_run
+
+    async def watched(project, line, path, **more):
+        seen.append(dict(channel._working))
+        return await real(project, line, path, **more)
+
+    channel._command_run = watched
+    wrote(repo, "loader.py", "x = 1\n")
+
+    await deliver(channel, typed("/commit fast"))
+
+    assert seen == [{"alpha-engine": "commit fast"}]
+    assert channel._working == {}
+
+
+async def test_a_command_taking_a_label_asks_for_it_and_the_pick_runs_the_option(
+    tmp_path: Path, wired, monkeypatch
+) -> None:
+    from halyard.core.config_file import CommitOption
+
+    channel, api, _, repo = wired
+    ran = scoped(channel, monkeypatch)
+    found = channel._repositories["alpha-engine"]
+    channel._repositories["alpha-engine"] = replace(
+        found, commit_options={"wide": CommitOption("wide", commands=("e2e-scope",))}
+    )
+    tracker = behind_a_tracker(channel, monkeypatch, Tracker(labels=("backend",)))
+    wrote(repo, "loader.py", "x = 1\n")
+
+    await deliver(channel, typed("/commit wide"))
+
+    assert ran == []
+    asking = api.sent[-1]
+    assert "takes the task's <b>ddd-scope</b> label" in asking["text"]
+    refining = asking["reply_markup"]["inline_keyboard"][0][1]
+    assert refining["text"] == "ddd:refining"
+
+    await tap(channel, {**picked(""), "data": refining["callback_data"]})
+
+    assert tracker.added == [(281, "ddd:refining")]
+    assert ran == ["make test-e2e-scope SCOPE=refining"]
+    assert "✅ wide · e2e-scope passed · " in api.sent[-1]["text"]
+
+
+def test_commit_is_registered_and_telegram_will_accept_it() -> None:
     """One invalid name and Telegram rejects the whole list, so every command
-    is silently missing from the menu."""
-    from halyard.channels.telegram.adapter import COMMANDS
+    is silently missing from the menu. `/review_and_commit` is off it, now
+    that `/commit` offers the checks, and still answered — so no prompt may
+    take its name."""
+    from halyard.channels.telegram.adapter import COMMANDS, reserved_names
 
     names = {name for name, _ in COMMANDS}
-    assert {"commit", "review_and_commit"} <= names
+    assert "commit" in names
+    assert "review_and_commit" not in names
+    assert "review_and_commit" in reserved_names()
     for name, description in COMMANDS:
         assert re.fullmatch(r"[a-z0-9_]{1,32}", name), name
         assert len(description) <= 256, name

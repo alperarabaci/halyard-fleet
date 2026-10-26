@@ -42,6 +42,7 @@ def test_every_choice_card_can_be_cancelled() -> None:
         cards.result_choices("proof", ("nav", "drv")),
         cards.transition_choices(("review", "discovery")),
         cards.transition_seat_choices("review", ("nav", "xrev")),
+        cards.commit_choices(("fast",)),
     ]
 
     for keyboard in built:
@@ -127,3 +128,19 @@ def test_a_stopped_card_says_who_stopped_it() -> None:
 
     assert settled.startswith("<b>⏹ STOPPED</b> by tg:4242")
     assert "Inspection: <b>claims</b>" in settled
+
+
+def test_commit_offers_the_plain_commit_first_then_each_option() -> None:
+    keys = cards.commit_choices(("fast", "wide"))["inline_keyboard"]
+
+    assert keys[0] == [{"text": "✅ Commit", "callback_data": "hc:commit:."}]
+    assert [key["callback_data"] for key in keys[1]] == ["hc:commit:fast", "hc:commit:wide"]
+    assert keys[-1] == [cards.CANCEL]
+    assert cards.parse_choice_data("hc:commit:.") == ("commit", cards.PLAIN_COMMIT)
+
+
+def test_review_and_commit_offers_the_options_alone() -> None:
+    keys = cards.commit_choices(("fast",), plain=False)["inline_keyboard"]
+
+    assert keys == [[{"text": "🧪 fast", "callback_data": "hc:commit:fast"}], [cards.CANCEL]]
+    assert cards.commit_choices((), plain=False) is None

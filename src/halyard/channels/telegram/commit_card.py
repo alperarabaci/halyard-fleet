@@ -91,6 +91,7 @@ def render(
     message: str,
     summary: tuple[str, ...] = (),
     warnings: tuple[str, ...] = (),
+    checks: tuple[str, ...] = (),
 ) -> str:
     """The card: what changed, what it would be called, and what it would do.
 
@@ -104,6 +105,10 @@ def render(
     whole palette — so position carries the weight red would carry elsewhere: a
     blockquote draws its own rule down the left margin, and sitting before the
     heading means it is read before anything has been scrolled past.
+
+    `checks` are what a commit option ran first, a line each, just above the
+    message: what passed, and how each inspection came out. Its answers are in
+    the chat above the card.
     """
     said = [f"• {html.escape(line)}" for line in summary]
     alarm = (
@@ -123,6 +128,7 @@ def render(
             "",
             *_summary(work),
             *(["", *said] if said else []),
+            *(["", *(html.escape(line) for line in checks)] if checks else []),
             "",
             f"<pre>{html.escape(message)}</pre>",
         ]

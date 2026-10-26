@@ -68,7 +68,7 @@ from halyard.core.audit import (
     user_message,
 )
 from halyard.core.calls import Calls
-from halyard.core.config_file import ModelChoice, Project, Transition
+from halyard.core.config_file import CommitOption, ModelChoice, Project, Transition
 from halyard.core.events import Role
 from halyard.core.gate import Gate
 from halyard.core.questions import (
@@ -125,8 +125,7 @@ COMMANDS: tuple[tuple[str, str], ...] = (
     ("inspect", "Run one of this project's inspections over this chat's last reply"),
     ("transition", "Take this chat's last reply to its next stage, as this project defines it"),
     ("workflow", "Take this project's transitions in the order it wrote them down"),
-    ("commit", "Commit this branch's work, with a message to approve"),
-    ("review_and_commit", "The same, with this project's checks and its review round"),
+    ("commit", "Commit this branch's work, plainly or after this project's own checks"),
     ("open", "Open an app on the machine — claude, codex, gemini"),
     ("command", "Run one of this project's own commands"),
     ("label", "Put a label on the task this branch is for"),
@@ -142,8 +141,9 @@ COMMANDS: tuple[tuple[str, str], ...] = (
 
 #: Answered when typed, and kept off the menu. `/to` is what a transition already
 #: does from the menu, and one fewer button on a phone is worth more than a
-#: second way to the same place; whoever types it still gets it.
-UNLISTED: tuple[str, ...] = ("to",)
+#: second way to the same place; whoever types it still gets it. So is
+#: `/review_and_commit`, now that `/commit` offers a project's checks itself.
+UNLISTED: tuple[str, ...] = ("to", "review_and_commit")
 
 #: Commands a card of buttons stands for, on the `simple` menu: each button is
 #: that command typed.
@@ -1806,7 +1806,7 @@ class TelegramChannel:
             # gate, and asks a model for a sentence. None of that may hold the
             # poller, which is what answers everybody else's buttons.
             self._detach(
-                self._propose_commit(here or "", thread, full=command != "commit"),
+                self._commit(argument, here or "", thread, checked=command != "commit"),
                 f"/{command}",
             )
             return
@@ -2775,27 +2775,92 @@ class TelegramChannel:
             commits.flag_of(said),
         )
 
+    async def _commit(
+        self, typed: str, chat_id: str, thread_id: int | None, *, checked: bool = False
+    ) -> None:
+        """`/commit` — offer how to commit this project's work, or commit it the
+        way named.
+
+        A project with `commit_options:` gets a card: the plain Commit, which
+        checks nothing, and a button per option. One without any is proposed a
+        commit at once, as it always was. `/commit review` names the option
+        outright.
+
+        `checked` is `/review_and_commit`, from before the options, which asks
+        for the checks: the one option there is, or the card without the plain
+        Commit — and with no options, the project's warnings and its round, as
+        it always had.
+        """
+        found = self._repository_for(chat_id)
+        if found is None:
+            await self._say(self._no_repository(chat_id), chat_id, thread_id)
+            return
+        options = found.commit_options
+        if wanted := typed.strip():
+            option = next(
+                (one for key, one in options.items() if key.casefold() == wanted.casefold()), None
+            )
+            if option is not None:
+                await self._propose_commit(chat_id, thread_id, option=option)
+                return
+            await self._say(
+                f"<b>{html.escape(found.name)}</b> has no commit option called "
+                f"<b>{html.escape(wanted)}</b>.",
+                chat_id,
+                thread_id,
+            )
+            if not options:
+                return
+        elif not options:
+            await self._propose_commit(chat_id, thread_id, full=checked)
+            return
+        elif checked and len(options) == 1:
+            await self._propose_commit(chat_id, thread_id, option=next(iter(options.values())))
+            return
+        offered = [] if checked else ["✅ <b>Commit</b> — checks nothing"]
+        for option in options.values():
+            does = [
+                *([f"runs {', '.join(option.commands)}"] if option.commands else []),
+                *([f"inspects {', '.join(option.inspections)}"] if option.inspections else []),
+            ]
+            offered.append(
+                f"🧪 <b>{html.escape(option.name)}</b> — {html.escape(' · '.join(does))}"
+            )
+        await self._say(
+            f"Commit <b>{html.escape(found.name)}</b> how?\n\n" + "\n".join(offered),
+            chat_id,
+            thread_id,
+            reply_markup=cards.commit_choices(tuple(options), plain=not checked),
+        )
+
     async def _propose_commit(
-        self, chat_id: str, thread_id: int | None, *, full: bool = False
+        self,
+        chat_id: str,
+        thread_id: int | None,
+        *,
+        full: bool = False,
+        option: CommitOption | None = None,
     ) -> None:
         """Read the branch's uncommitted work and offer to commit it.
 
-        Two commands, one path. `/commit` proposes a message and stops there —
-        which is what most changes want, and what a change to `scripts/` wants
-        every time. `/review_and_commit` adds whatever the project has asked
-        for: its own check, its warnings, and the round it offers instead of
-        committing.
+        Plain, it proposes a message and stops there — which is what most
+        changes want, and what a change to `scripts/` wants every time. With a
+        commit `option`, its commands and inspections run first, and the card
+        carries what the project asked for besides: its warnings, and the round
+        it offers instead of committing. `full` is those two alone, for
+        `/review_and_commit` in a project without options.
 
-        Split by command rather than by a list of exceptions. A rule that says
-        *these paths skip the gate* has to be maintained against a repository
-        that keeps growing, and gets it wrong quietly; a second command is
-        chosen at the moment somebody already knows which of the two they meant.
+        Chosen by a button rather than by a list of exceptions. A rule that
+        says *these paths skip the gate* has to be maintained against a
+        repository that keeps growing, and gets it wrong quietly; a button is
+        pressed at the moment somebody already knows which they meant.
         """
         found = self._repository_for(chat_id)
         if found is None:
             await self._say(self._no_repository(chat_id), chat_id, thread_id)
             return
         project, path = found.name, found.path
+        full = full or option is not None
 
         # Off the event loop: git is a subprocess, and the poller has approval
         # cards to keep delivering while this reads a repository.
@@ -2808,74 +2873,14 @@ class TelegramChannel:
             await self._say(f"\U0001f6ab {html.escape(work.blocked)}", chat_id, thread_id)
             return
 
-        # Said before it starts, not after. A project's own check can run for
-        # minutes, and silence for minutes reads as nothing having happened.
-        checked = commits.Checked()
-        if full:
-            # `validate:` names one of the project's `commands:`, checked when
-            # the file was read; what runs is the line written there.
-            command = found.commands.get(found.validate) if found.validate else None
-            skipping = commits.validation.only_documentation(work)
-            if command and not skipping:
-                await self._say(
-                    f"\u23f3 Running <code>{html.escape(command)}</code>\u2026",
-                    chat_id,
-                    thread_id,
-                )
-            elif command:
-                await self._say(
-                    f"\U0001f4c4 Documentation only \u2014 not running "
-                    f"<code>{html.escape(command)}</code>.",
-                    chat_id,
-                    thread_id,
-                )
-
-            # Progress from the worker thread, put back on the loop. Somebody
-            # who pressed this is waiting for a card and cannot do anything else
-            # with that thread, so a run that says nothing for three minutes
-            # reads as Halyard having died rather than as a test suite working.
-            loop = asyncio.get_running_loop()
-
-            def progress(seconds: float, latest: str) -> None:
-                asyncio.run_coroutine_threadsafe(
-                    self._say(
-                        f"\u2026 {self._elapsed(seconds)} \u2014 "
-                        f"<code>{html.escape(latest[:150])}</code>",
-                        chat_id,
-                        thread_id,
-                    ),
-                    loop,
-                )
-
-            started = time.monotonic()
-            checked = await asyncio.to_thread(
-                partial(
-                    commits.check,
-                    work,
-                    path,
-                    command,
-                    warn_if=found.warn_if,
-                    on_progress=progress,
-                )
-            )
-            logger.info(
-                "commit %s: %d files, checks %s in %.1fs",
-                project,
-                len(work.changes),
-                "skipped (documentation)" if checked.documentation_only else "ran",
-                time.monotonic() - started,
-            )
-            if checked.refused:
-                # No card at all. A failing check is a fact rather than a
-                # judgement, so there is nothing here for somebody to weigh.
-                said = (
-                    f"\U0001f6ab <code>{html.escape(checked.refused)}</code> failed. "
-                    "Nothing was committed."
-                )
-                if checked.output:
-                    said += f"\n\n<pre>{html.escape(checked.output)}</pre>"
-                await self._say(said, chat_id, thread_id)
+        checks: tuple[str, ...] = ()
+        content: str | None = None
+        if option is not None:
+            ran = await self._check_with(found, option, work, chat_id, thread_id)
+            if ran is None:
                 return
+            checks, content = ran
+        checked = commits.check(work, warn_if=found.warn_if) if full else commits.Checked()
 
         asked = commits.confirmation.inquiry(found.confirmation, path) if full else ""
         writing = time.monotonic()
@@ -2901,7 +2906,15 @@ class TelegramChannel:
         alarms = (*checked.warnings, *((flag,) if flag else ()))
         offers_round = full and commits.confirmation.offered(found.confirmation)
         handle = self._proposals.add(
-            project, path, work, message, summary, alarms, reviewed=offers_round
+            project,
+            path,
+            work,
+            message,
+            summary,
+            alarms,
+            reviewed=offers_round,
+            checks=checks,
+            checked_content=content,
         )
         await self._say(
             commit_card.render(
@@ -2910,12 +2923,212 @@ class TelegramChannel:
                 message=message,
                 summary=summary,
                 warnings=alarms,
+                checks=checks,
             ),
             chat_id,
             thread_id,
             reply_markup=commit_card.keyboard(handle, confirmation=offers_round),
             **self._commit_card_about(handle, project, message),
         )
+
+    async def _check_with(
+        self,
+        found: Project,
+        option: CommitOption,
+        work: commits.Uncommitted,
+        chat_id: str,
+        thread_id: int | None,
+    ) -> tuple[tuple[str, ...], str] | None:
+        """Run a commit option over the work: its commands, then its inspections.
+
+        The lines its card carries, and the files it checked — or None, having
+        said why there is no card: a command failed or did not run, a command
+        is waiting for a label, another one is running here, or the files moved
+        while they were checked. The commands run as a transition's do — one
+        project command at a time, `/stop` ends one, a task label filled in —
+        and the inspections read the change: what `commits.described` says of
+        it, with the envelope a transition's inspections have.
+
+        Only prose changed, nothing runs: no test suite or inspection of code
+        has anything to say about it. The files are held to that all the same,
+        since a file of code arriving afterwards would be committed unchecked.
+        """
+        name = f"<b>{html.escape(option.name)}</b>"
+        if commits.validation.only_documentation(work):
+            content = await asyncio.to_thread(frame.tree, found.path)
+            if content is None:
+                await self._say(
+                    f"\U0001f6ab git could not say which files {name} would check, so "
+                    "there is no card.",
+                    chat_id,
+                    thread_id,
+                )
+                return None
+            await self._say(
+                f"\U0001f4c4 Documentation only — {name} runs nothing for it.",
+                chat_id,
+                thread_id,
+            )
+            return (f"\U0001f4c4 {option.name} · documentation only, nothing run",), content.content
+
+        lines = await self._command_lines(found, option.commands)
+        if lines.missing:
+            await self._ask_for_label(
+                found,
+                lines,
+                kind=cards.PICKED_FOR_COMMIT,
+                name=option.name,
+                chat_id=chat_id,
+                thread_id=thread_id,
+            )
+            return None
+        # One at a time per project, as for `/command` and a transition: two
+        # `make` runs in one directory fight over the same outputs.
+        if option.commands and (busy := self._working.get(found.name)):
+            await self._say(
+                f"⏳ <b>{html.escape(busy)}</b> is still running in "
+                f"<b>{html.escape(found.name)}</b>, so {name} did not run. One at a time.",
+                chat_id,
+                thread_id,
+            )
+            return None
+        if option.commands:
+            self._working[found.name] = f"commit {option.name}"
+        # Said before it starts, not after. A project's own check can run for
+        # minutes, and silence for minutes reads as nothing having happened.
+        steps = []
+        if option.commands:
+            run = ", ".join(f"<code>{html.escape(lines.lines[c])}</code>" for c in option.commands)
+            steps.append(f"running {run}")
+        if option.inspections:
+            steps.append(f"inspecting {html.escape(', '.join(option.inspections))}")
+        started = time.monotonic()
+        try:
+            before = await asyncio.to_thread(frame.tree, found.path)
+            if before is None:
+                await self._say(
+                    f"\U0001f6ab git could not say which files {name} would check, so "
+                    "nothing was run.",
+                    chat_id,
+                    thread_id,
+                )
+                return None
+            await self._say(f"⏳ {name} — {', then '.join(steps)}…", chat_id, thread_id)
+            ran, stopped = await transitioning.run_commands(
+                option.commands,
+                lines=lines.lines,
+                not_run=found.commands_not_run,
+                runner=_Running(self, found.path, chat_id, thread_id, found.name),
+                about=f"Commit option {option.name}",
+                stop_at=(commands_running.FAILED, commands_running.NOT_RUN),
+            )
+            if stopped is not None:
+                # No card at all. A failing check is a fact rather than a
+                # judgement, so there is nothing here for somebody to weigh.
+                await self._say(self._check_stopped(option, *ran[-1]), chat_id, thread_id)
+                return None
+            answers = await self._inspect_change(found, option, work, ran, chat_id, thread_id)
+            after = await asyncio.to_thread(frame.tree, found.path)
+        finally:
+            if option.commands:
+                self._working.pop(found.name, None)
+        logger.info(
+            "commit %s: %s checked %d files in %.1fs",
+            found.name,
+            option.name,
+            len(work.changes),
+            time.monotonic() - started,
+        )
+        if after is None or after.content != before.content:
+            await self._say(
+                f"\U0001f6ab The files changed while {name} checked them, so there is no "
+                "card: what it checked is not what a commit would take. /commit again to "
+                "check them as they are now.",
+                chat_id,
+                thread_id,
+            )
+            return None
+        passed = (
+            f"✅ {option.name} · {command.name} passed · {self._elapsed(result.seconds)}"
+            for command, result in ran
+        )
+        inspected = (
+            f"\U0001f50e {option.name} · {answer.name} {answer.status.value}" for answer in answers
+        )
+        return (*passed, *inspected), before.content
+
+    def _check_stopped(
+        self,
+        option: CommitOption,
+        command: commands_offered.Command,
+        result: commands_running.Result,
+    ) -> str:
+        """What a commit option's command that failed, or did not run, says in
+        the chat — with the end of what it printed."""
+        took = self._elapsed(result.seconds)
+        if result.stopped:
+            how = f"was stopped from the chat after {took}"
+        elif result.timed_out:
+            how = f"was stopped after {took}, out of time"
+        elif result.exit_code is None:
+            how = "could not be started"
+        elif commands_running.outcome(result, command.not_run) == commands_running.FAILED:
+            how = f"failed after {took}"
+        else:
+            how = f"did not run (exit {result.exit_code})"
+        said = (
+            f"\U0001f6ab <b>{html.escape(command.name)}</b> {how}, so "
+            f"<b>{html.escape(option.name)}</b> stopped there. Nothing was committed."
+        )
+        if result.output:
+            said += f"\n\n<pre>{html.escape(result.output)}</pre>"
+        return said
+
+    async def _inspect_change(
+        self,
+        found: Project,
+        option: CommitOption,
+        work: commits.Uncommitted,
+        ran: Sequence[tuple[commands_offered.Command, commands_running.Result]],
+        chat_id: str,
+        thread_id: int | None,
+    ) -> tuple[inspecting.Answer, ...]:
+        """A commit option's inspections over the change it would commit, each
+        answer said in the chat as it would be for `/inspect`.
+
+        They read what Halyard can say of the change rather than the chat's
+        last reply: the change is what is about to be committed, and a reply
+        may be about something else. The envelope is a transition's — where the
+        repository stands, and what each command did.
+        """
+        if not option.inspections:
+            return ()
+        labels = await self._task_labels(found)
+        known = await asyncio.to_thread(
+            partial(frame.context, found.path, found.name, labels=labels)
+        )
+        change = await asyncio.to_thread(commits.described, found.path)
+        answers = await transitioning.run_inspections(
+            option.inspections,
+            project_inspections=found.inspections,
+            project=found.path,
+            context=[
+                *known,
+                *(commands_running.summary(c.name, c.line, r, c.not_run) for c, r in ran),
+            ],
+            note="",
+            reply=change,
+            asker=self._inspector(chat_id, (chat_id, thread_id)),
+            model=self._inspection_model.model or INSPECTION_MODEL,
+            effort=self._inspection_model.effort,
+            models=found.inspection_models,
+            timeout=INSPECTION_TIMEOUT_SECONDS,
+            about=f"commit option {option.name}, the change on {work.branch}",
+            keeper=await self._keeper(found),
+        )
+        for answer in answers:
+            await self._say_answer(answer, chat_id, thread_id)
+        return answers
 
     async def _rewrite_commit(
         self, handle: str, text: str, chat_id: str, thread_id: int | None, user: str
@@ -2949,6 +3162,7 @@ class TelegramChannel:
                 message=reworded.message,
                 summary=reworded.summary,
                 warnings=reworded.warnings,
+                checks=reworded.checks,
             ),
             chat_id,
             thread_id,
@@ -3029,6 +3243,26 @@ class TelegramChannel:
             await self._settle_commit(proposal, "\u2716\ufe0f CANCELLED", user_id, here, message_id)
             return
 
+        if (moved := await self._moved_since_checked(proposal)) is not None:
+            # A commit takes the tree as it is now, so one that moved since its
+            # option checked it would commit what nobody checked. Refused, and
+            # the proposal spent: a fresh `/commit` checks the files as they are.
+            await self._dismiss(query_id, "Nothing was committed.")
+            await self._say(
+                f"\U0001f6ab {moved}, so nothing was committed. /commit again to check "
+                "them as they are now.",
+                here or "",
+                thread_id,
+            )
+            await self._settle_commit(
+                proposal,
+                "\U0001f6ab NOT COMMITTED \u2014 the files changed since they were checked",
+                user_id,
+                here,
+                message_id,
+            )
+            return
+
         try:
             sha = await asyncio.to_thread(commits.commit, proposal.path, proposal.message)
         except Exception as refused:
@@ -3075,6 +3309,18 @@ class TelegramChannel:
 
         await self._say("\n".join(done), here or "", thread_id)
         await self._settle_commit(proposal, outcome, user_id, here, message_id)
+
+    async def _moved_since_checked(self, proposal: commits.Proposal) -> str | None:
+        """Why a proposal's files are not the ones its commit option checked,
+        or None when they are — or when nothing checked them."""
+        if proposal.checked_content is None:
+            return None
+        now = await asyncio.to_thread(frame.tree, proposal.path)
+        if now is None:
+            return "git could not say whether the files changed since they were checked"
+        if now.content != proposal.checked_content:
+            return "The files changed since they were checked"
+        return None
 
     async def _send_confirmation(
         self,
@@ -3335,16 +3581,10 @@ class TelegramChannel:
                 f"from {said.agent_id or '?'} {said.session_id or '?'}"
             ),
         )
-        # Halyard's own words about reads that never ran, under the model's.
-        halyard_said = inspecting.not_run_block(answer.not_run)
         if not answer.measured:
-            await self._say(
-                f"<b>{html.escape(name)}</b> · {html.escape(inspecting.said(answer))}"
-                + (f"\n\n{html.escape(halyard_said)}" if halyard_said else ""),
-                chat_id,
-                thread_id,
-            )
+            await self._say_answer(answer, chat_id, thread_id)
             return
+        halyard_said = inspecting.not_run_block(answer.not_run)
         findings = answer.text + (f"\n\n{halyard_said}" if halyard_said else "")
         # Kept whole — what ran, on what, what it found, and the reply itself —
         # so a button under the answer hands a seat something it can read cold,
@@ -3364,15 +3604,42 @@ class TelegramChannel:
                     reply=said.text,
                 ),
             )
+        await self._say_answer(
+            answer,
+            chat_id,
+            thread_id,
+            onward=cards.result_choices(name, tuple(seat.label for seat in self._seats)),
+        )
+
+    async def _say_answer(
+        self,
+        answer: inspecting.Answer,
+        chat_id: str,
+        thread_id: int | None,
+        *,
+        onward: dict | None = None,
+    ) -> None:
+        """An inspection's answer in the chat: its name and how it came out,
+        then the model's text, split for Telegram — `onward` under the last
+        piece — and Halyard's own words about reads that never ran under it."""
+        name = html.escape(answer.name)
+        halyard_said = html.escape(inspecting.not_run_block(answer.not_run))
+        if not answer.measured:
+            await self._say(
+                f"<b>{name}</b> · {html.escape(inspecting.said(answer))}"
+                + (f"\n\n{halyard_said}" if halyard_said else ""),
+                chat_id,
+                thread_id,
+            )
+            return
         pieces = cards.split_for_telegram(answer.text)
-        onward = cards.result_choices(name, tuple(seat.label for seat in self._seats))
         # Outside the model's block, so it reads as Halyard's — under the last
         # piece when it fits there, after it otherwise.
-        tail = html.escape(halyard_said)
+        tail = halyard_said
         alone = bool(tail) and len(pieces[-1]) + len(tail) > cards.CHUNK_LIMIT
         status = html.escape(inspecting.said(answer))
         for index, chunk in enumerate(pieces):
-            head = f"<b>{html.escape(name)}</b> · {status}\n" if index == 0 else ""
+            head = f"<b>{name}</b> · {status}\n" if index == 0 else ""
             last = index == len(pieces) - 1
             said = f"\n\n{tail}" if last and tail and not alone else ""
             await self._say(
@@ -3756,6 +4023,8 @@ class TelegramChannel:
             await self._run_command(name, chat_id, thread_id)
         elif kind == cards.PICKED_FOR_WORKFLOW:
             await self._resume_workflow("go", chat_id, thread_id)
+        elif kind == cards.PICKED_FOR_COMMIT:
+            await self._commit(name, chat_id, thread_id)
 
     async def _task_labels(self, found: Project) -> dict[str, str]:
         """The task's labels from this project's own groups, for the envelope.
@@ -5928,6 +6197,17 @@ class TelegramChannel:
             if what == "run":
                 await self._run_command(value, here or "", message.get("message_thread_id"))
                 return
+            if what == "commit":
+                # Detached, as `/commit` is: an option may run the project's
+                # gate and its inspections before there is a card.
+                thread = message.get("message_thread_id")
+                self._detach(
+                    self._propose_commit(here or "", thread)
+                    if value == cards.PLAIN_COMMIT
+                    else self._commit(value, here or "", thread),
+                    "/commit",
+                )
+                return
             if what in ("inspect", "check"):
                 # `check` is what a card said until 2026-09-23; its buttons still
                 # work. Detached, as the command is: an inspection is a model turn
@@ -6234,6 +6514,8 @@ class TelegramChannel:
             return f"{name}, step {int(index) + 1}" if index.isdigit() else name
         if what == "pick":
             return button
+        if what == "commit":
+            return "Commit" if value == cards.PLAIN_COMMIT else value
         return value
 
     async def _close_pressed(self, callback: dict, outcome: str) -> None:

@@ -13,8 +13,8 @@ What you press on your phone, and what you run on the machine.
 | `/options` | every model and effort level the runtime accepts |
 | `/model`, `/effort` | what answers, and how hard it thinks |
 | `/command` | run one of the project's own commands, and hear how it went |
-| `/commit` | commit this branch's work, with a message to approve — and push |
-| `/review_and_commit` | the same, plus this project's own validation and its review round |
+| `/commit` | commit this branch's work, with a message to approve — and push; with `commit_options:`, plainly or after one of the project's own checks |
+| `/review_and_commit` | *(typed; not on the menu)* the project's checks: its one commit option, or its options without the plain Commit |
 | `/label` | put a label on the task this branch is for |
 | `/forward` | hand this chat's last reply to another agent |
 | `/to` | *(typed; not on the menu)* hand a message to another agent by name |

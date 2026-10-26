@@ -2,11 +2,13 @@
 
 Two checks that answer to different standards, deliberately.
 
-**The project's own command** — `make test-fast`, or whatever it calls its quick
-check — is a fact. If it fails the code is broken, there is nothing to weigh,
-and no card is offered at all. Configured per project and absent by default: a
-command invented on this project's behalf would fail on every commit somewhere
-else.
+**The project's own commands** — `make test-fast`, or whatever it calls its
+quick check — are facts. If one fails the code is broken, there is nothing to
+weigh, and no card is offered at all. They are named by a project's
+`commit_options:` and run as its other commands are, through
+`halyard.commands`; absent by default, because a command invented on this
+project's behalf would fail on every commit somewhere else. What this module
+says about them is when they are not worth running: `only_documentation`.
 
 **The warnings** are guesses, and are treated like them. They are also
 *somebody's convention* rather than a truth about software, so they are named
@@ -37,29 +39,19 @@ import re
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from fnmatch import fnmatch
-from pathlib import Path
 
-from halyard.commands.running import run as commands_run
 from halyard.commits.repository import Uncommitted
 
 logger = logging.getLogger(__name__)
-
-#: How long a project's check may take before the phone is told it did not
-#: finish. Generous, because "fast" means different things to different test
-#: suites, and bounded because somebody is holding a phone waiting for a card.
-VALIDATE_TIMEOUT = 600.0
-
-#: How much of a failing run to send. The last lines, because that is where a
-#: test runner puts what failed; the rest is a phone-shaped wall of dots.
-FAILURE_LINES = 25
 
 #: Changes that cannot break a test suite, so nothing is run for them.
 #:
 #: A `/commit` of one edited note used to start the project's whole gate and
 #: leave somebody watching a phone for minutes, for a change no test in it could
-#: have an opinion about.
+#: have an opinion about. A commit option's inspections are skipped with its
+#: commands: they read the change for what code can get wrong.
 #:
-#: Only the command is skipped. The warnings still run, and the task-id one in
+#: Only those are skipped. The warnings still run, and the task-id one in
 #: particular is *not* a false positive here: prompts and standards live in
 #: markdown in the project this was built for, and those files carry the task id
 #: like any other. It is searched in what was added, whatever the file is.
@@ -83,28 +75,13 @@ _ADDED = re.compile(r"^\+(?!\+\+)", re.MULTILINE)
 
 @dataclass(frozen=True)
 class Checked:
-    """What the checks found.
+    """What the guesses found. `warnings` ride along on the card and stop
+    nothing.
 
-    `refused` is set only by a fact — it means no card, and it says which check
-    said no. `warnings` ride along on the card and stop nothing.
-
-    All plain text. How any of it is marked up belongs to whichever channel is
-    showing it, and a test runner's output is full of angle brackets that would
-    otherwise arrive as broken HTML.
+    Plain text. How it is marked up belongs to whichever channel is showing it.
     """
 
-    #: The command that refused, or None if nothing did.
-    refused: str | None = None
-    #: The tail of what it printed, for somebody who has to guess why.
-    output: str = ""
     warnings: tuple[str, ...] = ()
-    #: What ran and passed, so the card can say so. Silence about a check that
-    #: passed would leave somebody wondering whether it ran at all.
-    passed: str | None = None
-    #: True when nothing ran because there was nothing a check could tell us.
-    #: Said on the card: a check that was skipped and a check that passed look
-    #: the same from a phone, and they are not the same.
-    documentation_only: bool = False
 
 
 def only_documentation(work: Uncommitted, patterns: Sequence[str] = DOCUMENTATION) -> bool:
@@ -168,44 +145,8 @@ WARNINGS: dict[str, Callable[[Uncommitted], str | None]] = {
 DEFAULT_WARNINGS: tuple[str, ...] = ("task-id-missing",)
 
 
-def _tail(text: str, lines: int = FAILURE_LINES) -> str:
-    kept = [line for line in (text or "").splitlines() if line.strip()][-lines:]
-    return "\n".join(kept)
-
-
-def run(
-    command: str,
-    path: Path,
-    *,
-    timeout: float = VALIDATE_TIMEOUT,
-    on_progress=None,
-) -> tuple[bool, str]:
-    """Run the project's check, through the one runner both callers share.
-
-    Kept as a function here rather than calling `commands.run` from `check`
-    directly, so a test can substitute it without reaching into another package.
-    """
-    result = commands_run(command, path, timeout=timeout, on_progress=on_progress)
-    return result.ok, result.output
-
-
-def check(
-    work: Uncommitted,
-    path: Path,
-    command: str | None,
-    *,
-    warn_if: Sequence[str] | None = None,
-    documentation: Sequence[str] = DOCUMENTATION,
-    timeout: float = VALIDATE_TIMEOUT,
-    on_progress=None,
-    run_check=run,
-) -> Checked:
-    """Everything that has to hold, in the order that wastes the least.
-
-    The guesses are evaluated first because they cost nothing, and the project's
-    command last because it costs the most — but the cheap ones cannot refuse,
-    so the order changes no outcome, only how long a doomed commit takes to say
-    so.
+def check(work: Uncommitted, *, warn_if: Sequence[str] | None = None) -> Checked:
+    """The warnings that apply to this work.
 
     `warn_if` names which warnings apply; `None` means the default set. A name
     nobody recognises is logged and skipped rather than raised — a typo in a
@@ -220,17 +161,4 @@ def check(
         if (said := found(work)) is not None:
             warnings.append(said)
 
-    # Nothing a test suite could say anything about, so it is not started. The
-    # warnings above still stand: they read what was written, and what was
-    # written is where a task id lives in a repository whose standards are
-    # markdown.
-    if only_documentation(work, documentation):
-        return Checked(warnings=tuple(warnings), documentation_only=True)
-
-    if not command:
-        return Checked(warnings=tuple(warnings))
-
-    passed, said = run_check(command, path, timeout=timeout, on_progress=on_progress)
-    if not passed:
-        return Checked(refused=command, output=said, warnings=tuple(warnings))
-    return Checked(warnings=tuple(warnings), passed=command)
+    return Checked(warnings=tuple(warnings))

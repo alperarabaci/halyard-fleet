@@ -57,6 +57,14 @@ class Proposal:
     #: the message redraws the card with the warning still on it — a warning
     #: that disappears when you type is a warning nobody heeds twice.
     warnings: tuple[str, ...] = ()
+    #: What a commit option ran before the card, a line each, held for the
+    #: same reason.
+    checks: tuple[str, ...] = ()
+    #: The files a commit option checked — the tree id `frame.tree` gives for
+    #: them — or None when nothing was checked. A commit takes the tree as it
+    #: is at the tap, so one that has moved since is refused: what would be
+    #: committed is not what was checked.
+    checked_content: str | None = None
 
 
 class Proposals:
@@ -82,6 +90,8 @@ class Proposals:
         summary: tuple[str, ...] = (),
         warnings: tuple[str, ...] = (),
         reviewed: bool = False,
+        checks: tuple[str, ...] = (),
+        checked_content: str | None = None,
     ) -> str:
         """Offer one, and return the handle its buttons will carry."""
         self._forget_stale()
@@ -95,6 +105,8 @@ class Proposals:
             summary=summary,
             warnings=warnings,
             reviewed=reviewed,
+            checks=checks,
+            checked_content=checked_content,
         )
         return handle
 

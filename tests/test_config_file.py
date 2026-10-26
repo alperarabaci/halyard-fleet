@@ -717,19 +717,84 @@ def test_a_transition_cannot_run_a_command_that_asks_for_a_typed_value(tmp_path)
         )
 
 
-def test_validate_cannot_name_a_command_that_takes_a_label(tmp_path) -> None:
-    """A commit has nowhere to ask for one."""
-    with pytest.raises(ValueError, match="takes a value"):
-        a_project(
-            tmp_path,
-            lines=[
-                "label_groups:",
-                "  ddd-scope: [ddd:capstone]",
-                "commands:",
-                E2E,
-                "validate: e2e-scope",
-            ],
-        )
+def test_validate_can_name_a_command_that_takes_a_label(tmp_path) -> None:
+    """Read as a commit option, it asks for the label with a card, as a
+    transition does."""
+    [project] = a_project(
+        tmp_path,
+        lines=[
+            "label_groups:",
+            "  ddd-scope: [ddd:capstone]",
+            "commands:",
+            E2E,
+            "validate: e2e-scope",
+        ],
+    )
+
+    assert project.commit_options["review"].commands == ("e2e-scope",)
+
+
+def commit_options(*options: str) -> list[str]:
+    """A project with two commands, two inspections, and these options."""
+    return [
+        "commands:",
+        "  test-fast: make test-fast",
+        "  lint: make lint",
+        "  both: [test-fast, lint]",
+        "  pull: make pull TASK={input.task}",
+        "inspections:",
+        "  destructive: NOTES/destructive.md",
+        "  claims: NOTES/claims.md",
+        "commit_options:",
+        *(f"  {option}" for option in options),
+    ]
+
+
+def test_commit_options_are_read_in_the_order_they_were_written(tmp_path) -> None:
+    from halyard.core.config_file import CommitOption
+
+    [project] = a_project(
+        tmp_path,
+        lines=commit_options(
+            "fast: {commands: [test-fast], inspect: [destructive]}",
+            "wide: {commands: [test-fast, lint]}",
+            "look: {inspect: [destructive, claims]}",
+        ),
+    )
+
+    assert project.commit_options == {
+        "fast": CommitOption("fast", commands=("test-fast",), inspections=("destructive",)),
+        "wide": CommitOption("wide", commands=("test-fast", "lint")),
+        "look": CommitOption("look", inspections=("destructive", "claims")),
+    }
+    assert project.older == ()
+
+
+@pytest.mark.parametrize(
+    ("option", "said"),
+    [
+        ("fast: {commands: [gone]}", "names commands this project does not define: gone"),
+        ("fast: {inspect: [proof]}", "names inspections this project does not define: proof"),
+        ("fast: {commands: [both]}", "names 'both', which is a list of commands"),
+        ("fast: {commands: [pull]}", "takes {input.task} — typed by somebody"),
+        ("fast: {}", "runs nothing"),
+        ("fast: {commands: [test-fast], to: navigator}", "unknown field(s) to"),
+        ("fast: {commands: test-fast}", "`commands:` must be a list of command names"),
+        ("fast: {inspect: claims}", "`inspect:` must be a list of inspection names"),
+        ("Fast: {commands: [test-fast]}", "needs a name of lowercase letters"),
+        ("fast: [test-fast]", "must be a mapping"),
+    ],
+)
+def test_a_commit_option_is_read_strictly(tmp_path, option: str, said: str) -> None:
+    """Refused when the file is read, rather than when somebody presses it with
+    a commit waiting."""
+    with pytest.raises(ValueError, match=re.escape(said)):
+        a_project(tmp_path, lines=commit_options(option))
+
+
+def test_commit_options_must_be_a_mapping(tmp_path) -> None:
+    with pytest.raises(ValueError, match="`commit_options:` must be a mapping"):
+        a_project(tmp_path, lines=["commit_options: [fast]"])
 
 
 def test_findings_are_no_longer_read_and_a_file_naming_them_still_starts(tmp_path) -> None:
@@ -797,12 +862,34 @@ def test_a_transition_of_commands_alone_is_something_to_hand_on(tmp_path) -> Non
     assert project.transitions["tests"].include_last_message is False
 
 
-def test_validate_names_one_of_the_projects_commands(tmp_path) -> None:
+def test_validate_is_read_as_the_commit_option_review(tmp_path) -> None:
+    """It works, and `doctor` says what it is called now."""
+    from halyard.core.config_file import CommitOption
+
     [project] = a_project(
         tmp_path, lines=["commands:", "  test-fast: make test-fast", "validate: test-fast"]
     )
 
-    assert project.validate == "test-fast"
+    assert project.commit_options == {"review": CommitOption("review", commands=("test-fast",))}
+    assert project.older == (
+        "the project: `validate: test-fast` is now `commit_options: review: commands: [test-fast]`",
+    )
+
+
+def test_validate_goes_first_beside_commit_options_of_its_own(tmp_path) -> None:
+    [project] = a_project(
+        tmp_path, lines=[*commit_options("wide: {commands: [lint]}"), "validate: test-fast"]
+    )
+
+    assert list(project.commit_options) == ["review", "wide"]
+
+
+def test_validate_and_an_option_called_review_is_refused(tmp_path) -> None:
+    """Two places saying what `review` runs; neither is quietly dropped."""
+    with pytest.raises(ValueError, match="has one by that name already"):
+        a_project(
+            tmp_path, lines=[*commit_options("review: {commands: [lint]}"), "validate: test-fast"]
+        )
 
 
 def test_validate_written_as_a_command_line_is_refused(tmp_path) -> None:

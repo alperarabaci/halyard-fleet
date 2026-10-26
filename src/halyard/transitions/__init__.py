@@ -25,8 +25,17 @@ envelope, and a transition with a `followup_prompt:` sends that from the second
 round on, with what the seat said back to the round before.
 """
 
-from halyard.transitions.flow import take
+from halyard.transitions.flow import run_commands, run_inspections, take
 from halyard.transitions.message import compose
 from halyard.transitions.spec import Delivery, Handed, Previous, Runner
 
-__all__ = ["Delivery", "Handed", "Previous", "Runner", "compose", "take"]
+__all__ = [
+    "Delivery",
+    "Handed",
+    "Previous",
+    "Runner",
+    "compose",
+    "run_commands",
+    "run_inspections",
+    "take",
+]
