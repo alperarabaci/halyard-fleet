@@ -557,14 +557,18 @@ async def test_a_resume_that_works_is_never_queued(monkeypatch) -> None:
     assert "queue" not in seen[0]
 
 
-async def test_a_queued_message_still_carries_the_chosen_model(monkeypatch) -> None:
+async def test_a_queued_message_carries_no_model(monkeypatch) -> None:
+    """It runs on the thread's own model inside the application. Codex 0.164's
+    queue call has no field for one, and Codex past 0.164 refuses
+    `codex queue --model` outright."""
     seen = answering(monkeypatch, Refusing(), FakeProcess())
     runner = runner_with_catalog()
     runner.set_model("abc", "gpt-5.6-sol")
 
     await runner.send("abc", "carry on", cwd="/repo")
 
-    assert "--model" in seen[1] and "gpt-5.6-sol" in seen[1]
+    assert "--model" in seen[0] and "gpt-5.6-sol" in seen[0], "the turn of its own still does"
+    assert seen[1][1:] == ["queue", "--thread", "abc", "--message", "carry on"]
 
 
 async def test_the_phrase_that_means_someone_else_holds_it() -> None:

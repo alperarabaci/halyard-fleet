@@ -298,13 +298,28 @@ def render_question(request: QuestionRequest, *, now: datetime) -> str:
     return _fit(lines)
 
 
+#: What a card says of an answer handed to an agent that is not waiting for it.
+QUEUED = (
+    "📥 <i>Queued: the agent takes it when its current turn ends, or at once "
+    "if Steer is pressed in its app.</i>"
+)
+
+
 def render_question_resolved(
-    request: QuestionRequest, *, answer: str | None, by: str | None, why: str = ""
+    request: QuestionRequest,
+    *,
+    answer: str | None,
+    by: str | None,
+    why: str = "",
+    queued: bool = False,
 ) -> str:
     """What the question card becomes once it has been answered.
 
     Edited in place, like a settled approval, so scrolling back shows the choice
     rather than a row of live-looking buttons on a question long since decided.
+    `queued` is an answer sent from here to an agent that carried on after
+    asking — Codex's: it reaches the agent behind the turn already running,
+    and the card says so rather than reading as though it had arrived.
     """
     who = f" by {html.escape(by)}" if by else ""
     chosen = (
@@ -315,6 +330,7 @@ def render_question_resolved(
     return _fit(
         [
             chosen,
+            *([QUEUED] if queued and answer is not None else []),
             "",
             f"Project: <code>{html.escape(request.project)}</code>",
             "",

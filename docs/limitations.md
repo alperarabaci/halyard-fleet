@@ -48,6 +48,12 @@ on it.
   turn you started over Telegram.** A Telegram-initiated turn runs headless, where
   Claude Code does not load `AskUserQuestion` — so it asks in prose you can just reply
   to, rather than as buttons.
+- **An answer to a Codex question waits for the turn running in its thread.** Codex
+  carries on after asking, and Halyard hands the answer in with `codex queue`, which
+  cannot steer a turn that is running: Codex takes it when that turn ends, and the card
+  says the answer is queued. Pressing Steer in the app hands it over at once. Steering
+  it from Halyard would need Codex's shared app-server to hold the thread, which the
+  Desktop app's threads may not; it is not built.
 - **Only Codex says how full its limits are.** It writes its accounting into its
   own transcript on every turn, so `/status` can read it back. Claude Code
   publishes nothing to read — measured on 2.1.246: no usage command on the CLI,
