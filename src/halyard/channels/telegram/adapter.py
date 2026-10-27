@@ -6677,8 +6677,11 @@ class TelegramChannel:
             return
 
         self._open_questions.pop(handle, None)
-        await self._settle_question_card(request, message_id, chat_id, answer, actor)
-        await self._dismiss(query_id, "Answered.")
+        # A question with no deadline was asked by an agent that carried on
+        # (Codex): its answer is queued behind whatever turn is running there.
+        queued = request.expires_at is None
+        await self._settle_question_card(request, message_id, chat_id, answer, actor, queued=queued)
+        await self._dismiss(query_id, "Queued for the agent." if queued else "Answered.")
 
     async def close_question(
         self, request: QuestionRequest, *, answer: str | None, by: str
@@ -6703,9 +6706,13 @@ class TelegramChannel:
         chat_id: str,
         answer: str | None,
         by: str | None,
+        *,
+        queued: bool = False,
     ) -> None:
         await self._desk.close(
-            chat_id, message_id, text=cards.render_question_resolved(request, answer=answer, by=by)
+            chat_id,
+            message_id,
+            text=cards.render_question_resolved(request, answer=answer, by=by, queued=queued),
         )
 
     def _oldest_open_question_in(

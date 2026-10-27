@@ -474,14 +474,13 @@ class CodexRunner:
     def _queueing(self, session_id: str, text: str) -> list[str]:
         """The command that hands a message to a session somebody else is running.
 
-        No effort override: that is a config value read when a turn starts, and
-        this turn starts inside the application. Passing it would be writing
-        down a preference that nothing applies.
+        No model and no effort: a queued message runs on the thread's own,
+        inside the application. Codex 0.164's queue call has a field for
+        neither, so `--model` was taken and dropped, and Codex past 0.164
+        refuses `codex queue --model` outright — every message sent this way
+        would have failed.
         """
-        arguments = [self._binary or "codex", "queue", "--thread", session_id]
-        if model := self._models.get(session_id) or self._default_model:
-            arguments += ["--model", model]
-        return [*arguments, "--message", text]
+        return [self._binary or "codex", "queue", "--thread", session_id, "--message", text]
 
     # --- a turn of Halyard's own ----------------------------------------------
 

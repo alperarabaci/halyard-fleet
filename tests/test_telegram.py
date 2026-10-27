@@ -2692,6 +2692,34 @@ async def test_a_question_with_no_deadline_takes_only_a_reply_to_its_card(
     assert (await qstore.wait_for(request.request_id)).answer == "main"
 
 
+async def test_an_answer_to_a_question_with_no_deadline_says_it_is_queued(
+    tmp_path: Path,
+) -> None:
+    """Codex carried on after asking, so the answer waits behind the turn
+    running there. The card says so rather than reading as though it had
+    arrived."""
+    channel, api, qstore, request, card = await a_question_with_no_deadline(tmp_path)
+
+    await channel._handle_message(
+        {**typed_in("main", CHAT), "reply_to_message": {"message_id": card}}
+    )
+
+    assert (await qstore.wait_for(request.request_id)).answer == "main"
+    settled = api.edits[-1]
+    assert settled["message_id"] == card
+    assert "<b>main</b>" in settled["text"]
+    assert cards.QUEUED in settled["text"]
+
+
+async def test_an_answer_an_agent_waits_for_is_not_called_queued(tmp_path: Path) -> None:
+    channel, api, _qstore, request = await with_a_question(tmp_path)
+
+    await channel._handle_callback(question_press(request, 0))
+
+    assert "<b>Red</b>" in api.edits[-1]["text"]
+    assert cards.QUEUED not in api.edits[-1]["text"]
+
+
 async def test_a_question_answered_at_the_desk_closes_its_card(tmp_path: Path) -> None:
     channel, api, _qstore, request, card = await a_question_with_no_deadline(tmp_path)
 
@@ -2700,6 +2728,7 @@ async def test_a_question_answered_at_the_desk_closes_its_card(tmp_path: Path) -
     assert api.edits[-1]["message_id"] == card
     assert "main" in api.edits[-1]["text"]
     assert "at the desk" in api.edits[-1]["text"]
+    assert cards.QUEUED not in api.edits[-1]["text"], "answered there, it queued nothing"
     assert channel._open_questions == {}
 
 
