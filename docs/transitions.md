@@ -10,10 +10,10 @@ runs its commands and then its inspections, and delivers all of it together.
 
 The names are the ones a workflow standard uses. In BPMN, in a statechart or in
 a Jira workflow, work sits in a **stage** — a state, a status — and moves
-between stages by a **transition**, which can have checks of its own and
-something it does once taken. Here a workflow's step is a stage, a transition
-is how the work enters it, its commands and inspections are what it checks on
-the way, and delivering to the agent is what it does. The word a reply ends
+between stages by a **transition**, which can look the work over on the way and
+do something once taken. Here a workflow's step is a stage, a transition is how
+the work enters it, its commands and inspections are how it looks the work over,
+and delivering to the agent is what it does. The word a reply ends
 with — `forward`, `back` — is the event that picks the transition. See
 [Workflows](workflows.md).
 
@@ -21,7 +21,9 @@ Transitions were called handoffs and agents were called seats until
 2026-09-24, and inspections were called checks until 2026-09-23. A
 configuration that still says `handoffs:`, `seats:` or `checks:`, or a step
 that says `handoff:` or `seat:`, works as it did; `/handoff` and `/checks`
-still answer, and `halyard doctor` says what to rename.
+still answer, and `halyard doctor` says what to rename. What Halyard puts around
+an inspection's own text called it a check until 2026-10-24: a run kept before
+then holds those words, and a repeat of it is given them again.
 
 Everything here sits under the project in `halyard.yaml`, and every file it
 names is the project's own, read relative to its `path:`.
@@ -36,11 +38,10 @@ projects:
     inspections:                      # /inspect offers these, one button each
       proof: NOTES/inspections/proof.md
       destructive: NOTES/inspections/destructive.md
-    label_groups:                     # the task's label from each group goes on the envelope
-      level: [level::1, level::2, level::3]
-      area: [area:api, area:web, area:all]
-    label_findings:                   # an answer saying one of these labels the task halyard:<inspection>
-      - "status: candidate"
+    labels:
+      groups:                         # the task's label from each group goes on the envelope
+        level: [level::1, level::2, level::3]
+        area: [area:api, area:web, area:all]
     transitions:                      # /transition offers these, one button each
       review:                         # a prompt, handed to the reviewer
         prompt: NOTES/transitions/review.md
@@ -58,26 +59,129 @@ projects:
 
 A transition carries the chat's last reply unless it says
 `include_last_message: false`, and goes to the agent or role in `to:` — every
-agent is offered when it names none. An inspection, a command or an agent it names that
+agent is offered when it names none.
+
+When a card asks which agent — a role two agents hold, or no `to:` at all — the
+agent that role last worked with in the project is first, in blue. Last worked
+with whichever way the work went: a message delivered to it, a transition, a
+workflow step, `/to`, `/forward`, or its own reply arriving. It is only offered
+first; pressing another makes that one first next time. `/forward` and `/to`
+offer the project's last agents first the same way, and leave out the chat's own
+agent. Kept per project in `projects/<name>/last-agents.json`, beside the
+database. An inspection, a command or an agent it names that
 the project does not define is refused when the file is read, rather than when
 somebody presses the button from a phone.
 
 ## An inspection runs inside the project
 
 Each is a one-shot turn in the project's own directory, over its own text and
-the reply: it can read files, has no tool that edits one, and is told to run
-only the commands its text names. Each of those comes to you as a card headed
-**INSPECTION**, naming the inspection and the transition it runs for, in the chat
-the transition is going to — or, for `/inspect`, the chat that asked. **Deny**
-refuses one command and the inspection carries on; **Stop the inspection**
-refuses it and ends the inspection, along with anything it started. A command
-refused, an inspection stopped, or one that runs out of time leaves the
-inspection unmeasured rather than clean.
+the reply: it may search and read local files and inspect diffs, using native
+reading tools or read-only shell commands such as `rg`, `cat`, `sed -n`, `nl`
+and `git status/diff/show/log`. These reads need not be written verbatim in the
+inspection. Git diff/show uses `--no-ext-diff --no-textconv` to avoid external
+helpers. Tests, guards, scripts, interpreters, project applications, database
+queries, network calls and file changes are forbidden, including scratch files
+and temporary indexes. Existing test sources and recorded results can be read.
+
+The runtime sandbox and the project's gate still apply. A read that needs a
+card appears as **INSPECTION** in the destination chat; reads the gate already
+recognizes can pass without a card. **Deny** refuses the read; **Stop the
+inspection** ends the inspection. A refused or unfinished read leaves the
+affected part unmeasured rather than clean, and must not be worked around.
+
+**A read that waits for a card may never run.** Claude Code waits for it until
+the card is answered or expires. Codex may not: its model can go on with other
+reads and answer while the card is still open, and the read then never runs.
+The inspection is told to wait for a command to return and never to answer as if
+it had read what one that has not returned would show, but only its own words
+say whether it did.
+
+So when an inspection's turn ends — answered, out of time, failed or stopped —
+every card it still has open is denied and closed, saying the inspection ended
+before it was answered and nothing ran. Allowing it later would do nothing. And
+when any read it asked for did not run, Halyard adds a block of its own under
+the answer:
+
+```
+Halyard: 1 read this inspection asked for did not run — `cat /tmp/x.log` (still
+waiting for approval when the inspection ended). Anything that rests on it is not
+measured.
+```
+
+Each read says what became of it: denied, and by whom; expired before anybody
+answered; still waiting when the inspection ended; or started and not back
+when it ended. A read that ran is not listed. The block goes wherever the
+answer goes: the transition's message, the `/inspect` reply, and the kept run
+(`not_run` in `inspection_runs`).
+
+## Every inspection answer has a status
+
+Whether an answer rests on everything it asked to read is decided from what was
+recorded, never from the model's words:
+
+- **complete** — every read it asked for ran;
+- **incomplete** — at least one did not, and it answered without it;
+- **unmeasured** — there is no answer: out of time, failed, or stopped.
+
+An incomplete inspection is marked, and the transition or workflow step goes on
+as it would have. The status is on the chat's outcome line —
+`claims: complete · 12 reads`, `claims: incomplete · 12 reads, 1 did not run`,
+`claims: unmeasured — the model did not answer` — beside the inspection's name
+in the `/inspect` reply, and in the heading of its answer in the transition's
+message: `Inspection claims — NOTES/claims.md @ 3e8c847 · complete · 12 reads:`.
+
+It comes from the inspection's **trace**: every read the turn asked for, once,
+with what became of it — ran (an `error` from the tool, or a command that exits
+1 because `grep` found nothing, ran), denied and by whom, expired, still waiting
+for its card when the inspection ended, or started and not back when it ended.
+It is built from two records of the turn:
+
+- **What the runtime reports.** An inspection on Claude Code runs with
+  `--output-format stream-json --verbose`, which says every tool call and how it
+  came back — `Read` with its path, `Grep` and `Glob` with their pattern, `Bash`
+  with its command — a call the hook refused among them; the answer is still the
+  `result` that ends the stream. On Codex, `codex exec --json` says each command
+  it ran, with its exit code, and says nothing at all of one the gate denied or
+  one still waiting on it. What each read is kept — a path, a pattern, a
+  command — never what came back.
+- **What the gate decided**, for each call that met it: a card and its answer,
+  or a call let through by `tools:`, `writes:` or the read rules, or refused,
+  with nobody asked. So a Codex read the gate denied, absent from its stream, is
+  in the trace from its card.
+
+A read both name is one read; Claude Code's hook carries the id its stream does.
+opencode reports neither, so only the reads that met the gate are known, and its
+count says `seen at the gate`. Every other one-shot turn — a commit message, a
+compaction record, upkeep — runs as it did, and has no trace.
+
+Each kept run holds its status and its trace — `status` and `trace` in
+`inspection_runs` — and `halyard inspect show` prints one:
+
+```
+$ uv run halyard inspect show 5f0c9a2e
+5f0c9a2e  10-25 14:02  alpha-engine  claims · discovery  gpt-6.1-sol@high  96s  incomplete
+Status: incomplete · 4 reads, 1 did not run
+
+Reads, as the runtime reported them and the gate decided:
+  ran    Bash  git diff --no-ext-diff --stat
+  ran    Bash  rg -n "seed" src — exit 1
+  ran    Bash  sed -n 1,80p src/loader.py
+  ended  Bash  cat /tmp/x.log — still waiting for approval when the inspection ended
+
+Halyard: 1 read this inspection asked for did not run — `cat /tmp/x.log` (still
+waiting for approval when the inspection ended). Anything that rests on it is not
+measured.
+
+Answer:
+…
+```
+
+A repeat, and a run kept before statuses, has neither, and says so.
 
 An inspection's turn is Halyard's own, not an agent's, and it is marked so
 before it begins. Its answer arrives as the inspection's; the raw reply its
 runtime reports is kept out of the chat, and it is never seen working on a task
-— so `label_work` puts no label on anything for it. Its commands meet the same
+— so `labels: who_worked` puts no label on anything for it. Its commands meet the same
 rules as anyone's.
 
 ## An inspection runs on the machine's model, or its own
@@ -95,9 +199,24 @@ Without an effort, the runtime picks one, and not the same for every model: in
 the catalog Claude Code 2.1.280 ships, Sonnet 5 thinks at `high` unless told and
 Opus 5.5 at `medium`.
 
-Every inspection runs on the default runtime, Claude Code, whichever agent's
-chat it is asked from: the model and the effort are that runtime's words. Another
-runtime is for trying one on purpose — see below.
+The model also says where an inspection runs, whichever agent's chat it is
+asked from: a model's name is one runtime's word. A `gpt-…` model runs on Codex,
+at the efforts Codex takes for it; anything else runs on the default runtime,
+Claude Code.
+
+```yaml
+settings:
+  HALYARD_INSPECTION_MODEL: gpt-5.6-terra
+projects:
+  alpha-engine:
+    inspections:
+      thin-bff: {file: NOTES/halyard/inspections/thin-bff.md, model: gpt-6.1-sol, effort: high}
+```
+
+`codex debug models --bundled` lists the models the Codex CLI on a machine can
+run, and `halyard doctor` fails a model it cannot — a CLI too old for it, or no
+CLI at all — since every turn on it would fail at once. Trying another runtime on
+a kept run is `halyard inspect repeat --runtime` — see below.
 
 An inspection that needs a stronger model says so where it is described,
 written as a mapping instead of a file alone. What it leaves out is the
@@ -129,20 +248,10 @@ apart — `2 files changed, 27 insertions(+), 1 deletion(-) · 3 untracked files
 — because git's own summary leaves them out, and "nothing" beside three new
 files reads as no change at all.
 
-A project can name groups of task labels under `label_groups:`, and the one the
+A project can name groups of task labels under `labels: groups:`, and the one the
 task carries from each group goes on the envelope too — `level: level::3`. It
 only reports: a task with none of them, or a tracker that cannot be read, adds
 nothing.
-
-## A finding can label the task
-
-A project writes under `label_findings:` what its inspections' answers say when
-they found something, in its own words — quoted, because a phrase with a colon
-is otherwise a YAML mapping — and whenever an answer says one of them the task
-gets `halyard:<inspection>`. From `/inspect` and from a transition alike, since
-both run the same inspection. Halyard only adds: closing a finding, as a false
-alarm or as approved, is a label somebody puts on by hand. A project that has
-not said what a finding looks like has nothing written.
 
 ## Every inspection can be kept
 
@@ -157,8 +266,10 @@ Then each run — by `/inspect`, by a transition, by a workflow's step — is a 
 `inspection_runs`, in Halyard's database beside the tokens the turns Halyard
 starts use: the inspection, its file and the revision of it, the model, what the
 model was given word for word, what it said, how long it took, whether it
-answered, the finding phrase it said if any, and where the files stood — `HEAD`
-and the content id from the envelope. A run stopped or left unanswered is kept
+answered, the finding phrase it said if any, what Halyard said under it about
+reads that did not run, its status and every read it asked for — see above —
+and where the files stood — `HEAD` and the content id
+from the envelope. A run stopped or left unanswered is kept
 too, with why. This is the one place Halyard keeps text: the input holds the
 reply that was inspected, and an inspection cannot be compared or run again
 without it.
@@ -194,6 +305,7 @@ repeats.
 
 ```sh
 uv run halyard inspect recent                          # the last runs, with their ids
+uv run halyard inspect show 5f0c9a2e                   # one run: its status, its reads, its answer
 uv run halyard inspect repeat 5f0c9a2e --model opus    # the same input, another model
 uv run halyard inspect repeat 5f0c9a2e --effort max    # the same model, thinking harder
 uv run halyard inspect repeat 5f0c9a2e --times 3       # the same again, three times
@@ -244,10 +356,26 @@ under `projects/<project>/inspections/<id>/` — for whoever judges the runs.
 Under `commands:` a transition names entries of the project's `commands:`, and they
 run in that order before its inspections — one at a time, as `/command` runs them, so
 a transition does not go while something else is running in the project. What
-each did goes into the envelope the inspections read, as one line with its exit code
-and last line, and what it printed goes into the message. A command that fails
-is reported and the transition goes on: whoever receives it has to see that it
-failed. One still running after ten minutes is stopped, and its line says so.
+each did goes into the envelope the inspections read, as one line with its exit code,
+what that means — `(passed)`, `(failed)` or `(not run)` — and its last line, and what
+it printed goes into the message. A command that fails is reported and the
+transition goes on: whoever receives it has to see that it failed.
+
+A command that did not run stops the transition there: the commands after it, the
+inspections and the message are skipped, and the chat is told which command and
+why. Inspections over a run that never happened would read green in nothing. Not
+run is a command that could not start, was not found or could not be executed (exit
+127, 126), was ended by a signal (128 and up), or was still running after ten
+minutes — and any exit code the command itself says means it had nothing to run:
+
+```yaml
+commands:
+  test-fast: {run: scripts/check.sh test-fast, not_run: [2]}
+```
+
+A workflow whose step stopped this way is held there, as for any other stop: fix
+what was missing and pick the step again. Nothing is counted for it; a round is
+the agent taking a message.
 
 The inspections read that one line and nothing more, so a command whose results
 an inspection has to compare — several targets, each with a count and an exit code —
@@ -259,7 +387,7 @@ twenty-five when it failed.
 
 Some commands need to know what the work is about — which part of the codebase
 an end-to-end suite covers. The task says so: somebody labels it when the work is
-planned, from a group the project lists under `label_groups:`, and a command
+planned, from a group the project lists under `labels: groups:`, and a command
 names that group in full — `SCOPE={label_groups.area}` above. What goes in the
 line is the part of each label after its last colon, every one the task carries
 from the group, in the group's order: `area:api` and `area:web` run
@@ -271,11 +399,10 @@ a button per label, and the one pressed goes on the task, so the next time — o
 the other machine — is not asked again. A branch that names no task has nothing
 to put it on, and the label pressed is kept for that work until Halyard restarts.
 The same happens wherever the command runs: `/command`, a transition, a workflow's
-step, which waits for the tap.
+step, which waits for the tap, and a commit option.
 
 A command naming a group the project does not define, or one with no labels, is
-refused when the file is read; so is `validate:` naming one, since a commit has
-nowhere to ask.
+refused when the file is read.
 
 ## A command can be a list, and take a value you type
 
@@ -300,8 +427,8 @@ business.
 
 `/command` offers a list beside the commands, and only `/command` runs one. A
 transition names commands themselves, so naming a list there is refused when the
-file is read, and so is a transition or `validate:` naming a command that asks for
-a typed value: neither has anybody to ask.
+file is read, and so is a transition or a commit option naming a command that asks
+for a typed value: neither has anybody to ask.
 
 ## Rounds are a workflow's
 

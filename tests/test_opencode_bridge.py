@@ -183,17 +183,23 @@ def test_a_patch_sends_every_file_and_where_a_moved_one_goes(tmp_path: Path) -> 
 
 
 #: The bridge with a control plane whose approvals either never come back —
-#: the card is still out — or come back at once with the given decision, fed a
-#: run of events of any type. Prints every body posted and every answer given
-#: to opencode.
+#: the card is still out — or come back at once with the given decision, or
+#: fail once and then allow, fed a run of events of any type. Prints every body
+#: posted and every answer given to opencode.
 SEQUENCE = r"""
 import { pathToFileURL } from "node:url"
 const posted = []
 const answered = []
+let calls = 0
 globalThis.fetch = async (url, init) => {
   posted.push({ url: String(url), body: JSON.parse(init.body) })
   if (String(url).endsWith("/v1/approvals")) {
+    calls += 1
     if (process.argv[4] === "hang") return new Promise(() => {})
+    if (process.argv[4] === "drop-once") {
+      if (calls === 1) throw new TypeError("fetch failed")
+      return { ok: true, json: async () => ({ decision: "allow" }) }
+    }
     return { ok: true, json: async () => ({ decision: process.argv[4] }) }
   }
   return { ok: true, json: async () => ({ closed: true }) }
@@ -235,7 +241,7 @@ def played(tmp_path: Path, *events: dict, approvals: str = "hang") -> dict:
         capture_output=True,
         text=True,
         timeout=30,
-        env={"PATH": "/usr/bin:/bin", "HOME": "/Users/somebody"},
+        env={"PATH": "/usr/bin:/bin", "HOME": "/Users/somebody", "HALYARD_RETRY_MS": "10"},
     )
     assert done.returncode == 0, done.stderr
     return json.loads(done.stdout.strip().splitlines()[-1])
@@ -310,3 +316,22 @@ def test_the_bridges_own_answer_is_not_mistaken_for_the_desks(tmp_path: Path) ->
 
     assert [call["path"]["permissionID"] for call in result["answered"]] == ["per_1"]
     assert closings(result) == []
+
+
+def test_a_question_still_open_is_asked_again_and_answered_from_the_phone(
+    tmp_path: Path,
+) -> None:
+    """The call dropped and the question is still on opencode's screen. Asked
+    again under the same id, so the phone's answer still reaches it, rather
+    than leaving a card that says "timed out"."""
+    result = played(
+        tmp_path,
+        {"type": "permission.asked", "properties": asked("bash", metadata={"command": "ls"})},
+        approvals="drop-once",
+    )
+
+    asking = [
+        p["body"]["tool_use_id"] for p in result["posted"] if p["url"].endswith("/v1/approvals")
+    ]
+    assert asking == ["per_1", "per_1"]
+    assert [call["body"]["response"] for call in result["answered"]] == ["once"]

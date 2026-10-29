@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 from halyard import inspections
@@ -41,44 +42,12 @@ class Asking:
         return self.says
 
 
-class Labelling:
-    """A `Labeller` that keeps what it was asked to put on the task."""
-
-    def __init__(self, *, fails: bool = False) -> None:
-        self.put: list[str] = []
-        self.fails = fails
-
-    async def label(self, label: str) -> None:
-        if self.fails:
-            raise RuntimeError("the tracker is down")
-        self.put.append(label)
-
-
-async def checked(
-    tmp_path: Path, says: str | None, labeller: Labelling, findings=("status: candidate",)
-) -> inspections.Answer:
-    (tmp_path / "proof.md").write_text("# proof\n")
-    return await inspections.run(
-        "proof",
-        Path("proof.md"),
-        project=tmp_path,
-        context=[],
-        note="",
-        reply="42 passed",
-        asker=Asking(says=says),
-        model="sonnet",
-        timeout=5,
-        findings=findings,
-        labeller=labeller,
-    )
-
-
 async def ran(
-    tmp_path: Path, asker: Asking, check: str = "proof.md", *, transition: str = ""
+    tmp_path: Path, asker: Asking, inspection: str = "proof.md", *, transition: str = ""
 ) -> inspections.Answer:
     return await inspections.run(
         "proof",
-        Path(check),
+        Path(inspection),
         project=tmp_path,
         context=["Work item: alpha-engine#355"],
         note="delivery",
@@ -91,24 +60,88 @@ async def ran(
 
 
 def test_the_prompt_says_where_the_check_stands_and_what_it_may_do() -> None:
-    """In the project, reading but never editing; running only what the check's
-    own text names — measured: told only that it could run commands, a claims
-    check ran the suite test by test, wrote probes of its own and made scratch
-    copies — and reading for the check rather than through everything the
-    project's own instructions name."""
+    """The project supplies context, not an instruction to run its workflow."""
     asked = inspections.prompt(
         "# proof", context=["Project: alpha-engine"], note="delivery", text="42 passed"
     )
 
     assert asked.startswith("# proof")
     assert "runs in the project's own directory" in asked
-    assert "cannot edit anything" in asked
-    assert "only the commands this check's text tells it to" in asked
-    assert "nothing of its own" in asked
+    assert "is read-only" in asked
     assert "rather than a reading list" in asked
     assert "Envelope:\n- Project: alpha-engine\n- Said by whoever asked: delivery" in asked
     assert "delivery" in asked
     assert asked.endswith("42 passed")
+
+
+def test_local_evidence_can_be_read_through_native_tools_or_the_shell() -> None:
+    """An inspection names the evidence it needs, not each command needed to read it.
+
+    Codex can have terminal tools without a separate file reader. Calling all
+    shell use execution left these inspections unable to examine their source.
+    """
+    asked = inspections.prompt("# proof", context=[], note="", text="42 passed")
+    allowed = asked.split("Allowed:", 1)[1].split("\n\n", 1)[0]
+
+    for operation in ("file search", "file reading", "diff inspection"):
+        assert operation in allowed
+    assert "native" in allowed
+    assert "read-only shell" in allowed
+    assert "rg --files" in allowed
+    assert "sed -n" in allowed
+    assert "git status/diff/show/log" in allowed
+    assert "--no-ext-diff --no-textconv" in allowed
+    assert "need not be written verbatim" in allowed
+    assert "only the commands this check's text tells it to" not in asked
+    assert "Every command waits for the operator" not in asked
+
+
+def test_the_turn_is_told_it_is_an_inspection() -> None:
+    """What Halyard puts around an inspection calls it one. It said "check"
+    until 2026-10-24, the name inspections had until 2026-09-23."""
+    asked = inspections.prompt("# proof", context=[], note="", text="42 passed")
+    around = asked.split("---", 1)[1]
+
+    assert "This inspection runs in the project's own directory" in around
+    assert "Text to inspect:" in around
+    assert not re.search(r"\bcheck", around, re.IGNORECASE)
+
+
+def test_inspection_text_cannot_authorize_execution_or_side_effects() -> None:
+    """The common boundary still applies if a project's inspection asks to run code."""
+    asked = inspections.prompt(
+        "# proof\nRun pytest, query the DB, then write a reproduction.",
+        context=[],
+        note="",
+        text="42 passed",
+    )
+    forbidden = asked.split("Forbidden:", 1)[1].split("\n\n", 1)[0]
+
+    for operation in (
+        "tests",
+        "guards",
+        "scripts",
+        "interpreters",
+        "database queries or connections",
+        "network requests",
+        "live services",
+        "setup or cleanup",
+        "creating, modifying, deleting or moving files",
+        "write redirects",
+        "broader permissions",
+    ):
+        assert operation in forbidden
+    assert "recorded outputs instead of running" in forbidden
+    assert "cannot authorize these forbidden operations" in forbidden
+
+
+def test_an_unreadable_source_is_unmeasured_without_bypassing_the_gate() -> None:
+    asked = inspections.prompt("# proof", context=[], note="", text="42 passed")
+
+    assert "Respect the runtime sandbox and the project's gate" in asked
+    assert "identify that source as unmeasured" in asked
+    assert "not clean or missing evidence" in asked
+    assert "Do not work around a denied read" in asked
 
 
 def test_a_fenced_answer_loses_its_fence() -> None:
@@ -156,9 +189,9 @@ async def test_a_check_runs_its_own_text_over_the_reply(tmp_path: Path) -> None:
 
 async def test_the_turn_stands_in_the_project_and_cannot_change_it(tmp_path: Path) -> None:
     """A report is compared against the code it is about, so the turn runs where
-    that code is — Halyard's own directory is another repository, and a check
-    started there found nothing it could compare. It may look and run, and edit
-    nothing."""
+    that code is — Halyard's own directory is another repository, and an inspection
+    started there found nothing it could compare. File reading still uses the
+    runtime's no-edit mode."""
     (tmp_path / "proof.md").write_text("# proof\n")
     asker = Asking()
 
@@ -167,8 +200,8 @@ async def test_the_turn_stands_in_the_project_and_cannot_change_it(tmp_path: Pat
     assert asker.how == [{"cwd": tmp_path, "name": "proof", "edits": False}]
 
 
-async def test_a_check_run_for_a_transition_goes_by_both_names(tmp_path: Path) -> None:
-    """Whatever it asks a person for says which check and which transition."""
+async def test_an_inspection_run_for_a_transition_goes_by_both_names(tmp_path: Path) -> None:
+    """Whatever it asks a person for says which inspection and which transition."""
     (tmp_path / "proof.md").write_text("# proof\n")
     asker = Asking()
 
@@ -190,7 +223,7 @@ async def test_a_model_that_does_not_answer_is_said_not_skipped(tmp_path: Path) 
 async def test_a_check_that_cannot_be_read_never_asks(tmp_path: Path) -> None:
     asker = Asking()
 
-    answer = await ran(tmp_path, asker, check="gone.md")
+    answer = await ran(tmp_path, asker, inspection="gone.md")
 
     assert asker.asked == []
     assert "could not read" in answer.why
@@ -210,50 +243,6 @@ async def test_a_check_somebody_stopped_says_so(tmp_path: Path) -> None:
     assert answer.why == "stopped by tg:4242"
 
 
-def test_a_finding_is_the_projects_own_words_whatever_their_case() -> None:
-    """Whatever the project's check files have the model write, matched as
-    written give or take case; no phrases means nothing is ever a finding."""
-    findings = ("status: candidate", "status: evidence missing")
-
-    assert (
-        inspections.finding("proof · #355 · Status: Candidate\n- one", findings)
-        == "status: candidate"
-    )
-    assert inspections.finding("proof · #355 · status: no finding", findings) is None
-    assert inspections.finding("proof · #355 · status: candidate", ()) is None
-
-
-async def test_a_check_that_finds_something_labels_the_task(tmp_path: Path) -> None:
-    """Decided by the check, from the project's own words — so a check run by
-    hand and one run by a transition label alike."""
-    labeller = Labelling()
-
-    await checked(tmp_path, "proof · status: candidate", labeller)
-
-    assert labeller.put == ["halyard:proof"]
-
-
-async def test_nothing_is_labelled_without_a_finding(tmp_path: Path) -> None:
-    """Not for a clean answer, not for one that never came, and not for a
-    project that has not said what a finding looks like."""
-    labeller = Labelling()
-
-    await checked(tmp_path, "proof · status: no finding", labeller)
-    await checked(tmp_path, None, labeller)
-    await checked(tmp_path, "proof · status: candidate", labeller, findings=())
-
-    assert labeller.put == []
-
-
-async def test_a_label_that_cannot_be_written_costs_the_label_not_the_answer(
-    tmp_path: Path,
-) -> None:
-    answer = await checked(tmp_path, "proof · status: candidate", Labelling(fails=True))
-
-    assert answer.measured
-    assert answer.text == "proof · status: candidate"
-
-
 # --- every run, kept whole --------------------------------------------------
 
 
@@ -270,9 +259,7 @@ class Keeping:
         self.kept.append(kept)
 
 
-async def kept_run(
-    tmp_path: Path, asker, keeper: Keeping, *, says_finding: bool = False, effort=None
-):
+async def kept_run(tmp_path: Path, asker, keeper: Keeping, *, effort=None):
     (tmp_path / "proof.md").write_text("# proof\n")
     return await inspections.run(
         "proof",
@@ -286,7 +273,6 @@ async def kept_run(
         effort=effort,
         timeout=5,
         transition="close",
-        findings=("status: candidate",) if says_finding else (),
         keeper=keeper,
     )
 
@@ -307,7 +293,7 @@ async def test_every_run_is_kept_whole_under_the_id_it_ran_under(tmp_path: Path)
     tokens are recorded by — which is what makes a run comparable later."""
     asker, keeper = Asking(says="proof · status: candidate"), Keeping()
 
-    await kept_run(tmp_path, asker, keeper, says_finding=True)
+    await kept_run(tmp_path, asker, keeper)
 
     [kept] = keeper.kept
     [(text, _)] = asker.asked
@@ -315,7 +301,8 @@ async def test_every_run_is_kept_whole_under_the_id_it_ran_under(tmp_path: Path)
     assert kept.session == asker.sessions[0]
     assert (kept.name, kept.transition, kept.model) == ("proof", "close", "sonnet")
     assert kept.answer == "proof · status: candidate"
-    assert kept.finding == "status: candidate"
+    # Findings no longer label tasks, so none is read out of the answer.
+    assert kept.finding is None
     assert kept.context[1] == "HEAD: 2cdcab9c"
     assert "42 passed" in kept.asked
 
@@ -428,3 +415,220 @@ def test_a_kept_run_joins_the_tokens_it_used(tmp_path: Path) -> None:
             "FROM inspection_runs r JOIN turn_usage u ON u.session_id = r.id"
         ).fetchall()
     assert row == ("proof", "2cdcab9c", "5df40c87", "answered", "developed", 2, 1, 0, 3400)
+
+
+# --- reads that did not run ------------------------------------------------------
+
+
+def test_the_turn_is_told_to_wait_for_a_command_and_not_to_answer_past_it() -> None:
+    asked = inspections.prompt("# proof", context=[], note="", text="42 passed")
+
+    assert (
+        "A command may wait minutes for the operator's approval: wait for it to "
+        "return before answering, and never answer as if you read what a command "
+        "that has not returned would have shown."
+    ) in asked
+
+
+def test_reads_that_did_not_run_are_said_in_halyard_s_words() -> None:
+    one = (inspections.NotRun("cat /tmp/x.log", "denied by tg:4242"),)
+    two = (*one, inspections.NotRun("sed -n 1,5p a.py", "expired before anybody answered"))
+
+    assert inspections.not_run_block(()) == ""
+    assert inspections.not_run_block(one) == (
+        "Halyard: 1 read this inspection asked for did not run — `cat /tmp/x.log` "
+        "(denied by tg:4242). Anything that rests on it is not measured."
+    )
+    assert inspections.not_run_block(two) == (
+        "Halyard: 2 reads this inspection asked for did not run — `cat /tmp/x.log` "
+        "(denied by tg:4242); `sed -n 1,5p a.py` (expired before anybody answered). "
+        "Anything that rests on them is not measured."
+    )
+
+
+class Gating(Asking):
+    """An `Asker` that can say what its turn read, and what became of each read."""
+
+    def __init__(self, *reads: inspections.Read, says: str | None = "proof · no finding"):
+        super().__init__(says)
+        self.reads = reads
+
+    def trace(self, session_id: str) -> inspections.Trace:
+        reads = self.reads if session_id == self.sessions[-1] else ()
+        return inspections.Trace(reads, reported=True)
+
+
+RAN = inspections.Read("Read", "src/app.py", inspections.Outcome.RAN)
+
+
+async def test_an_answer_carries_the_reads_that_did_not_run_and_so_does_its_record(
+    tmp_path: Path,
+) -> None:
+    read = inspections.NotRun(
+        "cat /tmp/x.log", "still waiting for approval when the inspection ended"
+    )
+    ended = inspections.Read("Bash", read.command, inspections.Outcome.ENDED, read.why)
+    asker, keeper = Gating(RAN, ended), Keeping()
+
+    answer = await kept_run(tmp_path, asker, keeper)
+
+    assert isinstance(asker, inspections.Gated)
+    assert answer.text == "proof · no finding"
+    assert answer.not_run == (read,)
+    [kept] = keeper.kept
+    assert kept.answer == "proof · no finding", "the model's answer is kept as it came"
+    assert kept.not_run == inspections.not_run_block((read,))
+
+
+async def test_an_unanswered_inspection_still_carries_its_reads_that_did_not_run(
+    tmp_path: Path,
+) -> None:
+    read = inspections.NotRun("cat a", "denied by tg:4242")
+    denied = inspections.Read("Bash", "cat a", inspections.Outcome.DENIED, read.why)
+
+    answer = await kept_run(tmp_path, Gating(denied, says=None), Keeping())
+
+    assert not answer.measured
+    assert answer.not_run == (read,)
+
+
+async def test_an_asker_that_cannot_tell_adds_nothing(tmp_path: Path) -> None:
+    keeper = Keeping()
+
+    answer = await kept_run(tmp_path, Asking(), keeper)
+
+    assert answer.not_run == ()
+    assert keeper.kept[0].not_run == ""
+
+
+def test_what_halyard_said_under_an_answer_is_kept_in_a_column_of_its_own(
+    tmp_path: Path,
+) -> None:
+    """Beside the answer, not in it: the model's words stay comparable. A table
+    made before the column gets it, empty for the rows it had."""
+    import sqlite3
+    from datetime import UTC, datetime
+
+    database = tmp_path / "halyard.db"
+    with sqlite3.connect(database) as db:
+        db.execute(
+            "CREATE TABLE inspection_runs (id TEXT PRIMARY KEY, at TEXT NOT NULL, "
+            "project TEXT NOT NULL, work TEXT, inspection TEXT NOT NULL, file TEXT NOT NULL, "
+            "file_version TEXT NOT NULL, transition TEXT, workflow_run TEXT, step TEXT, "
+            "phase INTEGER, round INTEGER, runtime TEXT, model TEXT NOT NULL, effort TEXT, "
+            "head TEXT, content TEXT, context TEXT NOT NULL, note TEXT NOT NULL, "
+            "input TEXT NOT NULL, answer TEXT, outcome TEXT NOT NULL, why TEXT NOT NULL, "
+            "finding TEXT, took REAL NOT NULL, experimental INTEGER NOT NULL DEFAULT 0, "
+            "repeat_of TEXT)"
+        )
+        db.execute(
+            "INSERT INTO inspection_runs (id, at, project, inspection, file, file_version, "
+            "model, context, note, input, outcome, why, took) VALUES ('old', '2026-10-01', "
+            "'alpha-engine', 'proof', 'NOTES/proof.md', 'abc', 'sonnet', '', '', '', "
+            "'answered', '', 1.0)"
+        )
+    said = "Halyard: 1 read this inspection asked for did not run — `cat a` (denied)."
+    kept = inspections.Kept(
+        session="sess-2",
+        at=datetime(2026, 10, 25, 9, 0, tzinfo=UTC),
+        name="proof",
+        path=Path("NOTES/proof.md"),
+        version="3e8c847",
+        transition="",
+        model="sonnet",
+        asked="# proof",
+        context=(),
+        note="",
+        answer="proof · no finding",
+        why="",
+        finding=None,
+        took=12.0,
+        not_run=said,
+    )
+
+    inspections.record.keep(database, kept, project="alpha-engine", work=None, runtime="codex")
+
+    with sqlite3.connect(database) as db:
+        rows = db.execute("SELECT id, answer, not_run FROM inspection_runs ORDER BY id").fetchall()
+    assert rows == [("old", None, None), ("sess-2", "proof · no finding", said)]
+
+
+async def test_a_run_s_status_comes_from_what_it_read_and_is_kept_with_its_trace(
+    tmp_path: Path,
+) -> None:
+    ended = inspections.Read("Bash", "cat /tmp/x.log", inspections.Outcome.ENDED, "still waiting")
+
+    complete = Keeping()
+    answer = await kept_run(tmp_path, Gating(RAN), complete)
+    assert answer.status is inspections.Status.COMPLETE
+    assert (complete.kept[0].status, complete.kept[0].trace) == (
+        "complete",
+        inspections.Trace((RAN,), reported=True),
+    )
+
+    incomplete = Keeping()
+    answer = await kept_run(tmp_path, Gating(RAN, ended), incomplete)
+    assert answer.status is inspections.Status.INCOMPLETE
+    assert answer.text == "proof · no finding", "marked, and the answer stands"
+    assert incomplete.kept[0].status == "incomplete"
+
+    unmeasured = Keeping()
+    answer = await kept_run(tmp_path, Gating(RAN, ended, says=None), unmeasured)
+    assert answer.status is inspections.Status.UNMEASURED
+    assert unmeasured.kept[0].status == "unmeasured"
+    assert unmeasured.kept[0].trace == inspections.Trace((RAN, ended), reported=True)
+
+
+def test_a_table_made_before_statuses_gets_the_columns(tmp_path: Path) -> None:
+    """Added the way `effort` and `not_run` were: empty for the rows it had."""
+    import json
+    import sqlite3
+    from datetime import UTC, datetime
+
+    database = tmp_path / "halyard.db"
+    with sqlite3.connect(database) as db:
+        db.execute(
+            "CREATE TABLE inspection_runs (id TEXT PRIMARY KEY, at TEXT NOT NULL, "
+            "project TEXT NOT NULL, work TEXT, inspection TEXT NOT NULL, file TEXT NOT NULL, "
+            "file_version TEXT NOT NULL, transition TEXT, workflow_run TEXT, step TEXT, "
+            "phase INTEGER, round INTEGER, runtime TEXT, model TEXT NOT NULL, effort TEXT, "
+            "head TEXT, content TEXT, context TEXT NOT NULL, note TEXT NOT NULL, "
+            "input TEXT NOT NULL, answer TEXT, outcome TEXT NOT NULL, why TEXT NOT NULL, "
+            "finding TEXT, not_run TEXT, took REAL NOT NULL, "
+            "experimental INTEGER NOT NULL DEFAULT 0, repeat_of TEXT)"
+        )
+        db.execute(
+            "INSERT INTO inspection_runs (id, at, project, inspection, file, file_version, "
+            "model, context, note, input, outcome, why, took) VALUES ('old', '2026-10-01', "
+            "'alpha-engine', 'proof', 'NOTES/proof.md', 'abc', 'sonnet', '', '', '', "
+            "'answered', '', 1.0)"
+        )
+    kept = inspections.Kept(
+        session="sess-3",
+        at=datetime(2026, 10, 25, 9, 0, tzinfo=UTC),
+        name="proof",
+        path=Path("NOTES/proof.md"),
+        version="3e8c847",
+        transition="",
+        model="sonnet",
+        asked="# proof",
+        context=(),
+        note="",
+        answer="proof · no finding",
+        why="",
+        finding=None,
+        took=12.0,
+        status="complete",
+        trace=inspections.Trace((RAN,), reported=True),
+    )
+
+    inspections.record.keep(database, kept, project="alpha-engine", work=None, runtime="codex")
+
+    with sqlite3.connect(database) as db:
+        rows = db.execute("SELECT id, status, trace FROM inspection_runs ORDER BY id").fetchall()
+    assert rows[0] == ("old", None, None)
+    assert rows[1][:2] == ("sess-3", "complete")
+    assert json.loads(rows[1][2]) == {
+        "reported": True,
+        "reads": [{"tool": "Read", "what": "src/app.py", "outcome": "ran", "detail": ""}],
+    }

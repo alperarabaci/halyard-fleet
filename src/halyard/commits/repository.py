@@ -88,6 +88,11 @@ _NOT_WORTH_READING = ("uv.lock", "package-lock.json", "yarn.lock", "poetry.lock"
 #: Git's own mark for a file it has never seen.
 UNTRACKED = "?"
 
+#: How many files `described` names on each side, tracked and untracked. A
+#: change across thousands of files is not read file by file, and the line git
+#: ends its summary with says how big it is.
+DESCRIBED_FILES = 200
+
 
 #: Git, told never to ask a person anything.
 #:
@@ -372,6 +377,45 @@ def read(path: Path, project: str, *, run: Run | None = None) -> Uncommitted:
         truncated=truncated,
         style=style,
     )
+
+
+def described(path: Path, *, run: Run | None = None) -> str:
+    """The change a commit would take, as Halyard can say it without the diff.
+
+    What `git diff --stat HEAD` gives for the tracked files, and the untracked
+    ones `git add -A` takes with them: the text a commit option's inspections
+    read. Not the diff itself, which can be huge — they run `git diff`
+    themselves for whatever they need. The stat is as wide as its names, so
+    none is cut to `.../` and each path can be read as it is.
+    """
+    try:
+        stat = _run(
+            path, "diff", "--stat=1000", "--stat-graph-width=20", "HEAD", run=run
+        ).splitlines()
+        listed = _run(path, "ls-files", "--others", "--exclude-standard", "-z", run=run)
+    except (GitError, OSError) as refused:
+        return f"git could not say what this commit would take: {refused}"
+    files, total = stat[:-1], stat[-1:]
+    new = [name for name in listed.split("\0") if name]
+    return "\n".join(
+        [
+            "The change a commit would take, as Halyard read it before committing: what "
+            "changed, not how — `git diff HEAD` shows that.",
+            "",
+            "Tracked files, from `git diff --stat HEAD`:",
+            *(_named(files) + total or ["none changed"]),
+            "",
+            "Untracked files, which `git add -A` takes with them:",
+            *(_named(new) or ["none"]),
+        ]
+    )
+
+
+def _named(lines: list[str]) -> list[str]:
+    """The first `DESCRIBED_FILES` lines, and how many more there are."""
+    if len(lines) <= DESCRIBED_FILES:
+        return lines
+    return [*lines[:DESCRIBED_FILES], f"…and {len(lines) - DESCRIBED_FILES} more"]
 
 
 def flag_of(said: str) -> str | None:

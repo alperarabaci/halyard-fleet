@@ -46,13 +46,18 @@ import { appendFileSync } from "node:fs"
 const HALYARD = process.env.HALYARD_URL ?? "http://127.0.0.1:8799"
 
 /**
- * How long to wait for an answer.
+ * How long one call waits for an answer.
  *
- * Bounded, but not because opencode needs it back: it waits indefinitely for
- * the screen. It is bounded so this plugin does not hold a promise open for a
- * question somebody already answered at the desk.
+ * Not how long the question waits: opencode keeps it on its screen for as
+ * long as it takes, and Halyard keeps its card open for as long too. A call
+ * that ends without an answer is made again while the question is still
+ * open, and finds the same card — so a dropped connection never leaves the
+ * phone with a card that says "timed out" over a question still waiting.
  */
 const TIMEOUT_MS = Number(process.env.HALYARD_TIMEOUT_MS ?? 300_000)
+
+/** How long to wait before asking again when Halyard could not be reached. */
+const RETRY_MS = Number(process.env.HALYARD_RETRY_MS ?? 15_000)
 
 /** Set to a path to record what this decided. Off unless asked for. */
 const LOG = process.env.HALYARD_OPENCODE_LOG
@@ -182,41 +187,60 @@ export const HalyardGate = async ({ client, directory, worktree }: any) => {
   /** Questions answered at the desk before Halyard's answer came back. */
   const answeredThere = new Set<string>()
 
+  /** One call for an answer. Throws when none came back. */
+  const ask = async (body: string) => {
+    const asking = await fetch(`${HALYARD}/v1/approvals`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body,
+      signal: AbortSignal.timeout(TIMEOUT_MS),
+    })
+    if (!asking.ok) throw new Error(`control plane answered ${asking.status}`)
+    return ((await asking.json()) as { decision?: string }).decision
+  }
+
   const answer = async (asked: Asked) => {
     const command = describe(asked)
     const asks = asksAbout(asked)
     const files = touched(asked)
 
+    const body = JSON.stringify({
+      session_id: asked.sessionID,
+      agent_id: "opencode",
+      tool: asked.permission ?? "bash",
+      command,
+      // The question's own id, not the tool call's: the reply event names
+      // the question by it, and one tool call can raise two questions.
+      tool_use_id: asked.id,
+      cwd: directory,
+      project_dir: worktree ?? directory,
+      // Only where the question is not simply the command: for a shell call
+      // the pattern *is* the command, and showing it twice is noise.
+      ...(asks ? { asks, patterns: asked.patterns } : {}),
+      // Measured from the worktree, which `project_dir` above is.
+      ...(files ? { file_paths: files } : {}),
+    })
+
     let decision: string | undefined
-    try {
-      const asking = await fetch(`${HALYARD}/v1/approvals`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({
-          session_id: asked.sessionID,
-          agent_id: "opencode",
-          tool: asked.permission ?? "bash",
-          command,
-          // The question's own id, not the tool call's: the reply event names
-          // the question by it, and one tool call can raise two questions.
-          tool_use_id: asked.id,
-          cwd: directory,
-          project_dir: worktree ?? directory,
-          // Only where the question is not simply the command: for a shell call
-          // the pattern *is* the command, and showing it twice is noise.
-          ...(asks ? { asks, patterns: asked.patterns } : {}),
-          // Measured from the worktree, which `project_dir` above is.
-          ...(files ? { file_paths: files } : {}),
-        }),
-        signal: AbortSignal.timeout(TIMEOUT_MS),
-      })
-      if (!asking.ok) throw new Error(`control plane answered ${asking.status}`)
-      decision = ((await asking.json()) as { decision?: string }).decision
-    } catch (unreachable) {
-      // Deliberately nothing. The question is on the screen; leaving it there
-      // is the whole fallback. See the note at the top of this file.
-      log("left to the desk", { id: asked.id, why: String(unreachable) })
-      return
+    for (;;) {
+      try {
+        decision = await ask(body)
+        break
+      } catch (unreachable) {
+        // The question is still on the screen, and stays there whatever this
+        // does; that is the whole fallback. See the note at the top of this
+        // file. Asked again while it is open, so the phone can still answer.
+        if (answeredThere.delete(asked.id)) {
+          log("answered at the desk while asking", { id: asked.id })
+          return
+        }
+        log("asking again", { id: asked.id, why: String(unreachable) })
+        // At once when the call only ran out of time: Halyard is there, and
+        // the card is still out. Otherwise give it a moment to come back.
+        if ((unreachable as { name?: string })?.name !== "TimeoutError") {
+          await new Promise((resolve) => setTimeout(resolve, RETRY_MS))
+        }
+      }
     }
 
     // Answered at the desk while the card was out. Whatever came back is not

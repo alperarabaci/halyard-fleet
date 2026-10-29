@@ -9,6 +9,7 @@ answers, plausibly, and says nothing about it.
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import signal
 from pathlib import Path
@@ -94,6 +95,18 @@ async def test_a_turn_inherits_the_resumed_session_model_by_default(monkeypatch)
     await runner().send("session-1", "carry on")
 
     assert "--model" not in calls[0]
+
+
+async def test_a_message_s_turn_says_when_it_started(monkeypatch) -> None:
+    """As its process starts, after any turn ahead of it: from then on, what the
+    session says answers this message. See `agents/turns.py`."""
+    calls = spying(monkeypatch)
+    told: list[str] = []
+
+    assert await runner().send("session-1", "carry on", started=told.append) is True
+
+    assert len(calls) == 1
+    assert told == ["session-1"]
 
 
 async def test_a_model_override_can_be_configured_from_the_environment(monkeypatch) -> None:
@@ -591,3 +604,276 @@ async def test_an_answer_marked_as_an_error_is_no_answer(
     answering(monkeypatch, json.dumps({"result": "API Error: 529", "is_error": True}).encode())
 
     assert await runner().ask("write a subject line") is None
+
+
+# --- an inspection's turn, streamed ------------------------------------------
+
+#: `claude -p --output-format stream-json --verbose`, in the shapes measured on
+#: 2.1.303 (2026-10-25): what the model called in `tool_use` blocks, and each
+#: `tool_result` in the next message — a Bash call the hook denied among them —
+#: ended by a `result` holding what `--output-format json` printed.
+STREAM = [
+    {"type": "system", "subtype": "init", "session_id": "the-id", "tools": ["Read", "Bash"]},
+    {
+        "type": "assistant",
+        "message": {
+            "content": [
+                {"type": "text", "text": "Reading the loader first."},
+                {
+                    "type": "tool_use",
+                    "id": "toolu_1",
+                    "name": "Read",
+                    "input": {"file_path": "src/loader.py"},
+                },
+                {
+                    "type": "tool_use",
+                    "id": "toolu_2",
+                    "name": "Grep",
+                    "input": {"pattern": "seed", "path": "src"},
+                },
+            ]
+        },
+    },
+    {
+        "type": "user",
+        "message": {
+            "content": [
+                {
+                    "type": "tool_result",
+                    "tool_use_id": "toolu_1",
+                    "is_error": False,
+                    "content": "def seed(): ...",
+                },
+                {
+                    "type": "tool_result",
+                    "tool_use_id": "toolu_2",
+                    "is_error": False,
+                    "content": "src/loader.py",
+                },
+            ]
+        },
+    },
+    {
+        "type": "assistant",
+        "message": {
+            "content": [
+                {
+                    "type": "tool_use",
+                    "id": "toolu_3",
+                    "name": "Glob",
+                    "input": {"pattern": "**/*.md"},
+                },
+                {
+                    "type": "tool_use",
+                    "id": "toolu_4",
+                    "name": "Bash",
+                    "input": {"command": "cat /tmp/x.log", "description": "the log"},
+                },
+                {
+                    "type": "tool_use",
+                    "id": "toolu_5",
+                    "name": "Read",
+                    "input": {"file_path": "src/gone.py"},
+                },
+            ]
+        },
+    },
+    {
+        "type": "user",
+        "message": {
+            "content": [
+                {
+                    "type": "tool_result",
+                    "tool_use_id": "toolu_3",
+                    "is_error": False,
+                    "content": "README.md",
+                },
+                {
+                    "type": "tool_result",
+                    "tool_use_id": "toolu_4",
+                    "is_error": True,
+                    "content": "PreToolUse:Bash hook error: Denied by tg:4242",
+                },
+                {
+                    "type": "tool_result",
+                    "tool_use_id": "toolu_5",
+                    "is_error": True,
+                    "content": [{"type": "text", "text": "File does not exist."}],
+                },
+            ]
+        },
+    },
+    {
+        "type": "result",
+        "subtype": "success",
+        "is_error": False,
+        "result": "claims · no finding",
+        "session_id": "the-id",
+        "modelUsage": {
+            "claude-sonnet-5": {
+                "inputTokens": 3,
+                "outputTokens": 40,
+                "cacheCreationInputTokens": 900,
+                "cacheReadInputTokens": 0,
+                "costUSD": 0.02,
+            }
+        },
+    },
+]
+
+
+class _Lines:
+    """A process's stdout, one JSON event to a line — and then, if asked,
+    nothing more for as long as anybody waits."""
+
+    def __init__(self, events: list[dict], *, then_hang: bool = False) -> None:
+        self._lines = [json.dumps(event).encode() + b"\n" for event in events]
+        self._hang = then_hang
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self) -> bytes:
+        if not self._lines:
+            if self._hang:
+                await asyncio.Event().wait()
+            raise StopAsyncIteration
+        return self._lines.pop(0)
+
+
+class _Quiet:
+    async def read(self) -> bytes:
+        return b""
+
+
+class Streaming:
+    """A turn answering in `stream-json`."""
+
+    pid = 4242
+
+    def __init__(self, events: list[dict], *, then_hang: bool = False) -> None:
+        self.stdout = _Lines(events, then_hang=then_hang)
+        self.stderr = _Quiet()
+        self.returncode: int | None = None
+
+    async def wait(self) -> int:
+        self.returncode = 0 if self.returncode is None else self.returncode
+        return self.returncode
+
+
+def streaming(monkeypatch, events: list[dict], **how) -> list[tuple[list[str], dict]]:
+    started: list[tuple[list[str], dict]] = []
+
+    async def fake_exec(*arguments, **kwargs):
+        started.append((list(arguments), kwargs))
+        return Streaming(events, **how)
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec)
+    return started
+
+
+async def test_an_inspection_s_turn_is_streamed_and_says_every_call(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Each call with what it read and how it came back — never what came
+    back — and the answer from the `result`, as it was read before."""
+    from datetime import UTC, datetime
+
+    from halyard.core import usage
+    from halyard.core.calls import Call, Calls
+
+    started = streaming(monkeypatch, STREAM)
+    calls = Calls()
+    database = tmp_path / "halyard.db"
+
+    said = await runner(usage_path=database).ask(
+        "inspect this", cwd=tmp_path, edits=False, session_id="the-id", calls=calls
+    )
+
+    assert said == "claims · no finding"
+    [(arguments, kwargs)] = started
+    assert arguments[arguments.index("--output-format") + 1] == "stream-json"
+    assert "--verbose" in arguments
+    assert kwargs["limit"] == runner_module.LINE_LIMIT
+    assert calls.reported
+    assert list(calls) == [
+        Call("toolu_1", "Read", "src/loader.py", "ran"),
+        Call("toolu_2", "Grep", "seed in src", "ran"),
+        Call("toolu_3", "Glob", "**/*.md", "ran"),
+        Call("toolu_4", "Bash", "cat /tmp/x.log", "denied"),
+        Call("toolu_5", "Read", "src/gone.py", "error"),
+    ]
+    assert "def seed" not in repr(list(calls)), "what came back is not kept"
+    [row] = usage.totals(database, datetime(2026, 1, 1, tzinfo=UTC))
+    assert row[5] == 900, "what it used is read from the `result` as before"
+
+
+async def test_a_streamed_answer_marked_as_an_error_is_still_no_answer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from halyard.core.calls import Calls
+
+    streaming(monkeypatch, [{"type": "result", "is_error": True, "result": "API Error: 529"}])
+
+    assert await runner().ask("inspect this", calls=Calls()) is None
+
+
+async def test_every_other_one_shot_turn_is_asked_for_json_as_before(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A commit message, a compaction record, upkeep: nothing to account for."""
+    calls = spying_on_the_turn(monkeypatch)
+
+    await runner().ask("write a subject line", system="You write messages.")
+    await runner().ask("check this", cwd=Path("."), edits=False, session_id="the-id")
+
+    for arguments, kwargs in calls:
+        assert arguments[arguments.index("--output-format") + 1] == "json"
+        assert "--verbose" not in arguments
+        assert "limit" not in kwargs
+
+
+async def test_a_streamed_turn_out_of_time_keeps_what_it_called_before(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A call that never came back is still a call, with nothing said of how."""
+    from halyard.core.calls import Calls
+
+    monkeypatch.setattr(os, "killpg", lambda *_: None)
+    streaming(monkeypatch, STREAM[:2], then_hang=True)
+    calls = Calls()
+
+    said = await runner().ask("inspect this", timeout=0.05, calls=calls)
+
+    assert said is None
+    assert [(call.id, call.came) for call in calls] == [("toolu_1", None), ("toolu_2", None)]
+
+
+class _Overlong:
+    """A stdout with a line longer than the reader allows."""
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self) -> bytes:
+        raise ValueError("Separator is not found, and chunk exceed the limit")
+
+
+async def test_a_streamed_line_too_long_to_read_ends_the_turn_with_no_answer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Ended with everything it started, as one out of time is."""
+    from halyard.core.calls import Calls
+
+    ended: list[int] = []
+    monkeypatch.setattr(os, "killpg", lambda group, _sent: ended.append(group))
+
+    async def fake_exec(*_arguments, **_kwargs):
+        process = Streaming([])
+        process.stdout = _Overlong()
+        return process
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec)
+
+    assert await runner().ask("inspect this", calls=Calls()) is None
+    assert ended == [4242]

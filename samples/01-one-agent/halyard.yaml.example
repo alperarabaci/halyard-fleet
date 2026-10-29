@@ -1,0 +1,33 @@
+# What this sample adds to your halyard.yaml — the one in your Halyard checkout.
+# Keep your own `settings:`; put the project under `projects:` next to any you
+# already have, and fill in your own path, session name and group.
+
+settings:
+  HALYARD_CHANNEL: telegram
+  TELEGRAM_BOT_TOKEN: "123456:replace-me"          # from @BotFather; secret
+  TELEGRAM_CHAT_ID: "-1001234567890"               # the group the bot is in
+  TELEGRAM_AUTHORIZED_USER_IDS: "11111111"         # who may answer a card
+  TELEGRAM_MENU: simple                            # the short command menu
+
+projects:
+  hello-counter:
+    # Where you copied this sample to — not inside the Halyard checkout.
+    path: ~/halyard-samples/hello-counter
+    agents:
+      dev:
+        # claude-code here; `codex` or `opencode` work the same way.
+        runtime: claude-code
+        # The name the runtime knows the session by. `uv run halyard sessions`
+        # lists the ones it can see.
+        session: hello-counter
+        # The group its cards and replies go to. Quoted: unquoted, YAML reads it
+        # as a number.
+        chat: "-1001234567890"
+
+prompts:
+  # `/sample_01` in the group sends this sample's task to the agent: the text of
+  # PROMPT.md. Anything typed after the command is added on the end.
+  sample_01: >-
+    Add a "Reset" button to `index.html`, with the id `reset`, that puts the
+    counter back to 0. Keep everything else on the page as it is. When you are
+    done, run `./check.sh` and tell me what it printed.

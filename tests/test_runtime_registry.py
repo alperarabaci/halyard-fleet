@@ -142,3 +142,22 @@ def test_doctor_hands_each_runtime_its_own_check_context(monkeypatch) -> None:
     )
 
     assert received == [{"marker": "from-settings"}]
+
+
+@pytest.mark.parametrize(
+    ("model", "runtime"),
+    [
+        ("gpt-5.6-terra", "codex"),
+        ("GPT-6.1-sol", "codex"),
+        ("codex-auto-review", "codex"),
+        ("sonnet", "claude-code"),
+        ("opus", "claude-code"),
+        ("zai-coding-plan/glm-5.3", "claude-code"),
+        ("", "claude-code"),
+        (None, "claude-code"),
+    ],
+)
+def test_a_one_shot_turn_runs_where_its_model_belongs(model, runtime) -> None:
+    """The model says where Halyard's own turns run — a GPT name is Codex's —
+    and one no runtime claims stays on the default, as every model did."""
+    assert registry.for_model(model) == runtime

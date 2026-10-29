@@ -8,6 +8,7 @@ describes the first one wearing a disguise.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Protocol, runtime_checkable
@@ -113,6 +114,7 @@ class AgentRunner(Protocol):
         text: str,
         cwd: str | None = None,
         when_done: LateFailure | None = None,
+        started: Callable[[str], object] | None = None,
     ) -> bool:
         """Put `text` into the session as if the user had typed it.
 
@@ -131,5 +133,14 @@ class AgentRunner(Protocol):
         called only when a turn that was accepted then fails, with the reason —
         running out of usage halfway through, most often. A runtime that
         decides before it answers never calls it, and says so.
+
+        `started` is called with the session's id as the message is about to
+        go into the session, before anything the session says to it: for a
+        runtime that queues a message behind a turn already going, when its own
+        turn begins rather than when it was queued — see `agents/turns.py`. A
+        runtime with no such queue calls it as it sends. It answers whether the
+        message still goes: False — its sender called it back while it waited —
+        and it is not sent, and `send` returns False. Not called for a message
+        refused before then.
         """
         ...

@@ -90,14 +90,15 @@ class Attribution:
     def __init__(
         self,
         *,
-        token: str,
+        tokens: Mapping[str, str],
         projects: Mapping[str, object],
         tag_of: Callable[[str], str | None],
     ) -> None:
         #: Only the projects that asked for this, each with a `path`, a `forge`
-        #: and its `seats` — see `label_work:` in `halyard.yaml`.
+        #: and its `seats` — see `labels: work:` in `halyard.yaml`.
         self._projects = dict(projects)
-        self._token = token
+        #: Each forge's token, by forge name — see `registry.build`.
+        self._tokens = dict(tokens)
         #: Runtime → the short name it labels with (`claude`). Handed in by the
         #: app, which knows the runtimes, so this module never imports one.
         self._tag_of = tag_of
@@ -219,7 +220,7 @@ class Attribution:
             origin = await asyncio.to_thread(origin_of, cwd)
             if origin is None:
                 return
-            forge = build(origin, self._token, declared=getattr(settings, "forge", None))
+            forge = build(origin, self._tokens, declared=getattr(settings, "forge", None))
             task = await forge.task(number)
             if label.casefold() in {name.casefold() for name in task.labels}:
                 return

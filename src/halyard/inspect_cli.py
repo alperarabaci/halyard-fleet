@@ -21,11 +21,15 @@ from pathlib import Path
 
 from halyard import frame
 from halyard.core.config_file import Project, projects
+from halyard.inspections import Status
 from halyard.inspections import repeat as repeating
+from halyard.inspections import trace as tracing
 
-USAGE = """usage: halyard inspect <recent [n] | repeat <id> [options] | compare <id>>
+USAGE = """usage: halyard inspect <recent [n] | show <id> | repeat <id> [options] | compare <id>>
 
   recent [n]         the last n inspections the work made (10), with their ids
+  show <id>          one run: its status, every read it asked for and what
+                     became of each, and its answer
   repeat <id>        give one the same input again, and keep the answer beside
     --model <m>        the original as an experiment: on this model,
     --effort <e>       thinking this hard (`default`: the runtime's own),
@@ -58,7 +62,9 @@ def main(args: Sequence[str]) -> int:
     what, rest = (words[0], words[1:]) if words else ("", [])
     # How many words each takes after its name: `recent` a number or none, the
     # others one id.
-    if len(rest) not in {"recent": (0, 1), "repeat": (1,), "compare": (1,)}.get(what, ()):
+    if len(rest) not in {"recent": (0, 1), "show": (1,), "repeat": (1,), "compare": (1,)}.get(
+        what, ()
+    ):
         print(USAGE, file=sys.stderr)
         return 2
     settings = _settings()
@@ -81,6 +87,9 @@ def main(args: Sequence[str]) -> int:
             file=sys.stderr,
         )
         return 2
+    if what == "show":
+        print("\n".join(shown(chosen)))
+        return 0
     # A repeat's id stands for its original: that is what is given again, and
     # what everything else is compared with.
     original = (repeating.find(database, chosen.repeat_of) if chosen.repeat_of else None) or chosen
@@ -135,13 +144,51 @@ def _line(run: repeating.Row, repeated: int = 0) -> str:
         f"{run.inspection}{ran_for}",
         f"{run.model}@{run.effort}" if run.effort else run.model,
         f"{run.took:.0f}s",
-        run.outcome if run.answer is not None else f"unmeasured: {run.why}",
+        (run.status or run.outcome) if run.answer is not None else f"unmeasured: {run.why}",
     ]
     if run.finding:
         parts.append(run.finding)
     if repeated:
         parts.append(f"repeated {repeated}x")
     return "  ".join(parts)
+
+
+def shown(run: repeating.Row) -> list[str]:
+    """One run in full: its status, every read it asked for and what became of
+    each, what Halyard said under it, and the answer.
+
+    The status and the reads are what was recorded — the runtime's stream and
+    the gate's decisions — never what the answer says it read. A run kept
+    before inspections had them, or a repeat, says so.
+    """
+    trace = tracing.from_json(run.trace)
+    try:
+        status = Status(run.status) if run.status else None
+    except ValueError:
+        status = None
+    lines = [_line(run)]
+    if status is None or trace is None:
+        lines.append("Status: not kept — a run from before inspections had one, or a repeat")
+    else:
+        lines.append(f"Status: {tracing.summed_up(status, trace, run.why)}")
+        lines += [
+            "",
+            "Reads, as the runtime reported them and the gate decided:"
+            if trace.reported
+            else "Reads the gate saw — the runtime did not say what else it read:",
+        ]
+        width = max((len(read.outcome.value) for read in trace.reads), default=0)
+        tools = max((len(read.tool) for read in trace.reads), default=0)
+        lines += [
+            f"  {read.outcome.value.ljust(width)}  {read.tool.ljust(tools)}  {read.what}"
+            + (f" — {read.detail}" if read.detail else "")
+            for read in trace.reads
+        ] or ["  none"]
+    if run.not_run:
+        lines += ["", run.not_run]
+    lines += ["", "Answer:", ""]
+    lines.append(run.answer if run.answer is not None else f"(no answer: {run.why})")
+    return lines
 
 
 def _recent(database: Path, limit: int) -> int:
@@ -368,7 +415,6 @@ async def _repeat(
             runtime=asker.runtime,
             project=found.path,
             context=context,
-            findings=found.label_findings,
             database=database,
             session=session,
         )

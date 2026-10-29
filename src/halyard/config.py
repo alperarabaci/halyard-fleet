@@ -33,6 +33,10 @@ from pydantic_settings import (
 logger = logging.getLogger(__name__)
 
 
+#: The levels `HALYARD_LOG_LEVEL` takes, loudest first.
+LOG_LEVELS = ("CRITICAL", "ERROR", "WARNING", "INFO", "DEBUG")
+
+
 class ChannelKind(StrEnum):
     """Which channel adapter resolves approvals."""
 
@@ -213,8 +217,26 @@ class Settings(BaseSettings):
     inspection_effort: str | None = Field(
         default=None, validation_alias="HALYARD_INSPECTION_EFFORT"
     )
+    #: The model Halyard's own one-shot turns run on when nothing more
+    #: specific names one: the commit message, and the record carried across a
+    #: compaction. Unset, sonnet. Inspections have their own, above.
+    default_model: str | None = Field(default=None, validation_alias="HALYARD_DEFAULT_MODEL")
+    #: How hard those turns think. Unset, the runtime's own effort for the model.
+    default_effort: str | None = Field(default=None, validation_alias="HALYARD_DEFAULT_EFFORT")
+    #: Commit wording can use a smaller model without changing other one-shot
+    #: turns. Each unset field inherits its corresponding default above.
+    commit_model: str | None = Field(default=None, validation_alias="HALYARD_COMMIT_MODEL")
+    commit_effort: str | None = Field(default=None, validation_alias="HALYARD_COMMIT_EFFORT")
 
+    #: One of CRITICAL, ERROR, WARNING, INFO, DEBUG. Anything else is ignored —
+    #: the log stays at INFO — and said, rather than refused: refused, the
+    #: service never started, and every command was denied while launchd
+    #: started it again and again. See `ignored`.
     log_level: str = Field(default="INFO", validation_alias="HALYARD_LOG_LEVEL")
+    #: The same setting as it was written, kept only to say it was ignored.
+    log_level_as_given: str | None = Field(
+        default=None, validation_alias="HALYARD_LOG_LEVEL", repr=False
+    )
     #: A ceiling on one week, so an always-on service cannot fill a disk before
     #: the next Monday. Reaching it rolls early and keeps both halves.
     log_max_bytes: int = Field(default=5_000_000, validation_alias="HALYARD_LOG_MAX_BYTES", gt=0)
@@ -228,6 +250,11 @@ class Settings(BaseSettings):
     project_name: str = Field(default="unknown", validation_alias="CLAUDE_PROJECT_NAME")
 
     telegram_bot_token: str | None = Field(default=None, validation_alias="TELEGRAM_BOT_TOKEN")
+    #: Which command menu Telegram shows: `full`, every command and prompt, or
+    #: `simple`, what a first setup needs with the rest a card away. Every
+    #: command is answered when typed either way. A value this does not know
+    #: is `full`, said in the log and by doctor.
+    telegram_menu: str = Field(default="full", validation_alias="TELEGRAM_MENU")
     telegram_chat_id: str | None = Field(default=None, validation_alias="TELEGRAM_CHAT_ID")
     #: `NoDecode` because pydantic-settings otherwise tries to JSON-decode any
     #: set-typed environment variable before a validator can see it. A single
@@ -270,10 +297,15 @@ class Settings(BaseSettings):
     #: without waiting for a release, because models ship faster than this does.
     claude_models: str | None = Field(default=None, validation_alias="HALYARD_CLAUDE_MODELS")
 
-    #: Which model writes the record carried across a compaction. A distillation
-    #: of text somebody else already wrote — the reasoning happened in the
-    #: session, not here — so it does not need the expensive one.
-    compaction_model: str = Field(default="sonnet", validation_alias="HALYARD_COMPACTION_MODEL")
+    #: Which model writes the record carried across a compaction, when it should
+    #: not be `HALYARD_DEFAULT_MODEL`. A distillation of text somebody else
+    #: already wrote — the reasoning happened in the session, not here — so it
+    #: does not need the expensive one.
+    compaction_model: str | None = Field(default=None, validation_alias="HALYARD_COMPACTION_MODEL")
+    #: Independent of commit wording and the default reasoning effort.
+    compaction_effort: str | None = Field(
+        default=None, validation_alias="HALYARD_COMPACTION_EFFORT"
+    )
 
     #: How much of the compaction record may be carried into the fresh context.
     #: Measured in the field: the model fills very nearly whatever it is given,
@@ -327,14 +359,21 @@ class Settings(BaseSettings):
     #: How hard those turns think — ZCode refuses a send that carries no
     #: reasoning level at all.
     zcode_reasoning: str = Field(default="max", validation_alias="ZCODE_REASONING")
-    #: For reaching an issue tracker — today only to add a label to the task a
-    #: branch is for. Named for the idea rather than for GitLab, because the
-    #: provider is chosen by the repository's remote and a second one is a
-    #: module rather than a rename. Absent means `/label` says so and every
-    #: other command is unaffected.
+    #: For reaching an issue tracker — to read the task a branch is for and
+    #: put a label on it. One token per forge, each used for its own forge
+    #: alone, so one machine can label a GitHub project and a GitLab one; which
+    #: forge a project is on, its repository's remote says. Absent means
+    #: `/label` says so for that forge and every other command is unaffected.
     #:
+    #: GitHub's is a fine-grained token limited to the repository, with
+    #: Issues: read and write.
+    github_token: str | None = Field(default=None, validation_alias="HALYARD_GITHUB_TOKEN")
     #: GitLab has no scope narrower than `api` for writing a label onto an
     #: issue, so a *project* access token is the way to make that mean less.
+    gitlab_token: str | None = Field(default=None, validation_alias="HALYARD_GITLAB_TOKEN")
+    #: The name `HALYARD_GITLAB_TOKEN` had while GitLab was the only forge,
+    #: until 2026-10-25. Still read, as GitLab's token when the new name is
+    #: unset; `halyard doctor` says to rename it.
     forge_token: str | None = Field(default=None, validation_alias="HALYARD_FORGE_TOKEN")
     #: When true, an agent's own `git commit` or `git push` is refused before
     #: anybody is asked. Off by default, so nothing changes for anybody who has
@@ -342,6 +381,13 @@ class Settings(BaseSettings):
     #: not lift it.
     refuse_agent_commits: bool = Field(
         default=False, validation_alias="HALYARD_REFUSE_AGENT_COMMITS"
+    )
+    #: When true, Halyard decides every call itself, even one from a chat whose
+    #: own setting approves for it — Codex's "approve for me", Claude Code's
+    #: auto mode. Off by default: that choice was made in the chat, and asking
+    #: again on a phone made the ordinary way of working harder.
+    override_agent_approvals: bool = Field(
+        default=False, validation_alias="HALYARD_OVERRIDE_AGENT_APPROVALS"
     )
 
     #: Let a shell command through without asking when it is a read the gate
@@ -360,23 +406,55 @@ class Settings(BaseSettings):
     #: The name is from when a low risk label was the test. That test let one
     #: read carry a whole command — `ls | xargs rm` — and it no longer decides:
     #: every part has to be understood, and a part that is not is a question.
+    #:
+    #: Anything but `low` is ignored, and the gate stays as strict as with
+    #: nothing set — never refused. Refused, it stopped the service from
+    #: starting: launchd started it again and again, every command on every
+    #: wired project was denied while it did, and none of it reached Telegram,
+    #: which is where the person who could fix it was. So it is said instead —
+    #: see `ignored` — in the log, in the navigator's chat and by doctor.
     allow_risk_at_or_below: str | None = Field(
         default=None, validation_alias="HALYARD_ALLOW_RISK_AT_OR_BELOW"
+    )
+    #: The same setting as it was written, kept only to say it was ignored.
+    #: Nothing decides anything by it: `allow_risk_at_or_below` above is what
+    #: the gate reads.
+    allow_risk_as_given: str | None = Field(
+        default=None, validation_alias="HALYARD_ALLOW_RISK_AT_OR_BELOW", repr=False
     )
 
     @field_validator("allow_risk_at_or_below")
     @classmethod
     def _only_low_may_be_skipped(cls, value: str | None) -> str | None:
-        if value is None or not str(value).strip():
-            return None
-        wanted = str(value).strip().lower()
-        if wanted != "low":
-            raise ValueError(
-                "HALYARD_ALLOW_RISK_AT_OR_BELOW takes `low` and nothing else. "
-                "Medium covers commits, moves and container starts; a gate that "
-                "skips those is not a gate."
+        """`low`, or nothing. Medium covers commits, moves and container
+        starts; a gate that skips those is not a gate — so a value it does not
+        take leaves the gate as it is with none."""
+        wanted = str(value or "").strip().lower()
+        return "low" if wanted == "low" else None
+
+    @property
+    def ignored(self) -> list[str]:
+        """Settings given a value Halyard does not take, each in a sentence:
+        which, what it was, and what happens instead. Said at startup, in the
+        navigator's chat and by `halyard doctor`, rather than refused — a
+        service that will not start denies everything and tells nobody."""
+        said = []
+        level = str(self.log_level_as_given or "").strip()
+        if level and level.upper() not in LOG_LEVELS:
+            said.append(
+                f"HALYARD_LOG_LEVEL is {level!r}, which is not a level: "
+                f"{', '.join(LOG_LEVELS)}. It is ignored, so the log is kept at INFO — set "
+                "one of those, or remove it."
             )
-        return wanted
+        given = str(self.allow_risk_as_given or "").strip()
+        if given and self.allow_risk_at_or_below is None:
+            said.append(
+                f"HALYARD_ALLOW_RISK_AT_OR_BELOW is {given!r}, and it takes `low` and nothing "
+                "else: medium covers commits, moves and container starts, and a gate that "
+                "skips those is not a gate. It is ignored, so every command asks as if it "
+                "were not set — set it to `low`, or remove it."
+            )
+        return said
 
     @model_validator(mode="after")
     def _timeouts_must_be_ordered(self) -> Settings:
@@ -408,21 +486,21 @@ class Settings(BaseSettings):
     @field_validator("log_level", mode="before")
     @classmethod
     def _known_level(cls, value: object) -> object:
-        """Refuse a level that does not exist rather than quietly using INFO.
+        """A level, or INFO for one that does not exist — never quietly.
 
         A typo here is invisible in the worst way: `HALYARD_LOG_LEVEL=DEBUGG`
         would leave you reading an INFO log while believing you had turned
         debugging on, and concluding from its silence that nothing happened.
+        So it is said, loudly — see `ignored`. It used to be refused, which
+        kept the service from starting at all: worse than a quiet log.
         """
-        if isinstance(value, str):
-            level = value.strip().upper()
-            if level not in ("CRITICAL", "ERROR", "WARNING", "INFO", "DEBUG"):
-                raise ValueError(
-                    f"HALYARD_LOG_LEVEL={value!r} is not a level. "
-                    "Use one of CRITICAL, ERROR, WARNING, INFO, DEBUG."
-                )
-            return level
-        return value
+        level = str(value if value is not None else "").strip().upper()
+        return level if level in LOG_LEVELS else "INFO"
+
+    @field_validator("log_level_as_given", mode="before")
+    @classmethod
+    def _as_written(cls, value: object) -> str | None:
+        return None if value is None else str(value)
 
     @field_validator("log_file", mode="before")
     @classmethod
@@ -459,6 +537,17 @@ class Settings(BaseSettings):
             # can approve anything or, worse, that the check was skipped.
             raise ValueError(f"HALYARD_CHANNEL=telegram requires {', '.join(missing)} to be set")
         return self
+
+    @property
+    def forge_tokens(self) -> dict[str, str]:
+        """Each forge's token, by the name `halyard.tasks` gives the forge —
+        the old `HALYARD_FORGE_TOKEN` standing in for GitLab's when its own is
+        unset. A forge with no token is left out."""
+        tokens = {
+            "github": self.github_token,
+            "gitlab": self.gitlab_token or self.forge_token,
+        }
+        return {forge: token for forge, token in tokens.items() if token}
 
     @property
     def host(self) -> str:

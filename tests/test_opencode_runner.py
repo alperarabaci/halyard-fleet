@@ -44,6 +44,28 @@ async def test_a_message_lands_in_the_session_it_was_addressed_to(sent) -> None:
     assert body["parts"] == [{"type": "text", "text": "carry on"}]
 
 
+async def test_a_message_is_said_to_start_as_it_goes(sent) -> None:
+    """Nothing here queues it, so it starts as it is posted — and is said to
+    first, so nothing the session answers can come before."""
+    told: list[tuple[str, int]] = []
+
+    await OpencodeRunner().send("ses_1", "carry on", started=lambda s: told.append((s, len(sent))))
+
+    assert told == [("ses_1", 0)]
+    assert len(sent) == 1
+
+
+async def test_a_message_called_back_as_it_goes_is_not_posted(sent) -> None:
+    async def called_back(_session_id: str) -> bool:
+        return False
+
+    runner = OpencodeRunner()
+
+    assert await runner.send("ses_1", "carry on", started=called_back) is False
+    assert sent == []
+    assert runner.busy("ses_1") is False
+
+
 async def test_no_model_is_sent_when_none_was_chosen(sent) -> None:
     """Somebody who has not chosen from the phone has chosen at the desk, and
     overriding that silently is the opposite of what they did."""
@@ -387,3 +409,48 @@ async def test_an_opencode_that_is_not_there_is_no_answer(monkeypatch) -> None:
     monkeypatch.setattr("halyard.agents.opencode._port", lambda: 4096)
 
     assert await OpencodeRunner().ask("look") is None
+
+
+# --- stopping a session's turn ---------------------------------------------------
+
+
+def statuses(monkeypatch, listed: dict | None) -> list[tuple[str, str]]:
+    """opencode answering `/session/status` with `listed`, and every call made."""
+    called: list[tuple[str, str]] = []
+
+    def call(method: str, where: str, body, timeout):
+        called.append((method, where))
+        if where.split("?")[0].endswith("/session/status"):
+            return listed
+        return True
+
+    monkeypatch.setattr(OpencodeRunner, "_call", staticmethod(call))
+    monkeypatch.setattr("halyard.agents.opencode._port", lambda: 4096)
+    return called
+
+
+async def test_stop_aborts_a_session_that_is_working(monkeypatch) -> None:
+    """Waiting on a question nobody answered counts: that is the stuck turn
+    somebody wants to stop."""
+    called = statuses(monkeypatch, {"ses_1": {"type": "busy"}})
+
+    assert await OpencodeRunner().stop("ses_1", cwd="/repo") is True
+    assert called == [
+        ("GET", "http://127.0.0.1:4096/session/status?directory=%2Frepo"),
+        ("POST", "http://127.0.0.1:4096/session/ses_1/abort?directory=%2Frepo"),
+    ]
+
+
+async def test_stop_leaves_an_idle_session_alone(monkeypatch) -> None:
+    called = statuses(monkeypatch, {"ses_2": {"type": "busy"}, "ses_3": {"type": "idle"}})
+
+    assert await OpencodeRunner().stop("ses_1") is False
+    assert await OpencodeRunner().stop("ses_3") is False
+    assert [method for method, _ in called] == ["GET", "GET"]
+
+
+async def test_stop_with_opencode_unreachable_stops_nothing(monkeypatch) -> None:
+    called = statuses(monkeypatch, None)
+
+    assert await OpencodeRunner().stop("ses_1") is False
+    assert [method for method, _ in called] == ["GET"]

@@ -23,6 +23,8 @@ from halyard.workflows.runs import Run, counted_as
 
 #: The decisions every step can make; `next` is only offered where a phase ends.
 _EVERYWHERE = (Decision.FORWARD, Decision.BACK, Decision.WAIT)
+#: At the last step `done` takes forward's place: leaving it ends the workflow.
+_AT_THE_END = (Decision.DONE, Decision.BACK, Decision.WAIT)
 
 
 def lines_for(
@@ -79,11 +81,13 @@ def lines_for(
             f"{word(Decision.WAIT)} ({to(Decision.WAIT)})"
         )
         return said
+    last = run.step == len(flow) - 1
+    offered = _AT_THE_END if last else _EVERYWHERE
     already = carried(run.carried) if step.decided_by else None
     if already is not None:
         by = step.decided_by or ""
         who = f" ({seats[by]})" if seats.get(by) else ""
-        others = [decision for decision in _EVERYWHERE if decision is not already]
+        others = [decision for decision in offered if decision is not already]
         said.append(f"Already decided by {by}{who}: {word(already)} ({to(already)})")
         said.append(
             "To overrule it, decide on your last line: "
@@ -92,18 +96,23 @@ def lines_for(
         return said
     said.append(
         "Decide on your last line: "
-        + " · ".join(f"{word(decision)} ({to(decision)})" for decision in _EVERYWHERE)
+        + " · ".join(f"{word(decision)} ({to(decision)})" for decision in offered)
     )
     if stretch is not None and run.step == stretch[1]:
         # Only here: the end of a phase is the one place `next` means anything,
         # and the one place a reply with no decision stops rather than going on.
         phases = flow[stretch[0] : stretch[1] + 1]
+        out = (
+            f"{word(Decision.DONE)} ends the workflow"
+            if last
+            else f"{word(Decision.FORWARD)} leaves the phases"
+        )
         said.append(
             f"This step ends phase {run.phase}: {word(Decision.NEXT)} ({to(Decision.NEXT)}) "
             f"starts the next one, and {word(Decision.NEXT)} <step> starts it at another of "
-            f"{', '.join(phases)}; {word(Decision.FORWARD)} leaves the phases. "
+            f"{', '.join(phases)}; {out}. "
             f"{word(Decision.WAIT)}, or a reply with no decision, stops for the operator, "
-            "who starts the next phase or leaves them."
+            f"who starts the next phase or {'ends the workflow' if last else 'leaves them'}."
         )
     return said
 

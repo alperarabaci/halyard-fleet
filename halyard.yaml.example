@@ -25,6 +25,11 @@ settings:
   # Only these Telegram users can answer an approval. Everyone else is
   # refused and the attempt is written to the audit log.
   TELEGRAM_AUTHORIZED_USER_IDS: "11111111"
+  # Which command menu the bot shows. `full` (the default) lists every command
+  # and every prompt; `simple` lists actions, stop, agent, prompts, commit, open,
+  # doctor and help, with status, pause, resume, options, model, effort and your
+  # prompts a card away. Every command still answers when typed either way.
+  # TELEGRAM_MENU: simple
 
   # The credential the turns Halyard starts run on.
   #
@@ -80,6 +85,11 @@ settings:
   # value it takes.
   # HALYARD_ALLOW_RISK_AT_OR_BELOW: low
 
+  # A chat that approves for itself — Codex's "approve for me", Claude Code's
+  # auto mode — is left to it: its own reviewer decides, nothing reaches the
+  # phone, and the audit log says so. Set this to decide every call here anyway.
+  # HALYARD_OVERRIDE_AGENT_APPROVALS: true
+
   # Keep every inspection run in the database — what the model was given, word
   # for word, and what it said — to compare models on the same input later.
   # Off unless set, because it is the one place Halyard keeps text: the input
@@ -90,8 +100,26 @@ settings:
   # high, xhigh or max. Sonnet unless set, at the runtime's own effort for the
   # model — which is not the same for every model. An inspection can name its
   # own under the project's `inspections:`.
+  # The model also says where the turn runs: a `gpt-…` model runs on Codex,
+  # at Codex's efforts (`codex debug models --bundled` lists what the CLI here
+  # can run), and anything else on Claude Code.
   # HALYARD_INSPECTION_MODEL: sonnet
   # HALYARD_INSPECTION_EFFORT: max
+
+  # The model Halyard's own turns run on — the commit message it proposes, and
+  # the record carried across a compaction — and how hard it thinks. Sonnet
+  # unless set, at the runtime's own effort for the model; `gpt-…` runs on
+  # Codex, as above. HALYARD_COMPACTION_MODEL still names the compaction
+  # record's alone.
+  # HALYARD_DEFAULT_MODEL: sonnet
+  # HALYARD_DEFAULT_EFFORT: medium
+
+  # Override each job separately. Each unset field inherits the corresponding
+  # HALYARD_DEFAULT_* value; inspection choices remain independent.
+  # HALYARD_COMMIT_MODEL: gpt-6-luna
+  # HALYARD_COMMIT_EFFORT: low
+  # HALYARD_COMPACTION_MODEL: gpt-6-luna
+  # HALYARD_COMPACTION_EFFORT: medium
 
   # How much the log says. INFO unless set; DEBUG says more. A level that does
   # not exist refuses to start rather than quietly logging at INFO.
@@ -184,25 +212,31 @@ projects:
   alpha-engine:
     # Where `halyard wire` puts the gate.
     path: ~/code/alpha-engine
-    # Put each agent's label on the task its branch is for — `navigator:claude`,
-    # `reviewer:codex` — the first time that agent works on it. Needs a forge
-    # token that may label issues; off unless set. See docs/setup.md.
-    # label_work: true
-    # What `/command` offers, by name. `validate:` and a transition's `commands:`
-    # name entries from here rather than a command line of their own.
+    # What `/command` offers, by name. A commit option's and a transition's
+    # `commands:` name entries from here rather than a command line of their own.
     # commands:
     #   test-fast: make test-fast
+    #   lint: {run: scripts/check.sh lint, not_run: [2]}   # its exit 2 means "did not run": a transition stops
     #   e2e: make test-e2e SCOPE={label_groups.area}   # the task's `area` label; asked for if missing
     #   cleanup: make cleanup
     #   pull-branch: make pull-branch TASK={input.task}   # typed when /command runs it
     #   next-task: [cleanup, pull-branch]              # a list: one after another, stops at a failure
-    # validate: test-fast             # run first by /review_and_commit
+    # What `/commit` can check first: a button each, beside the plain Commit. The
+    # commands run in order and one failing means no card; the inspections then
+    # read the change — its `git diff --stat`, and what is untracked — and their
+    # answers go above the card. Nothing runs when only documentation changed.
+    # commit_options:
+    #   fast: {commands: [test-fast]}
+    #   wide: {commands: [test-fast, e2e], inspect: [destructive]}   # names from inspections:
     # Commands an agent may run here without a card, written as they are typed.
     # They run this project's code, so they are never taken for reads; this says
     # you trust them. A last `*` takes further arguments — options, and paths
     # inside the project — and `NAME=*` says that setting may be given. Only with
     # HALYARD_ALLOW_RISK_AT_OR_BELOW on. An entry that could run anything
-    # (`bash *`, `python -c *`, `uv run *`, `make *`) is ignored, and doctor says so.
+    # (`bash *`, `python -c *`, `uv run *`, `make *`) is ignored, and doctor says so;
+    # written out whole, with no `*`, it is that one command, and kept. A shell
+    # handed a script it names may take a `*` in the script's arguments, each
+    # one word and never an option.
     # `halyard rules add` keeps more without editing this file, and `halyard rules
     # export` / `import` carry the whole list to another machine.
     # runs:
@@ -211,6 +245,7 @@ projects:
     #   - UV_CACHE_DIR=* uv run pytest *
     #   - uv run --package * pytest *
     #   - npx vitest run *
+    #   - bash scripts/check-work-item-reference.sh --base *
     # Inspections `/inspect` offers over a chat's last reply, and transitions
     # `/transition` offers — each the project's own file, read relative to `path`. A
     # transition carries the last reply, puts its prompt in front, runs its commands
@@ -246,7 +281,9 @@ projects:
     # `rounds:` says more. A list inside a workflow is its phases: the steps a plan
     # in parts goes through once per part, whose last step says `next` for another
     # phase — or `next develop` to start it further on — and `forward` to leave
-    # them. See docs/workflows.md.
+    # them. A step that `works_on:` an earlier one carries that step's agent's last
+    # reply, and its back goes there: close on the driver's report, not on the
+    # navigator's word that it can close. See docs/workflows.md.
     # workflows:
     #   decisions: {forward: forward, back: back, wait: wait, next: next}   # the defaults
     #   phases: 3                        # how many phases go before it stops and asks
@@ -257,21 +294,29 @@ projects:
     #     discovered: {transition: discover_completed, agent: navigator, rounds: 2}
     #     develop: {transition: driver_develop, agent: driver}
     #     verified: {transition: reviewed, agent: navigator}
-    #     close: {agent: navigator}
+    #     close: {agent: navigator, works_on: develop}
     #   level3: [review, reviewed, [discover, discovered, develop, verified], close]
-    # Groups of task labels. The first one the task carries from each group
-    # goes on the envelope inspections and transitions are given, as `level: level::3`.
-    # Nothing is required or refused: a task with none of them adds nothing.
-    # label_groups:
-    #   level: [level::1, level::2, level::3]
-    #   area: [area:api, area:web, area:all]   # a command can take one: {label_groups.area}
-    # What the inspections' answers say when they found something, in the
-    # project's own words — quoted, since a phrase with a colon is otherwise a
-    # mapping. An answer saying one of them puts `halyard:<inspection>` on the task. This writes
-    # to the tracker, so nothing is written unless it is set.
-    # label_findings:
-    #   - "status: candidate"
-    #   - "status: evidence missing"
+    # Everything about task labels, in one place. Each of these was a key of
+    # its own before (`label_work:`, `label_groups:`, a plain list under
+    # `labels:`, `labels_exclude:`); those still work, and doctor says where
+    # each moved. `label_findings:` is no longer read, and can be removed.
+    # labels:
+    #   # Who worked on a task, on the task: each agent's label goes on the task
+    #   # its branch is for — `navigator:claude`, `reviewer:codex` — the first
+    #   # time that agent works on it, so the tracker shows who built it and who
+    #   # reviewed it. Needs a forge token that may label issues; off unless set.
+    #   # See docs/setup.md.
+    #   who_worked: true
+    #   # Groups of task labels. The first one the task carries from each goes on
+    #   # the envelope inspections and transitions are given, as `level: level::3`.
+    #   groups:
+    #     level: [level::1, level::2, level::3]
+    #     area: [area:api, area:web, area:all]   # a command can take one: {label_groups.area}
+    #   # What `/label` offers (empty: all of them), and what it never offers, as
+    #   # patterns. Halyard's own labels — `halyard:*` and the agents' — are never
+    #   # offered whatever this says: nobody puts those on by hand.
+    #   offer: [andon, rework]
+    #   exclude: [wontfix]
     # Written `seats:` before 2026-09-24, and a step's `agent:` was `seat:`;
     # both still work.
     agents:
@@ -324,7 +369,7 @@ projects:
         # Optional. It colours the card and matches a hook that declares one.
         # Two agents may share a role; that is the point of having four.
         role: navigator
-        # Optional. The label this agent puts on a task when `label_work` is on —
+        # Optional. The label this agent puts on a task when `labels: who_worked` is on —
         # role and runtime unless set, `navigator:claude`, or `claude` alone for a
         # agent with no role. Set it to match labels your tracker already uses.
         # Leave the model out: that changes under an agent, and this never does.

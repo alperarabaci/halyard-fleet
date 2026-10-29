@@ -1,0 +1,58 @@
+# What this sample adds to your halyard.yaml — the one in your Halyard checkout.
+# One project with tests, one agent, and nothing trusted yet: the first round
+# shows what still comes as a card, and you choose what stops coming. Keep your
+# own `settings:`; put the project under `projects:` next to any you already
+# have, and fill in your own path, session name and group.
+
+settings:
+  HALYARD_CHANNEL: telegram
+  TELEGRAM_BOT_TOKEN: "123456:replace-me"          # from @BotFather; secret
+  TELEGRAM_CHAT_ID: "-1001234567890"               # the group the bot is in
+  TELEGRAM_AUTHORIZED_USER_IDS: "11111111"         # who may answer a card
+  TELEGRAM_MENU: simple                            # the short command menu
+  # What a trusted command needs. It also lets plain reads inside a project
+  # through with no card (`cat`, `grep`, `git log`…), on every wired project:
+  # it is for the whole machine. `halyard samples add` never changes settings,
+  # so add it to yours by hand.
+  HALYARD_ALLOW_RISK_AT_OR_BELOW: low
+
+# The files the agent may write without a card — added after the first round.
+# At the top of the file, not under the project: a pattern is matched inside
+# each wired project, so this lets notes through in every one of them. Edits
+# anywhere else still come as cards, and `.git/` and the runtimes' hook folders
+# always do, whatever the pattern. Read when Halyard starts; `samples add` never
+# adds it.
+writes:
+  - NOTES/**
+
+projects:
+  fewer-cards:
+    # Where you copied this sample to — not inside the Halyard checkout.
+    path: ~/halyard-samples/fewer-cards
+    # No `runs:`: nothing is trusted yet. What the agent may run without a card
+    # is added after the first round, with `halyard rules add`, from what
+    # `halyard upkeep runs-advice fewer-cards` proposes — kept in Halyard's
+    # database, and listed by `halyard rules list fewer-cards`.
+    agents:
+      # Agent labels are unique across every project in the file: they are how
+      # `/to` and `/forward` name an agent.
+      fewer-cards-dev:
+        # Claude Code: each file it writes is a card, unless `writes:` above
+        # names the place.
+        runtime: claude-code
+        # The name the runtime knows the session by. `uv run halyard sessions`
+        # lists the ones it can see.
+        session: fewer-cards
+        # Your default group: the same id as TELEGRAM_CHAT_ID. Quoted: unquoted,
+        # YAML reads it as a number.
+        chat: "-1001234567890"
+
+prompts:
+  # `/sample_09` in the group sends the agent the next task: the text of
+  # PROMPT.md. Pressed twice, it does both.
+  sample_09: >-
+    Read `TASK.md` and do the first task in it not ticked yet, test first: add a
+    test to `test_cart.py`, run only that test with
+    `python3 -m unittest -q test_cart.<Class>.<test>`, make it pass, and run them
+    all with `make test-fast`. Then tick the task, write what you changed in a few
+    lines to `NOTES/coupon.md` or `NOTES/shipping.md`, and tell me in two lines.

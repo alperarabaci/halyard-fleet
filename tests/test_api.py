@@ -51,6 +51,61 @@ async def test_configured_claude_binary_reaches_the_runtime_runner(tmp_path: Pat
     assert app.state.runner._binary == str(binary)
 
 
+def test_halyard_s_own_turns_take_the_default_model_from_halyard_yaml(tmp_path: Path) -> None:
+    """The commit message and the compaction record: sonnet until
+    `HALYARD_DEFAULT_MODEL` says otherwise, and `HALYARD_COMPACTION_MODEL`
+    still names the record's alone."""
+    from halyard.api.app import _commit_model, _compaction_model, _default_model
+    from halyard.core.config_file import ModelChoice
+
+    unset = make_settings(tmp_path, ChannelKind.STUB_ALLOW)
+    chosen = Settings(
+        HALYARD_CHANNEL=ChannelKind.STUB_ALLOW.value,
+        HALYARD_DB_PATH=str(tmp_path / "halyard.db"),
+        HALYARD_AUDIT_LOG=str(tmp_path / "audit.jsonl"),
+        CLAUDE_PROJECT_NAME="alpha-engine",
+        HALYARD_DEFAULT_MODEL="haiku",
+        HALYARD_DEFAULT_EFFORT="Low",
+        _env_file=None,
+    )
+    own = chosen.model_copy(update={"compaction_model": "opus"})
+
+    assert (_default_model(unset), _compaction_model(unset)) == (ModelChoice(), ModelChoice())
+    assert _default_model(chosen) == ModelChoice("haiku", "low")
+    assert _compaction_model(chosen) == ModelChoice("haiku", "low")
+    assert _compaction_model(own) == ModelChoice("opus", "low")
+    assert _commit_model(unset) == ModelChoice()
+    assert _commit_model(chosen) == ModelChoice("haiku", "low")
+
+
+def test_commit_and_compaction_choices_can_override_each_default_independently(tmp_path):
+    from halyard.api.app import _commit_model, _compaction_model, _default_model
+    from halyard.core.config_file import ModelChoice
+
+    settings = make_settings(tmp_path, ChannelKind.STUB_ALLOW).model_copy(
+        update={
+            "default_model": "gpt-5.6-terra",
+            "default_effort": "high",
+            "commit_model": " gpt-6-luna ",
+            "commit_effort": " Low ",
+            "compaction_model": "gpt-6-luna",
+            "compaction_effort": "Medium",
+        }
+    )
+    assert _commit_model(settings) == ModelChoice("gpt-6-luna", "low")
+    assert _compaction_model(settings) == ModelChoice("gpt-6-luna", "medium")
+    assert _default_model(settings) == ModelChoice("gpt-5.6-terra", "high")
+    assert _commit_model(settings.model_copy(update={"commit_model": None})) == ModelChoice(
+        "gpt-5.6-terra", "low"
+    )
+    assert _commit_model(settings.model_copy(update={"commit_effort": None})) == ModelChoice(
+        "gpt-6-luna", "high"
+    )
+    assert _compaction_model(settings.model_copy(update={"compaction_model": None})) == ModelChoice(
+        "gpt-5.6-terra", "medium"
+    )
+
+
 @pytest.fixture
 async def allowing(tmp_path: Path):
     from halyard.api.app import create_app
@@ -456,3 +511,95 @@ async def test_asking_without_a_token_says_so_and_writes_nothing(
 
     assert app.state.registry._listeners == []
     assert "no forge token" in caplog.text
+
+
+async def test_labels_are_written_with_each_forge_s_token(tmp_path: Path, monkeypatch) -> None:
+    """A GitHub token alone is enough to start, and every forge's token is
+    handed on — the old name standing in for GitLab's."""
+    from halyard.api import app as module
+
+    monkeypatch.setattr(
+        module, "configured_projects", lambda: _one_project(tmp_path, label_work=True)
+    )
+    settings = make_settings(tmp_path, ChannelKind.STUB_ALLOW).model_copy(
+        update={"github_token": "github_pat_x", "forge_token": "glpat-old"}
+    )
+
+    app = module.create_app(settings)
+
+    [listening] = app.state.registry._listeners
+    assert listening.__self__._tokens == {"github": "github_pat_x", "gitlab": "glpat-old"}
+
+
+async def test_a_risk_setting_it_does_not_take_starts_the_service_with_the_gate_strict(
+    tmp_path: Path, caplog
+) -> None:
+    """`medium` used to stop the service from starting, and launchd started it
+    again and again while every command was denied and nothing reached the
+    phone. Now the service starts, every read still asks, and it is said: in
+    the log, and to the navigator."""
+    import logging
+
+    from halyard.api.app import create_app
+    from halyard.core.events import Role
+
+    settings = Settings(
+        HALYARD_CHANNEL=ChannelKind.STUB_ALLOW.value,
+        HALYARD_DB_PATH=str(tmp_path / "halyard.db"),
+        HALYARD_AUDIT_LOG=str(tmp_path / "audit.jsonl"),
+        HALYARD_ALLOW_RISK_AT_OR_BELOW="medium",
+        CLAUDE_PROJECT_NAME="alpha-engine",
+        _env_file=None,
+    )
+    caplog.set_level(logging.ERROR, logger="halyard.api.app")
+
+    app = create_app(settings)
+    said: list[tuple[str, str, object]] = []
+
+    async def heard(session_id, text, role=None, **_):
+        said.append((session_id, text, role))
+
+    app.state.channel.send_message = heard
+    async with LifespanManager(app):
+        pass
+
+    assert app.state.service._rules.reads is False, "no read goes through without a card"
+    assert "HALYARD_ALLOW_RISK_AT_OR_BELOW is 'medium'" in caplog.text
+    assert [record.levelname for record in caplog.records] == ["ERROR"]
+    [(_, text, role)] = said
+    assert text.startswith("⚠️ HALYARD_ALLOW_RISK_AT_OR_BELOW is 'medium'")
+    assert role is Role.NAVIGATOR
+
+
+async def test_a_log_level_it_does_not_take_starts_the_service_and_is_said(
+    tmp_path: Path, caplog
+) -> None:
+    """As a risk setting it does not take is: the service starts, logging at
+    INFO, and the log and the navigator are told."""
+    import logging
+
+    from halyard.api.app import create_app
+
+    settings = Settings(
+        HALYARD_CHANNEL=ChannelKind.STUB_ALLOW.value,
+        HALYARD_DB_PATH=str(tmp_path / "halyard.db"),
+        HALYARD_AUDIT_LOG=str(tmp_path / "audit.jsonl"),
+        HALYARD_LOG_LEVEL="DEBUGG",
+        CLAUDE_PROJECT_NAME="alpha-engine",
+        _env_file=None,
+    )
+    caplog.set_level(logging.ERROR, logger="halyard.api.app")
+
+    app = create_app(settings)
+    said: list[str] = []
+
+    async def heard(session_id, text, role=None, **_):
+        said.append(text)
+
+    app.state.channel.send_message = heard
+    async with LifespanManager(app):
+        pass
+
+    assert settings.log_level == "INFO"
+    assert "HALYARD_LOG_LEVEL is 'DEBUGG'" in caplog.text
+    assert said == [f"⚠️ {settings.ignored[0]}"]

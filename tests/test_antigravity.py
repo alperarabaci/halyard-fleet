@@ -162,6 +162,33 @@ async def test_what_goes_out_is_a_wake_and_not_the_message(monkeypatch) -> None:
     assert "carry on" not in argv[-1], "the message must not go out as a system message"
 
 
+async def test_a_message_is_said_to_start_as_its_wake_goes(monkeypatch) -> None:
+    calls = spying(monkeypatch)
+    told: list[tuple[str, int]] = []
+
+    sent = await runner_with_endpoint(monkeypatch).send(
+        "abc", "carry on", started=lambda s: told.append((s, len(calls)))
+    )
+
+    assert sent is True
+    assert told == [("abc", 0)]
+
+
+async def test_a_message_called_back_as_it_goes_wakes_nothing_and_is_not_kept(
+    monkeypatch,
+) -> None:
+    """Left waiting to be collected, it would go into whatever turn came next."""
+    calls = spying(monkeypatch)
+    runner = runner_with_endpoint(monkeypatch)
+
+    async def called_back(_session_id: str) -> bool:
+        return False
+
+    assert await runner.send("abc", "carry on", started=called_back) is False
+    assert calls == []
+    assert runner.take_pending("abc") == []
+
+
 async def test_the_address_and_token_are_passed_as_environment(monkeypatch) -> None:
     """Neither is published to a file; both come off the running process."""
     calls = spying(monkeypatch)

@@ -318,3 +318,95 @@ def test_git_is_never_allowed_to_ask_a_person_anything(repo: Path, monkeypatch) 
     assert seen["SSH_ASKPASS"] == ""
     # Inherited, not replaced: git needs PATH and HOME to work at all.
     assert "PATH" in seen
+
+
+# --- what a commit option's inspections read -------------------------------
+
+
+def test_the_change_is_described_by_its_stat_and_its_untracked_files(repo: Path) -> None:
+    """What git says of it, not the diff, which can be huge."""
+    wrote(repo, "seed.txt", "b\nc\n")
+    wrote(repo, "loader.py", "x = 1\n")
+
+    said = commits.described(repo)
+
+    assert said.splitlines()[2:] == [
+        "Tracked files, from `git diff --stat HEAD`:",
+        " seed.txt | 3 ++-",
+        " 1 file changed, 2 insertions(+), 1 deletion(-)",
+        "",
+        "Untracked files, which `git add -A` takes with them:",
+        "loader.py",
+    ]
+    assert "x = 1" not in said
+
+
+def test_a_long_path_is_named_whole(repo: Path) -> None:
+    """Cut to `.../`, a path cannot be read with `git diff` afterwards."""
+    deep = repo / "src" / "a-directory-with-a-long-name" / "and-another-one-below-it"
+    deep.mkdir(parents=True)
+    (deep / "a_module_whose_name_is_long_too.py").write_text("x = 1\n")
+    git(repo, "add", ".")
+    git(repo, "commit", "-qm", "deep")
+    (deep / "a_module_whose_name_is_long_too.py").write_text("x = 2\n")
+
+    said = commits.described(repo)
+
+    assert (
+        " src/a-directory-with-a-long-name/and-another-one-below-it/"
+        "a_module_whose_name_is_long_too.py | 2 +-"
+    ) in said
+    assert "..." not in said
+
+
+def test_what_git_add_leaves_out_is_left_out(repo: Path) -> None:
+    wrote(repo, ".gitignore", "build/\n")
+    (repo / "build").mkdir()
+    wrote(repo, "build/out.bin", "x")
+
+    said = commits.described(repo)
+
+    assert said.splitlines()[-1] == ".gitignore"
+    assert "out.bin" not in said
+    assert "Tracked files, from `git diff --stat HEAD`:\nnone changed" in said
+
+
+def test_nothing_untracked_says_none(repo: Path) -> None:
+    wrote(repo, "seed.txt", "b\n")
+
+    assert commits.described(repo).endswith("takes with them:\nnone")
+
+
+def test_a_change_across_many_files_is_named_up_to_a_limit(repo: Path, monkeypatch) -> None:
+    """The count git ends its stat with still says how big it is."""
+    monkeypatch.setattr(repository, "DESCRIBED_FILES", 2)
+    for name in ("a", "b", "c"):
+        stage(repo, f"{name}.py", "x\n")
+        wrote(repo, f"new-{name}.py", "y\n")
+    git(repo, "commit", "-qm", "three")
+    for name in ("a", "b", "c"):
+        wrote(repo, f"{name}.py", "z\n")
+
+    said = commits.described(repo).splitlines()
+
+    assert said[3:6] == [" a.py | 2 +-", " b.py | 2 +-", "…and 1 more"]
+    assert said[6].startswith(" 3 files changed")
+    assert said[-3:] == ["new-a.py", "new-b.py", "…and 1 more"]
+
+
+def test_a_repository_git_cannot_read_is_said_rather_than_raised(tmp_path: Path) -> None:
+    assert commits.described(tmp_path).startswith("git could not say what this commit would take: ")
+
+
+def test_prose_alone_is_told_apart_and_still_warned_about(repo: Path) -> None:
+    """Nothing is run for documentation; what was written is still read."""
+    from halyard.commits.validation import only_documentation
+
+    wrote(repo, "NOTES.md", "the notes\n")
+    prose = commits.read(repo, "alpha-engine")
+    wrote(repo, "loader.py", "x = 1\n")
+    code = commits.read(repo, "alpha-engine")
+
+    assert only_documentation(prose) is True
+    assert commits.check(prose).warnings == ("281 appears nowhere in the code this would commit",)
+    assert only_documentation(code) is False

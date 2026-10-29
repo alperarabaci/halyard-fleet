@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 
-from halyard import frame
+from halyard import frame, inspections
 from halyard.commands import Command, Result
 from halyard.inspections import Answer
 from halyard.transitions.spec import Previous
@@ -24,20 +24,29 @@ def compose(
     reply: str | None,
     ran: Sequence[tuple[Command, Result]] = (),
     previous: Previous | None = None,
+    step: str = "",
 ) -> str:
     """Everything a seat needs to act on a transition, in the order it reads it.
 
     Who it is for and from, first, so a session can tell a transition from an
-    instruction typed at it. Then the project's own text for this transition, which
-    speaks of "the message below". Then the envelope: what Halyard can see for
-    itself — the task, the machine, the tree, which round this is and which
-    revision of the prompt — one fact to a line, because the project's prompts
-    refuse to guess at any of it. Then what its commands printed, and the
-    inspections' answers, measured or not. Then, on a round after the first, what the
-    seat said back to the round before. Then the reply itself, last, where the
-    prompt said it would be.
+    instruction typed at it — and, for a workflow's `step`, that a Halyard
+    workflow sent it, which a project's prompts can tell an agent to keep going
+    for: nothing that would stop it half way. Then the project's own text for
+    this transition, which speaks of "the message below". Then the envelope:
+    what Halyard can see for itself — the task, the machine, the tree, which
+    round this is and which revision of the prompt — one fact to a line,
+    because the project's prompts refuse to guess at any of it. Then what its
+    commands printed, and the inspections' answers, measured or not — each
+    headed with its status, from what it read: complete, incomplete or
+    unmeasured. Then, on a
+    round after the first, what the seat said back to the round before. Then
+    the reply itself, last, where the prompt said it would be.
     """
-    parts = [f"To {recipient}, from Halyard — transition: {name}."]
+    parts = [
+        f"To {recipient}, from Halyard workflow {step} — transition: {name}."
+        if step
+        else f"To {recipient}, from Halyard — transition: {name}."
+    ]
     if prompt:
         parts += ["", prompt]
     facts = list(context)
@@ -54,8 +63,16 @@ def compose(
         parts += ["", f"Command {command.name} — {command.line}:", ""]
         parts.append(result.output or "(it printed nothing)")
     for answer in answers:
-        parts += ["", f"Inspection {answer.name} — {answer.path} @ {answer.version}:", ""]
+        # Its status from what it read, not from what it says it read: an
+        # incomplete answer goes on, marked.
+        status = inspections.said(answer, why=False)
+        heading = f"Inspection {answer.name} — {answer.path} @ {answer.version} · {status}:"
+        parts += ["", heading, ""]
         parts.append(answer.text if answer.measured else f"unmeasured — {answer.why}")
+        if answer.not_run:
+            # Halyard's, under the model's: a read the model may have answered
+            # without, because it never came back.
+            parts += ["", inspections.not_run_block(answer.not_run)]
     if previous is not None and previous.text is not None:
         parts += ["", f"{previous.seat}'s answer to round {previous.number}:", "", previous.text]
     if reply is not None:

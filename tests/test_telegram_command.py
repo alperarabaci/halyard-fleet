@@ -38,6 +38,7 @@ COMMANDS = {
 class FakeApi:
     def __init__(self) -> None:
         self.sent: list[dict] = []
+        self.edits: list[dict] = []
 
     async def open(self) -> None: ...
     async def close(self) -> None: ...
@@ -48,6 +49,7 @@ class FakeApi:
         return {"message_id": len(self.sent) + 100}
 
     async def edit_message_text(self, chat_id, message_id, text, **kwargs):
+        self.edits.append({"message_id": message_id, "text": text})
         return {"message_id": message_id}
 
     async def answer_callback_query(self, callback_query_id, *, text=None): ...
@@ -86,7 +88,7 @@ def pressed(name: str, *, user: str = APPROVER) -> dict:
         "id": "cb1",
         "from": {"id": int(user)},
         "data": cards.choice_data("run", name),
-        "message": {"message_id": 5, "chat": {"id": CHAT}},
+        "message": {"message_id": 5, "chat": {"id": CHAT}, "text": "Which command?"},
     }
 
 
@@ -220,6 +222,19 @@ async def test_pressing_a_button_runs_that_command(wired) -> None:
     await finished(channel)
 
     assert "pressed" in api.sent[-1]["text"]
+
+
+async def test_the_card_is_spent_once_a_command_is_chosen(wired) -> None:
+    """Closed, saying which, so the same command cannot be started again by a
+    second press on a card still showing its buttons."""
+    channel, api, _ = wired
+    teach(channel, greet="echo pressed")
+
+    await tap(channel, pressed("greet"))
+    await finished(channel)
+
+    [closed] = [edit for edit in api.edits if edit["message_id"] == 5]
+    assert closed["text"] == "Which command?\n\n☑️ greet"
 
 
 async def test_somebody_else_pressing_it_runs_nothing(wired) -> None:
@@ -402,7 +417,7 @@ def on_a_task(channel: TelegramChannel, monkeypatch, forge: FakeForge, *, branch
         lambda path: tracker.Origin(host="gitlab.com", path="a/b"),
     )
     monkeypatch.setattr(under_test.task_tracker, "build", lambda *a, **k: forge)
-    channel._forge_token = "glpat-x"
+    channel._forge_tokens = {"gitlab": "glpat-x"}
     return forge
 
 
@@ -432,6 +447,65 @@ async def test_label_names_the_task_and_offers_what_is_not_on_it(wired, monkeypa
         if button != cards.CANCEL
     }
     assert offered == {"andon", "rework"}
+
+
+async def test_a_project_can_leave_labels_out_of_the_card(wired, monkeypatch) -> None:
+    from dataclasses import replace as _replace
+
+    channel, api, _ = wired
+    on_a_task(channel, monkeypatch, FakeForge(defined=("andon", "halyard:proof", "rework")))
+    found = channel._repositories["alpha-engine"]
+    channel._repositories["alpha-engine"] = _replace(found, labels_exclude=("halyard:*",))
+
+    await deliver(channel, typed("/label"))
+
+    offered = {
+        button["text"]
+        for row in api.sent[-1]["reply_markup"]["inline_keyboard"]
+        for button in row
+        if button != cards.CANCEL
+    }
+    assert offered == {"andon", "rework"}
+
+
+async def test_halyard_s_own_labels_are_never_offered(wired, monkeypatch) -> None:
+    """An inspection's `halyard:proof` and an agent's `navigator:claude` are
+    written by Halyard itself; nobody puts one on by hand."""
+    from dataclasses import replace as _replace
+
+    from halyard.core.events import Role
+    from halyard.core.seats import Seat
+
+    channel, api, _ = wired
+    on_a_task(
+        channel,
+        monkeypatch,
+        FakeForge(defined=("andon", "halyard:proof", "navigator:claude", "rework")),
+    )
+    found = channel._repositories["alpha-engine"]
+    nav = Seat(label="nav", runtime="claude-code", project="alpha-engine", role=Role.NAVIGATOR)
+    channel._repositories["alpha-engine"] = _replace(found, seats=[nav])
+
+    await deliver(channel, typed("/label"))
+
+    offered = {
+        button["text"]
+        for row in api.sent[-1]["reply_markup"]["inline_keyboard"]
+        for button in row
+        if button != cards.CANCEL
+    }
+    assert offered == {"andon", "rework"}
+
+
+async def test_the_label_card_is_spent_once_a_label_is_chosen(wired, monkeypatch) -> None:
+    channel, api, _ = wired
+    on_a_task(channel, monkeypatch, FakeForge())
+
+    await tap(channel, label_pressed("andon"))
+    await finished(channel)
+
+    [closed] = [edit for edit in api.edits if edit["message_id"] == 5]
+    assert closed["text"] == "☑️ andon"
 
 
 async def test_a_project_can_narrow_which_labels_are_offered(wired, monkeypatch) -> None:
@@ -516,11 +590,31 @@ async def test_no_token_configured_says_which_problem_that_is(wired, monkeypatch
         "origin_of",
         lambda path: tracker.Origin(host="gitlab.com", path="a/b"),
     )
-    channel._forge_token = None
+    channel._forge_tokens = {}
 
     await deliver(channel, typed("/label"))
 
-    assert "No token" in api.sent[-1]["text"]
+    assert "No GitLab token for gitlab.com: set HALYARD_GITLAB_TOKEN" in api.sent[-1]["text"]
+
+
+async def test_a_gitlab_token_is_not_used_for_a_github_project(wired, monkeypatch) -> None:
+    """Each forge's token for its own forge alone: one machine can label a
+    GitHub project and a GitLab one, and neither token reaches the other."""
+    from halyard import tasks as tracker
+    from halyard.channels.telegram import adapter as under_test
+
+    channel, api, _ = wired
+    monkeypatch.setattr(under_test.task_tracker, "current_branch", lambda path: "320-thing")
+    monkeypatch.setattr(
+        under_test.task_tracker,
+        "origin_of",
+        lambda path: tracker.Origin(host="github.com", path="a/b"),
+    )
+    channel._forge_tokens = {"gitlab": "glpat-x"}
+
+    await deliver(channel, typed("/label"))
+
+    assert "No GitHub token for github.com: set HALYARD_GITHUB_TOKEN" in api.sent[-1]["text"]
 
 
 # --- /doctor -----------------------------------------------------------------

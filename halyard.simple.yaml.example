@@ -15,6 +15,10 @@ settings:
   TELEGRAM_CHAT_ID: "-1001234567890"
   # Only these Telegram users can answer an approval.
   TELEGRAM_AUTHORIZED_USER_IDS: "11111111"
+  # The short command menu: actions, stop, agent, prompts, commit, open, doctor,
+  # help — the rest a card away. Every command still answers when typed, and
+  # /help lists them all. Leave it out for the full menu.
+  TELEGRAM_MENU: simple
   # INFO unless set. DEBUG says more; a level that does not exist refuses to
   # start rather than quietly logging at INFO.
   # HALYARD_LOG_LEVEL: DEBUG

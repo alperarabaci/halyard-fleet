@@ -1,0 +1,51 @@
+# What this sample adds to your halyard.yaml — the one in your Halyard checkout.
+# Two projects, each a repository of its own with one agent, and each agent in
+# a group of its own. Keep your own `settings:`; put the projects under
+# `projects:` next to any you already have, and fill in your own paths, session
+# names and groups.
+
+settings:
+  HALYARD_CHANNEL: telegram
+  TELEGRAM_BOT_TOKEN: "123456:replace-me"          # from @BotFather; secret
+  TELEGRAM_CHAT_ID: "-1001234567890"               # the group the bot is in
+  TELEGRAM_AUTHORIZED_USER_IDS: "11111111"         # who may answer a card
+  TELEGRAM_MENU: simple                            # the short command menu
+
+projects:
+  greeting-page:
+    # Where you copied this sample to, and the folder of this project in it —
+    # not inside the Halyard checkout.
+    path: ~/halyard-samples/two-agents/greeting-page
+    # What `/command` offers in this project's group, by name. Halyard runs it
+    # in `path` and says how it went.
+    commands:
+      check: ./check.sh
+    agents:
+      greeting-dev:
+        runtime: claude-code
+        # The name the runtime knows the session by. `uv run halyard sessions`
+        # lists the ones it can see.
+        session: greeting-page
+        # Your default group: the same id as TELEGRAM_CHAT_ID. Quoted:
+        # unquoted, YAML reads it as a number.
+        chat: "-1001234567890"
+
+  todo-list:
+    path: ~/halyard-samples/two-agents/todo-list
+    commands:
+      check: ./check.sh
+    agents:
+      todo-dev:
+        runtime: codex
+        # The thread's name in Codex, or its id.
+        session: todo-list
+        # A group of its own: a second group, with the bot in it. `/status`
+        # sent there says its id.
+        chat: "-1002234567890"
+
+prompts:
+  # `/sample_02` sends this sample's task to the agent of the group it is typed
+  # in: the text of PROMPT.md. Each project's TASK.md says what that agent does.
+  sample_02: >-
+    Read `TASK.md` and do what it asks. Keep everything else in the project as
+    it is. When you are done, run `./check.sh` and tell me what it printed.

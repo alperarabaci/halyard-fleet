@@ -58,11 +58,14 @@ _PROJECT_FIELDS = {
     # The name `agents:` had until 2026-09-24, still read.
     "seats",
     "name",
+    "commit_options",
+    # What a commit's one check was before `commit_options:`, still read.
     "validate",
     "warn_if",
     "commands",
     "forge",
     "labels",
+    "labels_exclude",
     "label_groups",
     "label_findings",
     "label_work",
@@ -105,6 +108,26 @@ class Confirmation:
     inquiry: Path | None = None
     #: What the navigator is sent when the round is asked for.
     review: Path | None = None
+
+
+@dataclass(frozen=True)
+class CommitOption:
+    """A way to commit that checks the change first: a button on `/commit`'s
+    card beside the plain Commit.
+
+    Its commands run first, in order, where the project is; one that fails or
+    does not run means no card. Then its inspections read the change side by
+    side, and their answers go beside the card for a person to weigh: they
+    refuse nothing. Both are names from the project's own lists, so what
+    Halyard runs for a project is written in one place. See
+    `docs/configuration.md`.
+    """
+
+    name: str
+    #: Names from `commands:`, run in order.
+    commands: tuple[str, ...] = ()
+    #: Names from `inspections:`, run over the change once the commands passed.
+    inspections: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -170,6 +193,11 @@ class Step:
     #: nothing — `reviewed` after `review`, so a reviewer's back reaches the
     #: navigator first and the navigator's reply goes back to the reviewer.
     decided_by: str | None = None
+    #: An earlier step, whose work this one takes: it carries that step's
+    #: agent's last reply rather than the one just before it, and its back goes
+    #: there — `close` on `develop`, so the driver's report is what is closed
+    #: and what close sends back is the driver's to fix.
+    works_on: str | None = None
 
 
 @dataclass(frozen=True)
@@ -177,15 +205,17 @@ class Decisions:
     """The words a reply's last line decides in.
 
     Each is its own name unless a project says otherwise — `forward`, `back`,
-    `wait`, `next` — so a project whose prompts ask for those writes nothing,
-    and one whose prompts ask for other words names them: `decisions: {forward:
-    go}`. `next` only means something at the end of a flow's phases.
+    `wait`, `next`, `done` — so a project whose prompts ask for those writes
+    nothing, and one whose prompts ask for other words names them: `decisions:
+    {forward: go}`. `next` only means something at the end of a flow's phases,
+    and `done` only at a flow's last step.
     """
 
     forward: str = "forward"
     back: str = "back"
     wait: str = "wait"
     next: str = "next"
+    done: str = "done"
 
 
 #: How many phases a flow may go through before a run stops and asks. Past it
@@ -210,6 +240,11 @@ class Workflows:
     stretches: dict[str, tuple[int, int]] = field(default_factory=dict)
     #: How many phases any stretch may go through before a run stops and asks.
     phases: int = _DEFAULT_PHASES
+    #: Steps whose agent does not hold the role their transition goes to, a
+    #: sentence each — `discover` sending the driver's transition to a
+    #: navigator. Said rather than refused: it may be meant, and the step still
+    #: goes where it says. See `_astray`.
+    astray: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -234,12 +269,12 @@ class Project:
     #: anybody decides to gate it.
     path: Path | None
     seats: list[Seat]
-    #: What has to pass before `/review_and_commit` offers a commit: the name
-    #: of one of `commands:` — `test-fast` — so that everything Halyard runs for
-    #: a project is in that one list. Optional, and absent means no check runs
-    #: rather than some guessed default: a command invented for somebody's
-    #: repository would fail on every commit.
-    validate: str | None = None
+    #: The ways `/commit` offers to check a change before committing it, by
+    #: name — see `CommitOption`. Empty unless configured, and then `/commit`
+    #: proposes at once and runs nothing: a command invented for somebody's
+    #: repository would fail on every commit. A `validate:` is read as one of
+    #: these, named `review`.
+    commit_options: dict[str, CommitOption] = field(default_factory=dict)
     #: Which of the named warnings apply here. `None` means the default set;
     #: an empty list means none, which is how somebody who does not share this
     #: project's conventions turns them all off. See `commits.validation`.
@@ -253,14 +288,22 @@ class Project:
     #: fails — `next-task: [cleanup, pull-branch]`, written under `commands:`
     #: like the rest and offered by `/command` with them.
     command_lists: dict[str, tuple[str, ...]] = field(default_factory=dict)
-    #: Which kind of issue tracker this project's remote points at. Only needed
-    #: for a host that does not name itself — `gitlab.com` does, and
-    #: `git.example.com` cannot.
+    #: The exit codes a command says mean it did not run, by command — written
+    #: `{run: …, not_run: [2]}`. A transition stops at one; see
+    #: `commands.running.outcome`.
+    commands_not_run: dict[str, tuple[int, ...]] = field(default_factory=dict)
+    #: Which kind of issue tracker this project's remote points at — `gitlab`
+    #: or `github`. Only needed for a host that does not name itself:
+    #: `gitlab.com` and `github.com` do, and `git.example.com` cannot.
     forge: str | None = None
     #: Which labels `/label` offers. Empty means every label the project has,
     #: which is the right default until a project has more of them than a phone
     #: keyboard can show.
     labels: tuple[str, ...] = ()
+    #: Labels `/label` never offers, as patterns — `halyard:*`. A project's own
+    #: list grows with labels nobody puts on a task by hand, and a phone's
+    #: keyboard was full of them.
+    labels_exclude: tuple[str, ...] = ()
     #: Groups of task labels, by name — `level: [level::1, level::2, level::3]`.
     #: The first label a task carries from each goes on the envelope that
     #: inspections and transitions are given, as `level: level::3`. Empty unless
@@ -268,18 +311,13 @@ class Project:
     #: cannot be read, adds nothing: this reports what is there, it does not ask
     #: for anything.
     label_groups: dict[str, tuple[str, ...]] = field(default_factory=dict)
-    #: What this project's inspections answer when they found something, in its
-    #: own words — `status: candidate`. An answer that says one of them puts
-    #: `halyard:<inspection>` on the task, wherever it ran. Empty unless
-    #: configured, and nothing is written without it: this writes to somebody's
-    #: tracker on its own.
-    label_findings: tuple[str, ...] = ()
     #: Whether each seat's label goes on the task its branch is for, the first
     #: time that seat works on it — `navigator:claude`. Off unless asked for:
     #: it writes to somebody's issue tracker on its own. See `tasks.attribution`.
     label_work: bool = False
-    #: The extra round this project asks for before closing a piece of work.
-    #: `None` means no such round exists here, and `/commit` is unchanged.
+    #: The extra round this project asks for before closing a piece of work,
+    #: offered on the card a commit option makes. `None` means no such round
+    #: exists here, and `/commit` is unchanged.
     confirmation: Confirmation | None = None
     #: What `/inspect` runs over the last reply in a chat, by name — `proof:
     #: NOTES/inspections/proof.md`. Each is the project's own file, read relative
@@ -529,6 +567,102 @@ def _transitions_from(
     return found
 
 
+#: What a commit option may say: the words a transition uses for the same two.
+_COMMIT_OPTION_FIELDS = {"commands", "inspect"}
+
+#: The commit option a `validate:` is read as.
+VALIDATE_OPTION = "review"
+
+
+def _names_in(where: str, value: Any, key: str, what: str) -> list[str]:
+    """A list of names under `key:`, each stripped; none when it is absent."""
+    value = value or []
+    if not isinstance(value, list) or not all(isinstance(n, str) and n.strip() for n in value):
+        raise ValueError(f"{where}: `{key}:` must be a list of {what} names.")
+    return [n.strip() for n in value]
+
+
+def _commit_options_from(
+    project: str,
+    value: Any,
+    *,
+    commands: dict[str, str],
+    command_lists: dict[str, tuple[str, ...]],
+    inspections: dict[str, Path],
+) -> dict[str, CommitOption]:
+    """`commit_options:` as a mapping of name to what that option runs.
+
+    Checked against the project here, as a transition is: an option naming a
+    command or an inspection nobody defined would otherwise fail only when
+    somebody pressed it, with a commit waiting on it.
+    """
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        raise ValueError(
+            f"Project {project!r}: `commit_options:` must be a mapping of name to option."
+        )
+    found: dict[str, CommitOption] = {}
+    for raw, spec in value.items():
+        name = str(raw).strip()
+        where = f"Project {project!r}: commit option {name!r}"
+        if not _TRANSITION_NAME.match(name):
+            raise ValueError(
+                f"{where} needs a name of lowercase letters, digits, `-` or `_`, "
+                "up to 32 characters."
+            )
+        spec = spec or {}
+        if not isinstance(spec, dict):
+            raise ValueError(f"{where} must be a mapping.")
+        if unknown := set(spec) - _COMMIT_OPTION_FIELDS:
+            raise ValueError(
+                f"{where} has unknown field(s) {', '.join(sorted(map(str, unknown)))} — it "
+                "takes `commands:` and `inspect:`."
+            )
+        ran = _names_in(where, spec.get("commands"), "commands", "command")
+        named = _names_in(where, spec.get("inspect"), "inspect", "inspection")
+        if listed := [n for n in ran if n in command_lists]:
+            raise ValueError(
+                f"{where} names {listed[0]!r}, which is a list of commands — name the "
+                "commands in it instead."
+            )
+        if missing := [n for n in ran if n not in commands]:
+            raise ValueError(
+                f"{where} names commands this project does not define: {', '.join(missing)}"
+            )
+        if missing := [n for n in named if n not in inspections]:
+            raise ValueError(
+                f"{where} names inspections this project does not define: {', '.join(missing)}"
+            )
+        if not ran and not named:
+            raise ValueError(
+                f"{where} runs nothing: give it `commands:`, `inspect:` or both. A commit "
+                "that checks nothing is the plain Commit, which is always offered."
+            )
+        found[name] = CommitOption(name=name, commands=tuple(ran), inspections=tuple(named))
+    return found
+
+
+def _with_validate(
+    project: str, options: dict[str, CommitOption], validate: str | None, older: list[str]
+) -> dict[str, CommitOption]:
+    """The options, with `validate:` among them as `review` — said to `doctor`
+    as a rename, since it works."""
+    if validate is None:
+        return options
+    if VALIDATE_OPTION in options:
+        raise ValueError(
+            f"Project {project!r}: `validate:` is read as the commit option "
+            f"{VALIDATE_OPTION!r}, and `commit_options:` has one by that name already. "
+            f"Put {validate!r} in its `commands:` and drop `validate:`."
+        )
+    older.append(
+        f"the project: `validate: {validate}` is now "
+        f"`commit_options: {VALIDATE_OPTION}: commands: [{validate}]`"
+    )
+    return {VALIDATE_OPTION: CommitOption(name=VALIDATE_OPTION, commands=(validate,)), **options}
+
+
 #: What a step may say, the words a decision can be given, and the names under
 #: `workflows:` that are not flows.
 _STEP_FIELDS = {
@@ -540,8 +674,9 @@ _STEP_FIELDS = {
     "seat",
     "rounds",
     "decided_by",
+    "works_on",
 }
-_DECISION_FIELDS = ("forward", "back", "wait", "next")
+_DECISION_FIELDS = ("forward", "back", "wait", "next", "done")
 _NOT_A_FLOW = ("steps", "decisions", "phases")
 
 
@@ -588,6 +723,12 @@ def _workflows_from(
                 f"{where} names steps this project does not define under "
                 f"`workflows: steps:`: {', '.join(missing)}"
             )
+        for place, named in enumerate(wanted):
+            earlier = steps[named].works_on
+            if earlier is not None and earlier not in wanted[:place]:
+                raise ValueError(
+                    f"{where}: {named} works on {earlier}, which does not come before it here."
+                )
         flows[name] = tuple(wanted)
         if stretch is not None:
             stretches[name] = stretch
@@ -597,7 +738,36 @@ def _workflows_from(
         flows=flows,
         stretches=stretches,
         phases=_phases_from(project, value.get("phases")),
+        astray=_astray(steps, transitions, seats),
     )
+
+
+def _astray(
+    steps: dict[str, Step], transitions: dict[str, Transition], seats: list[Seat]
+) -> tuple[str, ...]:
+    """Steps whose agent holds another role than the one their transition goes to.
+
+    Measured on alpha-engine#453: `discover` named the navigator where its
+    transition goes to a driver, and the discovery went to the navigator in
+    both phases — which said so, both times, and stopped. The file said it
+    all along; nothing read it that way.
+    """
+    roles = {role.value for role in Role}
+    held = {seat.label: seat.role.value for seat in seats if seat.role is not None}
+    found = []
+    for step in steps.values():
+        transition = transitions.get(step.transition)
+        wanted = (transition.to or "").lower() if transition else ""
+        if wanted not in roles or not step.seat:
+            continue
+        has = step.seat if step.seat in roles else held.get(step.seat)
+        if has and has != wanted:
+            who = step.seat if step.seat in roles else f"{step.seat}, a {has}"
+            found.append(
+                f"step {step.name} goes to {who}, while its transition {step.transition} "
+                f"goes to a {wanted}"
+            )
+    return tuple(found)
 
 
 def _flow_from(where: str, listed: list) -> tuple[list[str], tuple[int, int] | None]:
@@ -638,8 +808,8 @@ def _phases_from(project: str, value: Any) -> int:
 
 
 def _decisions_from(project: str, value: Any) -> Decisions:
-    """`workflows: decisions:` — the words to read instead of `forward`, `back`
-    and `wait`. Any left out keep their own name."""
+    """`workflows: decisions:` — the words to read instead of `forward`,
+    `back`, `wait`, `next` and `done`. Any left out keep their own name."""
     if value is None:
         return Decisions()
     where = f"Project {project!r}: `workflows: decisions:`"
@@ -718,35 +888,56 @@ def _steps_from(
             seat=seat.lower() if seat and seat.lower() in roles else seat,
             rounds=rounds,
             decided_by=_as_text(spec.get("decided_by")),
+            works_on=_as_text(spec.get("works_on")),
         )
     for step in found.values():
         # Checked once every step is known: the one it names may come later.
-        if step.decided_by is not None and (
-            step.decided_by == step.name or step.decided_by not in found
-        ):
+        for field_name in ("decided_by", "works_on"):
+            other = getattr(step, field_name)
+            if other is not None and (other == step.name or other not in found):
+                raise ValueError(
+                    f"Project {project!r}: step {step.name!r}: `{field_name}:` must name "
+                    "another step under `workflows: steps:`."
+                )
+        if step.decided_by is not None and step.works_on is not None:
+            # One acts on the reply just before it, the other takes an earlier
+            # one instead: together the review it is meant to act on is lost.
             raise ValueError(
-                f"Project {project!r}: step {step.name!r}: `decided_by:` must name another "
-                "step under `workflows: steps:`."
+                f"Project {project!r}: step {step.name!r} has both `decided_by:` and "
+                "`works_on:`; a step acts on the step before it or works on an earlier "
+                "one, not both."
             )
     return found
 
 
-def _commands_from(project: str, value: Any) -> tuple[dict[str, str], dict[str, tuple[str, ...]]]:
-    """`commands:` as command lines by name, and the lists of them by name.
+def _commands_from(
+    project: str, value: Any
+) -> tuple[dict[str, str], dict[str, tuple[str, ...]], dict[str, tuple[int, ...]]]:
+    """`commands:` as command lines by name, the lists of them by name, and the
+    exit codes each says mean it did not run.
 
     A command is a line — `cleanup: make cleanup` — or the names of other
     commands to run in order: `next-task: [cleanup, pull-branch]`. A list names
     lines only, so what runs is always something written down as a line.
+
+    A line can also say which of its exit codes mean it produced no result —
+    `test-fast: {run: scripts/check.sh test-fast, not_run: [2]}` — which only
+    the command itself can know. See `commands.running.outcome`.
     """
     if value is None:
-        return {}, {}
+        return {}, {}, {}
     if not isinstance(value, dict):
         raise ValueError(f"Project {project!r}: `commands:` must be a mapping of name to command.")
     lines: dict[str, str] = {}
     lists: dict[str, tuple[str, ...]] = {}
+    not_run: dict[str, tuple[int, ...]] = {}
     for raw, spec in value.items():
         if isinstance(spec, list):
             lists[str(raw)] = tuple(str(name).strip() for name in spec if str(name).strip())
+        elif isinstance(spec, dict):
+            lines[str(raw)], codes = _command_with_codes(project, str(raw), spec)
+            if codes:
+                not_run[str(raw)] = codes
         else:
             lines[str(raw)] = str(spec)
     for name, listed in lists.items():
@@ -762,7 +953,25 @@ def _commands_from(project: str, value: Any) -> tuple[dict[str, str], dict[str, 
             raise ValueError(
                 f"{where} runs commands this project does not define: {', '.join(missing)}"
             )
-    return lines, lists
+    return lines, lists, not_run
+
+
+def _command_with_codes(project: str, name: str, spec: dict) -> tuple[str, tuple[int, ...]]:
+    """`{run: <line>, not_run: [<exit code>, ...]}`, read strictly."""
+    where = f"Project {project!r}: command {name!r}"
+    if stray := sorted(str(key) for key in spec if key not in ("run", "not_run")):
+        raise ValueError(f"{where} takes `run:` and `not_run:`, not {', '.join(stray)}.")
+    line = spec.get("run")
+    if not isinstance(line, str) or not line.strip():
+        raise ValueError(f"{where} needs `run:`, the command line.")
+    codes = spec.get("not_run") or []
+    if not isinstance(codes, list) or not all(
+        isinstance(code, int) and not isinstance(code, bool) and 0 < code < 256 for code in codes
+    ):
+        raise ValueError(
+            f"{where}: `not_run:` is a list of exit codes between 1 and 255, like [2]."
+        )
+    return line, tuple(dict.fromkeys(codes))
 
 
 def _not_a_list(
@@ -794,17 +1003,17 @@ def _placeholders_checked(
     commands: dict[str, str],
     label_groups: dict[str, tuple[str, ...]],
     *,
-    validate: str | None,
     transitions: dict[str, Transition],
+    commit_options: dict[str, CommitOption],
 ) -> None:
     """What a command line fills in is something that can be filled in.
 
     `{label_groups.<group>}` names a group this project has, with labels in
     it. `{input.<name>}` is typed by somebody, so only `/command` can run it: a
-    transition has nobody to ask, and neither does a commit's `validate:`, which
-    takes no label either. Refused here rather than when the command runs,
-    where the line would reach the shell with its braces still in it. See
-    `halyard.commands.labels` and `halyard.commands.inputs`.
+    transition has nobody to ask, and neither does a commit option. Refused
+    here rather than when the command runs, where the line would reach the
+    shell with its braces still in it. See `halyard.commands.labels` and
+    `halyard.commands.inputs`.
     """
     from halyard.commands.inputs import names_in
     from halyard.commands.labels import groups_in
@@ -814,15 +1023,9 @@ def _placeholders_checked(
             where = f"Project {project!r}: command {name!r} takes {{label_groups.{group}}}"
             if group not in label_groups:
                 defined = f" ({', '.join(label_groups)})" if label_groups else ""
-                raise ValueError(f"{where}, but `label_groups:` has no group {group!r}{defined}.")
+                raise ValueError(f"{where}, but `labels: groups:` has no group {group!r}{defined}.")
             if not label_groups[group]:
                 raise ValueError(f"{where}, and that group lists no labels to take one from.")
-        if name == validate and (groups_in(line) or names_in(line)):
-            raise ValueError(
-                f"Project {project!r}: `validate:` names {name!r}, which takes a value — a "
-                "task's label or something typed — and a commit has nowhere to ask for one. "
-                "Give `validate:` a command of its own."
-            )
     for transition in transitions.values():
         for name in transition.commands:
             if typed := names_in(commands.get(name, "")):
@@ -831,10 +1034,19 @@ def _placeholders_checked(
                     f"which takes {{input.{typed[0]}}} — typed by somebody, and a transition "
                     "has nobody to ask. Run it with /command."
                 )
+    for option in commit_options.values():
+        for name in option.commands:
+            if typed := names_in(commands.get(name, "")):
+                raise ValueError(
+                    f"Project {project!r}: commit option {option.name!r} runs {name!r}, "
+                    f"which takes {{input.{typed[0]}}} — typed by somebody, and a commit "
+                    "has nobody to ask. Run it with /command."
+                )
 
 
 def _validate_from(project: str, value: Any, commands: dict[str, str]) -> str | None:
-    """`validate:` as the name of one of the project's `commands:`.
+    """`validate:` as the name of one of the project's `commands:`, which is
+    read as the commit option `review` — see `_with_validate`.
 
     Not a command line of its own: what Halyard runs for a project is what
     `commands:` lists, and a line written anywhere else is one nobody reading
@@ -852,6 +1064,95 @@ def _validate_from(project: str, value: Any, commands: dict[str, str]) -> str | 
     )
 
 
+#: What a project's `labels:` block may say, and the names each had before
+#: it: at the top of the project, and inside the block itself.
+_LABELS_FIELDS: dict[str, tuple[str | None, str | None]] = {
+    "who_worked": ("label_work", "work"),
+    "groups": ("label_groups", None),
+    "offer": (None, None),
+    "exclude": ("labels_exclude", None),
+}
+
+#: What findings were written under, before they were taken out. An
+#: inspection's answer saying one of a project's phrases put `halyard:<name>` on
+#: the task; nothing read those labels back. A file still saying so is told
+#: rather than refused: refusing it would keep the control plane from starting.
+_FINDINGS_ONCE = ("label_findings", "findings")
+
+
+def _labels_block(project: str, body: dict, older: list[str]) -> dict[str, Any]:
+    """Everything a project says about task labels, in one place:
+
+        labels:
+          who_worked: true            # each agent's label on the task it works on
+          groups: {level: [level::1, level::2]}
+          offer: [andon, rework]      # what /label offers; empty means all
+          exclude: [wontfix]          # what /label never offers
+
+    Each was a key of its own before, and each is still read — with a sentence
+    saying where it moved, and refused alongside its new place. A plain list
+    under `labels:` is what it always was: what /label offers.
+    """
+    raw = body.get("labels")
+    if isinstance(raw, list | str):
+        older.append("the project: `labels: [...]` is now `labels: offer: [...]`")
+        block: dict = {"offer": raw}
+    elif isinstance(raw, dict):
+        block = raw
+    elif raw is None:
+        block = {}
+    else:
+        raise ValueError(f"Project {project!r}: `labels:` must be a mapping.")
+    allowed = {*_LABELS_FIELDS, *(inside for _, inside in _LABELS_FIELDS.values() if inside)}
+    if stray := sorted(str(key) for key in block if key not in allowed | {"findings"}):
+        raise ValueError(
+            f"Project {project!r}: `labels:` takes {', '.join(_LABELS_FIELDS)}, "
+            f"not {', '.join(stray)}."
+        )
+    top, inside = _FINDINGS_ONCE
+    for gone, written in ((f"`{top}:`", top in body), (f"`labels: {inside}:`", inside in block)):
+        if written:
+            older.append(
+                f"the project: {gone} is no longer read — inspection findings no longer "
+                "label tasks; it can be removed"
+            )
+    found: dict[str, Any] = {}
+    for key, (before, inside_before) in _LABELS_FIELDS.items():
+        written = [
+            (name, value)
+            for name, present, value in (
+                (f"`labels: {key}:`", key in block, block.get(key)),
+                (f"`{before}:`", before is not None and before in body, body.get(before or "")),
+                (
+                    f"`labels: {inside_before}:`",
+                    inside_before is not None and inside_before in block,
+                    block.get(inside_before or ""),
+                ),
+            )
+            if present
+        ]
+        if len(written) > 1:
+            raise ValueError(
+                f"Project {project!r} has {' and '.join(name for name, _ in written)} — "
+                f"they are the same thing; keep `labels: {key}:`."
+            )
+        if written and written[0][0] != f"`labels: {key}:`":
+            older.append(f"the project: {written[0][0]} is now `labels: {key}:`")
+        found[key] = written[0][1] if written else None
+    return found
+
+
+def _patterns_from(project: str, key: str, value: Any) -> tuple[str, ...]:
+    """A list of patterns, one string or several; nothing written is none."""
+    if value is None:
+        return ()
+    if isinstance(value, str):
+        value = [value]
+    if not isinstance(value, list):
+        raise ValueError(f"Project {project!r}: `{key}:` must be a list of patterns.")
+    return tuple(str(item).strip() for item in value if str(item).strip())
+
+
 def _warnings_from(project: str, value: Any) -> tuple[str, ...] | None:
     """`warn_if:` as a tuple, or None when it was not written at all.
 
@@ -865,31 +1166,6 @@ def _warnings_from(project: str, value: Any) -> tuple[str, ...] | None:
     if not isinstance(value, list):
         raise ValueError(f"Project {project!r}: `warn_if:` must be a list of names.")
     return tuple(str(name).strip() for name in value if str(name).strip())
-
-
-def _findings_from(project: str, value: Any) -> tuple[str, ...]:
-    """`label_findings:` as phrases, in the project's own words.
-
-    A phrase is nearly always `status: something`, which YAML reads as a
-    mapping unless it is quoted — so a mapping here is refused with that said,
-    rather than turned into text nobody's answer will ever contain.
-    """
-    if value is None:
-        return ()
-    if isinstance(value, str):
-        value = [value]
-    if not isinstance(value, list):
-        raise ValueError(f"Project {project!r}: `label_findings:` must be a list of phrases.")
-    phrases = []
-    for phrase in value:
-        if isinstance(phrase, dict):
-            raise ValueError(
-                f"Project {project!r}: a `label_findings:` phrase with a colon in it has "
-                'to be quoted — `- "status: candidate"` — or YAML reads it as a mapping.'
-            )
-        if str(phrase).strip():
-            phrases.append(str(phrase).strip())
-    return tuple(phrases)
 
 
 def _label_groups_from(project: str, value: Any) -> dict[str, tuple[str, ...]]:
@@ -1071,7 +1347,7 @@ def projects_from_yaml(text: str) -> list[Project]:
         if spelled is not None:
             older.append(spelled)
         inspections, inspection_models = _inspections_from(project, written)
-        commands, command_lists = _commands_from(project, body.get("commands"))
+        commands, command_lists, commands_not_run = _commands_from(project, body.get("commands"))
         moves, spelled = _spelled(project, body, "transitions", "handoffs", "the project")
         if spelled is not None:
             older.append(spelled)
@@ -1084,10 +1360,26 @@ def projects_from_yaml(text: str) -> list[Project]:
             commands=commands,
             older=older,
         )
-        label_groups = _label_groups_from(project, body.get("label_groups"))
-        validate = _validate_from(project, body.get("validate"), commands)
+        tagged = _labels_block(project, body, older)
+        label_groups = _label_groups_from(project, tagged["groups"])
+        commit_options = _with_validate(
+            project,
+            _commit_options_from(
+                project,
+                body.get("commit_options"),
+                commands=commands,
+                command_lists=command_lists,
+                inspections=inspections,
+            ),
+            _validate_from(project, body.get("validate"), commands),
+            older,
+        )
         _placeholders_checked(
-            project, commands, label_groups, validate=validate, transitions=transitions
+            project,
+            commands,
+            label_groups,
+            transitions=transitions,
+            commit_options=commit_options,
         )
         runs, runs_refused = _runs_from(project, body.get("runs"))
         projects.append(
@@ -1095,15 +1387,16 @@ def projects_from_yaml(text: str) -> list[Project]:
                 name=project,
                 path=Path(path).expanduser() if path else None,
                 seats=seats,
-                validate=validate,
+                commit_options=commit_options,
                 warn_if=_warnings_from(project, body.get("warn_if")),
                 commands=commands,
                 command_lists=command_lists,
+                commands_not_run=commands_not_run,
                 forge=_as_text(body.get("forge")),
-                labels=_warnings_from(project, body.get("labels")) or (),
+                labels=_patterns_from(project, "labels: offer", tagged["offer"]),
+                labels_exclude=_patterns_from(project, "labels: exclude", tagged["exclude"]),
                 label_groups=label_groups,
-                label_findings=_findings_from(project, body.get("label_findings")),
-                label_work=_as_flag(project, "label_work", body.get("label_work")),
+                label_work=_as_flag(project, "labels: who_worked", tagged["who_worked"]),
                 confirmation=_confirmation_from(project, body.get("confirmation")),
                 inspections=inspections,
                 inspection_models=inspection_models,
@@ -1184,6 +1477,66 @@ def resolve_project(name: str, directory: Path | None = None) -> Path:
 
     known = ", ".join(project.name for project in described)
     raise ValueError(f"No project called {name!r}. The file describes: {known}")
+
+
+#: What `halyard.yaml` holds at its top level, each read by a module of its
+#: own. Anything else there is read by nothing — see `stray_keys`.
+TOP_LEVEL = frozenset(
+    {
+        "settings",
+        "projects",
+        "runtimes",
+        "tools",
+        "writes",
+        "prompts",
+        "upkeep",
+        # Read by `/open`, from `halyard.applications.catalogue`.
+        "applications",
+    }
+)
+
+
+def stray_keys(directory: Path | None = None) -> list[tuple[str, str]]:
+    """Each key at the top of `halyard.yaml` that nothing reads, as a
+    `(level, text)` line for `doctor`.
+
+    A project's own setting written there is the likely one, and the worse:
+    `fail`, naming where it belongs. Found on a Mac mini: a `runs:` list flush
+    left left every command in it asking, and nothing anywhere said why — a
+    project's fields are checked strictly, and the top of the file not at all.
+    Any other key is a `warn`: read by nothing, whatever it was meant for.
+    """
+    path = find_config(directory)
+    if path is None:
+        return []
+    try:
+        loaded = yaml.safe_load(path.read_text(encoding="utf-8"))
+    except (OSError, yaml.YAMLError):
+        # Said where the file is read for real: the configuration will not load.
+        return []
+    if not isinstance(loaded, dict):
+        return []
+    said: list[tuple[str, str]] = []
+    for key in loaded:
+        name = str(key)
+        if name in TOP_LEVEL:
+            continue
+        if name in _PROJECT_FIELDS:
+            said.append(
+                (
+                    "fail",
+                    f"`{name}:` is at the top of {path.name}, where nothing reads it — it "
+                    "belongs under a project in `projects:`, beside its `path:`",
+                )
+            )
+        else:
+            said.append(
+                (
+                    "warn",
+                    f"`{name}:` at the top of {path.name} is read by nothing, so it is ignored",
+                )
+            )
+    return said
 
 
 def find_config(directory: Path | None = None) -> Path | None:

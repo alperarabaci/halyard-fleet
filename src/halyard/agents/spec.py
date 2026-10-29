@@ -29,7 +29,7 @@ from __future__ import annotations
 
 import importlib
 import shutil
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -165,6 +165,38 @@ class Watching:
     #: interrupting for; this is asked, repeatedly, by somebody who wants a
     #: number and is not being interrupted by anything.
     usage: Callable[[list[str]], tuple[str, ...]] | None = None
+    #: The questions asked and the answers given in lines just appended: a
+    #: question the agent put to the person and left waiting, which no hook
+    #: reports. `None` for a runtime whose questions come another way — Claude
+    #: Code's block on a hook, and arrive through it.
+    questions: Callable[[Iterable[str]], QuestionReading] | None = None
+
+
+@dataclass(frozen=True)
+class AskedQuestion:
+    """A question an agent asked a person and left waiting in its chat.
+
+    `id` is the runtime's own name for it — the one its answer has to carry —
+    and `options` is empty for a question that takes free text.
+    """
+
+    id: str
+    title: str
+    options: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class QuestionReading:
+    """What some lines of a transcript say about questions left waiting.
+
+    `asked` holds only those still open at the end of the lines; `set_aside`
+    says the person wrote something else in the chat, which leaves every
+    question asked before it unanswered for good.
+    """
+
+    asked: tuple[AskedQuestion, ...] = ()
+    answered: dict[str, str] = field(default_factory=dict)
+    set_aside: bool = False
 
 
 @dataclass(frozen=True)
@@ -303,12 +335,29 @@ class RuntimeSpec:
     #: Nothing runs unapproved either way, and the difference is worth printing
     #: because the person reading it is deciding whether to walk away.
     when_unanswered: str = ""
+    #: Whether this runtime's own question stays open until somebody answers
+    #: it, so a card for it does too. opencode's does: it waits on its screen
+    #: for as long as it takes. A card that expired after five minutes said
+    #: "timed out" on the phone while the question was still there, and left
+    #: nobody away from the desk a way to answer it.
+    question_waits: bool = False
     #: How `halyard verify` drives this runtime, when it can at all.
     verify: Verification | None = None
     #: How to watch this runtime's transcript for what it never reports. `None`
     #: means it is not watched, which is honest for a runtime whose file shape
     #: nobody has measured yet.
     watching: Watching | None = None
+    #: Whether a model name is this runtime's own, for a one-shot turn Halyard
+    #: starts of its own — an inspection, a commit message, a compaction
+    #: record. Those name a model and nothing else, so the model says where
+    #: they run: `gpt-5.6-terra` is Codex's. A model no runtime claims runs on
+    #: the default one, as every model did before another could take a turn of
+    #: its own. See `registry.for_model`.
+    claims_model: Callable[[str], bool] | None = None
+    #: Whether this runtime can run a model one of those turns names, at the
+    #: effort it names — `(level, text)` lines, as `check_session` returns.
+    #: Called by `doctor` with the model and the effort.
+    check_model: Callable[..., list[tuple[str, str]]] | None = None
 
     def on_this_machine(self) -> bool:
         return self.present() if self.present else bool(shutil.which(self.binary))

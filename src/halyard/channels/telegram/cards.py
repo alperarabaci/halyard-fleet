@@ -14,6 +14,7 @@ the only secret involved.
 from __future__ import annotations
 
 import html
+from collections.abc import Callable
 from datetime import datetime
 
 from halyard.core.approvals import ApprovalRequest
@@ -122,7 +123,14 @@ _CHOOSABLE = frozenset(
         "flowon",
         "flowpick",
         "flowstop",
+        "flowto",
         "pick",
+        # A command from a menu card — `/actions`, `/agent` — and a prompt from
+        # `/prompts`: each pressed is that command typed.
+        "do",
+        "prompt",
+        # How to commit: plainly, or with one of the project's commit options.
+        "commit",
     }
 )
 
@@ -146,6 +154,31 @@ CANCEL = {"text": "✖️ Cancel", "callback_data": choice_data("cancel", "x")}
 def _keyboard(rows: list[list[dict]]) -> dict:
     """Rows of choices, and a way out of them as the last row."""
     return {"inline_keyboard": [*rows, [dict(CANCEL)]]}
+
+
+#: How an agent offered first is drawn: Bot API 9.4's button `style`, in blue.
+#: An app too old to know it shows an ordinary button, and the order still says it.
+FIRST = "primary"
+
+
+def _agent_rows(
+    labels: tuple[str, ...], first: tuple[str, ...], button: Callable[[str], dict]
+) -> dict | None:
+    """A button per agent, three to a row: those in `first` — the agent each
+    role last worked with — ahead of the rest, on a row of their own and in
+    colour, and everybody else in the order they were given."""
+    ahead = [label for label in dict.fromkeys(first) if label in labels]
+    rest = [label for label in labels if label not in ahead]
+    rows: list[list[dict]] = []
+    for group, styled in ((ahead, True), (rest, False)):
+        made = []
+        for label in group:
+            try:
+                made.append({**button(label), **({"style": FIRST} if styled else {})})
+            except ValueError:
+                continue
+        rows += [made[i : i + 3] for i in range(0, len(made), 3)]
+    return _keyboard(rows) if rows else None
 
 
 def choices(what: str, values: tuple[str, ...]) -> dict | None:
@@ -175,8 +208,8 @@ def choices(what: str, values: tuple[str, ...]) -> dict | None:
     return _keyboard(rows)
 
 
-def forward_choices(labels: tuple[str, ...]) -> dict | None:
-    """Buttons for `/forward`, one per seat.
+def forward_choices(labels: tuple[str, ...], first: tuple[str, ...] = ()) -> dict | None:
+    """Buttons for `/forward`, one per seat, `first` ahead of the rest.
 
     The same shape as `seat_choices` and a different `what`, because pressing
     one means something else: there is no text to carry, so the answer is read
@@ -186,19 +219,13 @@ def forward_choices(labels: tuple[str, ...]) -> dict | None:
     cannot. Nothing has to be remembered between the tap and the message — the
     message is already on disk.
     """
-    buttons = []
-    for label in labels:
-        try:
-            buttons.append({"text": label, "callback_data": choice_data("fwd", label)})
-        except ValueError:
-            continue
-    if not buttons:
-        return None
-    return _keyboard([buttons[i : i + 3] for i in range(0, len(buttons), 3)])
+    return _agent_rows(
+        labels, first, lambda label: {"text": label, "callback_data": choice_data("fwd", label)}
+    )
 
 
-def seat_choices(labels: tuple[str, ...]) -> dict | None:
-    """Buttons for `/to`, one per seat.
+def seat_choices(labels: tuple[str, ...], first: tuple[str, ...] = ()) -> dict | None:
+    """Buttons for `/to`, one per seat, `first` ahead of the rest.
 
     Offered only when the text to send is already known — a seat button that
     still needed a message would have to remember which seat was pressed until
@@ -206,15 +233,9 @@ def seat_choices(labels: tuple[str, ...]) -> dict | None:
     reaches the wrong agent. Telegram's reply already carries the text, so
     there is nothing to hold.
     """
-    buttons = []
-    for label in labels:
-        try:
-            buttons.append({"text": label, "callback_data": choice_data("to", label)})
-        except ValueError:
-            continue
-    if not buttons:
-        return None
-    return _keyboard([buttons[i : i + 3] for i in range(0, len(buttons), 3)])
+    return _agent_rows(
+        labels, first, lambda label: {"text": label, "callback_data": choice_data("to", label)}
+    )
 
 
 #: Its own prefix, apart from the approval buttons and the preference ones.
@@ -267,29 +288,62 @@ def render_question(request: QuestionRequest, *, now: datetime) -> str:
         lines.append(f"<b>{index}.</b> {html.escape(option.label)}{tail}")
     lines += [
         "",
-        "<i>Tap an option, or reply with your own answer.</i>",
-        f"Expires in {format_remaining(request.expires_at, now)}",
+        "<i>Tap an option, or reply with your own answer.</i>"
+        if request.options
+        else "<i>Reply with your answer.</i>",
+        f"Expires in {format_remaining(request.expires_at, now)}"
+        if request.expires_at is not None
+        else "Open until it is answered, here or at the desk.",
     ]
     return _fit(lines)
 
 
+#: What a card says of an answer handed to an agent that is not waiting for it.
+QUEUED = (
+    "📥 <i>Queued: the agent takes it when its current turn ends, or at once "
+    "if Steer is pressed in its app.</i>"
+)
+
+
 def render_question_resolved(
-    request: QuestionRequest, *, answer: str | None, by: str | None
+    request: QuestionRequest,
+    *,
+    answer: str | None,
+    by: str | None,
+    why: str = "",
+    queued: bool = False,
 ) -> str:
     """What the question card becomes once it has been answered.
 
     Edited in place, like a settled approval, so scrolling back shows the choice
     rather than a row of live-looking buttons on a question long since decided.
+    `queued` is an answer sent from here to an agent that carried on after
+    asking — Codex's: it reaches the agent behind the turn already running,
+    and the card says so rather than reading as though it had arrived.
     """
     who = f" by {html.escape(by)}" if by else ""
     chosen = (
         f"✅ <b>{html.escape(answer)}</b>{who}"
         if answer is not None
-        else "↩️ <i>Left to the terminal — nobody answered in time.</i>"
+        else f"↩️ <i>Left to the terminal — {html.escape(why or 'nobody answered in time')}.</i>"
     )
     return _fit(
         [
             chosen,
+            *([QUEUED] if queued and answer is not None else []),
+            "",
+            f"Project: <code>{html.escape(request.project)}</code>",
+            "",
+            html.escape(request.question),
+        ]
+    )
+
+
+def render_question_set_aside(request: QuestionRequest) -> str:
+    """A question left unanswered because the conversation moved on."""
+    return _fit(
+        [
+            "↩️ <i>Not answered: the conversation moved on.</i>",
             "",
             f"Project: <code>{html.escape(request.project)}</code>",
             "",
@@ -317,7 +371,9 @@ def question_keyboard(request: QuestionRequest) -> dict | None:
     return {"inline_keyboard": rows} if rows else None
 
 
-def format_remaining(expires_at: datetime, now: datetime) -> str:
+def format_remaining(expires_at: datetime | None, now: datetime) -> str:
+    if expires_at is None:
+        return "until answered"
     seconds = int((expires_at - now).total_seconds())
     if seconds <= 0:
         return "expired"
@@ -370,8 +426,15 @@ def render(request: ApprovalRequest, *, now: datetime, inspection: str | None = 
     ]
     if request.reason:
         lines += ["", f"Why: {html.escape(request.reason)}"]
-    lines += ["", f"Expires in {format_remaining(request.expires_at, now)}"]
+    lines += ["", _deadline(request, now)]
     return _fit(lines)
+
+
+def _deadline(request: ApprovalRequest, now: datetime) -> str:
+    """When the card stops taking an answer, or that it does not."""
+    if request.expires_at is None:
+        return "Open until it is answered, here or at the desk."
+    return f"Expires in {format_remaining(request.expires_at, now)}"
 
 
 def render_resolved(
@@ -384,11 +447,26 @@ def render_resolved(
     buttons on questions that were settled hours ago. An inspection's card
     stays an inspection's, so the chat still says what was allowed to look.
     """
-    mark = {"allow": "✅ ALLOWED", "stop": "⏹ STOPPED"}.get(decision, "⛔ DENIED")
+    mark = {
+        "allow": "✅ ALLOWED",
+        "stop": "⏹ STOPPED",
+        # Nobody answered before the deadline; denied, as every unanswered card is.
+        "expired": "⌛ EXPIRED — DENIED",
+        # Halyard stopped while the card was open; denied, so nothing runs unasked.
+        "shutdown": "⏹ DENIED — HALYARD STOPPED",
+        # The inspection that asked ended first; nothing can run for it now.
+        "ended": "⏹ DENIED — THE INSPECTION ENDED",
+    }.get(decision, "⛔ DENIED")
     who = f" by {html.escape(by)}" if by else ""
+    why = (
+        ["The inspection ended before this was answered, so nothing ran."]
+        if decision == "ended"
+        else []
+    )
     return _fit(
         [
             f"<b>{mark}</b>{who}",
+            *why,
             "",
             *_inspected_by(inspection),
             f"Project: <code>{html.escape(request.project)}</code>",
@@ -499,6 +577,20 @@ def open_choices(names: tuple[str, ...]) -> dict | None:
     return _keyboard(rows)
 
 
+def menu_choices(what: str, names: tuple[str, ...]) -> dict | None:
+    """A button per command on a menu card, each the command it names — `do`
+    for one of Halyard's, `prompt` for one of yours. Three to a row."""
+    buttons = []
+    for name in names:
+        try:
+            buttons.append({"text": f"/{name}", "callback_data": choice_data(what, name)})
+        except ValueError:
+            continue
+    if not buttons:
+        return None
+    return _keyboard([buttons[i : i + 3] for i in range(0, len(buttons), 3)])
+
+
 def command_choices(names: tuple[str, ...]) -> dict | None:
     """A button per command a project offers.
 
@@ -582,11 +674,37 @@ def workflow_steps(workflow: str, flow: tuple[str, ...]) -> dict | None:
     return _keyboard([buttons[i : i + 3] for i in range(0, len(buttons), 3)])
 
 
-#: What a label picked for a command goes on to do: the transition, the command, or
-#: the workflow step that needed it, pressed again.
+#: What `/commit`'s card sends for the plain commit, beside the options: no
+#: option's name can be it.
+PLAIN_COMMIT = "."
+
+
+def commit_choices(options: tuple[str, ...], *, plain: bool = True) -> dict | None:
+    """`/commit`'s card: the plain Commit, then a button per commit option.
+
+    The plain one first and on its own row, because it checks nothing and
+    every change can take it; `plain=False` leaves it out, for
+    `/review_and_commit`, which asks for the checks.
+    """
+    rows: list[list[dict]] = []
+    if plain:
+        rows.append([{"text": "✅ Commit", "callback_data": choice_data("commit", PLAIN_COMMIT)}])
+    buttons = []
+    for name in options:
+        try:
+            buttons.append({"text": f"🧪 {name}", "callback_data": choice_data("commit", name)})
+        except ValueError:
+            continue
+    rows += [buttons[i : i + 3] for i in range(0, len(buttons), 3)]
+    return _keyboard(rows) if rows else None
+
+
+#: What a label picked for a command goes on to do: the transition, the command,
+#: the workflow step or the commit option that needed it, pressed again.
 PICKED_FOR_TRANSITION = "h"
 PICKED_FOR_COMMAND = "c"
 PICKED_FOR_WORKFLOW = "w"
+PICKED_FOR_COMMIT = "m"
 
 
 def label_picks(
@@ -615,10 +733,21 @@ def label_picks(
 
 
 def workflow_keyboard(
-    workflow: str, *, go: bool = False, go_text: str = "", on: str = "", pick: bool = False
+    workflow: str,
+    *,
+    go: bool = False,
+    go_text: str = "",
+    on: str = "",
+    pick: bool = False,
+    offers: tuple[tuple[str, int, bool, str], ...] = (),
 ) -> dict:
     """What can be done with a run: send the step it stopped before, leave its
     phases for the step `on` names, pick a step to go on from, or stop it.
+
+    `offers` are where an agent's own words would send the work — text, the
+    step's place in the flow, whether it goes back, and whose reply it carries
+    (empty for the agent the run last dealt with) — each a button of its own,
+    first.
 
     Every one of them keeps the work in the run but the last: a stop is where
     somebody steers, and steering by hand would leave the run behind. No cancel
@@ -629,6 +758,14 @@ def workflow_keyboard(
     def button(text: str, what: str) -> dict:
         return {"text": text, "callback_data": choice_data(what, workflow)}
 
+    offered = []
+    for text, place, back, speaker in offers:
+        value = f"{workflow}>{place}>{'b' if back else 'f'}" + (f">{speaker}" if speaker else "")
+        try:
+            data = choice_data("flowto", value)
+        except ValueError:
+            continue
+        offered.append([{"text": text, "callback_data": data}])
     moving = []
     if go:
         moving.append(button(go_text or "▶️ Send it anyway", "flowgo"))
@@ -636,7 +773,7 @@ def workflow_keyboard(
         moving.append(button(f"⏭ On to {on}", "flowon"))
     steering = [*([button("🧭 Pick a step", "flowpick")] if pick else [])]
     steering.append(button("⏹ Stop the workflow", "flowstop"))
-    return {"inline_keyboard": [row for row in (moving, steering) if row]}
+    return {"inline_keyboard": [*offered, *(row for row in (moving, steering) if row)]}
 
 
 def result_choices(inspection: str, labels: tuple[str, ...]) -> dict | None:
@@ -675,19 +812,20 @@ def transition_choices(names: tuple[str, ...]) -> dict | None:
     return _keyboard([buttons[i : i + 2] for i in range(0, len(buttons), 2)])
 
 
-def transition_seat_choices(transition: str, labels: tuple[str, ...]) -> dict | None:
-    """Buttons for where a transition goes, when its `to:` does not settle it.
+def transition_seat_choices(
+    transition: str, labels: tuple[str, ...], first: tuple[str, ...] = ()
+) -> dict | None:
+    """Buttons for where a transition goes, when its `to:` does not settle it —
+    the agent that role last worked with first.
 
     The transition travels in the button with the seat, so nothing has to be
     remembered between the tap and the send.
     """
-    buttons = []
-    for label in labels:
-        try:
-            data = choice_data("handto", f"{transition}>{label}")
-        except ValueError:
-            continue
-        buttons.append({"text": f"→ {label}", "callback_data": data})
-    if not buttons:
-        return None
-    return _keyboard([buttons[i : i + 3] for i in range(0, len(buttons), 3)])
+    return _agent_rows(
+        labels,
+        first,
+        lambda label: {
+            "text": f"→ {label}",
+            "callback_data": choice_data("handto", f"{transition}>{label}"),
+        },
+    )

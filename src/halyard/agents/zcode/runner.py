@@ -29,9 +29,10 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Callable
 
 from halyard.agents.base import SessionRef
-from halyard.agents.turns import LateFailure
+from halyard.agents.turns import LateFailure, say_started
 from halyard.agents.zcode import account, sessions, trust
 from halyard.agents.zcode.protocol import ASKING, Answer, Asking, Bridge, Permission
 
@@ -108,8 +109,14 @@ class ZCodeRunner:
         text: str,
         cwd: str | None = None,
         when_done: LateFailure | None = None,
+        started: Callable[[str], object] | None = None,
     ) -> bool:
-        """Put one message into a session, and hold its gate while it answers."""
+        """Put one message into a session, and hold its gate while it answers.
+
+        Nothing queues here — a session still answering is refused — so
+        `started` is called as the message goes, and answering False keeps it
+        out.
+        """
         if not session_id or not (text or "").strip():
             return False
         if (missing := self._unready()) is not None:
@@ -134,6 +141,8 @@ class ZCodeRunner:
         name = known.name if known is not None else ""
         cwd = cwd or (known.cwd if known is not None else None)
 
+        if await say_started(started, session_id) is False:
+            return False
         found = trust.app()
         assert found is not None  # `_unready` said so
         bridge = Bridge(

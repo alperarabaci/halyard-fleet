@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import sys
 import urllib.error
@@ -261,6 +262,77 @@ def _older_spellings(projects) -> list[str]:
     ]
 
 
+def _ignored(settings) -> list[str]:
+    """Settings given a value Halyard does not take. Ignored rather than
+    refused, so the service still starts, and said here as well as in its log
+    and the navigator's chat — a warning, since what runs is the stricter
+    gate, not a looser one."""
+    return [f"{WARN}{sentence}" for sentence in settings.ignored]
+
+
+def _forge_tokens(settings, projects, origin_of=None) -> list[str]:
+    """The token a project's forge needs, where the project asks for labels and
+    it is missing — and the old name for GitLab's, still in use.
+
+    Only a project that asks for labels — `labels: who_worked` writes them,
+    `labels: groups` reads them — is checked: with github.com and gitlab.com
+    both known, every project hosted on either would otherwise warn on every
+    run. `/label` says which token is missing when somebody uses it. The forge
+    is read the way `/label` reads it — the repository's remote, or `forge:` —
+    so a project whose remote names no forge is left alone.
+
+    Warnings, never problems: labels are optional, and every other command
+    works without a token. Without these, who_worked writes nothing and says so
+    only in the log, and the groups read nothing at all.
+    """
+    from halyard import tasks
+
+    origin_of = origin_of or tasks.origin_of
+    lines = []
+    if settings.forge_token:
+        lines.append(
+            f"{WARN}HALYARD_FORGE_TOKEN is now HALYARD_GITLAB_TOKEN, "
+            + (
+                "which is set, so the old one is not used and can go"
+                if settings.gitlab_token
+                else "and is still read as GitLab's; the old name still works"
+            )
+        )
+    tokens = settings.forge_tokens
+    for project in projects:
+        missing = [
+            *(["labels: who_worked writes nothing"] if project.label_work else []),
+            *(["labels: groups reads nothing from its tasks"] if project.label_groups else []),
+        ]
+        if not missing or project.path is None:
+            continue
+        origin = origin_of(project.path)
+        if origin is None:
+            continue
+        kind = tasks.kind_of(origin, project.forge)
+        if kind not in tasks.BUILDERS or tokens.get(kind):
+            continue
+        lines.append(
+            f"{WARN}{project.name} is on {tasks.BUILDERS[kind].name} ({origin.host}), and "
+            f"{tasks.TOKENS[kind]} is not set, so {' and '.join(missing)}"
+        )
+    return lines
+
+
+def _steps_astray(projects) -> list[str]:
+    """Workflow steps sent to an agent of another role than their transition's.
+
+    A warning: it may be meant, and the step goes where it says. Usually it is
+    a label copied onto the wrong line, and the step goes to the wrong agent in
+    every run until somebody reads the first line of what it was sent.
+    """
+    return [
+        f"{WARN}{project.name} — {sentence}"
+        for project in projects
+        for sentence in project.workflows.astray
+    ]
+
+
 def _runs(settings, projects) -> list[str]:
     """What each project trusts to run without asking — its `runs:` and what
     `halyard rules` keeps for it — what was refused, and whether any of it can
@@ -289,13 +361,16 @@ def _runs(settings, projects) -> list[str]:
     return lines
 
 
-def _inspection_efforts(settings, projects) -> list[str]:
-    """Each effort asked for inspections that the runtime they run on would
-    not take.
+def _one_shot_efforts(settings, projects) -> list[str]:
+    """Each effort asked for Halyard's own turns — inspections, and the commit
+    message and compaction record `HALYARD_DEFAULT_EFFORT` sets — that the
+    runtime they run on would not take.
 
-    A warning, and not a refusal to start: such an inspection still runs, at
-    the model's own effort, and says so in a log nobody is reading. This is
-    where somebody looks. Which efforts there are is the runtime's to say.
+    A warning, and not a refusal to start: such a turn still runs, at the
+    model's own effort, and says so in a log nobody is reading. This is where
+    somebody looks. Which efforts there are is the runtime's to say — here the
+    default runtime's, for the turns on its models; a model another runtime
+    claims is that runtime's to check, in `_one_shot_models`.
     """
     from halyard.agents import registry
 
@@ -306,9 +381,24 @@ def _inspection_efforts(settings, projects) -> list[str]:
     if not enforced:
         return []
     asked = [
-        ("HALYARD_INSPECTION_EFFORT", settings.inspection_effort),
+        ("HALYARD_DEFAULT_EFFORT", settings.default_model, settings.default_effort),
+        (
+            "HALYARD_COMMIT_EFFORT",
+            settings.commit_model or settings.default_model,
+            settings.commit_effort,
+        ),
+        (
+            "HALYARD_COMPACTION_EFFORT",
+            settings.compaction_model or settings.default_model,
+            settings.compaction_effort,
+        ),
+        ("HALYARD_INSPECTION_EFFORT", settings.inspection_model, settings.inspection_effort),
         *(
-            (f"{project.name}'s inspection {name}", chosen.effort)
+            (
+                f"{project.name}'s inspection {name}",
+                chosen.model or settings.inspection_model,
+                chosen.effort,
+            )
             for project in projects
             for name, chosen in project.inspection_models.items()
         ),
@@ -316,9 +406,61 @@ def _inspection_efforts(settings, projects) -> list[str]:
     return [
         f"{WARN}{where} asks for effort {effort!r}, which is not one of "
         f"{', '.join(allowed)} — it runs at the model's own effort instead"
-        for where, effort in asked
-        if effort and effort.strip().lower() not in allowed
+        for where, model, effort in asked
+        if effort
+        and registry.for_model(model) == registry.DEFAULT
+        and effort.strip().lower() not in allowed
     ]
+
+
+def _one_shot_models(settings, projects) -> tuple[list[str], int]:
+    """Each model Halyard's own turns name that a runtime other than the
+    default claims, and whether that runtime can run it here, at the effort
+    asked — with how many of them cannot.
+
+    A model the CLI here is missing, or too old for, is a turn that fails at
+    once, every time it is asked from the phone. The runtime says which, as it
+    does for a seat's model.
+    """
+    from halyard.agents import registry
+
+    named = [
+        ("HALYARD_DEFAULT_MODEL", settings.default_model, settings.default_effort),
+        (
+            "HALYARD_COMMIT_MODEL",
+            settings.commit_model or (settings.default_model if settings.commit_effort else None),
+            settings.commit_effort or settings.default_effort,
+        ),
+        (
+            "HALYARD_COMPACTION_MODEL",
+            settings.compaction_model
+            or (settings.default_model if settings.compaction_effort else None),
+            settings.compaction_effort or settings.default_effort,
+        ),
+        ("HALYARD_INSPECTION_MODEL", settings.inspection_model, settings.inspection_effort),
+        *(
+            (
+                f"{project.name}'s inspection {name}",
+                chosen.model,
+                chosen.effort or settings.inspection_effort,
+            )
+            for project in projects
+            for name, chosen in project.inspection_models.items()
+            if chosen.model
+        ),
+    ]
+    lines: list[str] = []
+    failed = 0
+    for where, model, effort in named:
+        model = (model or "").strip()
+        runtime = registry.for_model(model)
+        spec = registry.get(runtime) if model and runtime != registry.DEFAULT else None
+        if spec is None:
+            continue
+        said, fatal = _render(spec.check_model, where, model=model, effort=effort)
+        lines += said
+        failed += int(fatal)
+    return lines, failed
 
 
 def _check_seat(
@@ -614,6 +756,34 @@ def check_service_log(path: Path) -> tuple[list[str], int]:
     return lines, 0
 
 
+#: The group ids the shipped examples put where a real one goes:
+#: `-1001234567890`, `-1002234567890`, … `-2001234567890`.
+_EXAMPLE_CHAT = re.compile(r"^-[12]00\d234567890$")
+
+
+def example_values(settings, seats) -> list[str]:
+    """Telegram values still as a shipped example wrote them.
+
+    Left in, the control plane starts, `doctor` used to pass, and nothing ever
+    reaches a phone — measured with the first sample, whose `halyard.yaml`
+    block was taken as it came. Each is a value somebody has to put in.
+    """
+    said: list[str] = []
+    if "replace-me" in (settings.telegram_bot_token or ""):
+        said.append("TELEGRAM_BOT_TOKEN is still the example's: your bot's token, from @BotFather")
+    if _EXAMPLE_CHAT.match(settings.telegram_chat_id or ""):
+        said.append("TELEGRAM_CHAT_ID is still the example's: the id of the group the bot is in")
+    if "11111111" in (settings.telegram_authorized_user_ids or ()):
+        said.append(
+            "TELEGRAM_AUTHORIZED_USER_IDS is still the example's: your own id, from @userinfobot"
+        )
+    for seat in seats:
+        chat = (seat.chat or "").rpartition(":")[0] or (seat.chat or "")
+        if _EXAMPLE_CHAT.match(chat):
+            said.append(f"agent {seat.label}'s chat: is still the example's: its group's id")
+    return said
+
+
 def run() -> int:
     """Check the chain end to end. Returns a process exit code."""
     problems = 0
@@ -632,6 +802,32 @@ def run() -> int:
         )
         if settings.channel.decides_without_a_human:
             print(f"{WARN}channel {settings.channel.value} answers by itself — nobody is asked")
+        for line in _ignored(settings):
+            print(line)
+        if settings.channel.value == "telegram":
+            from halyard.core.config_file import load as configured_seats
+
+            try:
+                seats = configured_seats()
+            except Exception:
+                seats = []
+            for line in example_values(settings, seats):
+                problems += 1
+                print(f"{FAIL}{line}")
+            if settings.telegram_menu not in ("full", "simple"):
+                print(
+                    f"{WARN}TELEGRAM_MENU {settings.telegram_menu!r} is not full or simple, "
+                    "so the full menu is shown"
+                )
+        # Which way calls go from a chat that approves for itself, said either
+        # way: "why did nothing reach my phone" has its answer here.
+        if settings.override_agent_approvals:
+            print(f"{OK}every call is decided here, even from a chat that approves for itself")
+        else:
+            print(
+                f'{OK}a chat that approves for itself (Codex "approve for me", Claude Code'
+                " auto mode) is left to it"
+            )
     except ValidationError as exc:
         problems += 1
         print(f"{FAIL}configuration is not valid")
@@ -739,7 +935,15 @@ def run() -> int:
     # files present, because a missing one produces a warning at the moment it
     # is needed — in a log nobody is reading — and then a compaction that
     # quietly carries nothing.
-    from halyard.core.config_file import missing_files
+    from halyard.core.config_file import missing_files, stray_keys
+
+    # Keys at the top of the file that nothing reads. A project's fields are
+    # checked strictly when the file is read; the top of it was not, and a
+    # `runs:` written flush left was ignored without a word.
+    for level, line in stray_keys():
+        if level == "fail":
+            problems += 1
+        print(f"{FAIL if level == 'fail' else WARN}{line}")
 
     try:
         described = described_projects()
@@ -753,9 +957,18 @@ def run() -> int:
         print(f"{OK}every file the configuration names is where it says")
     for line in _older_spellings(described):
         print(line)
-    for line in _inspection_efforts(settings, described) if settings_ok else []:
+    for line in _steps_astray(described):
         print(line)
+    for line in _one_shot_efforts(settings, described) if settings_ok else []:
+        print(line)
+    if settings_ok:
+        said, failed = _one_shot_models(settings, described)
+        problems += failed
+        for line in said:
+            print(line)
     for line in _runs(settings if settings_ok else None, described):
+        print(line)
+    for line in _forge_tokens(settings, described) if settings_ok else []:
         print(line)
     if seats:
         print()

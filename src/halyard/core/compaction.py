@@ -148,7 +148,8 @@ RECORD_LIMIT = 2_000
 
 #: Which model writes the record. It is a distillation of text somebody else
 #: already wrote — the reasoning was done in the session, not here — so this
-#: does not need the expensive one. Override with HALYARD_COMPACTION_MODEL.
+#: does not need the expensive one. Override with HALYARD_COMPACTION_MODEL, or
+#: with HALYARD_DEFAULT_MODEL for every one-shot turn Halyard starts.
 RECORD_MODEL = "sonnet"
 
 #: How long the record may take before the compaction goes ahead without it.
@@ -247,6 +248,7 @@ class Recorder:
         root: Path | None = None,
         projects: Mapping[str, Path] | None = None,
         model: str | None = RECORD_MODEL,
+        effort: str | None = None,
         limit: int = RECORD_LIMIT,
         clock=time.monotonic,
         roots: tuple[Path, ...] | None = None,
@@ -266,6 +268,8 @@ class Recorder:
         #: the codebase they describe rather than beside Halyard.
         self._projects = dict(projects or {})
         self._model = model or RECORD_MODEL
+        #: How hard the record's model thinks; None leaves it to the runtime.
+        self._effort = effort
         self._limit = limit or RECORD_LIMIT
         self._clock = clock
         # Which directories a transcript may live in. A parameter so a test can
@@ -317,12 +321,14 @@ class Recorder:
             return False
         from halyard.agents import registry
 
-        runner = self._runners.get(seat.runtime)
+        runner = self._runners.get(registry.for_model(self._model))
         if runner is None or not hasattr(runner, "ask") or seat.runtime != registry.DEFAULT:
-            # Written by the default runtime, for its own seats: the record's
-            # model is that runtime's word. opencode and Codex can take a turn
-            # of their own now, and a seat on either is left alone as it was —
-            # handed `sonnet`, one reads it as no model and the other refuses it.
+            # Made for the default runtime's own seats, the ones whose
+            # compaction Halyard hears of; a seat on another is left alone as it
+            # was. Written by whichever runtime the record's model belongs to —
+            # `gpt-5.6-terra` on Codex, `sonnet` on the default — because a
+            # model's name is one runtime's word, and another reads it as no
+            # model or refuses it.
             return False
         # Found by id under the runtimes' own directories, never taken from the
         # request: a path in a payload posted over HTTP is a path an attacker
@@ -345,6 +351,7 @@ class Recorder:
                 runner.ask(
                     self._prompt(instructions, conversation),
                     model=self._model,
+                    effort=self._effort,
                     purpose="compaction record",
                     project=seat.project,
                 ),

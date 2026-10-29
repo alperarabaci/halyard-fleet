@@ -43,8 +43,9 @@ from halyard.core.audit import (
 from halyard.core.config_file import ModelChoice, missing_files
 from halyard.core.events import RiskLevel, Role
 from halyard.core.gate import Gate
+from halyard.core.left_questions import LeftQuestions
 from halyard.core.policy import Policy
-from halyard.core.questions import Choice, QuestionStore
+from halyard.core.questions import Choice, QuestionRequest, QuestionStore
 from halyard.core.redaction import Redactor
 from halyard.core.registry import SessionRegistry
 from halyard.core.seats import configured
@@ -79,10 +80,14 @@ def configured_projects() -> dict:
     from halyard.core.config_file import projects as described
 
     try:
-        return {p.name: p for p in described() if p.path}
+        found = {p.name: p for p in described() if p.path}
     except Exception:
         logger.warning("Could not read `projects:`", exc_info=True)
         return {}
+    for project in found.values():
+        for sentence in project.workflows.astray:
+            logger.warning("%s: %s — check the step's agent", project.name, sentence)
+    return found
 
 
 class ApprovalRequestBody(BaseModel):
@@ -124,6 +129,15 @@ class ApprovalRequestBody(BaseModel):
     #: the command itself. See `ApprovalRequest.asks`.
     asks: str | None = None
     patterns: list[str] | None = None
+    #: The approval setting the agent's own chat is in (`permission_mode` in
+    #: its hook payload), and the hook that asked. Recorded with the card.
+    #: Not bounded here: a value refused by validation would be a denial, and
+    #: these decide nothing. The service cuts them short.
+    permission_mode: str | None = None
+    hook_event: str | None = None
+    #: Whether the chat this came from approves its own calls — the bridge's
+    #: reading of it. See `ApprovalService` and `HALYARD_OVERRIDE_AGENT_APPROVALS`.
+    agent_approves: bool = False
 
 
 class AnsweredBody(BaseModel):
@@ -350,11 +364,12 @@ def _build_channel(
         runners=runners,
         seats=seats,
         prompts=prompts,
+        menu=settings.telegram_menu,
         # Where each project's code is, for `/commit`. Read here rather than in
         # the channel so a malformed `projects:` block cannot take the gate
         # down — the same reason `prompts:` is loaded defensively above.
         repositories=configured_projects(),
-        forge_token=settings.forge_token,
+        forge_tokens=settings.forge_tokens,
         # What each runtime's own availability check needs, asked of each
         # runtime — so a seat that cannot be reached is told why from the phone,
         # truthfully, and nothing here has to know one runtime's settings.
@@ -378,7 +393,37 @@ def _build_channel(
             (settings.inspection_model or "").strip() or None,
             (settings.inspection_effort or "").strip().lower() or None,
         ),
+        default_model=_default_model(settings),
+        commit_model=_commit_model(settings),
     )
+
+
+def _default_model(settings: Settings) -> ModelChoice:
+    """`HALYARD_DEFAULT_MODEL` and `HALYARD_DEFAULT_EFFORT`: what Halyard's own
+    one-shot turns run on when nothing more specific says."""
+    return ModelChoice(
+        (settings.default_model or "").strip() or None,
+        (settings.default_effort or "").strip().lower() or None,
+    )
+
+
+def _commit_model(settings: Settings) -> ModelChoice:
+    """Commit-specific model and effort, each inheriting the general default."""
+    return ModelChoice(
+        (settings.commit_model or "").strip() or None,
+        (settings.commit_effort or "").strip().lower() or None,
+    ).over(_default_model(settings))
+
+
+def _compaction_model(settings: Settings) -> ModelChoice:
+    """What the compaction record runs on: `HALYARD_COMPACTION_MODEL` when it
+    is set, with its own effort when named, the default otherwise. What both leave
+    unsaid is the recorder's own."""
+    own = ModelChoice(
+        (settings.compaction_model or "").strip() or None,
+        (settings.compaction_effort or "").strip().lower() or None,
+    )
+    return own.over(_default_model(settings))
 
 
 def create_app(settings: Settings, *, channel=None) -> FastAPI:
@@ -501,11 +546,15 @@ def create_app(settings: Settings, *, channel=None) -> FastAPI:
         allowed_writes=allowed_writes,
         allowed_tools=allowed_tools,
         refuse_agent_commits=settings.refuse_agent_commits,
+        override_agent_approvals=settings.override_agent_approvals,
         allow_risk_at_or_below=(
             RiskLevel(settings.allow_risk_at_or_below) if settings.allow_risk_at_or_below else None
         ),
         runs_by_project=runs_by_project,
         trusted_runs=trusted,
+        questions_wait=frozenset(
+            name for name, spec in runtimes.discover().items() if spec.question_waits
+        ),
     )
     questions = QuestionService(
         store=question_store,
@@ -516,28 +565,46 @@ def create_app(settings: Settings, *, channel=None) -> FastAPI:
         gate=gate,
         seats=seats,
     )
+
     # Notices a turn that died where no hook fires — an API error mid-turn does
     # not fire `Stop`, so the reply relay never runs. Entirely off the approval
     # path: fed session paths as a side effect of requests it does not touch.
-    watcher = TranscriptWatcher(channel=resolved_channel, gate=gate)
+    async def deliver_answer(request: QuestionRequest, answer: str) -> bool:
+        """Hand an answer from the phone to the runtime whose question it was."""
+        answering = getattr(by_runtime.get(request.agent_id), "answer_question", None)
+        if answering is None or not request.tool_use_id:
+            return False
+        return await answering(request.session_id, request.tool_use_id, request.question, answer)
+
+    left_questions = LeftQuestions(
+        store=question_store,
+        audit=audit,
+        registry=registry,
+        channel=resolved_channel,
+        deliver=deliver_answer,
+        project=settings.project_name,
+        gate=gate,
+    )
+    watcher = TranscriptWatcher(channel=resolved_channel, gate=gate, questions=left_questions)
     # Writes the record a compaction is about to make unrecoverable, in a turn
     # of its own so the session it is about is never resumed or forked.
     known_projects = configured_projects()
     # Each seat's label on the task its branch is for — only in projects that
     # asked, and only with a token to write with. See `tasks.attribution`.
     labelled = {name: found for name, found in known_projects.items() if found.label_work}
-    if labelled and settings.forge_token:
+    if labelled and settings.forge_tokens:
         from halyard.tasks.attribution import Attribution
 
         registry.listen(
-            Attribution(token=settings.forge_token, projects=labelled, tag_of=_tag_of).seen
+            Attribution(tokens=settings.forge_tokens, projects=labelled, tag_of=_tag_of).seen
         )
         # Said once, because nothing else is until a label is written, and "is it
         # on in the process that is running" had no answer from outside it.
         logger.info("Labelling tasks in %s as agents work on them", ", ".join(sorted(labelled)))
     elif labelled:
         logger.warning(
-            "label_work is on for %s, but there is no forge token to write labels with",
+            "labels: who_worked is on for %s, but there is no forge token to write labels "
+            "with — HALYARD_GITHUB_TOKEN or HALYARD_GITLAB_TOKEN",
             ", ".join(sorted(labelled)),
         )
     # Prompt files live in the codebase they describe, so they are looked for
@@ -550,12 +617,19 @@ def create_app(settings: Settings, *, channel=None) -> FastAPI:
     # nothing. One machine ran that way for weeks.
     for line in missing_files(list(known_projects.values())):
         logger.warning("%s", line)
+    # A setting given a value it does not take is ignored rather than refused —
+    # refused, the service never started and denied everything, and said so
+    # nowhere anybody was looking. Said here at error level, and to the
+    # navigator once the channel is up.
+    for sentence in settings.ignored:
+        logger.error("%s", sentence)
 
     recorder = after_compaction.Recorder(
         seats=configured_seats,
         projects=project_paths,
         runners=by_runtime,
-        model=settings.compaction_model,
+        model=_compaction_model(settings).model,
+        effort=_compaction_model(settings).effort,
         limit=settings.compaction_record_limit,
         channel=resolved_channel,
         gate=gate,
@@ -581,6 +655,11 @@ def create_app(settings: Settings, *, channel=None) -> FastAPI:
             logger.warning("%s", aged.wording(_now()))
             with contextlib.suppress(Exception):
                 await resolved_channel.send_message("halyard", aged.wording(_now()), Role.NAVIGATOR)
+        # The same for a setting that was ignored: the person who can fix it
+        # is on the phone, not reading this machine's log.
+        for sentence in settings.ignored:
+            with contextlib.suppress(Exception):
+                await resolved_channel.send_message("halyard", f"⚠️ {sentence}", Role.NAVIGATOR)
         # The watcher's own loop, alongside the channel's. A best-effort courier,
         # so a failure to start it is logged and shrugged off rather than kept
         # from serving.
@@ -706,6 +785,9 @@ def create_app(settings: Settings, *, channel=None) -> FastAPI:
             asks=body.asks,
             patterns=body.patterns,
             file_paths=body.file_paths,
+            permission_mode=body.permission_mode,
+            hook_event=body.hook_event,
+            agent_approves=body.agent_approves,
         )
         return ApprovalResponse(
             decision=outcome.decision,

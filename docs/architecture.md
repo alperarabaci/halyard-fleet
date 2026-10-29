@@ -6,10 +6,10 @@ properties that follow from the shape.
 ## The shape
 
 ```
-Claude Code (PreToolUse hook, blocking)
-    │  stdin: JSON payload
+Claude Code, Codex, ZCode (PreToolUse hook, blocking)
+    │  stdin: JSON payload               # opencode: its plugin makes the same call
     ▼
-hook_bridge.py                          # standalone, minimal, stdlib only
+hook.sh → hook_bridge.py                # standalone, stdlib only
     │  POST /v1/approvals  (blocking, with timeout)
     ▼
 Halyard Core (FastAPI)
@@ -29,45 +29,77 @@ Halyard Core (FastAPI)
     ▲
     │  200 OK: {"decision":"allow"|"deny","reason":"..."}
 hook_bridge.py
-    │  stdout: translated into the hook output format
+    │  stdout: translated into the runtime's hook output format
     ▼
-Claude Code continues, or stops
+the agent continues, or stops
 ```
 
 Two separations carry the design:
 
-**Channels and agents are different things.** Telegram is a channel. Claude Code is an agent
-runtime. Both will be replaced. `core/` must know about neither — it speaks only in `AgentEvent`,
-`ApprovalRequest`, and the two adapter protocols.
+**Channels and agents are different things.** Telegram is a channel. Claude Code, Codex, opencode
+and ZCode are agent runtimes, and more of either can come. `core/` must know about neither — it
+speaks only in `AgentEvent`, `ApprovalRequest`, and the two adapter protocols.
 
 **The bridge is deliberately stupid.** `hook_bridge.py` reads stdin, makes one HTTP call, and
-translates the reply into the hook output format — roughly 60 lines of stdlib, no dependencies.
-All policy, risk classification, redaction, and routing live in core, where they can be tested.
+translates the reply into the runtime's hook output format — stdlib only, no dependencies. It has
+grown to speak each runtime's payload, but it decides nothing: all policy, risk classification,
+redaction, and routing live in core, where they can be tested.
 
 ## Layout
 
 ```
 halyard-fleet/
+├── halyard.simple.yaml.example   # one project, one agent, one chat
+├── halyard.yaml.example          # everything a machine's halyard.yaml can say
+├── Makefile                      # wire, restart, doctor, runs-advice… as make targets
 ├── docs/
-│   ├── setup.md                        # installing it, wiring a project
-│   ├── telegram.md                     # the bot, agents, models
-│   ├── architecture.md                 # this file
-│   ├── mobile-agent-control-plane.md   # full design document
-│   ├── hook-payload-notes.md           # observed Claude Code hook behaviour
-│   └── session-io-notes.md             # writing into a live session
+│   ├── setup.md                  # installing it, the runtimes, wiring a project
+│   ├── before-you-wire-it.md     # what changes, and what surprised us
+│   ├── when-it-does-not-work.md  # every way setup has gone wrong, and the fix
+│   ├── commands.md               # every command, on the phone and on the machine
+│   ├── configuration.md          # what goes through without a card; a project's own setup
+│   ├── transitions.md            # inspections, and the work taken to its next stage
+│   ├── workflows.md              # transitions in order, each reply deciding the next
+│   ├── telegram.md               # the bot, its groups, models and effort
+│   ├── upkeep.md                 # jobs Halyard does about itself
+│   ├── limitations.md            # what it does not do, or not well yet
+│   ├── architecture.md           # this file
+│   ├── *-notes.md, codex-*.md    # what the runtimes' hooks and sessions do, measured
+│   ├── design/                   # an adapter designed before it was built
+│   └── postmortem/               # what went wrong, and what changed because of it
+├── samples/                      # ten small projects, from one agent to a team
 ├── src/halyard/
-│   ├── core/          # events, registry, approvals, policy, audit, redaction
-│   ├── channels/      # ChannelAdapter protocol + Telegram
-│   ├── agents/        # AgentAdapter protocol + Claude Code
-│   ├── api/           # FastAPI app and routers
+│   ├── core/          # the path a request takes: events, seats, approvals, policy,
+│   │                  # grants, audit, redaction — and the usage it leaves behind
+│   ├── agents/        # the runtime protocol; Claude Code, Codex, opencode, ZCode,
+│   │                  # and Antigravity, built and not shipped
+│   ├── channels/      # the channel protocol, a stub for tests, and Telegram
+│   ├── api/           # the FastAPI app the bridges call
+│   ├── commands/      # a project's own commands: /command, and a transition's
+│   ├── commits/       # /commit: the message, the warnings, the round, what an option reads
+│   ├── tasks/         # /label: the task a branch is for, and its issue tracker
+│   ├── inspections/   # a project's own inspections: the turn, kept runs, repeats
+│   ├── transitions/   # the work taken to its next stage: prompt, commands, inspections
+│   ├── workflows/     # transitions in order: decisions, runs, and their journal
+│   ├── upkeep/        # jobs about Halyard itself: runs-advice and its prompt
+│   ├── applications/  # /open: the apps on this machine
 │   ├── doctor.py      # what is wired, where, and whether it works
+│   ├── verify.py      # prove the gate is there, by running into it
 │   ├── wiring.py      # halyard wire / unwire
-│   └── config.py
-├── bridge/            # runs as a Claude Code subprocess, stdlib only
-│   ├── hook.sh        # the wrapper: denies whatever the Python cannot answer
-│   ├── hook_bridge.py # the approval bridge
-│   ├── relay.py       # the Stop-hook relay, which fails open on purpose
-│   └── _settings.py   # config lookup with no dependency on the package
+│   ├── service.py     # the launchd service that updates itself before it starts
+│   ├── *_cli.py       # init, samples, export, inspect, rules, runs, upkeep
+│   └── config.py      # the settings, read once at startup from halyard.yaml
+├── bridge/            # what the runtimes run: stdlib-only Python, one TypeScript plugin
+│   ├── hook.sh            # the wrapper: denies whatever the Python cannot answer
+│   ├── hook_bridge.py     # the approval bridge
+│   ├── permission_hook.sh # Codex's PermissionRequest, which answers in its own shape
+│   ├── relay.py           # the Stop-hook relay, which fails open on purpose
+│   ├── compaction.py      # hands a session its record back after a compaction
+│   ├── opencode.ts        # the gate, as an opencode plugin
+│   ├── inject.py          # Antigravity: what was said while it was not listening
+│   ├── observe.sh         # an optional payload observer, not the gate
+│   └── _settings.py       # config lookup with no dependency on the package
+├── scripts/           # applying a hook change across projects, and rolling it back
 └── tests/
 ```
 

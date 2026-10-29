@@ -39,6 +39,7 @@ from urllib.parse import quote
 from halyard.agents.base import SessionRef
 from halyard.agents.turns import LateFailure, say_started
 from halyard.core import usage
+from halyard.core.calls import Calls
 
 logger = logging.getLogger(__name__)
 
@@ -152,12 +153,39 @@ class OpencodeRunner:
     def busy(self, session_id: str) -> bool:
         return session_id in self._busy
 
+    async def stop(self, session_id: str, cwd: str | None = None) -> bool:
+        """End the turn going in that session. Whether one was going.
+
+        Asked of opencode, not of this runner: a message goes in by
+        `PROMPT`, which answers at once, so nothing here knows whether its turn
+        is still running — and a turn stuck on a question nobody answered is
+        exactly the one somebody wants to stop. `/session/status` lists every
+        session that is not idle; `abort` ends one, read out of 1.18.35's own
+        description as stopping "any ongoing AI processing or command
+        execution". Whoever started the turn: this chat is that session's.
+        """
+        from halyard.agents import opencode
+
+        base = f"http://127.0.0.1:{opencode._port()}"
+        where = f"?directory={quote(cwd, safe='')}" if cwd else ""
+        statuses = await asyncio.to_thread(
+            self._call, "GET", f"{base}/session/status{where}", None, TIMEOUT
+        )
+        status = statuses.get(session_id) if isinstance(statuses, dict) else None
+        if not isinstance(status, dict) or status.get("type") in (None, "idle"):
+            return False
+        aborted = await asyncio.to_thread(
+            self._call, "POST", f"{base}/session/{session_id}/abort{where}", {}, TIMEOUT
+        )
+        return aborted is not None
+
     async def send(
         self,
         session_id: str,
         text: str,
         cwd: str | None = None,
         when_done: LateFailure | None = None,
+        started: Callable[[str], object] | None = None,
     ) -> bool:
         """Put `text` into the session as if it had been typed there.
 
@@ -169,7 +197,9 @@ class OpencodeRunner:
         answers is not visible from here — no process to wait on, no exit code
         — and the runtime reports its own trouble through the plugin, which is
         the path a 429 already takes. Calling this on a guess would be worse
-        than leaving it to the half that can see.
+        than leaving it to the half that can see. `started` is called as the
+        message goes, and answering False keeps it out; a turn opencode already
+        has going in the session is not something this can see.
         """
         if not session_id or not (text or "").strip():
             return False
@@ -193,6 +223,8 @@ class OpencodeRunner:
 
         self._busy.add(session_id)
         try:
+            if await say_started(started, session_id) is False:
+                return False
             return await asyncio.to_thread(self._post, where, body)
         finally:
             self._busy.discard(session_id)
@@ -238,6 +270,7 @@ class OpencodeRunner:
         system: str | None = None,
         effort: str | None = None,
         started: Callable[[str], object] | None = None,
+        calls: Calls | None = None,
     ) -> str | None:
         """One turn in a session of its own, in the opencode already running here.
 
@@ -257,6 +290,9 @@ class OpencodeRunner:
 
         `started` is told the session's own id before the message goes: its
         questions and its reply arrive under that id, not the caller's.
+
+        `calls` is left as it is given: what the turn read is not read back
+        from opencode here, so only the gate knows the reads that met it.
 
         Returns the text of the last reply, or None on any failure.
         """

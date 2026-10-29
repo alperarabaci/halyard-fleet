@@ -1,0 +1,53 @@
+# What this sample adds to your halyard.yaml — the one in your Halyard checkout.
+# One project with two agents: a navigator who plans and checks, and a driver
+# who makes the change, each in a group of its own. Keep your own `settings:`;
+# put the project under `projects:` next to any you already have, and fill in
+# your own path, session names and groups.
+
+settings:
+  HALYARD_CHANNEL: telegram
+  TELEGRAM_BOT_TOKEN: "123456:replace-me"          # from @BotFather; secret
+  TELEGRAM_CHAT_ID: "-1001234567890"               # the group the bot is in
+  TELEGRAM_AUTHORIZED_USER_IDS: "11111111"         # who may answer a card
+  TELEGRAM_MENU: simple                            # the short command menu
+
+projects:
+  reading-list:
+    # Where you copied this sample to — not inside the Halyard checkout.
+    path: ~/halyard-samples/reading-list
+    # What `/transition` offers. `report` takes the chat's last reply — the
+    # driver's — to the navigator, with the project's own prompt in front. The
+    # prompt is a file in the project, read relative to `path`.
+    transitions:
+      report:
+        prompt: transitions/report.md
+        to: navigator
+    agents:
+      # Agent labels are unique across every project in the file: they are how
+      # `/to` and `/forward` name an agent.
+      reading-nav:
+        runtime: claude-code
+        # The name the runtime knows the session by. `uv run halyard sessions`
+        # lists the ones it can see.
+        session: reading-list-nav
+        # What `to: navigator` above finds.
+        role: navigator
+        # Your default group: the same id as TELEGRAM_CHAT_ID. Quoted: unquoted,
+        # YAML reads it as a number.
+        chat: "-1001234567890"
+      reading-drv:
+        # claude-code for both here; `codex` or `opencode` work the same way.
+        runtime: claude-code
+        session: reading-list-drv
+        role: driver
+        # A group of its own: a second group, with the bot in it. `/status`
+        # sent there says its id.
+        chat: "-1002234567890"
+
+prompts:
+  # `/sample_03` in the navigator's group asks it for a plan: the text of
+  # PROMPT.md.
+  sample_03: >-
+    Read `TASK.md`. Do not change any file yourself: write a short plan for the
+    driver who will make the change — what to change, in order, and how to check
+    it with `./check.sh`. Keep it under ten lines.

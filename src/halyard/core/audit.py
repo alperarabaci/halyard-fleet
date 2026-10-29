@@ -62,6 +62,10 @@ class AuditAction(StrEnum):
     #: counting the two together would make a Tuesday look like a series of
     #: refusals somebody never made.
     REFUSED_OUTRIGHT = "call.refused"
+    #: A call left to the agent's own approval, because its chat approves for
+    #: itself — Codex's "approve for me", Claude Code's auto mode. Nobody was
+    #: asked here; what the agent's reviewer decided is the agent's to record.
+    LEFT_TO_AGENT = "call.left_to_agent"
     #: An agent asked a person to choose between options, and a card went out.
     QUESTION_ASKED = "question.asked"
     #: A question was answered, or left to the terminal by the deadline.
@@ -129,7 +133,7 @@ def approval_requested(request: ApprovalRequest, *, now: datetime | None = None)
             "role": request.role.value if request.role else None,
             "reason": request.reason,
             "tool_use_id": request.tool_use_id,
-            "expires_at": request.expires_at.isoformat(),
+            "expires_at": request.expires_at.isoformat() if request.expires_at else None,
             # Where it ran, what it was judged against, and whether the command
             # above is less than what ran — so the log can be judged again later
             # by the rules of the day, and says when it cannot be.
@@ -140,6 +144,10 @@ def approval_requested(request: ApprovalRequest, *, now: datetime | None = None)
             # did I approve" has the answer the screen had, not only its occasion.
             # Absent otherwise, so every other record keeps exactly its shape.
             **({"asks": request.asks, "patterns": list(request.patterns)} if request.asks else {}),
+            # The chat's own approval setting and the hook that asked, when the
+            # bridge said: what the agent itself would have asked is countable.
+            **({"permission_mode": request.permission_mode} if request.permission_mode else {}),
+            **({"hook_event": request.hook_event} if request.hook_event else {}),
         },
     )
 
@@ -256,6 +264,36 @@ def tool_preauthorized(
     )
 
 
+def left_to_agent(
+    *,
+    session_id: str,
+    agent_id: str,
+    project: str,
+    tool: str,
+    command: str,
+    cwd: str,
+    permission_mode: str | None = None,
+    hook_event: str | None = None,
+    now: datetime | None = None,
+) -> AuditRecord:
+    """A call left to the agent's own approval, with what it was and where."""
+    return AuditRecord(
+        action=AuditAction.LEFT_TO_AGENT,
+        recorded_at=now or _default_clock(),
+        actor=agent_id,
+        session_id=session_id,
+        agent_id=agent_id,
+        project=project,
+        detail={
+            "tool": tool,
+            "command": command,
+            "cwd": cwd,
+            **({"permission_mode": permission_mode} if permission_mode else {}),
+            **({"hook_event": hook_event} if hook_event else {}),
+        },
+    )
+
+
 def refused_outright(
     *,
     session_id: str,
@@ -299,7 +337,7 @@ def question_asked(request: QuestionRequest, *, now: datetime | None = None) -> 
             "options": [choice.label for choice in request.options],
             "role": request.role.value if request.role else None,
             "tool_use_id": request.tool_use_id,
-            "expires_at": request.expires_at.isoformat(),
+            "expires_at": request.expires_at.isoformat() if request.expires_at else None,
         },
     )
 

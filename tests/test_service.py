@@ -6,13 +6,14 @@ the rest are the ways this could quietly start approving things.
 
 from __future__ import annotations
 
+import asyncio
 from datetime import timedelta
 from pathlib import Path
 
 import pytest
 
 from halyard.channels.stub import StubChannel
-from halyard.core.approvals import ApprovalRequest, ApprovalStore, Decision
+from halyard.core.approvals import ApprovalRequest, ApprovalStore, Decision, ResolutionReason
 from halyard.core.audit import AuditAction, AuditLog, AuditRecord, JsonlAuditSink
 from halyard.core.events import RiskLevel
 from halyard.core.policy import Policy
@@ -110,6 +111,8 @@ def build_service(
     allow_risk_at_or_below=None,
     runs_by_project=None,
     trusted_runs=None,
+    questions_wait: frozenset[str] = frozenset(),
+    override_agent_approvals: bool = False,
 ) -> tuple[ApprovalService, ApprovalStore, JsonlAuditSink]:
     store = store or ApprovalStore(ttl=ttl)
     sink = JsonlAuditSink(tmp_path / "audit.jsonl")
@@ -127,6 +130,8 @@ def build_service(
         allow_risk_at_or_below=allow_risk_at_or_below,
         runs_by_project=runs_by_project,
         trusted_runs=trusted_runs,
+        questions_wait=questions_wait,
+        override_agent_approvals=override_agent_approvals,
     )
     return service, store, sink
 
@@ -152,6 +157,26 @@ async def test_an_approved_request_comes_back_allowed(tmp_path: Path) -> None:
         AuditAction.APPROVAL_REQUESTED,
         AuditAction.APPROVAL_RESOLVED,
     ]
+
+
+async def test_a_card_keeps_the_chat_s_own_setting_and_the_hook_that_asked(
+    tmp_path: Path,
+) -> None:
+    """Counted later against Halyard's own: which cards the chat's setting
+    would have asked for anyway. Absent when the bridge did not say."""
+    service, _, sink = build_service(tmp_path)
+    await sink.open()
+
+    await ask(service, "git status", permission_mode="default", hook_event="PermissionRequest")
+    await ask(service, "git log", tool_use_id="toolu_2")
+    first, second = [
+        r.detail for r in await sink.read_all() if r.action is AuditAction.APPROVAL_REQUESTED
+    ]
+
+    assert first["permission_mode"] == "default"
+    assert first["hook_event"] == "PermissionRequest"
+    assert "permission_mode" not in second
+    assert "hook_event" not in second
 
 
 async def test_a_turn_of_halyard_s_own_is_asked_like_anyone_and_seen_working_nowhere(
@@ -255,6 +280,70 @@ async def test_nobody_answering_denies(tmp_path: Path) -> None:
     assert "expired" in outcome.reason.lower()
 
 
+class HangingChannel(SilentChannel):
+    """Never answers, and takes as long as a test likes to close a card."""
+
+    def __init__(self) -> None:
+        self.release = asyncio.Event()
+
+    async def approval_ended(self, request, resolution) -> None:
+        await self.release.wait()
+
+
+class EndingChannel(SilentChannel):
+    """Never answers, and hears how each request ended."""
+
+    def __init__(self, *, breaks: bool = False) -> None:
+        self.ended: list[tuple[str, ResolutionReason]] = []
+        self._breaks = breaks
+
+    async def approval_ended(self, request, resolution) -> None:
+        if self._breaks:
+            raise ConnectionError("telegram unreachable")
+        self.ended.append((request.request_id, resolution.reason))
+
+
+async def test_the_channel_hears_that_a_request_nobody_answered_is_over(tmp_path: Path) -> None:
+    """So its card can say so. Nothing else reaches it: no button was pressed,
+    and a card nobody tells goes on asking a question that is over."""
+    channel = EndingChannel()
+    service, _, sink = build_service(tmp_path, channel=channel, ttl=timedelta(milliseconds=50))
+    await sink.open()
+
+    await ask(service)
+    await asyncio.gather(*service._closing)
+
+    assert channel.ended == [(channel.last_request.request_id, ResolutionReason.TIMEOUT)]
+
+
+async def test_a_channel_that_cannot_close_its_card_changes_no_answer(tmp_path: Path) -> None:
+    service, _, sink = build_service(
+        tmp_path, channel=EndingChannel(breaks=True), ttl=timedelta(milliseconds=50)
+    )
+    await sink.open()
+
+    outcome = await ask(service)
+    await asyncio.gather(*service._closing)
+
+    assert not outcome.allowed
+    assert "expired" in outcome.reason.lower()
+
+
+async def test_the_answer_does_not_wait_for_the_card_to_close(tmp_path: Path) -> None:
+    """A denial is the bridge's to have at once; an edit hanging on Telegram
+    is closed beside it."""
+    channel = HangingChannel()
+    service, _, sink = build_service(tmp_path, channel=channel, ttl=timedelta(milliseconds=50))
+    await sink.open()
+
+    outcome = await asyncio.wait_for(ask(service), timeout=2)
+
+    assert not outcome.allowed
+    assert len(service._closing) == 1, "still closing"
+    channel.release.set()
+    await asyncio.gather(*service._closing)
+
+
 async def test_an_undeliverable_request_denies(tmp_path: Path) -> None:
     service, store, sink = build_service(tmp_path, channel=ExplodingChannel())
     await sink.open()
@@ -265,6 +354,96 @@ async def test_an_undeliverable_request_denies(tmp_path: Path) -> None:
     assert "deliver" in outcome.reason.lower()
     # And it is closed out, not left open to be answered by somebody later.
     assert await store.list_open() == []
+
+
+async def test_a_delivery_failure_names_the_channel_and_error_without_secrets(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    class LeakingChannel(ExplodingChannel):
+        name = "telegram"
+
+        async def send_approval_request(self, request: ApprovalRequest) -> str:
+            raise ConnectionError(f"failed to connect to https://example.org/bot/{SECRET}")
+
+    service, store, sink = build_service(tmp_path, channel=LeakingChannel())
+    await sink.open()
+
+    outcome = await ask(service)
+    errors = [
+        record for record in await sink.read_all() if record.action is AuditAction.BRIDGE_ERROR
+    ]
+
+    assert outcome.decision is BridgeDecision.DENY
+    assert "telegram (ConnectionError)" in outcome.reason
+    assert "delivery could not be confirmed" in outcome.reason
+    assert "Request approval again" in outcome.reason
+    assert len(errors) == 1
+    assert errors[0].request_id == outcome.request_id
+    assert "telegram (ConnectionError)" in errors[0].detail["message"]
+    for exposed in (outcome.reason, str(errors[0].detail), caplog.text):
+        assert SECRET not in exposed
+        assert "https://" not in exposed
+        assert "nobody saw it" not in exposed
+    assert await store.list_open() == []
+
+
+async def test_delivery_is_cancelled_when_the_approval_deadline_passes(tmp_path: Path) -> None:
+    cancelled = asyncio.Event()
+
+    class HangingChannel(SilentChannel):
+        async def send_approval_request(self, request: ApprovalRequest) -> str:
+            self.last_request = request
+            try:
+                await asyncio.Future()
+            except asyncio.CancelledError:
+                cancelled.set()
+                raise
+
+    channel = HangingChannel()
+    service, store, sink = build_service(tmp_path, channel=channel, ttl=timedelta(milliseconds=50))
+    await sink.open()
+
+    outcome = await asyncio.wait_for(ask(service), timeout=1)
+
+    assert cancelled.is_set()
+    assert outcome.decision is BridgeDecision.DENY
+    assert "silent (TimeoutError)" in outcome.reason
+    assert channel.last_request is not None
+    assert channel.last_request.request_id == outcome.request_id
+    assert channel.last_request.expires_at - channel.last_request.created_at == store.ttl
+    assert await store.list_open() == []
+    errors = [
+        record for record in await sink.read_all() if record.action is AuditAction.BRIDGE_ERROR
+    ]
+    assert len(errors) == 1
+    assert "silent (TimeoutError)" in errors[0].detail["message"]
+
+
+async def test_cancelling_delivery_still_cancels_the_call(tmp_path: Path) -> None:
+    started = asyncio.Event()
+    cancelled = asyncio.Event()
+
+    class HangingChannel(SilentChannel):
+        async def send_approval_request(self, request: ApprovalRequest) -> str:
+            started.set()
+            try:
+                await asyncio.Future()
+            except asyncio.CancelledError:
+                cancelled.set()
+                raise
+
+    service, store, sink = build_service(tmp_path, channel=HangingChannel())
+    await sink.open()
+
+    asking = asyncio.create_task(ask(service))
+    await asyncio.wait_for(started.wait(), timeout=1)
+    asking.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await asking
+
+    assert cancelled.is_set()
+    assert not any(record.action is AuditAction.BRIDGE_ERROR for record in await sink.read_all())
+    await store.shutdown()
 
 
 async def test_an_unwritable_audit_log_denies(tmp_path: Path) -> None:
@@ -380,7 +559,6 @@ async def test_a_request_without_a_project_dir_keeps_the_configured_name(
 
 # --- questions: the fail-open twin of the approval path ----------------------
 
-import asyncio  # noqa: E402
 import json  # noqa: E402
 
 from halyard.core.gate import Gate  # noqa: E402
@@ -485,6 +663,29 @@ async def test_a_channel_that_cannot_deliver_falls_back_to_the_terminal(tmp_path
     # The approval twin denies here. A question is not dangerous to leave to the
     # desk, so it says nothing instead.
     assert outcome.answer is None
+
+
+class EndingQuestionChannel(QuestionChannel):
+    """Captures the question, and hears how it ended."""
+
+    def __init__(self, store: QuestionStore) -> None:
+        super().__init__(store)
+        self.ended: list[ResolutionReason] = []
+
+    async def question_ended(self, request, resolution) -> None:
+        self.ended.append(resolution.reason)
+
+
+async def test_the_channel_hears_that_a_question_nobody_answered_is_over(tmp_path: Path) -> None:
+    store = QuestionStore(ttl=timedelta(seconds=0))
+    channel = EndingQuestionChannel(store)
+    service, _, sink = build_questions(tmp_path, channel=channel, store=store)
+    await sink.open()
+
+    await ask_question(service)
+    await asyncio.gather(*service._closing)
+
+    assert channel.ended == [ResolutionReason.TIMEOUT]
 
 
 async def test_a_question_nobody_answers_comes_back_empty(tmp_path: Path) -> None:
@@ -1148,6 +1349,113 @@ async def test_an_answer_at_the_desk_is_never_handed_back_as_an_approval(tmp_pat
     assert nothing_left is False
 
 
+# --- a card that waits as long as the question does ---------------------------
+
+
+class CountingChannel(SilentChannel):
+    """A silent channel that keeps every card it was handed."""
+
+    def __init__(self) -> None:
+        self.sent: list[ApprovalRequest] = []
+
+    async def send_approval_request(self, request: ApprovalRequest) -> str:
+        self.sent.append(request)
+        return "sent"
+
+
+async def card_out(channel: CountingChannel) -> ApprovalRequest:
+    for _ in range(200):
+        if channel.sent:
+            return channel.sent[-1]
+        await asyncio.sleep(0.01)
+    raise AssertionError("no card was sent")
+
+
+WAITS = {"session_id": "ses_1", "agent_id": "opencode", "tool": "bash", "tool_use_id": "per_1"}
+
+
+def waiting_service(tmp_path: Path, channel: CountingChannel):
+    return build_service(
+        tmp_path,
+        channel=channel,
+        ttl=timedelta(milliseconds=50),
+        questions_wait=frozenset({"opencode"}),
+    )
+
+
+async def test_a_card_for_a_question_that_waits_has_no_deadline(tmp_path: Path) -> None:
+    """opencode keeps its question on the screen for as long as it takes. A
+    card that expired after five minutes said "timed out" on the phone over a
+    question that was still there, and nobody away could answer it."""
+    channel = CountingChannel()
+    service, store, sink = waiting_service(tmp_path, channel)
+    await sink.open()
+
+    asking = asyncio.create_task(ask(service, "make deploy", **WAITS))
+    card = await card_out(channel)
+    await asyncio.sleep(0.2)
+    still_open = not asking.done()
+    await store.resolve(card.request_id, nonce=card.nonce, decision=Decision.ALLOW)
+
+    assert card.expires_at is None
+    assert still_open
+    assert (await asking).decision is BridgeDecision.ALLOW
+
+
+async def test_the_same_question_asked_again_finds_the_card_already_out(tmp_path: Path) -> None:
+    """The call that carried it was dropped, and the question asked again: one
+    card, answered once, and the answer goes to the call that is still there."""
+    channel = CountingChannel()
+    service, store, sink = waiting_service(tmp_path, channel)
+    await sink.open()
+
+    first = asyncio.create_task(ask(service, "make deploy", **WAITS))
+    card = await card_out(channel)
+    first.cancel()
+    again = asyncio.create_task(ask(service, "make deploy", **WAITS))
+    await asyncio.sleep(0.05)
+    await store.resolve(card.request_id, nonce=card.nonce, decision=Decision.ALLOW)
+    outcome = await again
+    actions = [record.action for record in await sink.read_all()]
+
+    assert outcome.decision is BridgeDecision.ALLOW
+    assert len(channel.sent) == 1
+    assert actions.count(AuditAction.APPROVAL_REQUESTED) == 1
+    assert actions.count(AuditAction.APPROVAL_RESOLVED) == 1
+
+
+async def test_an_answer_that_lands_between_two_calls_goes_to_the_next(tmp_path: Path) -> None:
+    """Answered on the phone just as one call ended and before the next: the
+    next one gets that answer, rather than a second card for a settled question."""
+    channel = CountingChannel()
+    service, store, sink = waiting_service(tmp_path, channel)
+    await sink.open()
+
+    first = asyncio.create_task(ask(service, "make deploy", **WAITS))
+    card = await card_out(channel)
+    first.cancel()
+    await store.resolve(card.request_id, nonce=card.nonce, decision=Decision.DENY)
+    await asyncio.sleep(0.05)
+    outcome = await ask(service, "make deploy", **WAITS)
+
+    assert outcome.decision is BridgeDecision.DENY
+    assert len(channel.sent) == 1
+
+
+async def test_a_question_that_does_not_wait_keeps_its_deadline(tmp_path: Path) -> None:
+    """Claude Code's hook is waiting on a verdict, so its card still expires."""
+    channel = CountingChannel()
+    service, _, sink = waiting_service(tmp_path, channel)
+    await sink.open()
+
+    outcome = await ask(
+        service, "make deploy", session_id="s", agent_id="claude-code", tool_use_id="toolu_1"
+    )
+
+    assert channel.sent[0].expires_at is not None
+    assert outcome.decision is BridgeDecision.DENY
+
+
 # --- a project's own commands --------------------------------------------------
 
 
@@ -1219,3 +1527,158 @@ async def test_a_card_says_where_it_ran_and_whether_redaction_changed_it(tmp_pat
     ]
     assert (first["cwd"], first["project_dir"], first["redacted"]) == ("/p/src", "/p", True)
     assert (second["cwd"], second["project_dir"], second["redacted"]) == ("/p", None, False)
+
+
+# --- a chat that approves for itself --------------------------------------------
+
+
+async def test_a_chat_that_approves_for_itself_is_left_to_it(tmp_path: Path) -> None:
+    """Codex's "approve for me", Claude Code's auto mode: chosen in the chat,
+    and not asked again here. Recorded, and nobody's card."""
+    channel = CountingChannel()
+    service, _, sink = build_service(tmp_path, channel=channel)
+    await sink.open()
+
+    outcome = await ask(service, "pytest -q", agent_id="codex", agent_approves=True)
+
+    assert outcome.decision is BridgeDecision.DEFER
+    assert channel.sent == []
+    [record] = await sink.read_all()
+    assert record.action is AuditAction.LEFT_TO_AGENT
+    assert record.detail["command"] == "pytest -q"
+
+
+async def test_halyard_decides_everything_when_told_to(tmp_path: Path) -> None:
+    channel = CountingChannel()
+    service, _, sink = build_service(tmp_path, channel=channel, override_agent_approvals=True)
+    await sink.open()
+
+    asking = asyncio.create_task(ask(service, "pytest -q", agent_approves=True))
+    card = await card_out(channel)
+    asking.cancel()
+
+    assert card.command_full == "pytest -q"
+
+
+async def test_a_refusal_still_stands_for_a_chat_that_approves_for_itself(tmp_path: Path) -> None:
+    service, _, sink = build_service(tmp_path, refuse_agent_commits=True)
+    await sink.open()
+
+    outcome = await ask(service, "git commit -m x", agent_approves=True)
+
+    assert outcome.decision is BridgeDecision.DENY
+
+
+async def test_a_turn_of_halyard_s_own_is_never_left_to_anyone(tmp_path: Path) -> None:
+    channel = CountingChannel()
+    service, _, sink = build_service(tmp_path, channel=channel)
+    await sink.open()
+    service._registry.mark_own("ses_own", "proof")
+
+    asking = asyncio.create_task(
+        ask(service, "pytest -q", session_id="ses_own", agent_approves=True)
+    )
+    card = await card_out(channel)
+    asking.cancel()
+
+    assert card.session_id == "ses_own"
+
+
+# --- what an inspection's trace needs of the gate ---------------------------
+
+
+class Hearing(StubChannel):
+    """A channel that hears every call decided without a card."""
+
+    def __init__(self, store: ApprovalStore, decision: Decision = Decision.ALLOW) -> None:
+        super().__init__(store, decision)
+        self.heard: list[dict] = []
+
+    def decided_without_a_card(self, **told) -> None:
+        self.heard.append(told)
+
+
+class HearingExploding(ExplodingChannel):
+    def __init__(self) -> None:
+        self.heard: list[dict] = []
+
+    def decided_without_a_card(self, **told) -> None:
+        self.heard.append(told)
+
+
+async def test_a_read_let_through_without_a_card_is_told_to_the_channel(tmp_path: Path) -> None:
+    """An inspection's trace needs it: a Codex read the gate let through is in
+    no other record the channel sees."""
+    project = a_project(tmp_path)
+    store = ApprovalStore(ttl=timedelta(minutes=5))
+    channel = Hearing(store)
+    service, _, sink = build_service(
+        tmp_path, channel=channel, store=store, allow_risk_at_or_below=RiskLevel.LOW
+    )
+    await sink.open()
+
+    outcome = await ask(
+        service,
+        "git status",
+        session_id="codex-thread",
+        tool_use_id="call_1",
+        project_dir=str(project),
+        cwd=str(project),
+    )
+
+    assert outcome.allowed
+    assert channel.heard == [
+        {
+            "session_id": "codex-thread",
+            "tool": "Bash",
+            "command": "git status",
+            "tool_use_id": "call_1",
+            "allowed": True,
+            "why": "pre-authorized (reads)",
+            "request_id": None,
+        }
+    ]
+    await sink.close()
+
+
+async def test_a_call_refused_outright_is_told_to_the_channel(tmp_path: Path) -> None:
+    store = ApprovalStore(ttl=timedelta(minutes=5))
+    channel = Hearing(store)
+    service, _, sink = build_service(
+        tmp_path, channel=channel, store=store, refuse_agent_commits=True
+    )
+    await sink.open()
+
+    await ask(service, "git commit -m x", tool_use_id="toolu_9")
+
+    [told] = channel.heard
+    assert (told["allowed"], told["tool_use_id"]) == (False, "toolu_9")
+    assert told["why"] == "refused: agents do not commit here"
+    await sink.close()
+
+
+async def test_a_call_with_a_card_is_the_card_s_and_is_not_told_again(tmp_path: Path) -> None:
+    store = ApprovalStore(ttl=timedelta(minutes=5))
+    channel = Hearing(store, Decision.DENY)
+    service, _, sink = build_service(tmp_path, channel=channel, store=store)
+    await sink.open()
+
+    await ask(service, "cat /tmp/x.log")
+
+    assert channel.heard == []
+    await sink.close()
+
+
+async def test_a_call_whose_card_could_not_be_sent_is_told_as_denied(tmp_path: Path) -> None:
+    """With its request, so a channel that did carry the card can tell."""
+    channel = HearingExploding()
+    service, _, sink = build_service(tmp_path, channel=channel)
+    await sink.open()
+
+    outcome = await ask(service, "cat /tmp/x.log")
+
+    [told] = channel.heard
+    assert told["allowed"] is False
+    assert told["request_id"] == outcome.request_id
+    assert told["why"] == "denied: it could not be put to anybody"
+    await sink.close()

@@ -39,6 +39,52 @@ def codex_home(root: Path, *, sessions: list[dict], rollouts: dict[str, dict]) -
 # --- finding a session ------------------------------------------------------
 
 
+def a_suffixed_rollout(root: Path, session_id: str, context: dict, *, at: int) -> Path:
+    """A rollout the Desktop app moved a thread on to, written at `at`."""
+    import os
+
+    day = root / "sessions" / "2026" / "10" / "13"
+    day.mkdir(parents=True, exist_ok=True)
+    path = day / f"rollout-2026-10-13T10-00-0{at % 10}-{session_id}_01a1{at:04d}.jsonl"
+    path.write_text(json.dumps({"type": "turn_context", "payload": context}) + "\n")
+    os.utime(path, (1_000_000 + at, 1_000_000 + at))
+    return path
+
+
+def test_a_thread_with_only_moved_on_rollouts_is_still_found_where_it_runs(
+    tmp_path: Path,
+) -> None:
+    """Looked up by the plain name only, such a thread had no directory, and
+    every message to it was refused with nothing printed to say why."""
+    root = codex_home(
+        tmp_path,
+        sessions=[{"id": "abc", "thread_name": "driver", "updated_at": "2026-10-13T10:00:00Z"}],
+        rollouts={},
+    )
+    a_suffixed_rollout(root, "abc", {"cwd": "/repo", "model": "gpt-6-sol"}, at=1)
+
+    ref = find_session("driver", root=root)
+
+    assert ref is not None
+    assert (ref.cwd, ref.model) == ("/repo", "gpt-6-sol")
+
+
+def test_the_rollout_being_written_says_the_model_not_the_first_one(tmp_path: Path) -> None:
+    root = codex_home(
+        tmp_path,
+        sessions=[{"id": "abc", "thread_name": "driver", "updated_at": "2026-10-13T10:00:00Z"}],
+        rollouts={"abc": {"cwd": "/repo", "model": "gpt-5.2"}},
+    )
+    import os
+
+    [first] = (root / "sessions").glob("*/*/*/rollout-*-abc.jsonl")
+    os.utime(first, (1_000_000, 1_000_000))
+    a_suffixed_rollout(root, "abc", {"cwd": "/repo", "model": "gpt-6-sol"}, at=2)
+    a_suffixed_rollout(root, "abc", {"cwd": "/repo", "model": "gpt-6.1-sol"}, at=9)
+
+    assert find_session("driver", root=root).model == "gpt-6.1-sol"
+
+
 def test_the_name_comes_from_the_index_and_the_rest_from_the_transcript(tmp_path: Path) -> None:
     """Codex splits what Claude Code keeps together.
 
@@ -278,9 +324,25 @@ async def test_a_session_with_no_recorded_directory_is_refused(monkeypatch) -> N
     """Better to deliver nothing than to deliver it past the wrong gate."""
     calls = spying(monkeypatch)
     monkeypatch.setattr("halyard.agents.codex.runner.find_session", lambda name: None)
+    runner = runner_with_catalog()
 
-    assert await runner_with_catalog().send("abc", "carry on") is False
+    assert await runner.send("abc", "carry on") is False
     assert calls == []
+    # Said, so the phone is told why: nothing was printed by anything.
+    assert "no working directory was found" in (runner.last_error("abc") or "")
+
+
+async def test_a_message_s_turn_says_when_it_started(monkeypatch) -> None:
+    calls = spying(monkeypatch)
+    told: list[str] = []
+
+    assert (
+        await runner_with_catalog().send("abc", "carry on", cwd="/repo", started=told.append)
+        is True
+    )
+
+    assert len(calls) == 1
+    assert told == ["abc"]
 
 
 async def test_two_messages_to_one_session_are_serialised(monkeypatch) -> None:
@@ -364,6 +426,15 @@ def test_a_catalog_that_could_not_be_read_asserts_nothing(monkeypatch) -> None:
 
 def test_a_session_recording_no_model_is_not_reported(monkeypatch) -> None:
     assert checked(monkeypatch, session_on(None), known=CATALOG) == []
+
+
+def test_a_session_with_no_directory_found_is_a_failure(monkeypatch) -> None:
+    """Every message to it is refused, and doctor said nothing."""
+    nowhere = SessionRef(session_id="s-1", name="a-seat", cwd=None, model="gpt-5.6-terra")
+
+    said = checked(monkeypatch, nowhere, known=CATALOG)
+
+    assert said == [("fail", "no working directory found for a-seat in its rollout under ~/.codex")]
 
 
 def test_a_homebrew_install_is_told_which_command_upgrades_it(monkeypatch) -> None:
@@ -486,14 +557,18 @@ async def test_a_resume_that_works_is_never_queued(monkeypatch) -> None:
     assert "queue" not in seen[0]
 
 
-async def test_a_queued_message_still_carries_the_chosen_model(monkeypatch) -> None:
+async def test_a_queued_message_carries_no_model(monkeypatch) -> None:
+    """It runs on the thread's own model inside the application. Codex 0.164's
+    queue call has no field for one, and Codex past 0.164 refuses
+    `codex queue --model` outright."""
     seen = answering(monkeypatch, Refusing(), FakeProcess())
     runner = runner_with_catalog()
     runner.set_model("abc", "gpt-5.6-sol")
 
     await runner.send("abc", "carry on", cwd="/repo")
 
-    assert "--model" in seen[1] and "gpt-5.6-sol" in seen[1]
+    assert "--model" in seen[0] and "gpt-5.6-sol" in seen[0], "the turn of its own still does"
+    assert seen[1][1:] == ["queue", "--thread", "abc", "--message", "carry on"]
 
 
 async def test_the_phrase_that_means_someone_else_holds_it() -> None:
@@ -649,3 +724,74 @@ async def test_a_turn_that_failed_is_no_answer(monkeypatch) -> None:
     )
 
     assert await CodexRunner().ask("look", model="gpt-5.4-mini") is None
+
+
+def _command(ident: str, command: str, *, exit_code: int | None, status: str, output: str = ""):
+    """A `command_execution` item, as `codex exec --json` gives one on 0.160.0."""
+    return {
+        "id": ident,
+        "type": "command_execution",
+        "command": f"/bin/zsh -lc '{command}'",
+        "aggregated_output": output,
+        "exit_code": exit_code,
+        "status": status,
+    }
+
+
+#: Measured on 0.160.0 (2026-10-25): each command that ran is `item.started`
+#: then `item.completed`; one the hook denied, or one still waiting on it, is
+#: not there at all. The last one here was still running when the turn ended.
+READS = [
+    {"type": "thread.started", "thread_id": "019a-thread"},
+    {"type": "turn.started"},
+    {
+        "type": "item.started",
+        "item": _command("item_0", "cat other.txt", exit_code=None, status="in_progress"),
+    },
+    {
+        "type": "item.completed",
+        "item": _command(
+            "item_0", "cat other.txt", exit_code=0, status="completed", output="the other file\n"
+        ),
+    },
+    {
+        "type": "item.started",
+        "item": _command("item_1", "rg -n seed src", exit_code=None, status="in_progress"),
+    },
+    {
+        "type": "item.completed",
+        "item": _command("item_1", "rg -n seed src", exit_code=1, status="completed"),
+    },
+    {
+        "type": "item.started",
+        "item": _command("item_2", "sed -n 1,5p a.py", exit_code=None, status="in_progress"),
+    },
+    {"type": "item.completed", "item": {"type": "agent_message", "text": "claims · no finding"}},
+    {"type": "turn.completed", "usage": {"input_tokens": 10, "output_tokens": 2}},
+]
+
+
+async def test_an_inspection_s_commands_are_kept_without_their_output(monkeypatch) -> None:
+    """The command, as it was asked for rather than in the shell it ran in,
+    and its exit code — a `grep` that found nothing ran. Never its output."""
+    from halyard.core.calls import Call, Calls
+
+    _executing(monkeypatch, READS)
+    calls = Calls()
+
+    said = await CodexRunner().ask("inspect", edits=False, calls=calls)
+
+    assert said == "claims · no finding"
+    assert calls.reported
+    assert list(calls) == [
+        Call("item_0", "Bash", "cat other.txt", "ran"),
+        Call("item_1", "Bash", "rg -n seed src", "ran", "exit 1"),
+        Call("item_2", "Bash", "sed -n 1,5p a.py", None),
+    ]
+    assert "the other file" not in repr(list(calls))
+
+
+async def test_a_turn_with_nothing_to_account_for_reads_as_it_did(monkeypatch) -> None:
+    _executing(monkeypatch, READS)
+
+    assert await CodexRunner().ask("inspect", edits=False) == "claims · no finding"

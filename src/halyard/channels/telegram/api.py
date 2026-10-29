@@ -1,7 +1,8 @@
 """A small async client for the parts of the Telegram Bot API this project uses.
 
-Deliberately not a general-purpose wrapper. Five calls, no retry policy, no
-model layer — just enough to put a card in front of somebody and hear back.
+Deliberately not a general-purpose wrapper. Connection failures before a JSON
+request is sent get two retries; ambiguous failures after sending do not, since
+Telegram may already have put the card in front of somebody.
 
 The token never appears in a log message. It lives in the base URL and nowhere
 else, and `__repr__` is overridden so an exception traceback that happens to
@@ -10,11 +11,16 @@ include this object does not paste a bot token into the audit trail.
 
 from __future__ import annotations
 
+import asyncio
+import logging
 from typing import Any
 
 import httpx
 
 API_ROOT = "https://api.telegram.org"
+CONNECTION_ATTEMPTS = 3
+
+logger = logging.getLogger(__name__)
 
 
 class TelegramError(RuntimeError):
@@ -54,7 +60,24 @@ class TelegramApi:
         if self._client is None:
             raise TelegramError("TelegramApi.open() must be awaited before use")
         body = {key: value for key, value in payload.items() if value is not None}
-        response = await self._client.post(f"{self._base}/{method}", json=body)
+        for attempt in range(1, CONNECTION_ATTEMPTS + 1):
+            try:
+                response = await self._client.post(f"{self._base}/{method}", json=body)
+                break
+            except (httpx.ConnectError, httpx.ConnectTimeout) as exc:
+                if attempt == CONNECTION_ATTEMPTS:
+                    raise
+                # No HTTP request was sent. Read/write failures are deliberately
+                # not retried: their card may already be in the chat.
+                logger.warning(
+                    "Telegram %s connection failed (%s); retrying attempt %d/%d in %ss",
+                    method,
+                    type(exc).__name__,
+                    attempt + 1,
+                    CONNECTION_ATTEMPTS,
+                    attempt,
+                )
+                await asyncio.sleep(attempt)
         try:
             answer = response.json()
         except ValueError as exc:
@@ -98,6 +121,21 @@ class TelegramApi:
             message_id=message_id,
             text=text,
             parse_mode=parse_mode,
+            reply_markup=reply_markup,
+        )
+
+    async def edit_message_reply_markup(
+        self, chat_id: str, message_id: int, *, reply_markup: dict | None = None
+    ) -> Any:
+        """Change only the buttons under a message — with none, take them away.
+
+        For a card whose text Telegram will not take back as it is, so its
+        buttons still go. See `CardDesk`.
+        """
+        return await self._call(
+            "editMessageReplyMarkup",
+            chat_id=chat_id,
+            message_id=message_id,
             reply_markup=reply_markup,
         )
 

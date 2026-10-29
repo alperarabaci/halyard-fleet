@@ -25,6 +25,7 @@ import contextlib
 import json
 import logging
 import os
+import shlex
 import shutil
 import subprocess
 from collections.abc import Callable
@@ -38,6 +39,7 @@ from halyard.agents.turns import (
     end_group,
     say_started,
 )
+from halyard.core import calls as reported
 from halyard.core import usage
 
 logger = logging.getLogger(__name__)
@@ -156,6 +158,40 @@ def find_codex_binary(configured: str | None = None) -> str | None:
     return None
 
 
+def _unwrapped(command: str) -> str:
+    """The command as it was asked for, out of the shell Codex runs it in:
+    `/bin/zsh -lc 'cat other.txt'` is `cat other.txt`. Anything else as it is."""
+    try:
+        words = shlex.split(command)
+    except ValueError:
+        return command
+    if len(words) == 3 and words[1] in ("-c", "-lc") and Path(words[0]).name.endswith("sh"):
+        return words[2]
+    return command
+
+
+def ran(calls: reported.Calls, kind: str | None, item: dict) -> None:
+    """One `command_execution` event of `codex exec --json`, into `calls`.
+
+    Measured on 0.160.0: `item.started` with `status` "in_progress", then
+    `item.completed` with "completed" and its `exit_code`. A command that
+    exits with something other than 0 ran — `grep` finding nothing exits 1 —
+    and only one Codex itself declined did not. Called `Bash`, as Codex's
+    hook calls it, so it reads the same as what the gate decided.
+    """
+    ident = str(item.get("id") or "")
+    command = _unwrapped(str(item.get("command") or ""))
+    if kind == "item.started":
+        calls.asked(ident, "Bash", command)
+    elif kind == "item.completed":
+        if item.get("status") == "declined":
+            calls.came_back(ident, reported.DENIED, "declined", tool="Bash", what=command)
+            return
+        code = item.get("exit_code")
+        detail = f"exit {code}" if isinstance(code, int) and code != 0 else ""
+        calls.came_back(ident, reported.RAN, detail, tool="Bash", what=command)
+
+
 class CodexRunner:
     """Delivers a message into a Codex session by resuming it."""
 
@@ -179,6 +215,10 @@ class CodexRunner:
         # minute, because one had asked at startup and the other just now.
         self._configured = binary
         self._turns = Turns("codex", wedged_after=wedged_after_seconds)
+        #: Why Halyard itself would not send, by session, when it would not —
+        #: no CLI, nowhere to run it from. Nothing printed those, so nothing
+        #: carried them to the phone.
+        self._refused: dict[str, str] = {}
         self._default_model = default_model or None
         self._models: dict[str, str] = {}
         self._efforts: dict[str, str] = {}
@@ -267,12 +307,17 @@ class CodexRunner:
         phone, away from the machine, and "check the control plane's log" is
         the one instruction they cannot follow — the log is on the machine they
         are away from. The reason was already printed by the CLI; it only had
-        to be carried.
+        to be carried — or it is Halyard's own, for a message it would not send.
         """
-        return self._turns.last_error(session_id)
+        return self._refused.get(session_id) or self._turns.last_error(session_id)
 
     def busy(self, session_id: str) -> bool:
         return self._turns.busy(session_id)
+
+    def stop(self, session_id: str, cwd: str | None = None) -> bool:
+        """End the turn sent from here into that session. Not one queued into a
+        thread open in its app: that runs inside the app, and is stopped there."""
+        return self._turns.stop(session_id)
 
     async def send(
         self,
@@ -280,6 +325,7 @@ class CodexRunner:
         text: str,
         cwd: str | None = None,
         when_done: LateFailure | None = None,
+        started: Callable[[str], object] | None = None,
     ) -> bool:
         """Resume the session with `text` as the next thing the user said.
 
@@ -292,9 +338,15 @@ class CodexRunner:
         Returns on acceptance rather than on completion — see
         `agents/turns.py`. `when_done` is called if an accepted turn then fails,
         which is how running out of usage halfway through still gets reported.
+        `started` is called as the turn carrying it begins, after any turn this
+        runner had going in the session, and answering False keeps it out. A
+        thread held open by its app queues the message there instead, behind
+        whatever the app has going, which is not something this can see.
         """
+        self._refused.pop(session_id, None)
         if not self._binary:
             logger.error("Cannot deliver a message: the codex CLI was not found.")
+            self._refused[session_id] = "The codex CLI was not found on this machine."
             return False
         if not text.strip():
             return False
@@ -327,6 +379,11 @@ class CodexRunner:
                     "resuming from somewhere else would apply that directory's hooks.",
                     session_id,
                 )
+                self._refused[session_id] = (
+                    "Not sent: no working directory was found for this session in "
+                    "~/.codex/sessions, and resuming it from anywhere else would run "
+                    "another directory's hooks."
+                )
                 return False
 
         arguments = [self._binary, "exec", "resume"]
@@ -347,6 +404,7 @@ class CodexRunner:
             # Not a failure: it is answered below. Logged as one, it made three
             # reviews that each got an answer read as three that never arrived.
             expected=held_by_another,
+            started=started,
         )
         if accepted or not held_by_another(self._turns.last_error(session_id)):
             return accepted
@@ -372,17 +430,57 @@ class CodexRunner:
             env=os.environ.copy(),
         )
 
+    async def answer_question(
+        self, session_id: str, question: str, title: str, answer: str
+    ) -> bool:
+        """Answer a question the thread asked and left waiting. Whether Codex took it.
+
+        Queued into the thread, the way the Desktop app sends its own answers —
+        never resumed: the question is open in the app, and an answer is not a
+        turn of Halyard's. No model and no settings, for the same reason. See
+        `codex.questions` for the envelope.
+        """
+        if not self._binary:
+            return False
+        from halyard.agents.codex import questions
+
+        arguments = [self._binary, "queue", "--thread", session_id]
+        arguments += ["--message", questions.envelope(question, title, answer)]
+        try:
+            process = await asyncio.create_subprocess_exec(
+                *arguments,
+                stdin=asyncio.subprocess.DEVNULL,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+        except OSError:
+            logger.exception("Could not start codex to answer %s", session_id)
+            return False
+        try:
+            _, stderr = await asyncio.wait_for(process.communicate(), timeout=30)
+        except TimeoutError:
+            process.kill()
+            logger.error("Codex did not take an answer for %s within 30s", session_id)
+            return False
+        if process.returncode != 0:
+            logger.error(
+                "Codex refused an answer for %s: %s",
+                session_id,
+                (stderr or b"").decode("utf-8", "replace").strip()[-300:],
+            )
+            return False
+        return True
+
     def _queueing(self, session_id: str, text: str) -> list[str]:
         """The command that hands a message to a session somebody else is running.
 
-        No effort override: that is a config value read when a turn starts, and
-        this turn starts inside the application. Passing it would be writing
-        down a preference that nothing applies.
+        No model and no effort: a queued message runs on the thread's own,
+        inside the application. Codex 0.164's queue call has a field for
+        neither, so `--model` was taken and dropped, and Codex past 0.164
+        refuses `codex queue --model` outright — every message sent this way
+        would have failed.
         """
-        arguments = [self._binary or "codex", "queue", "--thread", session_id]
-        if model := self._models.get(session_id) or self._default_model:
-            arguments += ["--model", model]
-        return [*arguments, "--message", text]
+        return [self._binary or "codex", "queue", "--thread", session_id, "--message", text]
 
     # --- a turn of Halyard's own ----------------------------------------------
 
@@ -400,6 +498,7 @@ class CodexRunner:
         system: str | None = None,
         effort: str | None = None,
         started: Callable[[str], object] | None = None,
+        calls: reported.Calls | None = None,
     ) -> str | None:
         """One turn in a thread of its own — `codex exec` — and nothing kept.
 
@@ -419,6 +518,11 @@ class CodexRunner:
         own id for the turn. Codex counts cached input inside `input_tokens`
         and reasoning inside `output_tokens`; the row keeps them the way the
         other runtimes' rows do.
+
+        Each command the turn runs is in that stream too, and goes into `calls`
+        when it is given — the command, its exit code, never its output. A
+        command the gate denied, or one still waiting on it, is never there:
+        Codex reports what ran, and only the gate knows what did not.
 
         Returns the last thing the model said, or None on any failure.
         """
@@ -459,7 +563,7 @@ class CodexRunner:
         said_aside = asyncio.ensure_future(process.stderr.read()) if process.stderr else None
         try:
             said, used, thread = await asyncio.wait_for(
-                self._read(process, started), timeout=timeout
+                self._read(process, started, calls), timeout=timeout
             )
             await process.wait()
         except TimeoutError:
@@ -495,9 +599,14 @@ class CodexRunner:
             )
         return said
 
-    async def _read(self, process, started) -> tuple[str | None, dict | None, str | None]:
+    async def _read(
+        self, process, started, calls: reported.Calls | None = None
+    ) -> tuple[str | None, dict | None, str | None]:
         """The turn's events as they come: the thread it runs as, the last
-        thing the model said, and what it used — or no answer when it failed."""
+        thing the model said, and what it used — or no answer when it failed.
+        Each command it runs goes into `calls`, as it starts and as it ends."""
+        if calls is not None:
+            calls.reported = True
         said: str | None = None
         used: dict | None = None
         thread: str | None = None
@@ -513,6 +622,8 @@ class CodexRunner:
             if kind == "thread.started" and not thread:
                 thread = event.get("thread_id")
                 await say_started(started, thread)
+            elif calls is not None and item.get("type") == "command_execution":
+                ran(calls, kind, item)
             elif kind == "item.completed" and item.get("type") == "agent_message":
                 said = item.get("text") or said
             elif kind == "turn.completed":

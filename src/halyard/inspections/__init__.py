@@ -14,48 +14,74 @@ reads them, adds what it can see for itself (`halyard.frame`), and hands the
 answer back as it came.
 
 **The turn stands in the project.** It runs in the project's directory, where
-the code a report is about is: it reads what the inspection needs, runs only
-the commands its text names — each put in front of a person by the project's
-gate first — and edits nothing. The prompt says so, and that a command refused
-or unfinished leaves the inspection unmeasured rather than clean. Whoever is
-asked to allow one of those commands can stop the inspection instead.
+the code a report is about is: it searches and reads files and inspects diffs,
+through native reading tools or read-only shell commands, and edits nothing.
+Tests, scripts, database and network operations are forbidden. The runtime's
+sandbox and the project's gate still apply: a read refused or unfinished leaves
+that part of the inspection unmeasured rather than clean. A read that waits for
+a person's approval may never run — the card denied, expired, or still open
+when the turn ends — and a model may answer without it, so Halyard says which
+reads did not run under the answer, in its own words (`not_run_block`).
 
-The prompt still says "check" where it speaks to the model, as it did before
-these were called inspections: what a model is told is kept the same, so that
-the answers before the name changed and after it can be compared.
+**Every answer has a status.** What the turn read is traced from what the
+runtime reported and what the gate decided, never from what the model says it
+read (`trace`): complete when every read it asked for ran, incomplete when one
+did not, unmeasured when there is no answer. An incomplete answer is marked,
+and whatever runs it goes on.
 
-**A finding can label the task.** A project writes under `label_findings:` what
-its inspections' answers say when they found something, in its own words, and
-an answer that says one of them puts `halyard:<inspection>` on the task. The
-inspection decides, from the project's settings — whoever runs it has no say —
-so one in a transition labels exactly as one run by hand. Halyard only adds.
+The prompt said "check" where it spoke to the model until 2026-10-24, so that
+answers from either side of the rename could be compared; it says "inspection"
+since. A kept run holds the words it was given, and a repeat gives them again.
 
 **Every run is kept.** What the model was given, word for word, and what it
 said, through `Keeper` into the table `record` writes — the one thing Halyard
 keeps the text of, so an inspection can be compared and run again later.
 
-**Three ports, and no chat.** An inspection reaches a model through `Asker`, the
-task through `Labeller` and its record through `Keeper`, and knows nothing of
-Telegram, of any runtime or of any tracker. `halyard.transitions` runs
+**Two ports, and no chat.** An inspection reaches a model through `Asker` and
+its record through `Keeper`, and knows nothing of Telegram, of any runtime or
+of any tracker. `halyard.transitions` runs
 inspections; nothing here hands anything on. `tests/test_layering.py` keeps it
 that way.
 """
 
-from halyard.inspections import record
-from halyard.inspections.spec import Answer, Asker, Keeper, Kept, Labeller, StoppedError
-from halyard.inspections.turn import finding, handed_on, prompt, run, unfenced
+from halyard.inspections import record, trace
+from halyard.inspections.spec import (
+    Answer,
+    Asker,
+    Decided,
+    Gated,
+    Keeper,
+    Kept,
+    NotRun,
+    Outcome,
+    Read,
+    Status,
+    StoppedError,
+    Trace,
+)
+from halyard.inspections.trace import merged, said
+from halyard.inspections.turn import handed_on, not_run_block, prompt, run, unfenced
 
 __all__ = [
     "Answer",
     "Asker",
+    "Decided",
+    "Gated",
     "Keeper",
     "Kept",
-    "Labeller",
+    "NotRun",
+    "Outcome",
+    "Read",
+    "Status",
     "StoppedError",
-    "finding",
+    "Trace",
     "handed_on",
+    "merged",
+    "not_run_block",
     "prompt",
     "record",
     "run",
+    "said",
+    "trace",
     "unfenced",
 ]

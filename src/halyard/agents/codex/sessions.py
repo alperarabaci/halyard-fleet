@@ -63,18 +63,32 @@ def _index_entries(root: Path | None = None) -> list[dict]:
     return entries
 
 
-def _rollout_for(session_id: str, root: Path | None = None) -> Path | None:
-    """The transcript belonging to a session id.
+def rollout_for(session_id: str, root: Path | None = None) -> Path | None:
+    """The transcript a session id is being written to now.
 
     Filed by date under `sessions/YYYY/MM/DD/rollout-<timestamp>-<id>.jsonl`,
     so it is found by the id in the name rather than by knowing the date.
+
+    The Desktop app moves a thread on to a new file every so often, named
+    `rollout-<timestamp>-<id>_<another id>.jsonl`, each starting afresh — so
+    the one being written is the newest. Looking only for the plain name found
+    the oldest, with the model and effort of days before, and found nothing at
+    all for a thread with no plain file left: no working directory, so nothing
+    could be delivered to it. Measured on a second machine: Codex had
+    compressed that thread's older rollouts, its first among them, to
+    `.jsonl.zst`; the newer, moved-on ones were still plain `.jsonl`.
     """
     sessions = codex_home(root) / "sessions"
     try:
-        matches = list(sessions.glob(f"*/*/*/rollout-*-{session_id}.jsonl"))
+        found = [
+            path
+            for pattern in (f"rollout-*-{session_id}.jsonl", f"rollout-*-{session_id}_*.jsonl")
+            for path in sessions.glob(f"*/*/*/{pattern}")
+            if path.is_file()
+        ]
+        return max(found, key=lambda path: path.stat().st_mtime) if found else None
     except OSError:
         return None
-    return matches[0] if matches else None
 
 
 def _context_of(transcript: Path) -> tuple[str | None, str | None, str | None]:
@@ -136,7 +150,7 @@ def _context_of(transcript: Path) -> tuple[str | None, str | None, str | None]:
 
 def describe(session_id: str, name: str, *, root: Path | None = None) -> SessionRef:
     """Everything known about one session, with whatever is missing left None."""
-    transcript = _rollout_for(session_id, root)
+    transcript = rollout_for(session_id, root)
     cwd, model, effort = _context_of(transcript) if transcript else (None, None, None)
     return SessionRef(session_id=session_id, name=name, cwd=cwd, model=model, effort=effort)
 
@@ -166,7 +180,7 @@ def find_session(name: str, *, root: Path | None = None) -> SessionRef | None:
     if wanted.casefold() in folded:
         return describe(folded[wanted.casefold()], wanted, root=root)
 
-    if _rollout_for(wanted, root) is not None:
+    if rollout_for(wanted, root) is not None:
         return describe(wanted, wanted, root=root)
     return None
 

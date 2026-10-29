@@ -1,0 +1,64 @@
+# What this sample adds to your halyard.yaml — the one in your Halyard checkout.
+# One project with tests, and one agent. Keep your own `settings:`; put the
+# project under `projects:` next to any you already have, and fill in your own
+# path, session name and group.
+
+settings:
+  HALYARD_CHANNEL: telegram
+  TELEGRAM_BOT_TOKEN: "123456:replace-me"          # from @BotFather; secret
+  TELEGRAM_CHAT_ID: "-1001234567890"               # the group the bot is in
+  TELEGRAM_AUTHORIZED_USER_IDS: "11111111"         # who may answer a card
+  TELEGRAM_MENU: simple                            # the short command menu
+  # What `runs:` below needs. It also lets plain reads inside a project through
+  # with no card (`cat`, `grep`, `git log`…), on every wired project: it is for
+  # the whole machine. `halyard samples add` never changes settings, so add it
+  # to yours by hand.
+  HALYARD_ALLOW_RISK_AT_OR_BELOW: low
+
+projects:
+  shopping-cart:
+    # Where you copied this sample to — not inside the Halyard checkout.
+    path: ~/halyard-samples/shopping-cart
+    # What `/command` offers, a button each. Halyard runs the one you press
+    # itself, in `path`, and says how it went: no agent, and no card.
+    commands:
+      # The tests `make test-fast` runs, called straight. Through make, a
+      # failure would end on make's own `make: *** … Error 1`: the last line,
+      # the one Halyard shows and reads. Sample 08 does this for a whole
+      # project's guard and tests.
+      test-fast: python3 -m unittest -q
+      # A word you type: `/command test-only discount` runs the tests with
+      # "discount" in their name.
+      test-only: python3 -m unittest -q -k {input.word}
+      # Starting the next task: back to main, then a branch named for it.
+      # `/command next-task 12-discount`. A list runs its commands in order and
+      # stops at the first that fails.
+      to-main: git switch main
+      new-branch: git switch -c {input.task}
+      next-task: [to-main, new-branch]
+    # What the agent may run without a card, written as it types it. Its file
+    # edits, and anything else it runs, still come to your phone as cards.
+    # Needs HALYARD_ALLOW_RISK_AT_OR_BELOW above. A chat in auto mode — Claude
+    # Code's, or Codex's "approve for me" — decides its own calls, and this is
+    # not read for it.
+    runs:
+      - make test-fast
+    agents:
+      # Agent labels are unique across every project in the file: they are how
+      # `/to` and `/forward` name an agent.
+      shopping-cart-dev:
+        # claude-code here; `codex` or `opencode` work the same way.
+        runtime: claude-code
+        # The name the runtime knows the session by. `uv run halyard sessions`
+        # lists the ones it can see.
+        session: shopping-cart
+        # Your default group: the same id as TELEGRAM_CHAT_ID. Quoted: unquoted,
+        # YAML reads it as a number.
+        chat: "-1001234567890"
+
+prompts:
+  # `/sample_05` in the group sends this sample's task to the agent: the text
+  # of PROMPT.md.
+  sample_05: >-
+    Read `TASK.md` and make the change it asks for. When you are done, run
+    `make test-fast` and tell me what it printed.

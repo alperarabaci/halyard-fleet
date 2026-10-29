@@ -119,7 +119,7 @@ def _list(database: Path, described: dict[str, Project], only: str | None) -> in
     if not shown:
         print("No project trusts any command to run without asking yet.")
     elif not _switched_on():
-        print("\nHALYARD_ALLOW_RISK_AT_OR_BELOW is not set, so none of these apply yet.")
+        print("\nHALYARD_ALLOW_RISK_AT_OR_BELOW is not `low`, so none of these apply yet.")
     return 0
 
 

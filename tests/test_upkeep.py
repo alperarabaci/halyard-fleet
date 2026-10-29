@@ -5,6 +5,7 @@ service's own rules, and a model's proposals checked and counted by Halyard."""
 from __future__ import annotations
 
 import asyncio
+import functools
 import hashlib
 import json
 from datetime import UTC, datetime, timedelta
@@ -282,7 +283,7 @@ def test_what_the_person_reads_carries_a_line_halyard_quoted(tmp_path: Path, pro
     advice = runs_advice.advise(
         answered(
             {"entry": "uv run pytest *", "why": "tests"},
-            {"entry": "sudo x", "why": "x"},
+            {"entry": "sudo *", "why": "x"},
             keep=({"family": "uv run python", "why": "code"},),
         ),
         found,
@@ -292,7 +293,7 @@ def test_what_the_person_reads_carries_a_line_halyard_quoted(tmp_path: Path, pro
 
     assert "halyard rules add alpha-engine 'uv run pytest *'" in text
     assert "would have spared 1 of the cards" in text
-    assert "not an entry:" in text and "halyard rules add alpha-engine 'sudo x'" not in text
+    assert "not an entry:" in text and "halyard rules add alpha-engine 'sudo *'" not in text
     assert "uv run python — code" in text
 
 
@@ -345,6 +346,11 @@ def machine(tmp_path: Path, project, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.setattr(
         upkeep_cli.upkeep, "load", lambda name: upkeep.Job(name, model="opus", timeout=5)
     )
+    # The cards are written on NOW's day, so the window is read from it too.
+    # On the clock, every one of them fell out of it fourteen days later.
+    monkeypatch.setattr(
+        upkeep_cli.runs_advice, "gather", functools.partial(runs_advice.gather, now=NOW)
+    )
     return database
 
 
@@ -380,6 +386,39 @@ def test_a_runtime_that_keeps_its_tools_is_not_asked(machine: Path, monkeypatch,
     assert run() == 1
     assert runner.asked == []
     assert "without tools" in capsys.readouterr().err
+
+
+def test_a_gpt_inspection_model_is_not_handed_to_this_job(machine: Path, monkeypatch) -> None:
+    """Inspections on `gpt-5.6-terra` run on Codex; this job needs a turn with
+    no tools, so it keeps to a Claude Code model — sonnet, when its own is unset."""
+    from halyard import upkeep_cli
+
+    logged(machine, {"command": "uv run pytest -q"})
+    upkeep_cli._settings().inspection_model = "gpt-5.6-terra"
+    upkeep_cli._settings().inspection_effort = "ultra"
+    monkeypatch.setattr(upkeep_cli.upkeep, "load", lambda name: upkeep.Job(name, timeout=5))
+    runner = Answering(None)
+    asking(monkeypatch, runner)
+
+    run()
+
+    [(_, given)] = runner.asked
+    assert (given["model"], given["effort"]) == ("sonnet", None)
+
+
+def test_a_gpt_model_named_for_this_job_is_refused(machine: Path, monkeypatch, capsys) -> None:
+    from halyard import upkeep_cli
+
+    logged(machine, {"command": "uv run pytest -q"})
+    monkeypatch.setattr(
+        upkeep_cli.upkeep, "load", lambda name: upkeep.Job(name, model="gpt-6-sol", timeout=5)
+    )
+    runner = Answering(None)
+    asking(monkeypatch, runner)
+
+    assert run() == 2
+    assert runner.asked == []
+    assert "gpt-6-sol runs on codex" in capsys.readouterr().err
 
 
 def test_no_answer_ends_the_command(machine: Path, monkeypatch, capsys) -> None:

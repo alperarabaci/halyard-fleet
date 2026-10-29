@@ -51,6 +51,19 @@ def test_inspections_are_kept_only_when_asked_for(monkeypatch: pytest.MonkeyPatc
     ).keep_inspections
 
 
+def test_commit_and_compaction_choices_are_read_from_the_environment(monkeypatch):
+    settings = from_env(
+        monkeypatch,
+        HALYARD_CHANNEL="stub_deny",
+        HALYARD_COMMIT_MODEL="gpt-6-luna",
+        HALYARD_COMMIT_EFFORT="low",
+        HALYARD_COMPACTION_MODEL="gpt-6-luna",
+        HALYARD_COMPACTION_EFFORT="medium",
+    )
+    assert (settings.commit_model, settings.commit_effort) == ("gpt-6-luna", "low")
+    assert (settings.compaction_model, settings.compaction_effort) == ("gpt-6-luna", "medium")
+
+
 def test_the_claude_binary_can_be_pinned() -> None:
     settings = build(
         HALYARD_CHANNEL="stub_deny",
@@ -228,3 +241,36 @@ def test_a_valid_custom_ordering_is_accepted() -> None:
     )
 
     assert settings.approval_timeout_seconds == 60
+
+
+def test_each_forge_has_a_token_of_its_own(monkeypatch: pytest.MonkeyPatch) -> None:
+    """So one machine can label a GitHub project and a GitLab one."""
+    settings = from_env(
+        monkeypatch,
+        HALYARD_CHANNEL="stub_deny",
+        HALYARD_GITHUB_TOKEN="github_pat_x",
+        HALYARD_GITLAB_TOKEN="glpat-x",
+    )
+
+    assert settings.forge_tokens == {"github": "github_pat_x", "gitlab": "glpat-x"}
+
+
+def test_the_old_forge_token_is_still_read_as_gitlabs(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`HALYARD_FORGE_TOKEN` was named while GitLab was the only forge: it is
+    GitLab's when GitLab's own is unset, and never GitHub's."""
+    old = from_env(monkeypatch, HALYARD_CHANNEL="stub_deny", HALYARD_FORGE_TOKEN="glpat-old")
+
+    assert old.forge_tokens == {"gitlab": "glpat-old"}
+
+    both = from_env(
+        monkeypatch,
+        HALYARD_CHANNEL="stub_deny",
+        HALYARD_FORGE_TOKEN="glpat-old",
+        HALYARD_GITLAB_TOKEN="glpat-new",
+    )
+
+    assert both.forge_tokens == {"gitlab": "glpat-new"}
+
+
+def test_no_forge_token_is_no_forge_token() -> None:
+    assert build(HALYARD_CHANNEL="stub_deny").forge_tokens == {}

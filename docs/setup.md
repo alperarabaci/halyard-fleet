@@ -32,6 +32,24 @@ Code version as the process holding the open desktop task. `halyard doctor`
 prints the executable it selected. Set `HALYARD_CLAUDE_BINARY` to a command name
 or absolute path only when you need to override that choice.
 
+### The runtimes, at a glance
+
+Each runtime brings its approvals to your phone and its replies with them. They differ
+in where the gate lives and in what a message from the phone needs. `halyard wire`
+writes the gate, and `halyard doctor` says what is still missing.
+
+| Runtime | The gate | A message from the phone |
+|---|---|---|
+| Claude Code | hooks in `.claude/settings.local.json` | resumes the session |
+| Codex | hooks in `.codex/hooks.json`, trusted once in Codex | resumes the thread |
+| opencode | a plugin in `.opencode/plugins/`, and `permission` in `opencode.json`; opencode started with `--port 4096` | goes into the opencode that is open |
+| ZCode | hooks in `.zcode/config.json`, trusted once in ZCode | needs `ZCODE_TOKEN` and `ZCODE_MODEL` in `halyard.yaml`; without them the agent takes its messages at the desk |
+
+Codex and ZCode skip hooks nobody has trusted, without a word; `halyard wire` says how
+to trust them, and never does it itself. opencode's question is on its
+own screen as well as your phone: either can answer, and the first answer wins. A ZCode
+turn stops at a captcha — see [Known limitations](limitations.md).
+
 ### Wiring the hooks
 
 One command, and it takes no argument in the ordinary case:
@@ -99,12 +117,34 @@ guarantees.
   "hooks": {
     "PreToolUse": [
       {
-        "matcher": "Bash",
+        "matcher": "Bash|AskUserQuestion|Write|Edit|MultiEdit|NotebookEdit|WebFetch|WebSearch|mcp__.*",
         "hooks": [
           {
             "type": "command",
             "command": "/absolute/path/to/halyard-fleet/bridge/hook.sh",
             "timeout": 600
+          }
+        ]
+      }
+    ],
+    "PreCompact": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/absolute/path/to/halyard-fleet/bridge/compaction.py",
+            "timeout": 180
+          }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/absolute/path/to/halyard-fleet/bridge/compaction.py",
+            "timeout": 15
           }
         ]
       }
@@ -146,7 +186,7 @@ gitignored, so a machine-specific path does not break a teammate's checkout.
 >
 > ```json
 > {
->   "hooks": { "PreToolUse": [ ... ], "Stop": [ ... ] },
+>   "hooks": { "PreToolUse": [ ... ], "PreCompact": [ ... ], "SessionStart": [ ... ], "Stop": [ ... ] },
 >   "permissions": { "allow": [ "Bash(uv run *)", "..." ] }
 > }
 > ```
@@ -161,6 +201,17 @@ change without another configuration edit.
 `hook_bridge.py`: the wrapper is what denies when the Python process cannot start at all — a
 missing interpreter, a bad path, an import error. Those exit non-zero with nothing on stdout, which
 Claude Code reads as *no opinion*, and it runs the command.
+
+The matcher is a list rather than everything: Bash, the file tools, the question tool, MCP calls
+and web fetches. `Read` and the client's own tool loading fire too, and gating them would put a
+card in front of every file read. Each of these needs Halyard running, as Bash does; `writes:` and
+`tools:` say which should not have to ask — see [Configuring a project](configuration.md).
+
+**`PreCompact` and `SessionStart` → `compaction.py`** keep a session's place across a compaction:
+the first has Halyard write a record about the session, the second hands it back once the summary
+is done. For an agent with neither `before_compaction:` nor `after_compaction:`, all they do is
+say in its group that the session is compacting — see
+[Configuring a project](configuration.md#when-a-session-is-compacted).
 
 **`Stop` → `relay.py`** sends the agent's replies to your phone. It is optional; approvals work
 without it.
@@ -291,7 +342,8 @@ at about four, and cannot say which codebase an agent belongs to:
 projects:
   alpha-engine:
     path: ~/code/alpha-engine
-    label_work: true
+    labels:
+      who_worked: true
     agents:
       nav:
         runtime: claude-code
@@ -325,12 +377,14 @@ An agent's `role:` is `navigator`, `driver` or `reviewer`, and it is optional. N
 of them is special to routing: a card goes to the agent it came from and says
 which role that is.
 
-**`label_work: true`** puts each agent's label on the task its branch is for —
+**`labels: who_worked: true`** (written `label_work: true` before) puts each agent's label on the task its branch is for —
 `navigator:claude`, `reviewer:codex` — the first time that agent works on it.
 The task comes from the branch name (`347-power-gen-fixes` is task 347), and a
-label already on the task is never written again. It needs a forge token that
-may label issues, and it is off unless a project asks, because it writes to an
-issue tracker on its own. An agent without a role is labelled with its runtime
+label already on the task is never written again. It needs the token for the
+project's forge — `HALYARD_GITHUB_TOKEN` or `HALYARD_GITLAB_TOKEN`, see
+[configuration](configuration.md) — and it is off unless a project asks, because it
+writes to an issue tracker on its own. On GitHub a label the repository does not
+have yet is created first. An agent without a role is labelled with its runtime
 alone, `claude`; in a project that does give roles, a session without one is
 not labelled, since it could be any of them.
 
@@ -352,6 +406,19 @@ given. A command still goes through only when every part of it is understood:
 is a card. It needs `HALYARD_ALLOW_RISK_AT_OR_BELOW: low`. An entry that could run
 anything — `bash *`, `python -c *`, `uv run *`, `make *` — is ignored rather than
 trusted, and `halyard doctor` says which.
+
+Written out whole, with no `*` anywhere, such an entry is one command, and it is
+kept: `bash scripts/check-work-item-reference.sh --base main` lets exactly that
+through. Only exactly that: another argument, a setting in front of it, or a file
+fed to it is a card.
+
+A shell handed a script it names may take a `*` after the script, in the script's
+arguments: `bash scripts/check-work-item-reference.sh --base *` runs that one file
+with `--base main`, `--base origin/main`, or any other base inside the project.
+There each `*` is one word, never an option, and a last one takes nothing more —
+a script's arguments are its own, and nothing here can tell which of them write.
+Not for the script itself (`bash scripts/*.sh`), after an option (`bash -c *`), or
+with a setting in front: `BASH_ENV=` alone makes a shell run another file.
 
 The same list can be kept without editing the file, in Halyard's database:
 
@@ -375,7 +442,8 @@ at the desk and changes under it, and a label naming one would go on naming it
 afterwards. Agents are told apart by runtime and role, so two agents in one
 project that share both must ask for the same label. One colon by default, because GitLab's paid tiers read `::`
 as a scoped label, where `driver::codex` would take `driver::claude` off a task
-both drivers worked on.
+both drivers worked on. GitHub has no scoped labels: there a colon is only part of
+the name.
 
 Copy `halyard.simple.yaml.example` for one project with one agent, or
 `halyard.yaml.example` for all of it, and edit the copy. It is gitignored — along with every

@@ -16,6 +16,11 @@ is one join away:
 An inspection a workflow step ran carries that step — its run, name, phase and
 round — so it joins `workflow_steps` the same way.
 
+**What it read is kept beside what it said.** `status` says whether every read
+it asked for ran — complete, incomplete, unmeasured — and `trace` holds each
+read, as JSON, with what became of it: from the runtime's stream and the
+gate's record, never from the model. See `halyard.inspections.trace`.
+
 **The text is kept, on purpose.** Halyard keeps no conversation anywhere else.
 Here the reply that was inspected is part of the input, and an inspection
 cannot be compared or run again without it. `experimental` and `repeat_of` are
@@ -30,6 +35,7 @@ import logging
 import sqlite3
 from pathlib import Path
 
+from halyard.inspections import trace as tracing
 from halyard.inspections.spec import Kept
 
 logger = logging.getLogger(__name__)
@@ -60,6 +66,9 @@ CREATE TABLE IF NOT EXISTS inspection_runs (
     outcome      TEXT NOT NULL,
     why          TEXT NOT NULL,
     finding      TEXT,
+    not_run      TEXT,
+    status       TEXT,
+    trace        TEXT,
     took         REAL NOT NULL,
     experimental INTEGER NOT NULL DEFAULT 0,
     repeat_of    TEXT
@@ -71,7 +80,9 @@ CREATE INDEX IF NOT EXISTS inspection_runs_work_idx ON inspection_runs (work);
 
 #: Columns added after the table was first made, and what they hold. A table
 #: made before one of them gets it added, empty for the rows it already has.
-_ADDED = {"effort": "TEXT"}
+#: `not_run` is what Halyard said under the answer about reads that never ran;
+#: `status` and `trace` what the turn read, and whether all of it ran.
+_ADDED = {"effort": "TEXT", "not_run": "TEXT", "status": "TEXT", "trace": "TEXT"}
 
 #: Columns renamed since, by the name they had: a transition was a handoff
 #: until 2026-09-24.
@@ -157,6 +168,9 @@ def keep(
         "outcome": "answered" if kept.answer is not None else "unmeasured",
         "why": kept.why,
         "finding": kept.finding,
+        "not_run": kept.not_run or None,
+        "status": kept.status or None,
+        "trace": tracing.to_json(kept.trace) if kept.trace is not None else None,
         "took": kept.took,
         "experimental": int(experimental),
         "repeat_of": repeat_of,

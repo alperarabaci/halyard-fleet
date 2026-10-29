@@ -5,6 +5,7 @@ across a restart.
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -16,13 +17,16 @@ from halyard.workflows import (
     Run,
     after,
     answered,
+    arrived,
     clear,
     current,
     decided,
     lines_for,
+    missed,
     read,
-    record,
     save,
+    still_sending,
+    taken_as,
 )
 
 AT = datetime(2026, 9, 16, 18, 21, tzinfo=UTC)
@@ -128,6 +132,12 @@ def test_a_word_a_project_left_out_keeps_its_own_name() -> None:
     assert read("RESULT: back", GO_HOLD) is Decision.BACK
 
 
+def test_done_is_read_and_can_be_renamed_like_the_others() -> None:
+    assert read("DECISION: done") is Decision.DONE
+    assert read("KARAR: closed", Decisions(done="closed")) is Decision.DONE
+    assert read("KARAR: done", Decisions(done="closed")) is None
+
+
 # --- where the run goes next ---------------------------------------------------
 
 
@@ -135,11 +145,21 @@ def test_forward_takes_the_next_step() -> None:
     assert next_after(Decision.FORWARD) == Next(step=2, decided=Decision.FORWARD)
 
 
-def test_a_reply_that_decided_nothing_carries_on() -> None:
+def test_a_reply_that_decided_nothing_stops_rather_than_carrying_on() -> None:
+    """Carried on, it handed the next agent a reply never meant for it — a step
+    sent to the wrong agent, a turn that ended on a question. Stopped, the
+    agent's own decision afterwards still moves it."""
     moving = next_after(None)
 
-    assert moving.step == 2
-    assert moving.stop == ""
+    assert moving.step is None
+    assert moving.stop == "review ended with no decision"
+    assert moving.liftable
+
+
+def test_a_review_that_decided_nothing_still_reaches_the_step_that_acts_on_it() -> None:
+    moving = reviewed_after(None, 0)
+
+    assert (moving.step, moving.stop) == (1, "")
 
 
 def test_back_is_one_step() -> None:
@@ -160,13 +180,39 @@ def test_wait_stops_the_run() -> None:
 
     assert moving.step is None
     assert moving.stop
+    assert moving.liftable, "the seat that asked to wait can take it on"
 
 
-def test_the_last_step_ends_the_flow() -> None:
-    moving = next_after(Decision.FORWARD, step=len(FLOW) - 1)
+def test_done_at_the_last_step_ends_the_flow() -> None:
+    moving = next_after(Decision.DONE, step=len(FLOW) - 1)
 
     assert moving.done is True
     assert moving.step is None
+
+
+def test_forward_at_the_last_step_stops_with_the_way_out() -> None:
+    """Ending the workflow is a claim that the work is finished, and a habitual
+    forward does not make it."""
+    moving = next_after(Decision.FORWARD, step=len(FLOW) - 1)
+
+    assert (moving.done, moving.step) == (False, None)
+    assert moving.stop == "discovered ended on forward, and only done ends the workflow"
+    assert (moving.leaving, moving.liftable) == (len(FLOW), True)
+
+
+def test_a_last_step_that_decided_nothing_stops_rather_than_ending() -> None:
+    moving = next_after(None, step=len(FLOW) - 1)
+
+    assert moving.stop == "discovered ended with no decision, and only done ends the workflow"
+    assert moving.leaving == len(FLOW)
+
+
+def test_done_anywhere_else_is_a_sentence_and_decides_nothing() -> None:
+    """A reply that ends in "Done." has usually finished a sentence, not the work."""
+    assert next_after(Decision.DONE) == next_after(None)
+    assert taken_as(Decision.DONE, step=1, flow=FLOW) is None
+    assert taken_as(Decision.DONE, step=len(FLOW) - 1, flow=FLOW) is Decision.DONE
+    assert taken_as(Decision.FORWARD, step=1, flow=FLOW) is Decision.FORWARD
 
 
 def test_a_step_past_its_rounds_is_offered_rather_than_taken(monkeypatch) -> None:
@@ -261,7 +307,8 @@ def test_only_the_step_that_names_it_acts_on_a_carried_decision() -> None:
     """A decision left over on a run moves nothing at a step that decides for itself."""
     moving = reviewed_after(None, 2, carried="back", discover=1)
 
-    assert (moving.step, moving.back) == (3, False)
+    assert (moving.step, moving.back) == (None, False)
+    assert moving.stop == "discover ended with no decision"
 
 
 # --- phases: the steps that go round again going forward ---------------------
@@ -429,10 +476,96 @@ def test_back_in_the_first_phase_is_the_step_before_as_ever() -> None:
     assert (moving.step, moving.phase) == (0, None)
 
 
+#: The same flow, with close taking the driver's work rather than the
+#: navigator's `verified` just before it.
+WORKED_ON_STEPS = {
+    **PHASED_STEPS,
+    "develop": Step(name="develop", transition="driver_develop", seat="xdrv", rounds=2),
+    "close": Step(name="close", transition="close", seat="nav", rounds=2, works_on="develop"),
+}
+
+
+def test_back_from_a_step_that_works_on_another_goes_to_that_one() -> None:
+    """Not to `verified`, the navigator's own step: what close sends back is
+    the driver's to fix, in the phase the work was made in."""
+    moving = after(
+        Decision.BACK,
+        run=a_run(4, phase=2, entered=1),
+        flow=PHASED,
+        steps=WORKED_ON_STEPS,
+        taken={"develop@2": 1, "verified@2": 1, "close": 1},
+        stretch=STRETCH,
+    )
+
+    assert (moving.step, moving.back, moving.phase, moving.stop) == (2, True, None, "")
+
+
+def test_back_to_the_step_worked_on_still_counts_its_rounds() -> None:
+    moving = after(
+        Decision.BACK,
+        run=a_run(4, phase=1, entered=1),
+        flow=PHASED,
+        steps=WORKED_ON_STEPS,
+        taken={"develop@1": 2, "close": 1},
+        stretch=STRETCH,
+    )
+
+    assert moving.step == 2
+    assert moving.stop == "develop would go for round 3 of 2"
+
+
+def test_a_step_that_works_on_another_is_told_its_back_goes_there() -> None:
+    lines = lines_for(
+        a_run(4, phase=1),
+        flow=PHASED,
+        steps=WORKED_ON_STEPS,
+        taken={"develop@1": 1, "verified@1": 1, "close": 1},
+        seats={"discover": "xdrv", "develop": "xdrv", "verified": "nav", "close": "nav"},
+        stretch=STRETCH,
+    )
+
+    assert "back (→ develop, xdrv, round 2 of 2)" in lines[1]
+
+
 def test_entering_the_phases_marks_where_the_first_one_started() -> None:
     moving = phased_after(Decision.FORWARD, 0)
 
     assert (moving.step, moving.entered) == (1, 1)
+
+
+#: The same phases with nothing after them: the last step of the phases is the
+#: last step of the flow.
+TO_THE_END = PHASED[:4]
+
+
+def to_the_end_after(decision: Decision | None) -> Next:
+    return after(
+        decision,
+        run=a_run(3, entered=1),
+        flow=TO_THE_END,
+        steps=PHASED_STEPS,
+        taken={},
+        stretch=STRETCH,
+    )
+
+
+def test_where_the_phases_end_the_flow_done_ends_it() -> None:
+    assert to_the_end_after(Decision.DONE).done is True
+
+
+def test_where_the_phases_end_the_flow_forward_stops_with_both_ways_on() -> None:
+    """The next phase is made ready and the end is offered; only done ends it."""
+    moving = to_the_end_after(Decision.FORWARD)
+
+    assert moving.stop == "verified ended on forward, and only done ends the workflow"
+    assert (moving.step, moving.phase, moving.leaving, moving.liftable) == (1, 2, 4, True)
+
+
+def test_where_the_phases_end_the_flow_no_decision_is_for_its_seat_to_lift_too() -> None:
+    moving = to_the_end_after(None)
+
+    assert moving.stop == "phase 1 ended with no decision"
+    assert (moving.leaving, moving.liftable) == (4, True)
 
 
 def phased_told(step: int, *, phase: int = 1, **taken) -> list[str]:
@@ -472,6 +605,26 @@ def test_the_end_of_a_phase_is_told_where_next_and_forward_go() -> None:
     )
 
 
+def test_where_the_phases_end_the_flow_the_last_step_is_told_done() -> None:
+    lines = lines_for(
+        a_run(3),
+        flow=TO_THE_END,
+        steps=PHASED_STEPS,
+        taken={},
+        seats={"to_nav": "nav", "discover": "xdrv", "develop": "xdrv", "verified": "nav"},
+        stretch=STRETCH,
+    )
+
+    assert lines[2] == (
+        "Decide on your last line: done (→ the workflow ends) · back (→ develop, xdrv) · "
+        "wait (→ the operator)"
+    )
+    assert lines[3].endswith(
+        "; done ends the workflow. wait, or a reply with no decision, stops for the "
+        "operator, who starts the next phase or ends the workflow."
+    )
+
+
 def test_a_step_outside_the_phases_is_told_no_phase() -> None:
     assert not any(line.startswith("Phase:") for line in phased_told(0))
 
@@ -499,16 +652,29 @@ def told(
 
 
 def test_a_step_says_where_each_word_on_its_last_line_takes_the_work() -> None:
+    assert told(2, discover=1) == [
+        "Workflow: level3 · step 3 of 4 · discover",
+        "Decide on your last line: forward (→ discovered, nav) · "
+        "back (→ reviewed, nav) · wait (→ the operator)",
+    ]
+
+
+def test_the_last_step_is_told_done_in_place_of_forward() -> None:
     assert told(3, discover=1, discovered=1) == [
         "Workflow: level3 · step 4 of 4 · discovered",
-        "Decide on your last line: forward (→ the workflow ends) · "
+        "Decide on your last line: done (→ the workflow ends) · "
         "back (→ discover, xdrv, round 2 of 2) · wait (→ the operator)",
     ]
 
 
 def test_a_step_is_told_the_project_s_own_words() -> None:
-    assert told(3, words=GO_HOLD, discover=1, discovered=1)[1] == (
-        "Decide on your last line: go (→ the workflow ends) · "
+    assert told(1, words=GO_HOLD, review=1, reviewed=1)[1] == (
+        "Decide on your last line: go (→ discover, xdrv) · "
+        "back (→ review, xreview, round 2 of 2) · hold (→ the operator)"
+    )
+    closing = Decisions(wait="hold", done="closed")
+    assert told(3, words=closing, discover=1, discovered=1)[1] == (
+        "Decide on your last line: closed (→ the workflow ends) · "
         "back (→ discover, xdrv, round 2 of 2) · hold (→ the operator)"
     )
 
@@ -640,25 +806,74 @@ def test_where_a_phase_end_would_leave_to_is_kept_only_until_the_run_moves(tmp_p
     assert stopped.held("it was asked to wait").leaving == -1
 
 
-def test_a_round_is_counted_into_the_run_as_it_is_now(tmp_path: Path) -> None:
-    """The seat can take the message after the run was saved again, so the
-    round goes into what is on disk, not into the run it was sent from."""
+def test_the_step_that_asked_to_wait_is_kept_only_until_the_run_moves(tmp_path: Path) -> None:
+    """So a seat deciding long after cannot move a run that has gone on since."""
     kept = tmp_path / "workflow-runs.json"
-    save(kept, "alpha-engine#386", a_run(1).waiting_on("xdrv"))
+    stopped = a_run(2).held("it was asked to wait", waited=1)
 
-    assert record(kept, "alpha-engine#386", "discover@1", to="xdrv", now=AT) == 1
-    assert record(kept, "alpha-engine#386", "discover@1", to="xdrv", now=AT) == 2
+    save(kept, "alpha-engine#400", stopped)
+
+    assert current(kept, "alpha-engine#400").waited == 1
+    assert stopped.at(3).waited == -1
+    assert stopped.waiting_on("xdrv").waited == -1
+    assert stopped.held("develop would go for round 2 of 1").waited == -1
+
+
+def test_as_it_stood_the_run_is_on_that_seat_s_step_awaiting_it() -> None:
+    stopped = a_run(2, entered=0).held("it was asked to wait", waited=1)
+
+    before = stopped.as_it_stood(None)
+
+    assert (before.step, before.phase, before.entered) == (1, 1, 0)
+    assert (before.waiting, before.waiting_for, before.stopped, before.waited) == (
+        True,
+        "xreview",
+        "",
+        -1,
+    )
+
+
+def test_a_wait_where_a_phase_ended_is_taken_back_to_that_phase() -> None:
+    """Parked at the next phase, ready for the button; the seat decides in the
+    phase it waited in."""
+    stopped = a_run(1, phase=3, entered=1).held("it was asked to wait", leaving=5, waited=4)
+
+    before = stopped.as_it_stood((1, 4))
+
+    assert (before.step, before.phase, before.entered, before.leaving) == (4, 2, 1, -1)
+
+
+def test_a_last_step_that_ended_without_done_stays_in_its_phase() -> None:
+    """Its way out is the end, and nothing was parked ahead of it."""
+    stopped = a_run(4, phase=2, entered=1).held(
+        "close ended on forward, and only done ends the workflow", leaving=5, waited=4
+    )
+
+    before = stopped.as_it_stood((1, 3))
+
+    assert (before.step, before.phase, before.entered, before.leaving) == (4, 2, 1, -1)
+
+
+def test_a_round_is_counted_into_the_run_as_it_is_now(tmp_path: Path) -> None:
+    """The run can be saved again while its step is on its way, so the round
+    goes into what is on disk, not into the run the step was sent from."""
+    kept = tmp_path / "workflow-runs.json"
+    earlier = Round(at=AT, to="xdrv", decision="back", decided_by="discover")
+    sent = a_run(1, rounds={"discover@1": (earlier,)}).sending("xdrv")
+    save(kept, "alpha-engine#386", replace(sent, carried="back"))
+
+    assert arrived(kept, "alpha-engine#386", sent, "discover@1", now=AT) == 2
 
     found = current(kept, "alpha-engine#386")
-    assert found is not None and found.waiting_for == "xdrv"
-    assert found.taken() == {"discover@1": 2}
+    assert found is not None and found.carried == "back"
+    assert found.rounds["discover@1"] == (earlier, Round(at=AT, to="xdrv"))
 
 
 def test_nothing_is_counted_for_a_run_that_is_gone(tmp_path: Path) -> None:
     """Somebody stopped it while its step was on its way."""
     kept = tmp_path / "workflow-runs.json"
 
-    assert record(kept, "alpha-engine#386", "discover@1", to="xdrv") == 0
+    assert arrived(kept, "alpha-engine#386", a_run(1).sending("xdrv"), "discover@1") == 0
     assert current(kept, "alpha-engine#386") is None
 
 
@@ -705,3 +920,199 @@ def test_the_work_with_the_oldest_run_is_forgotten_first(tmp_path: Path, monkeyp
 
     assert current(kept, "alpha-engine#1") is None
     assert current(kept, "alpha-engine#3") is not None
+
+
+def test_a_run_s_name_survives_being_written_and_read(tmp_path: Path) -> None:
+    from halyard.workflows import new_ident
+
+    kept = tmp_path / "workflow-runs.json"
+    ident = new_ident()
+
+    save(kept, "alpha-engine#453", a_run(2, ident=ident))
+
+    assert len(ident) == 8 and int(ident, 16) >= 0
+    assert current(kept, "alpha-engine#453").ident == ident
+
+
+def test_a_run_is_kept_under_its_name_and_an_older_one_as_before() -> None:
+    from halyard.workflows.journal import run_id
+
+    assert run_id(a_run(1, ident="3f2a9c1e"), "alpha-engine#453") == "3f2a9c1e"
+    assert run_id(a_run(1), "alpha-engine#453") == f"alpha-engine#453 {AT.isoformat()}"
+
+
+def test_when_a_run_stopped_is_kept_and_forgotten_once_it_moves(tmp_path: Path) -> None:
+    kept = tmp_path / "workflow-runs.json"
+    stopped = a_run(2, stopped_at=AT + timedelta(minutes=5)).held("it was asked to wait")
+
+    save(kept, "alpha-engine#454", stopped)
+
+    assert current(kept, "alpha-engine#454").stopped_at == AT + timedelta(minutes=5)
+    assert stopped.at(3).stopped_at is None
+    assert stopped.waiting_on("xnav").stopped_at is None
+
+
+# --- a step on its way, and one that got there ---------------------------------
+
+
+def test_a_step_on_its_way_is_not_waited_on_and_survives_a_restart(tmp_path: Path) -> None:
+    """Whose reply it carries, and whether it is a return, stay with it: sending
+    it again needs them if it never gets there."""
+    kept = tmp_path / "workflow-runs.json"
+
+    save(kept, "alpha-engine#470", a_run(1, back=True).sending("xdrv"))
+
+    found = current(kept, "alpha-engine#470")
+    assert found is not None
+    assert (found.sending_to, found.waiting, found.stopped) == ("xdrv", False, "")
+    assert (found.waiting_for, found.back) == ("xreview", True)
+
+
+def test_a_run_written_before_steps_were_on_their_way_is_waiting_still(tmp_path: Path) -> None:
+    """Read as interrupted, every run waiting at the upgrade would stop at once."""
+    kept = tmp_path / "workflow-runs.json"
+    kept.write_text(
+        '{"alpha-engine#470": {"workflow": "level3", "step": 1, '
+        '"since": "2026-09-16T18:21:00+00:00", "chat": "-100777", '
+        '"waiting_for": "xdrv", "waiting": true}}'
+    )
+
+    found = current(kept, "alpha-engine#470")
+
+    assert found is not None
+    assert (found.waiting, found.waiting_for, found.sending_to) == (True, "xdrv", "")
+
+
+def test_a_step_that_got_there_is_waited_on_and_counted_once(tmp_path: Path) -> None:
+    """In one write, before anything its turn says: the answer then marks the
+    round it answers."""
+    kept = tmp_path / "workflow-runs.json"
+    sent = a_run(1, back=True).sending("xdrv")
+    save(kept, "alpha-engine#470", sent)
+
+    assert arrived(kept, "alpha-engine#470", sent, "discover", now=AT) == 1
+    assert arrived(kept, "alpha-engine#470", sent, "discover", now=AT) == 0, "it got there once"
+
+    found = current(kept, "alpha-engine#470")
+    assert found is not None
+    assert (found.waiting, found.waiting_for, found.sending_to, found.back) == (
+        True,
+        "xdrv",
+        "",
+        False,
+    )
+    assert found.rounds == {"discover": (Round(at=AT, to="xdrv"),)}
+
+
+def test_getting_there_moves_nothing_once_the_run_is_not_that_step_on_its_way(
+    tmp_path: Path,
+) -> None:
+    """Stopped, moved or started afresh while the message waited behind a turn,
+    the run is not the one the step went from."""
+    kept = tmp_path / "workflow-runs.json"
+    sent = a_run(1, ident="3f2a9c1e").sending("xdrv")
+    afresh = a_run(1, ident="aa11bb22").sending("xdrv")
+
+    for since in (sent.held("stopped by hand"), sent.at(2).sending("nav"), afresh):
+        save(kept, "alpha-engine#470", since)
+        assert arrived(kept, "alpha-engine#470", sent, "discover") == 0
+        assert current(kept, "alpha-engine#470") == since
+
+    clear(kept, "alpha-engine#470")
+    assert arrived(kept, "alpha-engine#470", sent, "discover") == 0
+    assert current(kept, "alpha-engine#470") is None
+
+
+def test_a_step_that_reached_nobody_stops_the_run_as_it_was_sent(tmp_path: Path) -> None:
+    """Refused on the way, or refused — or failed — once its turn had started
+    and the run was waiting on it: either way it stops, carrying what it
+    carried, and the round its turn counted is given back."""
+    kept = tmp_path / "workflow-runs.json"
+    earlier = Round(at=AT, to="xdrv", decision="back", decided_by="discover")
+    sent = a_run(1, back=True, rounds={"discover": (earlier,)}).sending("xdrv")
+
+    save(kept, "alpha-engine#470", sent)
+    on_the_way = missed(kept, "alpha-engine#470", sent, "it stopped", key="discover")
+    arrived(kept, "alpha-engine#470", sent, "discover")
+    once_started = missed(kept, "alpha-engine#470", sent, "it stopped", key="discover")
+
+    for held in (on_the_way, once_started):
+        assert held is not None
+        assert (held.stopped, held.waiting, held.sending_to) == ("it stopped", False, "")
+        assert (held.step, held.waiting_for, held.back) == (1, "xreview", True)
+        assert held.rounds == {"discover": (earlier,)}, "only the round its turn counted goes"
+
+
+def test_a_stop_that_asks_for_a_step_that_got_there_leaves_one_on_its_way(
+    tmp_path: Path,
+) -> None:
+    """A turn stopped, or failed, is a turn that started: a step still on its
+    way had none."""
+    kept = tmp_path / "workflow-runs.json"
+    sent = a_run(1).sending("xdrv")
+    save(kept, "alpha-engine#470", sent)
+
+    assert missed(kept, "alpha-engine#470", sent, "it stopped", key="discover", there=True) is None
+    arrived(kept, "alpha-engine#470", sent, "discover")
+    held = missed(kept, "alpha-engine#470", sent, "it stopped", key="discover", there=True)
+
+    assert held is not None and held.stopped == "it stopped"
+    assert held.taken() == {}
+
+
+def test_a_step_s_only_round_given_back_leaves_it_none(tmp_path: Path) -> None:
+    kept = tmp_path / "workflow-runs.json"
+    sent = a_run(1).sending("xdrv")
+    save(kept, "alpha-engine#470", sent)
+    arrived(kept, "alpha-engine#470", sent, "discover")
+
+    held = missed(kept, "alpha-engine#470", sent, "it stopped", key="discover")
+
+    assert held is not None and held.taken() == {}
+
+
+def test_a_run_still_sends_its_step_on_its_way_and_once_there_until_answered(
+    tmp_path: Path,
+) -> None:
+    kept = tmp_path / "workflow-runs.json"
+    sent = a_run(1, ident="3f2a9c1e").sending("xdrv")
+    save(kept, "alpha-engine#470", sent)
+
+    assert still_sending(kept, "alpha-engine#470", sent) is True
+    arrived(kept, "alpha-engine#470", sent, "discover")
+    assert still_sending(kept, "alpha-engine#470", sent) is True
+    waited = current(kept, "alpha-engine#470")
+    assert waited is not None
+
+    for since in (
+        waited.at(2).sending("nav"),
+        waited.held("it was asked to wait", waited=1),
+        a_run(1, ident="aa11bb22").sending("xdrv"),
+    ):
+        save(kept, "alpha-engine#470", since)
+        assert still_sending(kept, "alpha-engine#470", sent) is False
+    clear(kept, "alpha-engine#470")
+    assert still_sending(kept, "alpha-engine#470", sent) is False
+
+
+def test_a_step_whose_answer_came_is_not_stopped_by_its_turn_failing_later(
+    tmp_path: Path,
+) -> None:
+    """Moved on — to another agent, or to a later step of the same one — or
+    stopped by the answer, or started afresh: it is not that step any more."""
+    kept = tmp_path / "workflow-runs.json"
+    sent = a_run(1, ident="3f2a9c1e").sending("xdrv")
+    save(kept, "alpha-engine#470", sent)
+    arrived(kept, "alpha-engine#470", sent, "discover")
+    waited = current(kept, "alpha-engine#470")
+    assert waited is not None
+
+    for since in (
+        waited.at(2).sending("nav"),
+        waited.at(3).sending("xdrv"),
+        waited.at(3).waiting_on("xdrv"),
+        waited.held("it was asked to wait", waited=1),
+        a_run(1, ident="aa11bb22").sending("xdrv"),
+    ):
+        save(kept, "alpha-engine#470", since)
+        assert missed(kept, "alpha-engine#470", sent, "it stopped") is None

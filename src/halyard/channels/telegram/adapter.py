@@ -17,13 +17,15 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import html
+import inspect
 import io
 import logging
 import re
+import threading
 import time
 import uuid
 from collections.abc import Awaitable, Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from functools import partial
 from pathlib import Path
@@ -37,16 +39,20 @@ from halyard.agents.base import AgentRunner
 from halyard.applications import catalogue, desktop
 from halyard.channels.telegram import cards, commit_card
 from halyard.channels.telegram.api import TelegramApi
+from halyard.channels.telegram.desk import STANDING, Card, CardDesk
+from halyard.channels.telegram.shelf import Kept, Shelf
+from halyard.channels.telegram.step_status import StepStatus
 from halyard.commands import catalogue as commands_offered
 from halyard.commands import inputs as command_inputs
 from halyard.commands import labels as command_labels
 from halyard.commands import running as commands_running
-from halyard.core import last_said, transcripts
+from halyard.core import last_agents, last_said, transcripts
 from halyard.core import prompts as configured_prompts
 from halyard.core.approvals import (
     AlreadyResolvedError,
     ApprovalExpiredError,
     ApprovalRequest,
+    ApprovalResolution,
     ApprovalStore,
     Decision,
     InvalidNonceError,
@@ -61,13 +67,15 @@ from halyard.core.audit import (
     unauthorized_callback,
     user_message,
 )
-from halyard.core.config_file import ModelChoice, Project, Transition
+from halyard.core.calls import Calls
+from halyard.core.config_file import CommitOption, ModelChoice, Project, Transition
 from halyard.core.events import Role
 from halyard.core.gate import Gate
 from halyard.core.questions import (
     AlreadyAnsweredError,
     QuestionExpiredError,
     QuestionRequest,
+    QuestionResolution,
     QuestionStore,
     UnknownQuestionError,
 )
@@ -111,12 +119,13 @@ POLL_RETRY_MAX_SECONDS = 30.0
 #: description at most 256. Anything else is rejected for the whole list.
 COMMANDS: tuple[tuple[str, str], ...] = (
     ("chat", "Send a message into this agent's session"),
+    ("prompts", "Send one of your prompts, from a button"),
+    ("stop", "Stop what is running here: the agent's turn, or a project command"),
     ("forward", "Hand this chat's last reply to another agent"),
     ("inspect", "Run one of this project's inspections over this chat's last reply"),
     ("transition", "Take this chat's last reply to its next stage, as this project defines it"),
     ("workflow", "Take this project's transitions in the order it wrote them down"),
-    ("commit", "Commit this branch's work, with a message to approve"),
-    ("review_and_commit", "The same, with this project's checks and its review round"),
+    ("commit", "Commit this branch's work, plainly or after this project's own checks"),
     ("open", "Open an app on the machine — claude, codex, gemini"),
     ("command", "Run one of this project's own commands"),
     ("label", "Put a label on the task this branch is for"),
@@ -132,15 +141,41 @@ COMMANDS: tuple[tuple[str, str], ...] = (
 
 #: Answered when typed, and kept off the menu. `/to` is what a transition already
 #: does from the menu, and one fewer button on a phone is worth more than a
-#: second way to the same place; whoever types it still gets it.
-UNLISTED: tuple[str, ...] = ("to",)
+#: second way to the same place; whoever types it still gets it. So is
+#: `/review_and_commit`, now that `/commit` offers a project's checks itself.
+UNLISTED: tuple[str, ...] = ("to", "review_and_commit")
+
+#: Commands a card of buttons stands for, on the `simple` menu: each button is
+#: that command typed.
+ACTIONS: tuple[str, ...] = ("status", "pause", "resume", "stop")
+AGENT: tuple[str, ...] = ("options", "model", "effort")
+GROUPS: tuple[tuple[str, str], ...] = (
+    ("actions", "Status, pause, resume or stop, as buttons"),
+    ("agent", "This agent's options, model and effort, as buttons"),
+)
+
+#: The menu `TELEGRAM_MENU: simple` publishes: what a first setup needs, with
+#: the rest a card away. Nothing is gone from it — every command is answered
+#: when typed, and `/help` lists them all. `full`, the default, is `COMMANDS`
+#: and every prompt of yours.
+SIMPLE: tuple[str, ...] = (
+    "actions",
+    "stop",
+    "agent",
+    "prompts",
+    "commit",
+    "open",
+    "doctor",
+    "help",
+)
+MENUS: tuple[str, ...] = ("full", "simple")
 
 
 def reserved_names() -> list[str]:
     """Every name a configured prompt cannot take: the menu's, and the ones
     answered only when typed — a prompt called `to` would never run, because
     `/to` answers first."""
-    return [name for name, _ in COMMANDS] + list(UNLISTED)
+    return [name for name, _ in (*COMMANDS, *GROUPS)] + list(UNLISTED)
 
 
 #: How the prompt names the seat it is waiting for.
@@ -178,9 +213,10 @@ WAIT_FOR_TEXT_SECONDS = 300
 ASK_FOR_MESSAGE = "Send the commit message for {handle}?"
 _ASKED_MESSAGE = re.compile(r"^Send the commit message for (\S+)\?")
 
-#: The one-shot model that writes the subject line. Named here rather than in
-#: `halyard.commits`, which is deliberately ignorant of runtimes: this is a
-#: Claude Code alias, and the channel is what holds the runners.
+#: The one-shot model that writes the subject line when the commit and default
+#: settings name none. Named here rather than in `halyard.commits`, which is
+#: deliberately ignorant of runtimes: this is a Claude Code alias, and the
+#: channel is what holds the runners.
 MESSAGE_MODEL = "sonnet"
 
 #: How long to wait for it. A commit message is one short line; anything slower
@@ -217,7 +253,27 @@ TRANSITION_COMMAND_TIMEOUT_SECONDS = 600.0
 #: `_kept`.
 SAID_FILE = "last-said.json"
 RESULTS_FILE = "check-results.json"
-WORKFLOW_FILE = "workflow-runs.json"
+WORKFLOW_FILE = flowing.runs.FILE
+
+#: What a run's older card says once a newer card for the run has taken its
+#: place. Only a run's newest card keeps buttons: they carry the workflow's
+#: name alone, so on an old card they acted on whatever run was going when they
+#: were pressed. See `TelegramChannel._say_about_run`.
+RUN_SUPERSEDED = "↪️ <i>This run has a newer card.</i>"
+#: What every card of a run says once the run is over.
+RUN_DONE = "📋 <i>The run is done.</i>"
+RUN_STOPPED = "⏹ <i>The run was stopped.</i>"
+#: What a card says when a button on it is pressed after its run was over or
+#: replaced: nothing is done, and the card closes.
+RUN_EARLIER = "↪️ <i>From an earlier run — /workflow shows the one going now.</i>"
+RUN_OVER = "⏹ <i>That run is over.</i>"
+#: How long calling a step back waits for what was taking it to end: its command
+#: ends within a poll, its inspections when their turns are cancelled. Past this
+#: the run goes on, and a step after it finds the command still going.
+CALLED_BACK_WITHIN_SECONDS = 30.0
+#: What a run's card the last process left open says, closed as this one starts,
+#: when the run itself is kept: it goes on, and `/workflow` gives it a card again.
+RUN_KEPT = "⏹ <i>Closed — Halyard restarted. The run is kept: /workflow shows it.</i>"
 
 
 def _local(moment: datetime) -> datetime:
@@ -227,6 +283,13 @@ def _local(moment: datetime) -> datetime:
     reply that arrived at 23:20 was shown as 20:20, and read as three hours old.
     """
     return moment.astimezone()
+
+
+def _named(run: flowing.Run) -> str:
+    """A run the way a log line or a step's first line names it: its workflow,
+    and its own name when it has one — `level3 (run 3f2a9c1e)` — so one run
+    can be found by itself, whatever its messages say the work is."""
+    return f"{run.workflow} (run {run.ident})" if run.ident else run.workflow
 
 
 def _seat_name(seat: Seat | None) -> str:
@@ -310,12 +373,27 @@ class StepRounds:
 
     before: tuple[flowing.Round, ...]
     allowed: int
+    #: Counts the round when the step gets there — a turn carrying it starts in
+    #: the seat's session, or, for a runtime that never says so, the session
+    #: takes it — and from then the run waits on the seat. Which round, or 0
+    #: when it was counted already or the run no longer sends the step.
     count: Callable[[str], Awaitable[int]]
     #: The run, as `workflow_steps` knows it, the step's name, and its phase
     #: when it is one of a flow's phase steps.
     run: str = ""
     step: str = ""
     phase: int | None = None
+    #: Whether the run still sends the step — not once it was stopped or
+    #: steered elsewhere — and what the run is told, with why, when the step
+    #: reached nobody, or its turn ended without an answer — and, with who,
+    #: when somebody stopped its turn before it answered.
+    still: Callable[[], Awaitable[bool]] | None = None
+    missed: Callable[[str], Awaitable[None]] | None = None
+    failed: Callable[[str], Awaitable[None]] | None = None
+    stopped: Callable[[str], Awaitable[None]] | None = None
+    #: With who, when the step was waiting behind a turn somebody stopped,
+    #: and went with it before it reached its seat.
+    dropped: Callable[[str], Awaitable[None]] | None = None
 
 
 @dataclass(frozen=True)
@@ -361,12 +439,76 @@ def parse_destination(value: str | None) -> tuple[str, int | None] | None:
     return value, None
 
 
+@dataclass(frozen=True)
+class _Landing:
+    """What waits on one message reaching a seat: a workflow's step.
+
+    `started` is asked as a turn carrying it starts in the seat's session —
+    its round counts, and the run waits on the seat from then — and answers
+    whether it still goes. `accepted` is told when the session took it, for a
+    runtime that never says when a turn starts. `refused` is told, with why,
+    when it reached nobody, `failed` when its turn ended without an answer,
+    `stopped`, with who, when somebody stopped its turn before it answered,
+    and `dropped`, with who, when it was waiting behind a turn somebody
+    stopped and went with it. `wanted` says whether the run still sends it. A
+    message from anywhere else has nothing waiting on it.
+    """
+
+    started: Callable[[], Awaitable[bool]] | None = None
+    accepted: Callable[[], Awaitable[object]] | None = None
+    refused: Callable[[str], Awaitable[None]] | None = None
+    failed: Callable[[str], Awaitable[None]] | None = None
+    stopped: Callable[[str], Awaitable[None]] | None = None
+    dropped: Callable[[str], Awaitable[None]] | None = None
+    wanted: Callable[[], Awaitable[bool]] | None = None
+
+    async def missed(self, why: str) -> None:
+        """Say it reached nobody, to whatever waits on it. Best-effort: the
+        chat has been told already, and this must not stop that."""
+        await self._tell(self.refused, why, "reached nobody")
+
+    async def ended(self, why: str) -> None:
+        """Say its turn ended without an answer, to whatever waits on it."""
+        await self._tell(self.failed, why, "ended without an answer")
+
+    async def halted(self, who: str) -> None:
+        """Say somebody stopped its turn before it answered."""
+        await self._tell(self.stopped, who, "was stopped")
+
+    async def dropped_by(self, who: str) -> None:
+        """Say it went with a turn somebody stopped, before it reached anyone."""
+        await self._tell(self.dropped, who, "was dropped")
+
+    async def still(self) -> bool:
+        """Whether whatever waits on it still wants it sent."""
+        return self.wanted is None or await self.wanted()
+
+    @staticmethod
+    async def _tell(told: Callable[[str], Awaitable[None]] | None, why: str, what: str) -> None:
+        if told is None:
+            return
+        try:
+            await told(why)
+        except Exception:
+            logger.exception("Could not say that a message %s", what)
+
+
+@dataclass
+class _Underway:
+    """A workflow step on its way: the task taking its transition — its
+    commands, its inspections, its message — and which step, to which seat."""
+
+    task: asyncio.Task
+    step: str
+    seat: str
+
+
 class _SeatDelivery:
     """The channel's side of `transitions.Delivery`: the path `/to` takes.
 
     So a transition lands where a person would have sent it by hand, and both chats
-    say so, the way they do for `/to`. `accepted` runs once the seat's session
-    takes the message, which is when a transition's round counts.
+    say so, the way they do for `/to`. `landing` is what waits on it getting
+    there — see `_Landing` — and `handed` says whether it has gone that far.
     """
 
     def __init__(
@@ -375,22 +517,82 @@ class _SeatDelivery:
         actor: str,
         chat_id: str,
         thread_id: int | None,
-        accepted: Callable[[], Awaitable[None]] | None = None,
+        landing: _Landing | None = None,
+        status: StepStatus | None = None,
     ) -> None:
         self._channel = channel
         self._actor = actor
         self._chat_id = chat_id
         self._thread_id = thread_id
-        self._accepted = accepted
+        self._landing = landing
+        #: A workflow step's line on its run's card — see `StepStatus`.
+        self._status = status
+        self.handed = False
 
     async def to_seat(self, label: str, text: str) -> None:
+        if self._landing is not None and not await self._landing.still():
+            # The run stopped sending it while it was prepared: nothing goes,
+            # and whoever stopped it says so.
+            logger.info("A step for %s was not handed on: its run no longer sends it", label)
+            return
+        self.handed = True
+        if self._status is not None:
+            await self._status.on_its_way(label)
         await self._channel._forward_to_seat(
             f"{label} {text}",
             self._actor,
             self._chat_id,
             self._thread_id,
-            accepted=self._accepted,
+            landing=self._landing,
         )
+
+
+def _reads(count: int) -> str:
+    """`1 read`, `2 reads`."""
+    return f"{count} read{'s' if count != 1 else ''}"
+
+
+def _why_it_did_not_run(resolution: ApprovalResolution) -> str:
+    """What became of the card of a read that did not run, in a few words."""
+    if resolution.reason is ResolutionReason.ENDED:
+        return "still waiting for approval when the inspection ended"
+    if resolution.reason in (ResolutionReason.TIMEOUT, ResolutionReason.EXPIRED):
+        return "expired before anybody answered"
+    if resolution.reason is ResolutionReason.SHUTDOWN:
+        return "denied as Halyard stopped"
+    by = resolution.decided_by
+    return f"denied by {by}" if by else "denied"
+
+
+def _card_decided(request: ApprovalRequest, resolution: ApprovalResolution) -> inspecting.Decided:
+    """What the gate made of a read an inspection asked for, from its card."""
+    if resolution.allowed:
+        by = resolution.decided_by
+        stopped, detail = None, f"allowed by {by}" if by else "allowed"
+    else:
+        stopped = (
+            inspecting.Outcome.ENDED
+            if resolution.reason is ResolutionReason.ENDED
+            else inspecting.Outcome.EXPIRED
+            if resolution.reason in (ResolutionReason.TIMEOUT, ResolutionReason.EXPIRED)
+            else inspecting.Outcome.DENIED
+        )
+        detail = _why_it_did_not_run(resolution)
+    return inspecting.Decided(
+        ref=request.tool_use_id or "",
+        tool=request.tool,
+        what=request.command_full,
+        stopped=stopped,
+        detail=detail,
+    )
+
+
+def _last_line(said: str | None, most: int = 200) -> str:
+    """The last line with something on it, cut to fit in a sentence: why a
+    message reached nobody, as the run it stops says it."""
+    lines = (line.strip() for line in reversed((said or "").splitlines()))
+    line = next((line for line in lines if line), "")
+    return line if len(line) <= most else line[: most - 1] + "…"
 
 
 def _files_of(said: last_said.Said | None) -> frame.Tree | None:
@@ -400,11 +602,9 @@ def _files_of(said: last_said.Said | None) -> frame.Tree | None:
     return frame.Tree(head=said.head or "?", content=said.content)
 
 
-def _ended(result: commands_running.Result) -> str:
-    """How a command ended, in a word."""
-    if result.timed_out:
-        return "stopped"
-    return "passed" if result.ok else "failed"
+def _ended(result: commands_running.Result, command: commands_offered.Command) -> str:
+    """How a command ended, in a word or two: passed, failed, or not run."""
+    return commands_running.outcome(result, command.not_run)
 
 
 @dataclass
@@ -417,6 +617,20 @@ class _Inspection:
     turn: asyncio.Future
     #: Who pressed Stop, once somebody has.
     stopped_by: str | None = None
+    #: What it runs for: a workflow run's card key, for a step's inspection —
+    #: so calling the step back can stop it. Empty for any other.
+    about: str = ""
+    #: Every id its turn runs under: the one chosen here, and the one its
+    #: runtime gave it, where that is another — a Codex thread, an opencode
+    #: session. A card's request carries the runtime's.
+    sessions: set[str] = field(default_factory=set)
+    #: The cards it opened, in order, so what became of each can be said when
+    #: it ends.
+    cards: list[ApprovalRequest] = field(default_factory=list)
+    #: The calls the gate let through or refused with nobody asked, in order.
+    uncarded: list[inspecting.Decided] = field(default_factory=list)
+    #: What its runtime reports it called, as the turn goes.
+    calls: Calls = field(default_factory=Calls)
 
 
 class _Inspecting:
@@ -428,19 +642,35 @@ class _Inspecting:
     in the chat the answer is headed for — rather than one from a session nobody
     has seen, in whichever chat an unknown session falls to. The card can stop
     the inspection.
+
+    When the turn ends, however it ends, every card it still has open is denied
+    and closed: what it asked for can no longer run. What it read is kept for
+    `trace` — what its runtime reported, merged with what the gate made of each
+    call — which makes this `inspections.Gated`.
     """
 
     def __init__(
         self,
         channel: TelegramChannel,
-        runner,
         destination: tuple[str, int | None],
         project: str | None = None,
+        about: str = "",
+        status: StepStatus | None = None,
     ) -> None:
         self._channel = channel
-        self._runner = runner
         self._destination = destination
         self._project = project
+        self._about = about
+        #: A workflow step's line on its run's card, counting the inspections
+        #: that have answered — see `StepStatus`.
+        self._status = status
+        #: What each finished turn read, by the id the turn was asked under,
+        #: until `trace` hands it over.
+        self._traces: dict[str, inspecting.Trace] = {}
+
+    def trace(self, session_id: str) -> inspecting.Trace:
+        """What the turn asked under `session_id` read, and what became of each read."""
+        return self._traces.pop(session_id, None) or inspecting.Trace()
 
     async def ask(
         self,
@@ -454,25 +684,67 @@ class _Inspecting:
         session_id: str | None = None,
         effort: str | None = None,
     ) -> str | None:
+        if self._status is not None:
+            await self._status.inspecting()
+        try:
+            return await self._asked(
+                text,
+                timeout=timeout,
+                model=model,
+                cwd=cwd,
+                name=name,
+                edits=edits,
+                session_id=session_id,
+                effort=effort,
+            )
+        finally:
+            # Answered, unmeasured, stopped: it is one fewer to wait for.
+            if self._status is not None:
+                await self._status.inspection_answered()
+
+    async def _asked(
+        self,
+        text: str,
+        *,
+        timeout: float,
+        model: str | None,
+        cwd: Path | None,
+        name: str | None,
+        edits: bool,
+        session_id: str | None,
+        effort: str | None,
+    ) -> str | None:
+        # On the runtime the inspection's model belongs to, asked per turn: one
+        # transition's inspections can each name a model of their own.
+        runner = self._channel._one_shot_for(model)
+        if runner is None:
+            logger.warning(
+                "Inspection %s did not run: nothing here can take a turn on %s", name, model
+            )
+            return None
         # The inspection's own id when it chose one, so its record and its
         # tokens are found by the same key.
         session = session_id or str(uuid.uuid4())
         label = name or "inspection"
         registry = self._channel._registry
+        sessions = {session}
 
         def own(ident: str) -> None:
             # Marked before the turn begins, so nothing it says is taken for
             # an agent's — under the id the runtime runs it by, which is not
-            # always the one chosen here.
+            # always the one chosen here. Kept with the inspection too: its
+            # cards carry that id.
+            sessions.add(ident)
             if registry is not None:
                 registry.mark_own(ident, label)
 
         own(session)
+        calls = Calls()
         running = _Inspection(
             label,
             self._destination,
             asyncio.ensure_future(
-                self._runner.ask(
+                runner.ask(
                     text,
                     timeout=timeout,
                     model=model,
@@ -483,8 +755,12 @@ class _Inspecting:
                     project=self._project,
                     effort=effort,
                     started=own,
+                    calls=calls,
                 )
             ),
+            about=self._about,
+            sessions=sessions,
+            calls=calls,
         )
         self._channel._inspecting[session] = running
         logger.info("Inspection %s runs as session %s", running.name, session)
@@ -496,11 +772,12 @@ class _Inspecting:
             raise inspecting.StoppedError(f"stopped by {running.stopped_by}") from None
         finally:
             self._channel._inspecting.pop(session, None)
-
-    @property
-    def runtime(self) -> str:
-        """Which runtime the turns run on — `claude-code`."""
-        return str(getattr(self._runner, "id", "") or "")
+            # Answered, out of time, failed or stopped: a card still open asks
+            # for a read nothing will run now.
+            try:
+                self._traces[session] = await self._channel._inspection_ended(running)
+            except Exception:
+                logger.exception("Could not close the cards of inspection %s", running.name)
 
 
 class _Keeping:
@@ -515,19 +792,19 @@ class _Keeping:
         *,
         project: str,
         work: str | None,
-        runtime: str,
         counted: StepRounds | None = None,
     ) -> None:
         self._channel = channel
         self._project = project
         self._work = work
-        self._runtime = runtime
         self._counted = counted
 
     async def keep(self, kept: inspecting.Kept) -> None:
         """Written off to one side, as a label is: the answer is on its way to
         somebody, and a row in a database shares its file with the audit log,
         which may be writing. Nothing waits for it."""
+        from halyard.agents import registry
+
         database = self._channel._database
         if database is None:
             return
@@ -539,7 +816,9 @@ class _Keeping:
                 kept,
                 project=self._project,
                 work=self._work,
-                runtime=self._runtime or None,
+                # Each run's own: one transition's inspections can each name a
+                # model, and the model is what says which runtime ran it.
+                runtime=registry.for_model(kept.model),
                 workflow_run=step.run or None if step else None,
                 step=step.step or None if step else None,
                 phase=step.phase if step else None,
@@ -547,21 +826,6 @@ class _Keeping:
             )
         )
         self._channel._detach(write, f"keep inspection {kept.name}")
-
-
-class _Labelling:
-    """The channel's side of `inspections.Labeller`: a label onto this project's task.
-
-    Written off to one side, so an inspection's answer and a transition never wait on an
-    issue tracker, and quietly — the log says what happened, nobody is asked.
-    """
-
-    def __init__(self, channel: TelegramChannel, found: Project) -> None:
-        self._channel = channel
-        self._found = found
-
-    async def label(self, label: str) -> None:
-        self._channel._detach(self._channel._put_label(self._found, label), f"label {label}")
 
 
 class _Running:
@@ -574,17 +838,34 @@ class _Running:
     """
 
     def __init__(
-        self, channel: TelegramChannel, path: Path, chat_id: str, thread_id: int | None
+        self,
+        channel: TelegramChannel,
+        path: Path,
+        chat_id: str,
+        thread_id: int | None,
+        project: str = "",
+        status: StepStatus | None = None,
     ) -> None:
         self._channel = channel
+        self._project = project
         self._path = path
         self._chat_id = chat_id
         self._thread_id = thread_id
+        #: A workflow step's line on its run's card. With one, how the command
+        #: is getting on is said there — its time even when it prints nothing —
+        #: rather than in a message of its own every 45 seconds.
+        self._status = status
 
     async def run(self, command: commands_offered.Command) -> commands_running.Result:
         loop = asyncio.get_running_loop()
+        status = self._status
+        if status is not None:
+            await status.running(command.name)
 
         def progress(seconds: float, latest: str) -> None:
+            if status is not None:
+                status.printed(latest)
+                return
             asyncio.run_coroutine_threadsafe(
                 self._channel._say(
                     f"… <b>{html.escape(command.name)}</b> "
@@ -596,14 +877,12 @@ class _Running:
                 loop,
             )
 
-        return await asyncio.to_thread(
-            partial(
-                commands_running.run,
-                command.line,
-                self._path,
-                timeout=TRANSITION_COMMAND_TIMEOUT_SECONDS,
-                on_progress=progress,
-            )
+        return await self._channel._command_run(
+            self._project,
+            command.line,
+            self._path,
+            timeout=TRANSITION_COMMAND_TIMEOUT_SECONDS,
+            on_progress=progress,
         )
 
 
@@ -631,8 +910,11 @@ class TelegramChannel:
         seats: list[Seat] | None = None,
         session_names: dict[Role, str] | None = None,
         prompts: Mapping[str, str] | None = None,
+        #: Which menu Telegram is given: `full`, every command, or `simple`.
+        #: See `SIMPLE`. Anything else is `full`, said in the log.
+        menu: str = "full",
         repositories: Mapping[str, Project] | None = None,
-        forge_token: str | None = None,
+        forge_tokens: Mapping[str, str] | None = None,
         #: Where the last thing said in each chat is kept, so `/forward`
         #: survives a restart. None disables it: nothing else depends on it.
         said_path: Path | None = None,
@@ -646,6 +928,12 @@ class TelegramChannel:
         #: project's own entry for an inspection says otherwise. What it leaves
         #: unsaid is `INSPECTION_MODEL`, at the runtime's own effort.
         inspection_model: ModelChoice | None = None,
+        #: The model Halyard's own one-shot turns run on — the commit message —
+        #: and how hard it thinks. What it leaves unsaid is `MESSAGE_MODEL`, at
+        #: the runtime's own effort.
+        default_model: ModelChoice | None = None,
+        #: Commit wording alone. Unset fields inherit `default_model`.
+        commit_model: ModelChoice | None = None,
         #: Each runtime's own availability-check context, by runtime name — see
         #: `RuntimeSpec.check_context`. Asked only when a seat's session cannot
         #: be found, to say *why*; each check is handed its own and nobody else's.
@@ -664,6 +952,8 @@ class TelegramChannel:
         self._inspection_model = (inspection_model or ModelChoice()).over(
             ModelChoice(INSPECTION_MODEL)
         )
+        self._default_model = (default_model or ModelChoice()).over(ModelChoice(MESSAGE_MODEL))
+        self._commit_model = commit_model or ModelChoice()
         # Two seats and a default. A role with nowhere of its own falls back to
         # the main chat, so an existing single-chat setup keeps working
         # untouched by any of this.
@@ -692,19 +982,38 @@ class TelegramChannel:
         # so changing the wording of one is editing a file rather than waiting
         # for a release.
         self._prompts = dict(prompts if prompts is not None else configured_prompts.DEFAULTS)
+        if menu not in MENUS:
+            logger.warning("TELEGRAM_MENU %r is not one of %s; using full", menu, ", ".join(MENUS))
+        self._menu_kind = menu if menu in MENUS else "full"
         self._sending: set[asyncio.Task] = set()
+        #: Each run's step line, by the run's card key — one at a time, the
+        #: step it is on. See `StepStatus`.
+        self._statuses: dict[str, StepStatus] = {}
         # Who pressed a seat button and has not yet said what to send. Keyed by
         # the person as well as the chat: in a group, somebody else typing must
         # not be swept into a hand-off they did not ask for.
         self._recipients: dict[tuple[str, int | None, str], tuple[str, datetime]] = {}
         self._authorized = authorized_user_ids
         self._clock = clock
-        #: For reaching an issue tracker. Absent means `/label` says so and
-        #: nothing else notices.
-        self._forge_token = forge_token
+        #: For reaching an issue tracker: each forge's token, by forge name.
+        #: One absent means `/label` says so for that forge and nothing else
+        #: notices.
+        self._forge_tokens = dict(forge_tokens or {})
         #: Which command is running in which project, so a second one is
         #: refused rather than started on top of it.
         self._working: dict[str, str] = {}
+        #: How to end the command running in each project — `/stop`.
+        self._stops: dict[str, threading.Event] = {}
+        #: The workflow steps on their way, by their run's card key, so one can
+        #: be called back — see `_call_back`.
+        self._underway: dict[str, _Underway] = {}
+        #: The workflow step whose turn went into each session last, by session
+        #: id, so `/stop` there can stop that step's run too — see `_stop_turn`.
+        self._step_turns: dict[str, _Landing] = {}
+        #: How often `/stop` stopped a turn in each session, and who did last,
+        #: by session id — so a message dropped from behind that turn can say
+        #: who stopped it.
+        self._stopped_in: dict[str, tuple[int, str]] = {}
         #: Labels somebody picked for a command, by project and work item — the
         #: value it runs with when the task could not be given the label, or
         #: before the tracker says it has it. Gone on a restart: the task is
@@ -737,6 +1046,11 @@ class TelegramChannel:
         # Same shape otherwise — handle to (request, message id, chat).
         self._question_store = question_store
         self._open_questions: dict[str, tuple[QuestionRequest, int, str]] = {}
+        #: Every card with buttons this channel sent, and how each one closes.
+        #: See `CardDesk`. The maps above say what a button answers; this says
+        #: whether its card is still open, and closes it. Written down in the
+        #: database as well, so a restart closes what this process left open.
+        self._desk = CardDesk(api, clock, shelf=Shelf(database) if database else None)
         self._poller: asyncio.Task | None = None
         self._offset: int | None = None
         # Which chat the command being handled came from, so a listing can mark
@@ -748,18 +1062,33 @@ class TelegramChannel:
         return "telegram"
 
     def _menu(self) -> tuple[tuple[str, str], ...]:
-        """Every command this bot answers: the built-in ones, then yours.
+        """The menu Telegram publishes: every command and prompt, or on
+        `simple` the few a first setup needs, with the rest a card away."""
+        if self._menu_kind == "simple":
+            described = dict((*COMMANDS, *GROUPS))
+            return tuple((name, described[name]) for name in SIMPLE)
+        return self._everything()
 
-        One list, used both for the menu Telegram publishes and for `/help`.
-        Two lists would drift, and the way you would find out is by typing a
-        command the menu offered and being ignored.
-        """
-        return COMMANDS + tuple(
-            (name, configured_prompts.describe(text)) for name, text in self._prompts.items()
+    def _everything(self) -> tuple[tuple[str, str], ...]:
+        """Every command this bot answers: the built-in ones, then yours —
+        what `/help` lists whichever menu is published, so a command off the
+        menu is never one nobody can find."""
+        return (
+            COMMANDS
+            + GROUPS
+            + tuple(
+                (name, configured_prompts.describe(text)) for name, text in self._prompts.items()
+            )
         )
 
     async def start(self) -> None:
         await self._api.open()
+        # Read before any card of this process is sent, so none of its own is
+        # taken for one the last process left open — and the runs with them,
+        # before anything here moves one. Dealt with off to one side:
+        # answering is what starting is for.
+        left = await self._desk.left_over()
+        runs = await asyncio.to_thread(self._runs_left)
         # Registered so they appear when somebody types `/`. Best-effort: the
         # bot answers every one of these whether Telegram knows about them or
         # not, and a control plane that would not start because a menu could
@@ -769,8 +1098,70 @@ class TelegramChannel:
         except Exception:
             logger.warning("Could not register the command list with Telegram", exc_info=True)
         self._poller = asyncio.create_task(self._poll_forever(), name="telegram-poll")
+        if left or any(run.sending_to for _, _, run in runs):
+            self._detach(self._after_restart(left, runs), "picking up after a restart")
+
+    def _runs_left(self) -> list[tuple[Project, str, flowing.Run]]:
+        """Every run not finished, in a project this configuration has: the
+        project, the work it is counted against, the run."""
+        if self._said_path is None:
+            return []
+        places = {}
+        for found in self._repositories.values():
+            kept = self._kept_for(found.name, WORKFLOW_FILE)
+            if kept is not None and found.workflows.flows:
+                places[kept.parent.name] = found
+        return [
+            (places[project], work, run)
+            for project, work, run in flowing.going(self._said_path.parent / "projects")
+            if project in places
+        ]
+
+    async def _after_restart(
+        self, left: list[Kept], runs: list[tuple[Project, str, flowing.Run]]
+    ) -> None:
+        """Take up what the last process left: its steps on their way, and its cards.
+
+        A step on its way when that process stopped never got there — its
+        commands, its inspections and the message went with the process — so
+        its run stops, the step ready to send again, rather than waiting for a
+        reply nothing was asked for. A run's card left open closes saying the
+        run is kept, where it is; any other card closes as `CardDesk` closes
+        those. See `close_left_over`.
+        """
+        cut_short: set[str] = set()
+        for found, work, run in runs:
+            where = self._kept_for(found.name, WORKFLOW_FILE)
+            if not run.sending_to or where is None:
+                continue
+            flow = found.workflows.flows.get(run.workflow) or ()
+            step = flow[run.step] if run.step < len(flow) else "its step"
+            reason = f"{step} was interrupted before it reached {run.sending_to}: Halyard restarted"
+            # Read again: somebody may have stopped or steered it since.
+            held = await asyncio.to_thread(flowing.missed, where, work, run, reason)
+            if held is None:
+                continue
+            await self._stopped(found, work, held, go=True)
+            cut_short.add(self._run_key(found, work, run))
+        kept = {self._run_key(found, work, run) for found, work, run in runs}
+
+        def saying(card: Kept) -> str | None:
+            if card.kind != "run":
+                return None
+            if card.key in cut_short:
+                return RUN_SUPERSEDED
+            return RUN_KEPT if card.key in kept else None
+
+        if left:
+            logger.info(
+                "Closing %d card%s the last run left open", len(left), "s" if len(left) != 1 else ""
+            )
+            await self._desk.close_left_over(left, saying=saying)
 
     async def stop(self) -> None:
+        for status in self._statuses.values():
+            status.stop()
+        self._statuses.clear()
         if self._poller is not None:
             self._poller.cancel()
             # Awaiting the cancelled task is what makes stop() actually wait for
@@ -838,6 +1229,82 @@ class TelegramChannel:
                     return parse_destination(seat.chat) or (self._chat_id, None)
         return (role and self._routes.get(role)) or (self._chat_id, None)
 
+    def _inspection_of(self, session_id: str) -> _Inspection | None:
+        """The running inspection a session is, by the id chosen for its turn
+        or one its runtime ran it under."""
+        running = self._inspecting.get(session_id)
+        if running is not None:
+            return running
+        return next((r for r in self._inspecting.values() if session_id in r.sessions), None)
+
+    async def _inspection_ended(self, running: _Inspection) -> inspecting.Trace:
+        """Close every card an inspection that has ended still has open, and
+        say what it read: what its runtime reported, merged with what the
+        gate made of each call — see `inspections.trace`.
+
+        A card still open is denied — nothing can run for a turn that is over —
+        and closed saying so: left, it stayed on the phone until it expired,
+        and allowing it then did nothing.
+        """
+        decided: list[inspecting.Decided] = []
+        for request in running.cards:
+            resolution = await self._store.resolution_of(request.request_id)
+            if resolution is None:
+                try:
+                    resolution = await self._store.deny(
+                        request.request_id,
+                        reason=ResolutionReason.ENDED,
+                        note=(
+                            f"The inspection {running.name} ended before anybody answered, "
+                            "so this did not run."
+                        ),
+                    )
+                except UnknownApprovalError:
+                    continue
+                if resolution.reason is ResolutionReason.ENDED:
+                    entry = self._open.get(cards.handle_of(request))
+                    if entry is not None:
+                        _, message_id, chat_id, _ = entry
+                        await self._settle_card(request, message_id, chat_id, "ended", None)
+            decided.append(_card_decided(request, resolution))
+        trace = inspecting.merged(
+            running.calls, [*decided, *running.uncarded], reported=running.calls.reported
+        )
+        if missed := trace.not_run:
+            logger.info(
+                "Inspection %s ended with %s that did not run",
+                running.name,
+                _reads(len(missed)),
+            )
+        return trace
+
+    def decided_without_a_card(
+        self,
+        *,
+        session_id: str,
+        tool: str,
+        command: str,
+        tool_use_id: str | None,
+        allowed: bool,
+        why: str,
+        request_id: str | None = None,
+    ) -> None:
+        """A call the gate let through or refused with nobody asked — kept
+        with the inspection it is, when it is one, for its trace. One whose
+        card this channel carried is the card's already."""
+        running = self._inspection_of(session_id)
+        if running is None or any(r.request_id == request_id for r in running.cards):
+            return
+        running.uncarded.append(
+            inspecting.Decided(
+                ref=tool_use_id or "",
+                tool=tool,
+                what=command,
+                stopped=None if allowed else inspecting.Outcome.DENIED,
+                detail=why,
+            )
+        )
+
     def _inspection_named(self, session_id: str) -> str | None:
         """Which inspection a session is running, when it is one: an inspection
         this channel started, or a turn Halyard started for itself elsewhere
@@ -876,11 +1343,25 @@ class TelegramChannel:
             request.session_id,
             request.project,
         )
-        message = await self._api.send_message(
-            chat_id, text, reply_markup=markup, message_thread_id=thread_id
+        card = await self._desk.open(
+            chat_id,
+            text,
+            markup,
+            thread=thread_id,
+            kind="approval",
+            key=request.request_id,
+            expires_at=request.expires_at,
+            ending=lambda how, by: cards.render_resolved(
+                request, decision=how, by=by, inspection=inspection
+            ),
         )
-        message_id = int(message["message_id"])
+        assert card is not None, "an approval is always kept"
+        message_id = card.message_id
         self._open[cards.handle_of(request)] = (request, message_id, chat_id, thread_id)
+        if (asking := self._inspection_of(request.session_id)) is not None:
+            # Kept with the inspection, under whichever id its runtime gave
+            # the turn, so it is closed when the inspection ends.
+            asking.cards.append(request)
         # Where a card went, said once per card. "It arrived in the wrong
         # group" is otherwise a question only the person holding the phone can
         # answer, and the answer decays as soon as they scroll.
@@ -906,6 +1387,31 @@ class TelegramChannel:
         _, message_id, chat_id, _ = entry
         await self._settle_card(request, message_id, chat_id, decision, by)
 
+    async def approval_ended(
+        self, request: ApprovalRequest, resolution: ApprovalResolution
+    ) -> None:
+        """Close an approval's card the way it ended, when no button did.
+
+        Core says so once the wait for an answer is over, however it ended. A
+        press closes its own card as it answers it, and an answer at the desk
+        closes it through `close_approval`; what is left is the deadline passing
+        and Halyard stopping, which no button reaches — and which used to leave
+        the card asking, buttons and all, long after it had been denied.
+        """
+        late = self._too_late(resolution.reason)
+        if late is not None:
+            await self._desk.end_about("approval", request.request_id, late[0])
+
+    async def question_ended(
+        self, request: QuestionRequest, resolution: QuestionResolution
+    ) -> None:
+        """Close a question's card the way it ended, when no answer here did:
+        the deadline passing, or Halyard stopping. See `approval_ended`."""
+        if resolution.reason in (ResolutionReason.TIMEOUT, ResolutionReason.EXPIRED):
+            await self._desk.end_about("question", request.request_id, "expired")
+        elif resolution.reason is ResolutionReason.SHUTDOWN:
+            await self._desk.end_about("question", request.request_id, "shutdown")
+
     async def send_question(self, request: QuestionRequest) -> str:
         """Put a question card in the seat's chat.
 
@@ -924,10 +1430,23 @@ class TelegramChannel:
             request.session_id,
             request.project,
         )
-        message = await self._api.send_message(
-            chat_id, text, reply_markup=markup, message_thread_id=thread_id
+        card = await self._desk.open(
+            chat_id,
+            text,
+            markup,
+            thread=thread_id,
+            kind="question",
+            key=request.request_id,
+            expires_at=request.expires_at,
+            ending=lambda how, _by: cards.render_question_resolved(
+                request,
+                answer=None,
+                by=None,
+                why="Halyard stopped" if how == "shutdown" else "",
+            ),
         )
-        message_id = int(message["message_id"])
+        assert card is not None, "a question is always kept"
+        message_id = card.message_id
         self._open_questions[cards.question_handle_of(request)] = (request, message_id, chat_id)
         logger.info(
             "Question for %s (%s, session %r) sent to %s",
@@ -971,9 +1490,11 @@ class TelegramChannel:
         # A workflow waiting on this seat takes its next step — off this path,
         # which is relaying a reply: the step ahead may run commands and inspections,
         # and none of that should hold up what the seat just said.
-        answered = for_session(self._seats, agent_id, session_name, session_id) or for_project(
-            self._seats, agent_id, project
-        )
+        speaking = for_session(self._seats, agent_id, session_name, session_id)
+        # Only the seat the session is known to be: the project-wide guess
+        # below is good enough to wake a workflow, not to say who worked last.
+        self._worked_with(speaking)
+        answered = speaking or for_project(self._seats, agent_id, project)
         if answered is not None:
             self._detach(self._advance_workflow(answered, text), "/workflow")
         # A provider that has stopped answering is the one message worth a
@@ -986,13 +1507,14 @@ class TelegramChannel:
         message = None
         for index, chunk in enumerate(chunks, start=1):
             marker = f"<i>({index}/{len(chunks)})</i>\n" if len(chunks) > 1 else ""
-            message = await self._api.send_message(
-                chat_id,
-                marker + html.escape(chunk),
-                message_thread_id=thread_id,
-                # On the last one, where somebody's thumb already is.
-                reply_markup=keyboard if index == len(chunks) else None,
-            )
+            said = marker + html.escape(chunk)
+            if keyboard is not None and index == len(chunks):
+                # On the last one, where somebody's thumb already is — and a
+                # card, so the button goes once it is pressed.
+                card = await self._desk.open(chat_id, said, keyboard, thread=thread_id)
+                message = {"message_id": card.message_id} if card is not None else message
+                continue
+            message = await self._api.send_message(chat_id, said, message_thread_id=thread_id)
         return str(message["message_id"]) if message else ""
 
     def _offer_another_model(self, text: str, agent_id: str | None) -> dict | None:
@@ -1121,6 +1643,22 @@ class TelegramChannel:
                     # One bad update must not take the loop down with it, or a
                     # single malformed message would silence every future answer.
                     logger.exception("Failed to handle a Telegram update")
+            await self._close_expired()
+
+    async def _close_expired(self) -> None:
+        """Close every card whose deadline has passed, once per poll.
+
+        Whatever a card is about normally closes it as it ends — a press, a
+        decision at the desk, the request timing out. This is what makes a card
+        with a deadline unable to outlive it when none of those reached it.
+        """
+        try:
+            closed = await self._desk.sweep()
+        except Exception:
+            logger.warning("Could not close the cards past their deadline", exc_info=True)
+            return
+        if closed:
+            logger.info("Closed %d card%s past their deadline", closed, "s" if closed != 1 else "")
 
     async def _handle_message(self, message: dict) -> None:
         """Handle a typed command.
@@ -1152,7 +1690,8 @@ class TelegramChannel:
             # "Other" path. The session is blocked waiting on it, so this is what
             # the words are for; a normal forward could not run anyway. Checked
             # before anything else for that reason.
-            if here and await self._answer_open_question_with_text(here, text, user_id):
+            replied_to = (message.get("reply_to_message") or {}).get("message_id")
+            if here and await self._answer_open_question_with_text(here, text, user_id, replied_to):
                 return
             # A value a command asked for takes the next message in its chat,
             # before a seat could: it was asked for a moment ago, right here.
@@ -1213,6 +1752,23 @@ class TelegramChannel:
                 return
             await self._forward_to_session(argument, actor, here or "", thread)
             return
+        if command == "stop":
+            await self._stop_turn(actor, here or "", thread)
+            return
+        if command in ("actions", "agent"):
+            names = ACTIONS if command == "actions" else AGENT
+            await self._say(
+                "Status, pause, resume or stop:"
+                if command == "actions"
+                else "This agent's options, model or effort:",
+                here,
+                thread,
+                reply_markup=cards.menu_choices("do", names),
+            )
+            return
+        if command == "prompts":
+            await self._offer_prompts(here, thread)
+            return
         if command == "to":
             # What is being handed over: the message this replies to, or the
             # rest of the line. Replying is the natural gesture for "this one,
@@ -1250,7 +1806,7 @@ class TelegramChannel:
             # gate, and asks a model for a sentence. None of that may hold the
             # poller, which is what answers everybody else's buttons.
             self._detach(
-                self._propose_commit(here or "", thread, full=command != "commit"),
+                self._commit(argument, here or "", thread, checked=command != "commit"),
                 f"/{command}",
             )
             return
@@ -1303,7 +1859,7 @@ class TelegramChannel:
         elif command == "options":
             await self._say(self._options(here), here, thread)
         elif command == "status":
-            await self._say(await self._status(), here, thread)
+            await self._say(await self._status(here), here, thread)
         elif command in self._prompts:
             # A sentence somebody says often enough to have named. Whatever
             # follows the command is added to it, so `/md the failing test`
@@ -1313,12 +1869,31 @@ class TelegramChannel:
                 f"{said}\n\n{argument}" if argument else said, actor, here or "", thread
             )
         elif command in ("start", "help"):
-            listed = "\n".join(f"/{name} — {description}" for name, description in self._menu())
+            listed = "\n".join(
+                f"/{name} — {description}" for name, description in self._everything()
+            )
             await self._say(
                 "<b>Halyard</b>\n\nType anything to send it into the session.\n\n" + listed,
                 here,
                 thread,
             )
+
+    async def _offer_prompts(self, chat_id: str | None, thread_id: int | None) -> None:
+        """Your prompts as buttons, each sent into this chat's session when
+        pressed — what typing its command does."""
+        if not self._prompts:
+            await self._say("No prompts are configured.", chat_id, thread_id)
+            return
+        listed = "\n".join(
+            f"/{name} — {html.escape(configured_prompts.describe(text))}"
+            for name, text in self._prompts.items()
+        )
+        await self._say(
+            f"Which prompt?\n\n{listed}",
+            chat_id,
+            thread_id,
+            reply_markup=cards.menu_choices("prompt", tuple(self._prompts)),
+        )
 
     def _seat_list(self) -> str:
         """Every seat that can be addressed, as a person would pick one from.
@@ -1348,7 +1923,7 @@ class TelegramChannel:
         thread_id: int | None = None,
         replied: str = "",
         anchor_id: int | None = None,
-        accepted: Callable[[], Awaitable[None]] | None = None,
+        landing: _Landing | None = None,
     ) -> None:
         """Send a message to a seat by name, from anywhere.
 
@@ -1405,6 +1980,8 @@ class TelegramChannel:
                 chat_id,
                 thread_id,
             )
+            if landing is not None:
+                await landing.missed(f"no agent is called {label}")
             return
 
         destination, destination_thread = parse_destination(seat.chat) or (chat_id, thread_id)
@@ -1431,7 +2008,7 @@ class TelegramChannel:
                 )
                 await self._say(head + marker + html.escape(chunk), destination, destination_thread)
         await self._forward_to_session(
-            text, actor, destination, destination_thread, accepted=accepted
+            text, actor, destination, destination_thread, landing=landing
         )
 
     def _detach(self, work, what: str) -> None:
@@ -1694,7 +2271,7 @@ class TelegramChannel:
             return None
 
         try:
-            forge = task_tracker.build(origin, self._forge_token or "", declared=found.forge)
+            forge = task_tracker.build(origin, self._forge_tokens, declared=found.forge)
         except task_tracker.ForgeError as refused:
             await self._say(f"\U0001f6ab {html.escape(str(refused))}", chat_id, thread_id)
             return None
@@ -1717,7 +2294,9 @@ class TelegramChannel:
                     thread_id,
                 )
                 return
-            choice = await task_tracker.to_offer(forge, number, project.labels)
+            choice = await task_tracker.to_offer(
+                forge, number, project.labels, (*project.labels_exclude, *self._own_labels(project))
+            )
         except task_tracker.ForgeError as refused:
             await self._say(f"\U0001f6ab {html.escape(str(refused))}", chat_id, thread_id)
             return
@@ -1734,6 +2313,27 @@ class TelegramChannel:
             thread_id,
             reply_markup=cards.label_choices(choice.offer),
         )
+
+    def _own_labels(self, project: Project) -> tuple[str, ...]:
+        """The labels Halyard writes on tasks itself, as patterns: each of the
+        project's agents' own (`navigator:claude`), and what an inspection's
+        finding put there while findings labelled tasks (`halyard:proof`) —
+        those stay on the tracker. Nobody puts one of these on by hand, and
+        they were most of a long `/label` card."""
+        from halyard.agents import registry
+        from halyard.tasks.attribution import label_for
+
+        def tag_of(runtime: str) -> str:
+            spec = registry.get(runtime)
+            return (spec.tag or spec.name) if spec else runtime
+
+        def literally(label: str) -> str:
+            return "".join(f"[{c}]" if c in "*?[" else c for c in label)
+
+        agents = (
+            seat.task_label or label_for(tag_of(seat.runtime), seat.role) for seat in project.seats
+        )
+        return ("halyard:*", *(literally(label) for label in agents))
 
     # --- running a project's own commands -----------------------------------
 
@@ -1965,7 +2565,7 @@ class TelegramChannel:
                         chat_id,
                         thread_id,
                     )
-                result = await self._run_and_say(path, command, chat_id, thread_id)
+                result = await self._run_and_say(path, command, chat_id, thread_id, project)
                 if result is not None and result.ok:
                     continue
                 if rest := [later.name for later in order[place + 1 :]]:
@@ -1982,13 +2582,38 @@ class TelegramChannel:
             # would refuse every command afterwards for no reason anybody could see.
             self._working.pop(project, None)
 
+    async def _command_run(
+        self, project: str, line: str, path: Path, **more
+    ) -> commands_running.Result:
+        """Run a project command where `/stop`, in that project's chats, can end it.
+
+        Cancelled while it runs — a workflow's step called back — it is ended
+        the same way, and waited for: nothing started next finds it still
+        going in the same directory.
+        """
+        stop = threading.Event()
+        self._stops[project] = stop
+        running = asyncio.ensure_future(
+            asyncio.to_thread(partial(commands_running.run, line, path, stop=stop, **more))
+        )
+        try:
+            return await asyncio.shield(running)
+        except asyncio.CancelledError:
+            stop.set()
+            with contextlib.suppress(Exception):
+                await running
+            raise
+        finally:
+            if self._stops.get(project) is stop:
+                del self._stops[project]
+
     async def _run_and_say(
-        self, path: Path, command, chat_id: str, thread_id: int | None
+        self, path: Path, command, chat_id: str, thread_id: int | None, project: str = ""
     ) -> commands_running.Result | None:
         """Run one command to the end, and say what happened. None when it
         could not be started at all."""
         try:
-            result = await asyncio.to_thread(commands_running.run, command.line, path)
+            result = await self._command_run(project, command.line, path)
         except Exception:
             logger.warning("A command from Telegram could not be run", exc_info=True)
             await self._say(
@@ -1998,7 +2623,9 @@ class TelegramChannel:
             )
             return None
 
-        if result.timed_out:
+        if result.stopped:
+            head = f"\u23f9 <b>{html.escape(command.name)}</b> was stopped from the chat after "
+        elif result.timed_out:
             head = f"\u23f1 <b>{html.escape(command.name)}</b> was stopped after "
         elif result.ok:
             head = f"\u2705 <b>{html.escape(command.name)}</b> finished in "
@@ -2098,18 +2725,6 @@ class TelegramChannel:
             "<code>halyard.yaml</code>."
         )
 
-    def _message_runner(self, chat_id: str):
-        """Whichever runtime this chat's seat uses, for the one-shot turn.
-
-        The only place the commit flow touches a runtime at all, and it stays
-        on this side of the boundary: `halyard.commits` is handed a finished
-        sentence, never a way to ask for one.
-        """
-        seat = for_chat(self._seats, chat_id) if chat_id else None
-        if seat and (found := self._runners.get(seat.runtime)):
-            return found
-        return self._runner
-
     async def _write_message(
         self, chat_id: str, work, inquiry: str = ""
     ) -> tuple[str | None, tuple[str, ...], str | None]:
@@ -2119,24 +2734,32 @@ class TelegramChannel:
         person deciding is away from the desk and has not seen this code, and a
         list of filenames says where an agent has been rather than what it did.
 
+        Written on the runtime the commit model belongs to — `HALYARD_COMMIT_MODEL`,
+        or `HALYARD_DEFAULT_MODEL` when it is unset — whichever chat asks: the only
+        place the commit flow touches a runtime at all.
+        `halyard.commits` is handed a finished sentence, never a way to ask for
+        one.
+
         Fails soft, on purpose. A model that cannot be reached should not cost
         somebody the commit — the reference computed from the branch is a
         usable message on its own, and `Rewrite` is one tap away.
         """
-        runner = self._message_runner(chat_id)
-        # Written on the default runtime only, as it was while no other could
-        # take a turn of its own: `MESSAGE_MODEL` is that runtime's word, and a
-        # runtime that read it as something else would write the message on a
-        # model nobody chose. Another agent's chat keeps the reference alone.
-        if runner is not self._runner:
-            runner = None
+        chosen = self._commit_model.over(self._default_model)
+        runner = self._one_shot_for(chosen.model)
         said = None
-        if runner is not None and hasattr(runner, "ask"):
+        if runner is not None:
+            logger.info(
+                "Commit message for %s: model %s, effort %s",
+                self._project_name_for(chat_id),
+                chosen.model,
+                chosen.effort or "runtime default",
+            )
             try:
                 said = await asyncio.wait_for(
                     runner.ask(
                         commits.prompt(work, inquiry),
-                        model=MESSAGE_MODEL,
+                        model=chosen.model,
+                        effort=chosen.effort,
                         purpose="commit message",
                         project=self._project_name_for(chat_id),
                         system=commits.SYSTEM,
@@ -2152,27 +2775,92 @@ class TelegramChannel:
             commits.flag_of(said),
         )
 
+    async def _commit(
+        self, typed: str, chat_id: str, thread_id: int | None, *, checked: bool = False
+    ) -> None:
+        """`/commit` — offer how to commit this project's work, or commit it the
+        way named.
+
+        A project with `commit_options:` gets a card: the plain Commit, which
+        checks nothing, and a button per option. One without any is proposed a
+        commit at once, as it always was. `/commit review` names the option
+        outright.
+
+        `checked` is `/review_and_commit`, from before the options, which asks
+        for the checks: the one option there is, or the card without the plain
+        Commit — and with no options, the project's warnings and its round, as
+        it always had.
+        """
+        found = self._repository_for(chat_id)
+        if found is None:
+            await self._say(self._no_repository(chat_id), chat_id, thread_id)
+            return
+        options = found.commit_options
+        if wanted := typed.strip():
+            option = next(
+                (one for key, one in options.items() if key.casefold() == wanted.casefold()), None
+            )
+            if option is not None:
+                await self._propose_commit(chat_id, thread_id, option=option)
+                return
+            await self._say(
+                f"<b>{html.escape(found.name)}</b> has no commit option called "
+                f"<b>{html.escape(wanted)}</b>.",
+                chat_id,
+                thread_id,
+            )
+            if not options:
+                return
+        elif not options:
+            await self._propose_commit(chat_id, thread_id, full=checked)
+            return
+        elif checked and len(options) == 1:
+            await self._propose_commit(chat_id, thread_id, option=next(iter(options.values())))
+            return
+        offered = [] if checked else ["✅ <b>Commit</b> — checks nothing"]
+        for option in options.values():
+            does = [
+                *([f"runs {', '.join(option.commands)}"] if option.commands else []),
+                *([f"inspects {', '.join(option.inspections)}"] if option.inspections else []),
+            ]
+            offered.append(
+                f"🧪 <b>{html.escape(option.name)}</b> — {html.escape(' · '.join(does))}"
+            )
+        await self._say(
+            f"Commit <b>{html.escape(found.name)}</b> how?\n\n" + "\n".join(offered),
+            chat_id,
+            thread_id,
+            reply_markup=cards.commit_choices(tuple(options), plain=not checked),
+        )
+
     async def _propose_commit(
-        self, chat_id: str, thread_id: int | None, *, full: bool = False
+        self,
+        chat_id: str,
+        thread_id: int | None,
+        *,
+        full: bool = False,
+        option: CommitOption | None = None,
     ) -> None:
         """Read the branch's uncommitted work and offer to commit it.
 
-        Two commands, one path. `/commit` proposes a message and stops there —
-        which is what most changes want, and what a change to `scripts/` wants
-        every time. `/review_and_commit` adds whatever the project has asked
-        for: its own check, its warnings, and the round it offers instead of
-        committing.
+        Plain, it proposes a message and stops there — which is what most
+        changes want, and what a change to `scripts/` wants every time. With a
+        commit `option`, its commands and inspections run first, and the card
+        carries what the project asked for besides: its warnings, and the round
+        it offers instead of committing. `full` is those two alone, for
+        `/review_and_commit` in a project without options.
 
-        Split by command rather than by a list of exceptions. A rule that says
-        *these paths skip the gate* has to be maintained against a repository
-        that keeps growing, and gets it wrong quietly; a second command is
-        chosen at the moment somebody already knows which of the two they meant.
+        Chosen by a button rather than by a list of exceptions. A rule that
+        says *these paths skip the gate* has to be maintained against a
+        repository that keeps growing, and gets it wrong quietly; a button is
+        pressed at the moment somebody already knows which they meant.
         """
         found = self._repository_for(chat_id)
         if found is None:
             await self._say(self._no_repository(chat_id), chat_id, thread_id)
             return
         project, path = found.name, found.path
+        full = full or option is not None
 
         # Off the event loop: git is a subprocess, and the poller has approval
         # cards to keep delivering while this reads a repository.
@@ -2185,74 +2873,14 @@ class TelegramChannel:
             await self._say(f"\U0001f6ab {html.escape(work.blocked)}", chat_id, thread_id)
             return
 
-        # Said before it starts, not after. A project's own check can run for
-        # minutes, and silence for minutes reads as nothing having happened.
-        checked = commits.Checked()
-        if full:
-            # `validate:` names one of the project's `commands:`, checked when
-            # the file was read; what runs is the line written there.
-            command = found.commands.get(found.validate) if found.validate else None
-            skipping = commits.validation.only_documentation(work)
-            if command and not skipping:
-                await self._say(
-                    f"\u23f3 Running <code>{html.escape(command)}</code>\u2026",
-                    chat_id,
-                    thread_id,
-                )
-            elif command:
-                await self._say(
-                    f"\U0001f4c4 Documentation only \u2014 not running "
-                    f"<code>{html.escape(command)}</code>.",
-                    chat_id,
-                    thread_id,
-                )
-
-            # Progress from the worker thread, put back on the loop. Somebody
-            # who pressed this is waiting for a card and cannot do anything else
-            # with that thread, so a run that says nothing for three minutes
-            # reads as Halyard having died rather than as a test suite working.
-            loop = asyncio.get_running_loop()
-
-            def progress(seconds: float, latest: str) -> None:
-                asyncio.run_coroutine_threadsafe(
-                    self._say(
-                        f"\u2026 {self._elapsed(seconds)} \u2014 "
-                        f"<code>{html.escape(latest[:150])}</code>",
-                        chat_id,
-                        thread_id,
-                    ),
-                    loop,
-                )
-
-            started = time.monotonic()
-            checked = await asyncio.to_thread(
-                partial(
-                    commits.check,
-                    work,
-                    path,
-                    command,
-                    warn_if=found.warn_if,
-                    on_progress=progress,
-                )
-            )
-            logger.info(
-                "commit %s: %d files, checks %s in %.1fs",
-                project,
-                len(work.changes),
-                "skipped (documentation)" if checked.documentation_only else "ran",
-                time.monotonic() - started,
-            )
-            if checked.refused:
-                # No card at all. A failing check is a fact rather than a
-                # judgement, so there is nothing here for somebody to weigh.
-                said = (
-                    f"\U0001f6ab <code>{html.escape(checked.refused)}</code> failed. "
-                    "Nothing was committed."
-                )
-                if checked.output:
-                    said += f"\n\n<pre>{html.escape(checked.output)}</pre>"
-                await self._say(said, chat_id, thread_id)
+        checks: tuple[str, ...] = ()
+        content: str | None = None
+        if option is not None:
+            ran = await self._check_with(found, option, work, chat_id, thread_id)
+            if ran is None:
                 return
+            checks, content = ran
+        checked = commits.check(work, warn_if=found.warn_if) if full else commits.Checked()
 
         asked = commits.confirmation.inquiry(found.confirmation, path) if full else ""
         writing = time.monotonic()
@@ -2278,7 +2906,15 @@ class TelegramChannel:
         alarms = (*checked.warnings, *((flag,) if flag else ()))
         offers_round = full and commits.confirmation.offered(found.confirmation)
         handle = self._proposals.add(
-            project, path, work, message, summary, alarms, reviewed=offers_round
+            project,
+            path,
+            work,
+            message,
+            summary,
+            alarms,
+            reviewed=offers_round,
+            checks=checks,
+            checked_content=content,
         )
         await self._say(
             commit_card.render(
@@ -2287,11 +2923,212 @@ class TelegramChannel:
                 message=message,
                 summary=summary,
                 warnings=alarms,
+                checks=checks,
             ),
             chat_id,
             thread_id,
             reply_markup=commit_card.keyboard(handle, confirmation=offers_round),
+            **self._commit_card_about(handle, project, message),
         )
+
+    async def _check_with(
+        self,
+        found: Project,
+        option: CommitOption,
+        work: commits.Uncommitted,
+        chat_id: str,
+        thread_id: int | None,
+    ) -> tuple[tuple[str, ...], str] | None:
+        """Run a commit option over the work: its commands, then its inspections.
+
+        The lines its card carries, and the files it checked — or None, having
+        said why there is no card: a command failed or did not run, a command
+        is waiting for a label, another one is running here, or the files moved
+        while they were checked. The commands run as a transition's do — one
+        project command at a time, `/stop` ends one, a task label filled in —
+        and the inspections read the change: what `commits.described` says of
+        it, with the envelope a transition's inspections have.
+
+        Only prose changed, nothing runs: no test suite or inspection of code
+        has anything to say about it. The files are held to that all the same,
+        since a file of code arriving afterwards would be committed unchecked.
+        """
+        name = f"<b>{html.escape(option.name)}</b>"
+        if commits.validation.only_documentation(work):
+            content = await asyncio.to_thread(frame.tree, found.path)
+            if content is None:
+                await self._say(
+                    f"\U0001f6ab git could not say which files {name} would check, so "
+                    "there is no card.",
+                    chat_id,
+                    thread_id,
+                )
+                return None
+            await self._say(
+                f"\U0001f4c4 Documentation only — {name} runs nothing for it.",
+                chat_id,
+                thread_id,
+            )
+            return (f"\U0001f4c4 {option.name} · documentation only, nothing run",), content.content
+
+        lines = await self._command_lines(found, option.commands)
+        if lines.missing:
+            await self._ask_for_label(
+                found,
+                lines,
+                kind=cards.PICKED_FOR_COMMIT,
+                name=option.name,
+                chat_id=chat_id,
+                thread_id=thread_id,
+            )
+            return None
+        # One at a time per project, as for `/command` and a transition: two
+        # `make` runs in one directory fight over the same outputs.
+        if option.commands and (busy := self._working.get(found.name)):
+            await self._say(
+                f"⏳ <b>{html.escape(busy)}</b> is still running in "
+                f"<b>{html.escape(found.name)}</b>, so {name} did not run. One at a time.",
+                chat_id,
+                thread_id,
+            )
+            return None
+        if option.commands:
+            self._working[found.name] = f"commit {option.name}"
+        # Said before it starts, not after. A project's own check can run for
+        # minutes, and silence for minutes reads as nothing having happened.
+        steps = []
+        if option.commands:
+            run = ", ".join(f"<code>{html.escape(lines.lines[c])}</code>" for c in option.commands)
+            steps.append(f"running {run}")
+        if option.inspections:
+            steps.append(f"inspecting {html.escape(', '.join(option.inspections))}")
+        started = time.monotonic()
+        try:
+            before = await asyncio.to_thread(frame.tree, found.path)
+            if before is None:
+                await self._say(
+                    f"\U0001f6ab git could not say which files {name} would check, so "
+                    "nothing was run.",
+                    chat_id,
+                    thread_id,
+                )
+                return None
+            await self._say(f"⏳ {name} — {', then '.join(steps)}…", chat_id, thread_id)
+            ran, stopped = await transitioning.run_commands(
+                option.commands,
+                lines=lines.lines,
+                not_run=found.commands_not_run,
+                runner=_Running(self, found.path, chat_id, thread_id, found.name),
+                about=f"Commit option {option.name}",
+                stop_at=(commands_running.FAILED, commands_running.NOT_RUN),
+            )
+            if stopped is not None:
+                # No card at all. A failing check is a fact rather than a
+                # judgement, so there is nothing here for somebody to weigh.
+                await self._say(self._check_stopped(option, *ran[-1]), chat_id, thread_id)
+                return None
+            answers = await self._inspect_change(found, option, work, ran, chat_id, thread_id)
+            after = await asyncio.to_thread(frame.tree, found.path)
+        finally:
+            if option.commands:
+                self._working.pop(found.name, None)
+        logger.info(
+            "commit %s: %s checked %d files in %.1fs",
+            found.name,
+            option.name,
+            len(work.changes),
+            time.monotonic() - started,
+        )
+        if after is None or after.content != before.content:
+            await self._say(
+                f"\U0001f6ab The files changed while {name} checked them, so there is no "
+                "card: what it checked is not what a commit would take. /commit again to "
+                "check them as they are now.",
+                chat_id,
+                thread_id,
+            )
+            return None
+        passed = (
+            f"✅ {option.name} · {command.name} passed · {self._elapsed(result.seconds)}"
+            for command, result in ran
+        )
+        inspected = (
+            f"\U0001f50e {option.name} · {answer.name} {answer.status.value}" for answer in answers
+        )
+        return (*passed, *inspected), before.content
+
+    def _check_stopped(
+        self,
+        option: CommitOption,
+        command: commands_offered.Command,
+        result: commands_running.Result,
+    ) -> str:
+        """What a commit option's command that failed, or did not run, says in
+        the chat — with the end of what it printed."""
+        took = self._elapsed(result.seconds)
+        if result.stopped:
+            how = f"was stopped from the chat after {took}"
+        elif result.timed_out:
+            how = f"was stopped after {took}, out of time"
+        elif result.exit_code is None:
+            how = "could not be started"
+        elif commands_running.outcome(result, command.not_run) == commands_running.FAILED:
+            how = f"failed after {took}"
+        else:
+            how = f"did not run (exit {result.exit_code})"
+        said = (
+            f"\U0001f6ab <b>{html.escape(command.name)}</b> {how}, so "
+            f"<b>{html.escape(option.name)}</b> stopped there. Nothing was committed."
+        )
+        if result.output:
+            said += f"\n\n<pre>{html.escape(result.output)}</pre>"
+        return said
+
+    async def _inspect_change(
+        self,
+        found: Project,
+        option: CommitOption,
+        work: commits.Uncommitted,
+        ran: Sequence[tuple[commands_offered.Command, commands_running.Result]],
+        chat_id: str,
+        thread_id: int | None,
+    ) -> tuple[inspecting.Answer, ...]:
+        """A commit option's inspections over the change it would commit, each
+        answer said in the chat as it would be for `/inspect`.
+
+        They read what Halyard can say of the change rather than the chat's
+        last reply: the change is what is about to be committed, and a reply
+        may be about something else. The envelope is a transition's — where the
+        repository stands, and what each command did.
+        """
+        if not option.inspections:
+            return ()
+        labels = await self._task_labels(found)
+        known = await asyncio.to_thread(
+            partial(frame.context, found.path, found.name, labels=labels)
+        )
+        change = await asyncio.to_thread(commits.described, found.path)
+        answers = await transitioning.run_inspections(
+            option.inspections,
+            project_inspections=found.inspections,
+            project=found.path,
+            context=[
+                *known,
+                *(commands_running.summary(c.name, c.line, r, c.not_run) for c, r in ran),
+            ],
+            note="",
+            reply=change,
+            asker=self._inspector(chat_id, (chat_id, thread_id)),
+            model=self._inspection_model.model or INSPECTION_MODEL,
+            effort=self._inspection_model.effort,
+            models=found.inspection_models,
+            timeout=INSPECTION_TIMEOUT_SECONDS,
+            about=f"commit option {option.name}, the change on {work.branch}",
+            keeper=await self._keeper(found),
+        )
+        for answer in answers:
+            await self._say_answer(answer, chat_id, thread_id)
+        return answers
 
     async def _rewrite_commit(
         self, handle: str, text: str, chat_id: str, thread_id: int | None, user: str
@@ -2315,18 +3152,43 @@ class TelegramChannel:
         if reworded is None:
             await self._say("That commit is no longer open.", chat_id, thread_id)
             return
-        await self._say(
+        # The card it replaces closes once the new one is there. Left live, its
+        # Commit would commit the new wording under the old one's text.
+        before = self._desk.of("commit", handle)
+        card = await self._say(
             commit_card.render(
                 project=reworded.project,
                 work=reworded.work,
                 message=reworded.message,
                 summary=reworded.summary,
                 warnings=reworded.warnings,
+                checks=reworded.checks,
             ),
             chat_id,
             thread_id,
             reply_markup=commit_card.keyboard(handle, confirmation=reworded.reviewed),
+            **self._commit_card_about(handle, reworded.project, reworded.message),
         )
+        if card is not None:
+            for old in before:
+                await self._desk.close_card(
+                    old, outcome="✏️ <i>Reworded — the card below is the one to answer.</i>"
+                )
+
+    def _commit_card_about(self, handle: str, project: str, message: str) -> dict:
+        """What a commit card is about, for the desk: the proposal its buttons
+        carry, good until the proposal is stale — and what the card says then."""
+        return {
+            "kind": "commit",
+            "key": handle,
+            "expires_at": self._proposals.deadline(handle),
+            "ending": lambda how, by: commit_card.render_resolved(
+                project=project,
+                message=message,
+                outcome="⌛ EXPIRED — /commit again to see the branch as it is now",
+                by=None,
+            ),
+        }
 
     async def _decide_commit(
         self, proposed: tuple[str, str], user_id: str, query_id: str, callback: dict
@@ -2349,6 +3211,7 @@ class TelegramChannel:
             # Left in place: the sentence still has to find it.
             if handle not in self._proposals:
                 await self._dismiss(query_id, "That commit is no longer open.")
+                await self._commit_card_gone(message, here)
                 return
             await self._dismiss(query_id)
             await self._say(
@@ -2364,6 +3227,7 @@ class TelegramChannel:
         proposal = self._proposals.take(handle)
         if proposal is None:
             await self._dismiss(query_id, "That commit is no longer open.")
+            await self._commit_card_gone(message, here)
             return
 
         if action == commit_card.CONFIRM:
@@ -2379,6 +3243,26 @@ class TelegramChannel:
             await self._settle_commit(proposal, "\u2716\ufe0f CANCELLED", user_id, here, message_id)
             return
 
+        if (moved := await self._moved_since_checked(proposal)) is not None:
+            # A commit takes the tree as it is now, so one that moved since its
+            # option checked it would commit what nobody checked. Refused, and
+            # the proposal spent: a fresh `/commit` checks the files as they are.
+            await self._dismiss(query_id, "Nothing was committed.")
+            await self._say(
+                f"\U0001f6ab {moved}, so nothing was committed. /commit again to check "
+                "them as they are now.",
+                here or "",
+                thread_id,
+            )
+            await self._settle_commit(
+                proposal,
+                "\U0001f6ab NOT COMMITTED \u2014 the files changed since they were checked",
+                user_id,
+                here,
+                message_id,
+            )
+            return
+
         try:
             sha = await asyncio.to_thread(commits.commit, proposal.path, proposal.message)
         except Exception as refused:
@@ -2386,6 +3270,11 @@ class TelegramChannel:
             await self._dismiss(query_id, "git refused.")
             await self._say(
                 f"\U0001f6ab git refused: {html.escape(str(refused))}", here or "", thread_id
+            )
+            # The proposal is spent: its card says so, and a fresh `/commit`
+            # reads the branch as it is after whatever git objected to.
+            await self._settle_commit(
+                proposal, "\U0001f6ab NOT COMMITTED \u2014 git refused", user_id, here, message_id
             )
             return
 
@@ -2421,6 +3310,18 @@ class TelegramChannel:
         await self._say("\n".join(done), here or "", thread_id)
         await self._settle_commit(proposal, outcome, user_id, here, message_id)
 
+    async def _moved_since_checked(self, proposal: commits.Proposal) -> str | None:
+        """Why a proposal's files are not the ones its commit option checked,
+        or None when they are — or when nothing checked them."""
+        if proposal.checked_content is None:
+            return None
+        now = await asyncio.to_thread(frame.tree, proposal.path)
+        if now is None:
+            return "git could not say whether the files changed since they were checked"
+        if now.content != proposal.checked_content:
+            return "The files changed since they were checked"
+        return None
+
     async def _send_confirmation(
         self,
         proposal,
@@ -2443,6 +3344,13 @@ class TelegramChannel:
         )
         if not round_text:
             await self._say("That project has no confirmation round to send.", chat_id, thread_id)
+            await self._settle_commit(
+                proposal,
+                "\u2716\ufe0f NO ROUND SENT \u2014 none configured",
+                user_id,
+                chat_id,
+                message_id,
+            )
             return
 
         seat = next(
@@ -2459,6 +3367,13 @@ class TelegramChannel:
                 chat_id,
                 thread_id,
             )
+            await self._settle_commit(
+                proposal,
+                "\u2716\ufe0f NO ROUND SENT \u2014 no navigator",
+                user_id,
+                chat_id,
+                message_id,
+            )
             return
 
         await self._settle_commit(
@@ -2474,6 +3389,16 @@ class TelegramChannel:
             f"{seat.label} {round_text}", f"tg:{user_id}", chat_id, thread_id
         )
 
+    async def _commit_card_gone(self, message: dict, chat_id: str | None) -> None:
+        """Close a commit card whose proposal is gone — answered on another
+        card, or stale — so it stops offering what it can no longer do."""
+        await self._desk.close(
+            chat_id,
+            message.get("message_id"),
+            outcome="⌛ <i>No longer open — /commit again to see the branch as it is now.</i>",
+            shown=message.get("text") or "",
+        )
+
     async def _settle_commit(
         self,
         proposal,
@@ -2483,22 +3408,16 @@ class TelegramChannel:
         message_id: int | None,
     ) -> None:
         """Edit the card to say what happened, so scrolling back is honest."""
-        if message_id is None:
-            return
-        try:
-            await self._api.edit_message_text(
-                chat_id or self._chat_id,
-                message_id,
-                commit_card.render_resolved(
-                    project=proposal.project,
-                    message=proposal.message,
-                    outcome=outcome,
-                    by=f"tg:{user_id}",
-                ),
-                reply_markup=None,
-            )
-        except Exception:
-            logger.warning("Could not update a commit card", exc_info=True)
+        await self._desk.close(
+            chat_id or self._chat_id,
+            message_id,
+            text=commit_card.render_resolved(
+                project=proposal.project,
+                message=proposal.message,
+                outcome=outcome,
+                by=f"tg:{user_id}",
+            ),
+        )
 
     async def _forward_last(
         self, label: str, actor: str, chat_id: str, thread_id: int | None
@@ -2532,7 +3451,7 @@ class TelegramChannel:
 
         label = (label or "").strip()
         if not label:
-            keyboard = cards.forward_choices(tuple(seat.label for seat in self._seats))
+            keyboard = cards.forward_choices(*self._agents_to_offer(chat_id))
             if keyboard is None:
                 await self._say(self._seat_list(), chat_id, thread_id)
                 return
@@ -2615,10 +3534,15 @@ class TelegramChannel:
             await self._run_inspection("", chat_id, thread_id)
             return
 
-        asker = self._inspector(chat_id, (chat_id, thread_id))
-        if asker is None:
-            await self._say("No runtime here can take a one-shot turn.", chat_id, thread_id)
+        chosen = found.inspection_models.get(name, ModelChoice()).over(self._inspection_model)
+        if self._one_shot_for(chosen.model) is None:
+            await self._say(
+                f"No runtime here can take a turn on <b>{html.escape(str(chosen.model))}</b>.",
+                chat_id,
+                thread_id,
+            )
             return
+        asker = self._inspector(chat_id, (chat_id, thread_id))
 
         path = found.inspections[name]
         arrived = _local(said.at).strftime("%H:%M")
@@ -2640,7 +3564,6 @@ class TelegramChannel:
                 labels=labels,
             )
         )
-        chosen = found.inspection_models.get(name, ModelChoice()).over(self._inspection_model)
         answer = await inspecting.run(
             name,
             path,
@@ -2652,22 +3575,17 @@ class TelegramChannel:
             model=chosen.model or INSPECTION_MODEL,
             effort=chosen.effort,
             timeout=INSPECTION_TIMEOUT_SECONDS,
-            findings=found.label_findings,
-            labeller=_Labelling(self, found),
-            keeper=await self._keeper(found, asker.runtime),
+            keeper=await self._keeper(found),
             about=(
                 f"reply {arrived}, {len(said.text)} chars, "
                 f"from {said.agent_id or '?'} {said.session_id or '?'}"
             ),
         )
         if not answer.measured:
-            await self._say(
-                f"<b>{html.escape(name)}</b> · unmeasured — {html.escape(answer.why)}",
-                chat_id,
-                thread_id,
-            )
+            await self._say_answer(answer, chat_id, thread_id)
             return
-        findings = answer.text
+        halyard_said = inspecting.not_run_block(answer.not_run)
+        findings = answer.text + (f"\n\n{halyard_said}" if halyard_said else "")
         # Kept whole — what ran, on what, what it found, and the reply itself —
         # so a button under the answer hands a seat something it can read cold,
         # not just the piece of the answer the button sits under.
@@ -2686,16 +3604,52 @@ class TelegramChannel:
                     reply=said.text,
                 ),
             )
-        pieces = cards.split_for_telegram(findings)
-        onward = cards.result_choices(name, tuple(seat.label for seat in self._seats))
-        for index, chunk in enumerate(pieces):
-            head = f"<b>{html.escape(name)}</b>\n" if index == 0 else ""
+        await self._say_answer(
+            answer,
+            chat_id,
+            thread_id,
+            onward=cards.result_choices(name, tuple(seat.label for seat in self._seats)),
+        )
+
+    async def _say_answer(
+        self,
+        answer: inspecting.Answer,
+        chat_id: str,
+        thread_id: int | None,
+        *,
+        onward: dict | None = None,
+    ) -> None:
+        """An inspection's answer in the chat: its name and how it came out,
+        then the model's text, split for Telegram — `onward` under the last
+        piece — and Halyard's own words about reads that never ran under it."""
+        name = html.escape(answer.name)
+        halyard_said = html.escape(inspecting.not_run_block(answer.not_run))
+        if not answer.measured:
             await self._say(
-                f"{head}<pre>{html.escape(chunk)}</pre>",
+                f"<b>{name}</b> · {html.escape(inspecting.said(answer))}"
+                + (f"\n\n{halyard_said}" if halyard_said else ""),
                 chat_id,
                 thread_id,
-                reply_markup=onward if index == len(pieces) - 1 else None,
             )
+            return
+        pieces = cards.split_for_telegram(answer.text)
+        # Outside the model's block, so it reads as Halyard's — under the last
+        # piece when it fits there, after it otherwise.
+        tail = halyard_said
+        alone = bool(tail) and len(pieces[-1]) + len(tail) > cards.CHUNK_LIMIT
+        status = html.escape(inspecting.said(answer))
+        for index, chunk in enumerate(pieces):
+            head = f"<b>{name}</b> · {status}\n" if index == 0 else ""
+            last = index == len(pieces) - 1
+            said = f"\n\n{tail}" if last and tail and not alone else ""
+            await self._say(
+                f"{head}<pre>{html.escape(chunk)}</pre>{said}",
+                chat_id,
+                thread_id,
+                reply_markup=onward if last else None,
+            )
+        if alone:
+            await self._say(tail, chat_id, thread_id)
 
     async def _send_result(
         self, value: str, actor: str, chat_id: str, thread_id: int | None
@@ -2727,32 +3681,46 @@ class TelegramChannel:
         greeting = f"To {_seat_name(target) or label}, from Halyard."
         await self._forward_to_seat(f"{label} {greeting}\n\n{kept.text}", actor, chat_id, thread_id)
 
-    def _one_shot_runner(self, chat_id: str):
-        """The runtime an inspection takes its turn on, or None — the channel's
-        side of `inspections.Asker`.
+    def _one_shot_for(self, model: str | None):
+        """The runner a one-shot turn on `model` takes — an inspection, a
+        commit message — or None when nothing here can take one.
 
-        The default runtime, whatever this chat's own is, so a report from any
-        agent can be inspected. It was "this chat's own if it can", which meant
-        the default while no other runtime could take a turn of its own. Now
-        opencode and Codex can, and the inspection's model and effort are the
-        default runtime's words: opencode takes `sonnet` for no model at all and
-        answers on its own default, and Codex refuses it. Another runtime is
-        chosen on purpose — `halyard inspect repeat --runtime` — never by the
-        chat an inspection happens to be asked from.
+        Chosen by the model, never by the chat the turn is asked from. It was
+        the default runtime whatever the chat, because the models these turns
+        named were that runtime's words: opencode reads `sonnet` as no model at
+        all, and Codex refuses it. Now the model says which runtime it belongs
+        to — `gpt-5.6-terra` is Codex's — so a report from any agent is
+        inspected, and a message written, on the runtime that model runs on.
+        See `registry.for_model`.
         """
-        return self._runner if hasattr(self._runner, "ask") else None
+        from halyard.agents import registry
 
-    def _inspector(self, chat_id: str, destination: tuple[str, int | None]) -> _Inspecting | None:
-        """This chat's one-shot runtime, for an inspection whose answer goes to
-        `destination` — and so does anything the inspection asks to run."""
-        runner = self._one_shot_runner(chat_id)
-        if not runner:
-            return None
-        return _Inspecting(self, runner, destination, project=self._project_name_for(chat_id))
+        runtime = registry.for_model(model)
+        runner = self._runners.get(runtime) or (
+            self._runner if runtime == registry.DEFAULT else None
+        )
+        return runner if hasattr(runner, "ask") else None
 
-    async def _keeper(
-        self, found: Project, runtime: str, counted: StepRounds | None = None
-    ) -> _Keeping | None:
+    def _inspector(
+        self,
+        chat_id: str,
+        destination: tuple[str, int | None],
+        about: str = "",
+        status: StepStatus | None = None,
+    ) -> _Inspecting:
+        """Inspections whose answers go to `destination` — and so does anything
+        an inspection asks to run. Each takes its turn on its model's runtime.
+        `about` is the run a workflow step's inspections are for, and `status`
+        its line on the run's card."""
+        return _Inspecting(
+            self,
+            destination,
+            project=self._project_name_for(chat_id),
+            about=about,
+            status=status,
+        )
+
+    async def _keeper(self, found: Project, counted: StepRounds | None = None) -> _Keeping | None:
         """Where this project's inspection runs are kept, or None when they are
         not — `keep_inspections` off, or no database to keep them in."""
         if not self._keep_inspections or self._database is None:
@@ -2761,7 +3729,6 @@ class TelegramChannel:
             self,
             project=found.name,
             work=await self._work_item(found),
-            runtime=runtime,
             counted=counted,
         )
 
@@ -2779,6 +3746,15 @@ class TelegramChannel:
         if running is None:
             return
         running.stopped_by = actor
+        # Under every id its turn ran by: a Codex thread's cards carry its own.
+        for ident in sorted(running.sessions):
+            await self._close_cards_of(ident, actor, "the inspection")
+        logger.info("Inspection %s stopped by %s", running.name, actor)
+        running.turn.cancel()
+
+    async def _close_cards_of(self, session: str, actor: str, what: str) -> int:
+        """Deny and close every card a stopped turn still has open. How many."""
+        closed = 0
         for request, message_id, chat_id, _ in list(self._open.values()):
             if request.session_id != session:
                 continue
@@ -2788,11 +3764,81 @@ class TelegramChannel:
                 await self._store.deny(
                     request.request_id,
                     reason=ResolutionReason.USER,
-                    note=f"Denied: {actor} stopped the inspection that asked for this.",
+                    note=f"Denied: {actor} stopped {what} that asked for this.",
                 )
             await self._settle_card(request, message_id, chat_id, "stop", actor)
-        logger.info("Inspection %s stopped by %s", running.name, actor)
-        running.turn.cancel()
+            closed += 1
+        return closed
+
+    async def _stop_turn(self, actor: str, chat_id: str, thread_id: int | None) -> None:
+        """End what is running for this chat: a project command — a
+        transition's or `/command`'s — and the turn sent into its session,
+        with the cards that turn left open.
+
+        Claude Code and Codex: only a turn Halyard started. One typed at the
+        desk, or queued into a Codex thread open in its app, runs there and is
+        stopped there. opencode: whatever turn its session has going, which
+        opencode itself knows. A runtime this cannot stop says so rather than
+        pretending.
+
+        A command stopped in a transition is a command that did not run, so the
+        transition stops there, and a workflow is held at that step.
+        """
+        command = self._stop_command(chat_id, actor)
+        found = await self._session_for(chat_id)
+        stopping = getattr(found.runner, "stop", None) if found is not None else None
+        stopped = False
+        if found is not None and stopping is not None:
+            stopped = stopping(found.session_id, cwd=found.cwd)
+            if inspect.isawaitable(stopped):
+                stopped = await stopped
+        if stopped and found is not None:
+            # Noted before anything else is awaited: a message waiting behind
+            # the turn goes with it as the turn ends, and asks who stopped it.
+            times, _ = self._stopped_in.get(found.session_id, (0, ""))
+            self._stopped_in[found.session_id] = (times + 1, actor)
+        if not command and not stopped:
+            if found is None:
+                said = "No agent session is tied to this chat, and no command is running here."
+            elif stopping is None:
+                said = f"A turn in {html.escape(found.runner.id)} cannot be stopped from here yet."
+            else:
+                said = (
+                    "Nothing that can be stopped from here is running in that session. A "
+                    "Claude Code or Codex turn typed at the desk, or queued into a Codex "
+                    "thread open in its app, is stopped there."
+                )
+            await self._say(said, chat_id, thread_id)
+            return
+        parts = []
+        if command:
+            parts.append(f"<b>{html.escape(command)}</b> ended, with everything it started.")
+        if stopped and found is not None:
+            closed = await self._close_cards_of(found.session_id, actor, "the turn")
+            logger.info("The turn in %s was stopped by %s", found.session_id, actor)
+            cards_said = (
+                f" {closed} open card{'s' if closed != 1 else ''} closed." if closed else ""
+            )
+            parts.append(f"The agent's turn: what it already did stays done.{cards_said}")
+        await self._say(f"⏹ <b>Stopped.</b> {' '.join(parts)}", chat_id, thread_id)
+        landing = self._step_turns.pop(found.session_id, None) if stopped and found else None
+        if landing is not None:
+            # A workflow's step was that turn's: stopped before its answer, the
+            # run would wait for one nothing is writing. It stops instead, while
+            # it still waits on that step — not once the answer came.
+            await landing.halted(actor)
+
+    def _stop_command(self, chat_id: str, actor: str) -> str | None:
+        """End the project command running for this chat's project, if one is.
+        What it was, as the project's busy marker names it."""
+        found = self._repository_for(chat_id)
+        stop = self._stops.get(found.name) if found is not None else None
+        if found is None or stop is None or stop.is_set():
+            return None
+        stop.set()
+        what = self._working.get(found.name) or "The command"
+        logger.info("%s in %s stopped by %s", what, found.name, actor)
+        return what
 
     async def _reach_quietly(self, found: Project):
         """The forge and the task this project's branch is for, or None.
@@ -2812,39 +3858,11 @@ class TelegramChannel:
             logger.info("%s#%d: the repository has no origin to ask", found.name, number)
             return None
         try:
-            forge = task_tracker.build(origin, self._forge_token or "", declared=found.forge)
+            forge = task_tracker.build(origin, self._forge_tokens, declared=found.forge)
         except task_tracker.ForgeError as refused:
             logger.info("%s#%d: %s", found.name, number, refused)
             return None
         return forge, number
-
-    async def _put_label(self, found: Project, label: str) -> None:
-        """One label onto the task this project's branch is for, unless it is on
-        it already. Logged whichever way it goes, never raised — see
-        `_Labelling`."""
-        reached = await self._reach_quietly(found)
-        if reached is None:
-            logger.info("%s went on no task: %s names none that can be reached", label, found.name)
-            return
-        forge, number = reached
-        try:
-            task = await asyncio.wait_for(forge.task(number), timeout=LABELS_TIMEOUT_SECONDS)
-            if label.casefold() in {name.casefold() for name in task.labels}:
-                logger.info("%s was already on %s#%d", label, found.name, number)
-                return
-            await asyncio.wait_for(
-                task_tracker.put_on(forge, number, label), timeout=LABELS_TIMEOUT_SECONDS
-            )
-        except (task_tracker.ForgeError, TimeoutError) as refused:
-            logger.warning(
-                "Could not put %s on %s#%d: %s",
-                label,
-                found.name,
-                number,
-                str(refused) or "no answer in time",
-            )
-            return
-        logger.info("Labelled %s#%d %s", found.name, number, label)
 
     async def _labels_on_task(self, found: Project) -> tuple[int | None, tuple[str, ...]]:
         """The task this project's branch is for, and the labels it carries.
@@ -2913,6 +3931,7 @@ class TelegramChannel:
         thread_id: int | None,
         workflow: str | None = None,
         lead: str = "",
+        card_key: str = "",
     ) -> None:
         """Offer a group's labels for a command the task gave no value.
 
@@ -2932,19 +3951,28 @@ class TelegramChannel:
             where = "this branch names no task to read one from"
             after = "it is kept for this work until Halyard restarts"
         pick = f"Pick one — {after}." if buttons else "Put one on the task and press it again."
-        await self._say(
+        asked = (
             f"{lead}\U0001f3f7 <b>{html.escape(lines.needing)}</b> takes the task's "
-            f"<b>{html.escape(group)}</b> label, and {where}. {pick}",
-            chat_id,
-            thread_id,
-            reply_markup=buttons,
+            f"<b>{html.escape(group)}</b> label, and {where}. {pick}"
         )
+        if card_key:
+            # Under a workflow's step: the run's card while it waits for a label.
+            await self._say_about_run(card_key, asked, chat_id, thread_id, buttons)
+        else:
+            await self._say(asked, chat_id, thread_id, reply_markup=buttons)
 
     async def _label_picked(
-        self, value: str, chat_id: str, thread_id: int | None, actor: str
+        self,
+        value: str,
+        chat_id: str,
+        thread_id: int | None,
+        actor: str,
+        *,
+        card: dict | None = None,
     ) -> None:
         """A label tapped for a command: onto the task, kept for this work, and
-        whatever needed it pressed again."""
+        whatever needed it pressed again. `card` is the one it was tapped on,
+        closed saying which once the label is known."""
         head, _, place = value.rpartition(">")
         head, _, group_place = head.rpartition(">")
         kind, name = head[:1], head[1:]
@@ -2960,6 +3988,8 @@ class TelegramChannel:
                 "That list has changed since it was offered — press it again.", chat_id, thread_id
             )
             return
+        if card is not None:
+            await self._close_card(card, chat_id, f"☑️ {html.escape(label)}")
 
         work = await self._work_item(found) or ""
         self._picked.setdefault((found.name, work), {})[group] = command_labels.value_of(label)
@@ -2993,6 +4023,8 @@ class TelegramChannel:
             await self._run_command(name, chat_id, thread_id)
         elif kind == cards.PICKED_FOR_WORKFLOW:
             await self._resume_workflow("go", chat_id, thread_id)
+        elif kind == cards.PICKED_FOR_COMMIT:
+            await self._commit(name, chat_id, thread_id)
 
     async def _task_labels(self, found: Project) -> dict[str, str]:
         """The task's labels from this project's own groups, for the envelope.
@@ -3159,12 +4191,16 @@ class TelegramChannel:
 
         seats = self._seats_for(found.name, to or transition.to)
         if len(seats) != 1:
+            recent = self._recent_agents(found.name)
+            wanted = (to or transition.to or "").lower()
             await self._say(
                 f"Hand <b>{html.escape(name)}</b> to which agent?",
                 chat_id,
                 thread_id,
                 reply_markup=cards.transition_seat_choices(
-                    name, tuple(seat.label for seat in seats or self._seats)
+                    name,
+                    tuple(seat.label for seat in seats or self._seats),
+                    first=(recent[wanted],) if wanted in recent else tuple(recent.values()),
                 ),
             )
             return
@@ -3211,9 +4247,11 @@ class TelegramChannel:
         extra: Sequence[str] = (),
         lead: str = "",
         buttons: dict | None = None,
+        card_key: str = "",
         command_lines: Mapping[str, str] | None = None,
         counted: StepRounds | None = None,
-    ) -> None:
+        step_line: str = "",
+    ) -> transitioning.Handed | None:
         """Make one transition: say so, run it, deliver it — and count the round
         when it is a workflow's step.
 
@@ -3224,8 +4262,21 @@ class TelegramChannel:
         which flow it belongs to and offers to stop it. `command_lines` are its
         commands as they run, with any task label in them — see `_command_lines`.
         `counted` is the step's rounds so far and how to count this one; a
-        transition pressed by hand has none, and says no round.
+        transition pressed by hand has none, and says no round. `card_key`
+        names the run a step's line belongs to, so it is the run's live card.
         """
+        # What would stop the message reaching the seat is asked before anything
+        # runs. Measured: `close` pressed while paused ran its tests and its
+        # inspections, and only then said to send /resume — the work done for
+        # nothing, and nothing delivered.
+        if why := await self._what_stops_delivery(seat, chat_id):
+            await self._say(
+                f"{lead}⏸ <b>{html.escape(name)}</b> did not start: {why} Nothing was run.",
+                chat_id,
+                thread_id,
+            )
+            return transitioning.Handed("", stopped=why)
+
         # One at a time per project, as for `/command`: two `make` runs in one
         # directory fight over the same outputs, and the second one's failure
         # is a mystery. Nothing is handed on; the transition can be pressed again.
@@ -3237,7 +4288,7 @@ class TelegramChannel:
                 chat_id,
                 thread_id,
             )
-            return
+            return transitioning.Handed("", stopped=f"{busy} is still running, one at a time")
 
         # Which round of its step this is, this one included — a workflow's
         # question only. Counted when it reaches the seat rather than here: a
@@ -3247,14 +4298,23 @@ class TelegramChannel:
         expected = counted.allowed if counted is not None else None
         previous = self._answer_since(done[-1], number) if done and number else None
 
-        async def reached() -> None:
-            """The round counts: the seat's session took the message."""
+        async def reached() -> bool:
+            """The step got to the seat's session — its turn is starting, or,
+            for a runtime that never says so, the session took it — so its
+            round counts, once, and the run waits on the seat. Whether it still
+            goes: not once its run stopped sending it."""
             if counted is None:
-                return
+                return True
             which = await counted.count(seat.label)
-            logger.info(
-                "Round %s of %s reached %s", rounds.shown(which, expected), name, seat.label
-            )
+            if which:
+                logger.info(
+                    "Round %s of %s reached %s", rounds.shown(which, expected), name, seat.label
+                )
+            going = bool(which) or counted.still is None or await counted.still()
+            if going and status is not None:
+                # Its agent has it: the run's card says the run waits on it.
+                await status.waiting(seat.label)
+            return going
 
         steps = [
             *([f"running {', '.join(transition.commands)}"] if transition.commands else []),
@@ -3266,13 +4326,37 @@ class TelegramChannel:
         ]
         first = f", {' then '.join(steps)} first" if steps else ""
         which = f" (round {rounds.shown(number, expected)})" if number and number > 1 else ""
-        await self._say(
+        line = (
             f"{lead}\U0001f91d <b>{html.escape(name)}</b>{which} → "
-            f"<b>{html.escape(_seat_name(seat))}</b>{html.escape(first)}…",
-            chat_id,
-            thread_id,
-            reply_markup=buttons,
+            f"<b>{html.escape(_seat_name(seat))}</b>{html.escape(first)}…"
         )
+        status = None
+        if card_key:
+            card = await self._say_about_run(card_key, line, chat_id, thread_id, buttons)
+            if card is not None:
+                # The run's one card says what its step is doing from here on:
+                # its commands, its inspections, and its agent.
+                status = StepStatus(self._desk, card, name, inspections=len(transition.inspections))
+                if (before := self._statuses.pop(card_key, None)) is not None:
+                    before.stop()
+                self._statuses[card_key] = status
+                status.start()
+        else:
+            await self._say(line, chat_id, thread_id, reply_markup=buttons)
+        landing = (
+            _Landing(
+                started=reached,
+                accepted=reached,
+                refused=counted.missed,
+                failed=counted.failed,
+                stopped=counted.stopped,
+                dropped=counted.dropped,
+                wanted=counted.still,
+            )
+            if counted is not None
+            else None
+        )
+        delivery = _SeatDelivery(self, actor, chat_id, thread_id, landing, status)
         if transition.commands:
             self._working[found.name] = f"transition {name}"
         try:
@@ -3288,15 +4372,11 @@ class TelegramChannel:
                 )
             )
             inspector = (
-                self._inspector(chat_id, self._destination_of(seat))
+                self._inspector(chat_id, self._destination_of(seat), about=card_key, status=status)
                 if transition.inspections
                 else None
             )
-            keeper = (
-                await self._keeper(found, inspector.runtime, counted)
-                if inspector is not None
-                else None
-            )
+            keeper = await self._keeper(found, counted) if inspector is not None else None
             handed = await transitioning.take(
                 transition,
                 project=found.path,
@@ -3313,32 +4393,57 @@ class TelegramChannel:
                 effort=self._inspection_model.effort,
                 models=found.inspection_models,
                 timeout=INSPECTION_TIMEOUT_SECONDS,
-                delivery=_SeatDelivery(
-                    self, actor, chat_id, thread_id, accepted=reached if number else None
-                ),
-                findings=found.label_findings,
-                labeller=_Labelling(self, found),
+                delivery=delivery,
                 project_commands={**found.commands, **(command_lines or {})},
-                runner=_Running(self, found.path, chat_id, thread_id),
+                project_not_run=found.commands_not_run,
+                runner=_Running(self, found.path, chat_id, thread_id, found.name, status),
                 round_number=number,
                 expected=expected,
                 previous=previous,
                 keeper=keeper,
+                step=step_line,
             )
+        except Exception:
+            # Broken before it was sent, it reached nobody, and whatever waits
+            # on it is told so rather than left waiting. Once sent, the
+            # delivery says how it went.
+            if landing is not None and not delivery.handed:
+                await landing.missed("it broke before it was sent — the log says why")
+            raise
         finally:
             # Released whatever happened, as `/command` does: a project left
             # marked busy would refuse every command after it.
             if transition.commands:
                 self._working.pop(found.name, None)
+        if landing is not None and not delivery.handed and not await landing.still():
+            # Its run stopped sending it while it was prepared, and it never
+            # went: whatever came of its commands and inspections is nobody's
+            # now, and whoever stopped the run has said so.
+            return handed
+        if handed.stopped:
+            # Nothing went, and nothing is counted: a round is the seat
+            # taking a message. Fixed and pressed again is the way on.
+            await self._say(
+                f"⏹ <b>{html.escape(name)}</b> stopped before reaching "
+                f"<b>{html.escape(_seat_name(seat))}</b>: a command did not run, so "
+                "nothing was inspected or sent.\n"
+                f"<code>{html.escape(handed.stopped)}</code>",
+                chat_id,
+                thread_id,
+            )
+            return handed
         outcomes = [
-            *(f"<b>{html.escape(c.name)}</b>: {_ended(r)}" for c, r in handed.ran),
+            *(f"<b>{html.escape(c.name)}</b>: {_ended(r, c)}" for c, r in handed.ran),
+            # Complete, incomplete or unmeasured, from what each read — an
+            # incomplete one is marked, and the transition goes on.
             *(
-                f"<b>{html.escape(a.name)}</b>: {'answered' if a.measured else 'unmeasured'}"
+                f"<b>{html.escape(a.name)}</b>: {html.escape(inspecting.said(a))}"
                 for a in handed.answers
             ),
         ]
         if outcomes:
             await self._say(" · ".join(outcomes), chat_id, thread_id)
+        return handed
 
     async def _run_workflow(
         self,
@@ -3362,7 +4467,9 @@ class TelegramChannel:
         A run that stopped is not left behind by this: naming a step of the
         same workflow sends the stopped run on from there, its rounds and its
         phase kept, which is how somebody steers a run without taking the work
-        out of it. Stopping it with the button is what starts afresh.
+        out of it. Stopping it with the button is what starts afresh. A step
+        still on its way is called back for the one named; one that reached
+        its agent is waited on.
         """
         found = self._repository_for(chat_id)
         if found is None:
@@ -3392,11 +4499,9 @@ class TelegramChannel:
         wanted, _, rest = typed.strip().partition(" ")
         if not wanted:
             if run is not None:
-                await self._say(
-                    self._where_the_run_is(found, run),
-                    chat_id,
-                    thread_id,
-                    reply_markup=cards.workflow_keyboard(run.workflow, go=not run.waiting),
+                said, keyboard = self._run_card(found, run)
+                await self._say_about_run(
+                    self._run_key(found, work, run), said, chat_id, thread_id, keyboard
                 )
                 return
             await self._say(
@@ -3417,11 +4522,12 @@ class TelegramChannel:
             await self._run_workflow("", chat_id, thread_id, actor)
             return
         if run is not None and run.waiting:
-            await self._say(
+            await self._say_about_run(
+                self._run_key(found, work, run),
                 self._where_the_run_is(found, run),
                 chat_id,
                 thread_id,
-                reply_markup=cards.workflow_keyboard(run.workflow),
+                cards.workflow_keyboard(run.workflow),
             )
             return
 
@@ -3439,12 +4545,20 @@ class TelegramChannel:
                     thread_id,
                 )
         if start is None or not 0 <= start < len(flow):
-            await self._say(
-                f"Start <b>{html.escape(name)}</b> at which step?",
-                chat_id,
-                thread_id,
-                reply_markup=cards.workflow_steps(name, flow),
-            )
+            asked = f"Start <b>{html.escape(name)}</b> at which step?"
+            steps = cards.workflow_steps(name, flow)
+            if run is not None and run.workflow == name:
+                # The stopped run's own picker: it goes when the run moves.
+                await self._say_about_run(
+                    self._run_key(found, work, run),
+                    asked,
+                    chat_id,
+                    thread_id,
+                    steps,
+                    supersedes=False,
+                )
+            else:
+                await self._say(asked, chat_id, thread_id, reply_markup=steps)
             return
         inside = stretch is not None and stretch[0] <= start <= stretch[1]
         if phase is not None and not inside:
@@ -3467,6 +4581,14 @@ class TelegramChannel:
                 entered=start if phase is not None or (inside and run.entered < 0) else None,
             )
         else:
+            if run is not None:
+                # A stopped run of another workflow, replaced by this one: its
+                # cards would otherwise steer the run that took its place.
+                await self._desk.close_about(
+                    "run",
+                    self._run_key(found, work, run),
+                    outcome=f"↪️ <i>Replaced by a run of {html.escape(name)}.</i>",
+                )
             going = flowing.Run(
                 workflow=name,
                 step=start,
@@ -3477,7 +4599,14 @@ class TelegramChannel:
                 by=actor,
                 phase=phase or 1,
                 entered=start if inside else -1,
+                ident=flowing.new_ident(),
             )
+        if run is not None and run.sending_to:
+            # The step on its way is called back first: the run written down as
+            # going where it was steered, so nothing delivers that step, then
+            # whatever is taking it stopped where it is.
+            await asyncio.to_thread(flowing.save, kept, work, going)
+            await self._call_back(found, work, run, actor)
         kept_said = self._kept(chat_id, SAID_FILE)
         await self._take_step(
             found,
@@ -3496,9 +4625,14 @@ class TelegramChannel:
             f"<b>{html.escape(run.workflow)}</b> {min(run.step + 1, len(flow))}/{len(flow)} · "
             f"{html.escape(step)}{self._phase_of(found, run)}"
         )
+        # On a line of its own: the name to find the run by in the logs and in
+        # `halyard runs`, whatever its messages say the work is.
+        named = f"\nrun <code>{html.escape(run.ident)}</code>" if run.ident else ""
         if run.waiting:
-            return f"▶️ {where} — waiting for <b>{html.escape(run.waiting_for)}</b>."
-        return f"⏸ {where} — {html.escape(run.stopped or 'not started yet')}."
+            return f"▶️ {where} — waiting for <b>{html.escape(run.waiting_for)}</b>.{named}"
+        if run.sending_to:
+            return f"▶️ {where} — on its way to <b>{html.escape(run.sending_to)}</b>.{named}"
+        return f"⏸ {where} — {html.escape(run.stopped or 'not started yet')}.{named}"
 
     async def _take_step(
         self,
@@ -3529,6 +4663,26 @@ class TelegramChannel:
             await self._stopped(found, work, run.held(f"{step.name} names no one agent to go to"))
             return
         [seat] = seats
+        if step.works_on and not run.back:
+            # Its work is an earlier step's: what is carried is that step's
+            # agent's last reply, not the one just before — a close after the
+            # navigator's `developed` closes the driver's report. Sent back to,
+            # it carries what sent it back, as any step does.
+            other = found.workflows.steps.get(step.works_on)
+            made = found.transitions.get(other.transition) if other else None
+            makers = self._seats_for(found.name, other.seat or made.to) if other and made else []
+            if len(makers) != 1:
+                await self._stopped(
+                    found,
+                    work,
+                    run.held(f"{step.name} works on {step.works_on}, which names no one agent"),
+                )
+                return
+            [maker] = makers
+            where = parse_destination(maker.chat) or (self._chat_id, None)
+            said_kept = self._kept_for(found.name, SAID_FILE)
+            said = last_said.last(said_kept, where[0]) if said_kept else None
+            sender = _seat_name(maker)
 
         lines = await self._command_lines(found, transition.commands)
         if lines.missing:
@@ -3536,7 +4690,7 @@ class TelegramChannel:
             # tap puts it on the task and sends this step on.
             held = run.held(f"{lines.needing} takes a {lines.missing} label the task does not have")
             await asyncio.to_thread(flowing.save, kept, work, held)
-            logger.info("Workflow %s for %s stopped: %s", run.workflow, work, held.stopped)
+            logger.info("Workflow %s for %s stopped: %s", _named(run), work, held.stopped)
             await self._ask_for_label(
                 found,
                 lines,
@@ -3545,6 +4699,7 @@ class TelegramChannel:
                 chat_id=run.chat,
                 thread_id=run.thread,
                 workflow=run.workflow,
+                card_key=self._run_key(found, work, run),
                 lead=(
                     f"⏸ <b>{html.escape(run.workflow)}</b> {run.step + 1}/{len(flow)} · "
                     f"{html.escape(step.name)}{self._phase_of(found, run)} — "
@@ -3570,10 +4725,15 @@ class TelegramChannel:
             stretch=stretch,
             most=found.workflows.phases,
         )
-        await asyncio.to_thread(flowing.save, kept, work, run.waiting_on(seat.label))
+        # On its way, and not waited on yet: its commands and inspections come
+        # first, and the seat may be in a turn the message waits behind. What
+        # the seat says meanwhile answers something else — and a restart in
+        # the middle leaves a step that never got there, not one waited on.
+        sent = run.sending(seat.label)
+        await asyncio.to_thread(flowing.save, kept, work, sent)
         logger.info(
             "Workflow %s step %d/%d (phase %d) for %s: %s → %s",
-            run.workflow,
+            _named(run),
             run.step + 1,
             len(flow),
             run.phase,
@@ -3582,36 +4742,106 @@ class TelegramChannel:
             seat.label,
         )
 
-        async def count(label: str) -> int:
-            return await asyncio.to_thread(flowing.record, kept, work, key, to=label)
+        async def count(_label: str) -> int:
+            # Counted once, as it gets there, and waited on from then.
+            return await asyncio.to_thread(flowing.arrived, kept, work, sent, key)
 
-        await self._take_transition(
-            found,
-            step.transition,
-            transition,
-            seat,
-            said,
-            note=note,
-            chat_id=run.chat,
-            thread_id=run.thread,
-            actor=run.by or "workflow",
-            sender=sender,
-            extra=extra,
-            lead=(
-                f"<b>{html.escape(run.workflow)}</b> {run.step + 1}/{len(flow)}"
-                f"{self._phase_of(found, run)} · "
+        async def still() -> bool:
+            return await asyncio.to_thread(flowing.still_sending, kept, work, sent)
+
+        async def stop_as(reason: str, *, go: bool, there: bool = False) -> None:
+            """Stopped as it was sent, any round its turn counted given back —
+            unless the run has moved past the step, when it is left alone, and
+            `there` asks for a step whose turn started."""
+            held = await asyncio.to_thread(
+                partial(flowing.missed, kept, work, sent, reason, key=key, there=there)
+            )
+            if held is not None:
+                await self._stopped(found, work, held, go=go)
+
+        async def missed(why: str) -> None:
+            await stop_as(f"{step.name} did not reach {seat.label}: {why.rstrip('.')}", go=True)
+
+        async def failed(why: str) -> None:
+            await stop_as(
+                f"{step.name}'s turn in {seat.label} ended without an answer: {why.rstrip('.')}",
+                go=True,
+                there=True,
+            )
+
+        async def halted(who: str) -> None:
+            await stop_as(
+                f"{step.name}'s turn in {seat.label} was stopped by {who} before it answered",
+                go=True,
+                there=True,
+            )
+
+        async def dropped(who: str) -> None:
+            await stop_as(
+                f"{step.name} was stopped by {who} before it reached {seat.label}", go=True
+            )
+
+        # Its own task, known by the run, so stopping or steering the run can
+        # call it back while it is on its way — see `_call_back`.
+        card_key = self._run_key(found, work, run)
+        going = asyncio.create_task(
+            self._take_transition(
+                found,
+                step.transition,
+                transition,
+                seat,
+                said,
+                note=note,
+                chat_id=run.chat,
+                thread_id=run.thread,
+                actor=run.by or "workflow",
+                sender=sender,
+                extra=extra,
+                lead=(
+                    f"<b>{html.escape(run.workflow)}</b> {run.step + 1}/{len(flow)}"
+                    f"{self._phase_of(found, run)} · "
+                ),
+                buttons=cards.workflow_keyboard(run.workflow),
+                card_key=card_key,
+                command_lines=lines.lines,
+                step_line=f"{_named(run)}, step {run.step + 1} of {len(flow)}: {step.name}",
+                counted=StepRounds(
+                    before=run.rounds.get(key, ()),
+                    allowed=step.rounds,
+                    count=count,
+                    run=flowing.journal.run_id(run, work),
+                    step=step.name,
+                    phase=run.phase if "@" in key else None,
+                    still=still,
+                    missed=missed,
+                    failed=failed,
+                    stopped=halted,
+                    dropped=dropped,
+                ),
             ),
-            buttons=cards.workflow_keyboard(run.workflow),
-            command_lines=lines.lines,
-            counted=StepRounds(
-                before=run.rounds.get(key, ()),
-                allowed=step.rounds,
-                count=count,
-                run=flowing.journal.run_id(run, work),
-                step=step.name,
-                phase=run.phase if "@" in key else None,
-            ),
+            name=f"workflow step {step.name}",
         )
+        underway = _Underway(going, step.name, seat.label)
+        self._underway[card_key] = underway
+        try:
+            await asyncio.wait({going})
+        except asyncio.CancelledError:
+            going.cancel()
+            raise
+        finally:
+            if self._underway.get(card_key) is underway:
+                del self._underway[card_key]
+        if going.cancelled():
+            # Called back on its way: whoever called it back has said so.
+            return
+        handed = going.result()
+        if handed is not None and handed.stopped:
+            # Held where it is, as for any other stop: fixed, the step is
+            # picked again and the run goes on with its rounds as they were.
+            # A transition that ran commands stopped at one that did not run;
+            # one that ran nothing could not have reached the seat at all.
+            why = "a command did not run" if handed.ran else handed.stopped.rstrip(".")
+            await stop_as(f"{step.name}: {why}", go=False)
 
     @staticmethod
     def _phase_of(found: Project, run: flowing.Run) -> str:
@@ -3636,6 +4866,37 @@ class TelegramChannel:
             named[name] = seats[0].label if len(seats) == 1 else (step.seat or transition.to or "")
         return named
 
+    @staticmethod
+    def _run_key(found: Project, work: str, run: flowing.Run) -> str:
+        """What a run's cards are about, for the desk: the run's own name — or,
+        for a run started before runs had one, its workflow on its work."""
+        return run.ident or f"{found.name}|{work}|{run.workflow}"
+
+    async def _say_about_run(
+        self,
+        key: str,
+        text: str,
+        chat_id: str | None,
+        thread_id: int | None,
+        keyboard: dict | None,
+        *,
+        supersedes: bool = True,
+    ) -> Card | None:
+        """Put a card about a run in the chat, as that run's one live card.
+
+        Every card the run had before closes once this one is there. A run's
+        buttons carry its workflow's name alone, so left live on an old card
+        they acted on whatever run was going when they were pressed. A picker
+        the run's card offers — `supersedes=False` — is the run's too, and goes
+        when the run moves, without closing the card it came from.
+        """
+        before = self._desk.of("run", key) if supersedes else []
+        card = await self._say(text, chat_id, thread_id, reply_markup=keyboard, kind="run", key=key)
+        if card is not None:
+            for old in before:
+                await self._desk.close_card(old, outcome=RUN_SUPERSEDED)
+        return card
+
     async def _stopped(
         self,
         found: Project,
@@ -3645,26 +4906,244 @@ class TelegramChannel:
         go: bool = False,
         go_text: str = "",
         on: str = "",
+        offers: tuple[tuple[str, int, bool, str], ...] = (),
     ) -> None:
         """Keep a run that is not going on, and say so where it was started.
 
-        The card keeps the work in the run: send what is ready, leave the
-        phases (`on` names where to), pick the step to go on from, or stop it.
-        Taking it by hand would take it out of the run, and nothing asked for
-        that.
+        The card keeps the work in the run: where the agent's own words would
+        have taken it (`offers`), send what is ready, leave the phases (`on`
+        names where to), pick the step to go on from, or stop it. Taking it by
+        hand would take it out of the run, and nothing asked for that. When it
+        stopped is kept, so `/workflow` can later offer what its agents said
+        since — see `_run_card`.
         """
+        run = replace(run, stopped_at=self._clock())
         kept = self._kept_for(found.name, WORKFLOW_FILE)
         if kept is not None:
             await asyncio.to_thread(flowing.save, kept, work, run)
-        logger.info("Workflow %s for %s stopped: %s", run.workflow, work, run.stopped)
+        logger.info("Workflow %s for %s stopped: %s", _named(run), work, run.stopped)
+        said, keyboard = self._run_card(found, run, go=go, go_text=go_text, on=on, offers=offers)
+        await self._say_about_run(
+            self._run_key(found, work, run), said, run.chat, run.thread, keyboard
+        )
+
+    async def _call_back(self, found: Project, work: str, run: flowing.Run, actor: str) -> None:
+        """Call back the step `run` had on its way, now that the run no longer
+        sends it — stopped, or steered to another step. The run is written down
+        that way first, so nothing delivers the step after: every runtime asks,
+        right before the turn that would carry it, whether it still goes.
+
+        What is still taking it is ended where it is: a command it was running
+        as `/stop` ends one, with everything it started, its inspections with
+        any card they had open, and the transition itself. The chat says the
+        step never reached its agent.
+        """
+        if not run.sending_to:
+            return
+        key = self._run_key(found, work, run)
+        underway = self._underway.get(key)
+        if underway is not None:
+            for session, inspection in list(self._inspecting.items()):
+                if inspection.about == key:
+                    await self._stop_inspection(session, actor or "the workflow")
+            underway.task.cancel()
+            done, _ = await asyncio.wait({underway.task}, timeout=CALLED_BACK_WITHIN_SECONDS)
+            if not done:
+                logger.warning("Step %s for %s was still winding down", underway.step, work)
+        flow = found.workflows.flows.get(run.workflow) or ()
+        step = flow[run.step] if run.step < len(flow) else "Its step"
+        logger.info("Workflow %s for %s: %s called back on its way", _named(run), work, step)
         await self._say(
-            self._where_the_run_is(found, run),
+            f"⏹ <b>{html.escape(step)}</b> was stopped before it reached "
+            f"<b>{html.escape(run.sending_to)}</b>.",
             run.chat,
             run.thread,
-            reply_markup=cards.workflow_keyboard(
-                run.workflow, go=go, go_text=go_text, on=on, pick=True
-            ),
         )
+
+    def _run_card(
+        self,
+        found: Project,
+        run: flowing.Run,
+        *,
+        go: bool | None = None,
+        go_text: str = "",
+        on: str | None = None,
+        offers: tuple[tuple[str, int, bool, str], ...] | None = None,
+    ) -> tuple[str, dict]:
+        """What a run's card says and offers — the same whether it was just
+        stopped or somebody asked `/workflow` later. A card that offered less
+        the second time left a stopped run with nothing to send it on with.
+
+        Whatever is not given is read from the run: what is ready to send,
+        named; where leaving the phases goes; where its agent's own words would
+        have taken it, after a wait or a reply with no decision; and, ahead of
+        all of them, where the agents' replies since the stop would take it —
+        the work often goes on outside a stopped run, and its agents' latest
+        words are what to send it on with.
+        """
+        said = self._where_the_run_is(found, run)
+        if run.sending_to:
+            # On its way, it can still be called back for a step picked instead.
+            return said, cards.workflow_keyboard(run.workflow, pick=True)
+        if run.waiting:
+            return said, cards.workflow_keyboard(run.workflow)
+        flow = found.workflows.flows.get(run.workflow) or ()
+        stretch = found.workflows.stretches.get(run.workflow)
+        if on is None:
+            on = (
+                (flow[run.leaving] if run.leaving < len(flow) else "the end")
+                if run.leaving >= 0
+                else ""
+            )
+        if offers is None:
+            offers = (
+                self._offers(found, run.as_it_stood(stretch), flow, stretch)
+                if run.waited >= 0 and run.leaving < 0
+                else ()
+            )
+        if go is None:
+            go = not offers and run.step < len(flow)
+        if go and not go_text and run.step < len(flow):
+            agent = self._step_seats(found, flow).get(flow[run.step], "")
+            go_text = f"▶️ {flow[run.step]}" + (f" → {agent}" if agent else "")
+        heard, since = self._heard_since(found, run, flow, stretch)
+        if run.waited >= 0 and run.waiting_for:
+            said += (
+                f"\n\nOr answer <b>{html.escape(run.waiting_for)}</b> in its own chat: its "
+                "own decision moves the run on from there."
+            )
+        if heard:
+            said += "\n\n" + "\n".join(heard)
+        keyboard = cards.workflow_keyboard(
+            run.workflow, go=go, go_text=go_text, on=on, pick=True, offers=(*since, *offers)
+        )
+        return said, keyboard
+
+    def _heard_since(
+        self,
+        found: Project,
+        run: flowing.Run,
+        flow: Sequence[str],
+        stretch: tuple[int, int] | None,
+    ) -> tuple[list[str], tuple[tuple[str, int, bool, str], ...]]:
+        """What the run's agents have said since it stopped, and where their
+        words would take the work from each of their steps.
+
+        Measured on alpha-engine#454: a run stopped on its round limit, the work
+        went on with the driver, and the driver's `forward` an hour later moved
+        nothing — a stopped run is only moved by its card, and the card offered
+        the round it had stopped on. Which of the driver's steps that forward
+        finished is not something the run can know, so each is offered: the
+        step after `discover`, and the step after `develop`.
+        """
+        # A run stopped before stops were timed: its last delivery stands in.
+        # What it offers is still held to its rounds, so the reply that
+        # stopped it offers nothing it has not already refused.
+        stopped = run.stopped_at or max(
+            (entry.at for entries in run.rounds.values() for entry in entries), default=None
+        )
+        if run.waiting or stopped is None:
+            return [], ()
+        kept = self._kept_for(found.name, SAID_FILE)
+        if kept is None:
+            return [], ()
+        agents = self._step_seats(found, flow)
+        words = found.workflows.decisions
+        lines: list[str] = []
+        offered: list[tuple[str, int, bool, str]] = []
+        for label in dict.fromkeys(agents.values()):
+            seat = find(self._seats, label)
+            where = parse_destination(seat.chat) if seat is not None and seat.chat else None
+            said = last_said.last(kept, where[0]) if where else None
+            if said is None or said.at <= stopped:
+                continue
+            decision, named = flowing.decided(said.text, words)
+            if decision is None or decision is flowing.Decision.WAIT:
+                continue
+            word = flowing.word_for(decision, words)
+            lines.append(
+                f"Since it stopped, <b>{html.escape(label)}</b> said <b>{html.escape(word)}</b> "
+                f"at {_local(said.at):%H:%M}."
+            )
+            for place, name in enumerate(flow):
+                if agents.get(name) != label:
+                    continue
+                going = flowing.after(
+                    decision,
+                    run=run.at(place),
+                    flow=flow,
+                    steps=found.workflows.steps,
+                    taken=run.taken(),
+                    stretch=stretch,
+                    most=found.workflows.phases,
+                    named=named,
+                )
+                if (
+                    going.step is None
+                    or going.stop
+                    or going.done
+                    or going.phase is not None
+                    or going.entered is not None
+                    or any(already == going.step for _, already, _, _ in offered)
+                ):
+                    continue
+                target = flow[going.step]
+                agent = agents.get(target, "")
+                offered.append(
+                    (
+                        f"💬 {label} {word}: {target}" + (f" → {agent}" if agent else ""),
+                        going.step,
+                        going.back,
+                        label,
+                    )
+                )
+        return lines, tuple(offered)
+
+    def _offers(
+        self,
+        found: Project,
+        run: flowing.Run,
+        flow: Sequence[str],
+        stretch: tuple[int, int] | None,
+    ) -> tuple[tuple[str, int, bool, str], ...]:
+        """Where the agent that stopped `run` would have sent the work with its
+        own words — forward and back — as buttons: the word, the step and its
+        agent. Only the moves a button can make as they are: one that would
+        change phase, enter the phases, or go past a step's rounds is left to
+        picking a step."""
+        words = found.workflows.decisions
+        agents = self._step_seats(found, flow)
+        offered: list[tuple[str, int, bool, str]] = []
+        for decision, icon in ((flowing.Decision.FORWARD, "▶️"), (flowing.Decision.BACK, "↩️")):
+            going = flowing.after(
+                decision,
+                run=run,
+                flow=flow,
+                steps=found.workflows.steps,
+                taken=run.taken(),
+                stretch=stretch,
+                most=found.workflows.phases,
+            )
+            if (
+                going.step is None
+                or going.stop
+                or going.done
+                or going.phase is not None
+                or going.entered is not None
+            ):
+                continue
+            name = flow[going.step]
+            agent = agents.get(name, "")
+            word = flowing.word_for(decision, words)
+            offered.append(
+                (
+                    f"{icon} {word}: {name}" + (f" → {agent}" if agent else ""),
+                    going.step,
+                    going.back,
+                    "",
+                )
+            )
+        return tuple(offered)
 
     async def _finished(self, found: Project, work: str, run: flowing.Run, outcome: str) -> None:
         """The end of a run: what it did is kept for reading later, and one
@@ -3694,7 +5173,14 @@ class TelegramChannel:
         kept = self._kept_for(found.name, WORKFLOW_FILE)
         if kept is not None:
             await asyncio.to_thread(flowing.clear, kept, work)
-        logger.info("Workflow %s for %s %s", run.workflow, work, outcome)
+        logger.info("Workflow %s for %s %s", _named(run), work, outcome)
+        # Its cards say so, every one: buttons left on them would steer the
+        # next run of the same workflow.
+        await self._desk.close_about(
+            "run",
+            self._run_key(found, work, run),
+            outcome=RUN_DONE if outcome == "done" else RUN_STOPPED,
+        )
         if outcome != "done":
             return
         flow = found.workflows.flows.get(run.workflow) or ()
@@ -3702,7 +5188,9 @@ class TelegramChannel:
         start, end = _local(run.since), _local(finished)
         shape = "%H:%M" if start.date() == end.date() else "%b %d %H:%M"
         await self._say(
-            f"📋 <b>{html.escape(run.workflow)}</b> is done — {html.escape(work)}\n"
+            f"📋 <b>{html.escape(run.workflow)}</b> is done — {html.escape(work)}"
+            + (f" · run <code>{html.escape(run.ident)}</code>" if run.ident else "")
+            + "\n"
             f"{start.strftime(shape)} → {end.strftime(shape)} · "
             f"{flowing.journal.lasted(run.since, finished)}\n"
             f"{html.escape(flowing.journal.steps_line(run, flow=flow, stretch=stretch))}",
@@ -3711,7 +5199,8 @@ class TelegramChannel:
         )
 
     async def _advance_workflow(self, answered: Seat, text: str) -> None:
-        """Take the next step, now that the seat a run was waiting for replied.
+        """Take the next step, now that the seat a run was waiting for replied
+        — or the seat whose reply stopped it decided again.
 
         Most replies are not a step: a seat nobody is waiting for costs a file
         read and nothing else. The decision is the reply's own last line, in
@@ -3727,12 +5216,35 @@ class TelegramChannel:
         if kept is None or work is None:
             return
         run = await asyncio.to_thread(flowing.current, kept, work)
-        if run is None or not run.waiting or run.waiting_for != answered.label:
+        if run is not None and run.sending_to == answered.label:
+            # The step has not got there: its commands or inspections are still
+            # going, or it waits behind a turn of that seat's. What the seat
+            # says now answers that turn, not the step.
+            logger.info(
+                "Workflow %s for %s: %s replied before step %d reached it; not its answer",
+                _named(run),
+                work,
+                answered.label,
+                run.step + 1,
+            )
+            return
+        if run is None or run.waiting_for != answered.label:
+            return
+        if not run.waiting and run.waited < 0:
             return
 
         flow = found.workflows.flows.get(run.workflow) or ()
         stretch = found.workflows.stretches.get(run.workflow)
         decision, named = flowing.decided(text, found.workflows.decisions)
+        lifting = not run.waiting
+        if lifting:
+            # The seat whose reply stopped the run, heard from again.
+            run = run.as_it_stood(stretch)
+        decision = flowing.taken_as(decision, step=run.step, flow=flow)
+        if lifting and decision in (None, flowing.Decision.WAIT):
+            # Only a decision takes it on: the replies in between are the word
+            # with the operator the stop was for, and another wait is the same one.
+            return
         moving = flowing.after(
             decision,
             run=run,
@@ -3744,18 +5256,21 @@ class TelegramChannel:
             named=named,
         )
         logger.info(
-            "Workflow %s for %s: %s decided %s%s, acting on %s",
-            run.workflow,
+            "Workflow %s for %s: %s decided %s%s%s, acting on %s",
+            _named(run),
             work,
             answered.label,
             decision or "nothing",
             f" {named}" if named else "",
+            " after the stop" if lifting else "",
             moving.decided or "nothing",
         )
         here = found.workflows.steps.get(flow[run.step]) if run.step < len(flow) else None
-        if here is not None:
+        if here is not None and not lifting:
             # Kept on the round this answers, so a run read back later says how
-            # it moved and on whose word, not only where it went.
+            # it moved and on whose word, not only where it went. A round whose
+            # reply stopped the run keeps what it said: what came after it
+            # answered the operator.
             whose = ""
             if moving.decided is not None:
                 whose = here.name if decision is not None else here.decided_by
@@ -3766,7 +5281,7 @@ class TelegramChannel:
                 decided_by=whose,
             )
             await asyncio.to_thread(flowing.save, kept, work, run)
-        if decision is None and moving.leaving is None:
+        if decision is None and moving.leaving is None and not moving.stop:
             # Said rather than done quietly: a flow that moves on a reply
             # nobody wrote a decision into is a step somebody should see taken.
             if moving.decided is not None and here is not None and here.decided_by:
@@ -3810,15 +5325,26 @@ class TelegramChannel:
             on = ""
             if moving.leaving is not None:
                 on = flow[moving.leaving] if moving.leaving < len(flow) else "the end"
+            # A stop on the agent's own reply — a wait, or no decision — offers
+            # where its words would have taken the work. The end of a phase and
+            # the end of the flow have buttons of their own.
+            offers = (
+                self._offers(found, run, flow, stretch)
+                if moving.liftable and moving.leaving is None
+                else ()
+            )
             await self._stopped(
                 found,
                 work,
                 parked.held(
-                    moving.stop, leaving=moving.leaving if moving.leaving is not None else -1
+                    moving.stop,
+                    leaving=moving.leaving if moving.leaving is not None else -1,
+                    waited=run.step if moving.liftable else -1,
                 ),
-                go=target is not None,
+                go=target is not None and not offers,
                 go_text=go_text,
                 on=on,
+                offers=offers,
             )
             return
         if moving.step is None:
@@ -3861,10 +5387,28 @@ class TelegramChannel:
             f"<b>{html.escape(by)}</b> named where to start."
         )
 
-    async def _resume_workflow(self, action: str, chat_id: str, thread_id: int | None) -> None:
-        """The buttons on a run: send the step it stopped before (`go`), leave
-        its phases instead (`on`), offer its steps to go on from (`pick`), or
-        stop it (`stop`)."""
+    async def _resume_workflow(
+        self,
+        action: str,
+        chat_id: str,
+        thread_id: int | None,
+        *,
+        place: int = -1,
+        back: bool = False,
+        speaker: str = "",
+        card: Card | None = None,
+        actor: str = "",
+    ) -> None:
+        """The buttons on a run: send the step it stopped before (`go`), send
+        the step at `place` its agent's own words would have (`to`), leave its
+        phases instead (`on`), offer its steps to go on from (`pick`), or stop
+        it (`stop`). A step on its way can be stopped, or a step picked to go in
+        its place; the others wait until the run stops.
+
+        `card` is the one pressed, when the desk sent it. Its buttons name only
+        the workflow, so a card of a run that is over or was replaced is not
+        acted on: it would steer the run going now — an old Stop stopping a run
+        started since. It closes instead, saying so. `actor` is who pressed."""
         found = self._repository_for(chat_id)
         if found is None:
             await self._say(self._no_repository(chat_id), chat_id, thread_id)
@@ -3872,11 +5416,18 @@ class TelegramChannel:
         kept = self._kept_for(found.name, WORKFLOW_FILE)
         work = await self._work_item(found)
         run = await asyncio.to_thread(flowing.current, kept, work) if kept and work else None
+        ours = card is not None and card.kind == "run"
         if run is None or kept is None or work is None:
+            if ours:
+                await self._desk.close_card(card, outcome=RUN_OVER)
             await self._say("No workflow is going here.", chat_id, thread_id)
+            return
+        if ours and card.key != self._run_key(found, work, run):
+            await self._desk.close_card(card, outcome=RUN_EARLIER)
             return
         if action == "stop":
             await self._finished(found, work, run, "stopped")
+            await self._call_back(found, work, run, actor)
             await self._say(
                 f"⏹ <b>{html.escape(run.workflow)}</b> stopped at step {run.step + 1}. "
                 "Its transitions can still be pressed by hand.",
@@ -3884,34 +5435,51 @@ class TelegramChannel:
                 thread_id,
             )
             return
-        if run.waiting:
+        if run.waiting or (run.sending_to and action != "pick"):
+            # Going: a step on its way sent again would reach its seat twice.
             await self._say(self._where_the_run_is(found, run), chat_id, thread_id)
             return
         flow = found.workflows.flows.get(run.workflow) or ()
+        if action == "to":
+            if not 0 <= place < len(flow):
+                await self._say(self._where_the_run_is(found, run), chat_id, thread_id)
+                return
+            run = run.at(place, back=back)
         if action == "pick":
-            await self._say(
+            # The run's own picker: it goes when the run moves, and leaves the
+            # run's card where it is until then.
+            await self._say_about_run(
+                self._run_key(found, work, run),
                 f"Send <b>{html.escape(run.workflow)}</b> on from which step"
                 f"{self._phase_of(found, run).replace(' · ', ', in ')}? Its rounds so far "
                 "are kept.",
                 chat_id,
                 thread_id,
-                reply_markup=cards.workflow_steps(run.workflow, flow),
+                cards.workflow_steps(run.workflow, flow),
+                supersedes=False,
             )
             return
         if action == "on":
-            # Only from a stop at the end of a phase, which is the one that
-            # says where leaving goes. The run is parked at the next phase, so
-            # the phase it leaves in is the one before that. A button left on
-            # an older card finds nothing to leave: the run has moved since.
+            # Only from a stop that says where leaving goes: the end of a phase,
+            # or the last step ending without done, whose way out is the end. A
+            # run parked at the next phase leaves from the phase before it. A
+            # button left on an older card finds nothing to leave: the run has
+            # moved since.
             stretch = found.workflows.stretches.get(run.workflow)
-            if stretch is None or run.leaving < 0:
+            if run.leaving < 0:
                 await self._say(self._where_the_run_is(found, run), chat_id, thread_id)
                 return
             if run.leaving >= len(flow):
                 await self._finished(found, work, run, "done")
                 return
+            if stretch is None:
+                await self._say(self._where_the_run_is(found, run), chat_id, thread_id)
+                return
             run = run.at(run.leaving, phase=max(run.phase - 1, 1), entered=stretch[0])
-        source = find(self._seats, run.waiting_for) if run.waiting_for else None
+        # The reply it carries: the agent an offer named, or the one the run
+        # last dealt with.
+        heard_from = speaker or run.waiting_for
+        source = find(self._seats, heard_from) if heard_from else None
         where = (parse_destination(source.chat) if source and source.chat else None) or (
             run.chat,
             run.thread,
@@ -3936,7 +5504,7 @@ class TelegramChannel:
         *truncated* version of what it is shown next to would be worse than no
         button.
         """
-        keyboard = cards.seat_choices(tuple(seat.label for seat in self._seats))
+        keyboard = cards.seat_choices(*self._agents_to_offer(chat_id))
         if keyboard is None:
             await self._say(self._seat_list(), chat_id, thread_id)
             return
@@ -3949,13 +5517,31 @@ class TelegramChannel:
             reply_to_message_id=anchor_id,
         )
 
+    async def _what_stops_delivery(self, seat: Seat, chat_id: str) -> str | None:
+        """Why a message to this seat could not be delivered now, or None.
+
+        The same refusals the delivery itself makes, asked up front: paused, no
+        way to send at all, or no session to send to. A sentence for the chat.
+        """
+        if self._gate.paused:
+            return "Halyard is paused. Send /resume first."
+        if not (self._runner or self._runners) or self._registry is None:
+            return "this control plane cannot send messages into a session."
+        destination, _ = parse_destination(seat.chat) or (chat_id, None)
+        if await self._session_for(destination) is None:
+            return (
+                f"the <b>{html.escape(seat.label)}</b> agent's session could not be found "
+                "— /status says more."
+            )
+        return None
+
     async def _forward_to_session(
         self,
         text: str,
         actor: str,
         chat_id: str,
         thread_id: int | None = None,
-        accepted: Callable[[], Awaitable[None]] | None = None,
+        landing: _Landing | None = None,
     ) -> None:
         """Put a typed message into the session that chat belongs to.
 
@@ -3963,9 +5549,14 @@ class TelegramChannel:
         each tool may stop for an approval — which arrives as a button press
         this same poll loop has to read. Waiting here for the turn to finish
         would mean waiting for an approval that can never be delivered.
+
+        `landing` is what waits on it getting there, told when it does not —
+        here, or in `_deliver`.
         """
         if self._gate.paused:
             await self._say("⏸ Paused. Send /resume first.", chat_id, thread_id)
+            if landing is not None:
+                await landing.missed("Halyard is paused")
             return
         if not (self._runner or self._runners) or self._registry is None:
             await self._say(
@@ -3974,6 +5565,8 @@ class TelegramChannel:
                 chat_id,
                 thread_id,
             )
+            if landing is not None:
+                await landing.missed("this control plane cannot send messages into a session")
             return
 
         found = await self._session_for(chat_id)
@@ -3982,7 +5575,7 @@ class TelegramChannel:
             # until the turn before it finished. Silence is what makes people
             # think a message was lost.
             await self._say(
-                "⏳ Still working on the last one — yours is queued behind it.",
+                "⏳ Still working on the last one — yours is queued behind it. /stop ends both.",
                 chat_id,
                 thread_id,
             )
@@ -4018,9 +5611,12 @@ class TelegramChannel:
                     "<code>halyard doctor</code>."
                 )
             await self._say(said, chat_id, thread_id)
+            if landing is not None:
+                await landing.missed("its session could not be found")
             return
 
-        task = asyncio.create_task(self._deliver(found, text, actor, chat_id, thread_id, accepted))
+        self._worked_with(self._seat_for_chat(chat_id))
+        task = asyncio.create_task(self._deliver(found, text, actor, chat_id, thread_id, landing))
         # Held so the loop does not drop the only reference and cancel it.
         self._sending.add(task)
         task.add_done_callback(self._sending.discard)
@@ -4091,6 +5687,33 @@ class TelegramChannel:
     def _seat_for_chat(self, chat_id: str) -> Seat | None:
         return for_chat(self._seats, chat_id) if self._seats else None
 
+    def _worked_with(self, seat: Seat | None) -> None:
+        """Note `seat` as the agent its role last worked with in its project,
+        which the cards that ask for an agent offer first — see `last_agents`."""
+        if seat is None or not seat.project or seat.role is None:
+            return
+        last_agents.remember(
+            self._kept_for(seat.project, last_agents.FILE), role=seat.role.value, label=seat.label
+        )
+
+    def _recent_agents(self, project: str | None) -> dict[str, str]:
+        """The agent each role last worked with in `project`, in the order the
+        roles are listed: navigator, driver, reviewer."""
+        if not project:
+            return {}
+        kept = last_agents.recent(self._kept_for(project, last_agents.FILE))
+        return {role.value: kept[role.value] for role in Role if role.value in kept}
+
+    def _agents_to_offer(self, chat_id: str) -> tuple[tuple[str, ...], tuple[str, ...]]:
+        """The agents `/forward` and `/to` offer from this chat, and the ones to
+        offer first: those this chat's project last worked with. Never the
+        chat's own agent — handing a reply back to whoever wrote it is a slip
+        of the thumb, not an intention."""
+        own = self._seat_for_chat(chat_id)
+        labels = tuple(seat.label for seat in self._seats if seat is not own)
+        first = tuple(self._recent_agents(self._project_name_for(chat_id)).values())
+        return labels, first
+
     def _runner_for(self, seat: Seat | None):
         """The runtime a seat is, falling back to the only one there is."""
         return (seat and self._runners.get(seat.runtime)) or self._runner
@@ -4151,10 +5774,24 @@ class TelegramChannel:
         actor: str,
         chat_id: str | None = None,
         thread_id: int | None = None,
-        accepted: Callable[[], Awaitable[None]] | None = None,
+        landing: _Landing | None = None,
     ) -> None:
         session_id, project, cwd = session.session_id, session.project, session.cwd
         runtime = getattr(session.runner, "id", "?")
+        # Asked only by what waits on its turn starting: everything else sends
+        # as it always has.
+        started = landing.started if landing is not None else None
+
+        async def begun() -> bool:
+            """Its turn is beginning, unless it was called back — and is then
+            the one `/stop` in that session stops."""
+            assert started is not None and landing is not None
+            if not await started():
+                return False
+            self._step_turns[session_id] = landing
+            return True
+
+        told = {"started": lambda _: begun()} if started is not None else {}
 
         async def stopped_afterwards(reason: str) -> None:
             """Say so when a turn that *was* accepted then fell over.
@@ -4171,10 +5808,17 @@ class TelegramChannel:
                 chat_id,
                 thread_id,
             )
+            if landing is not None:
+                # A workflow's step whose turn ended without its answer: the
+                # run would wait for a reply nothing is writing.
+                if self._step_turns.get(session_id) is landing:
+                    del self._step_turns[session_id]
+                await landing.ended(_last_line(reason) or "it stopped")
 
+        stops_before, _ = self._stopped_in.get(session_id, (0, ""))
         delivered = False
         try:
-            delivered = await session.runner.send(session_id, text, cwd, stopped_afterwards)
+            delivered = await session.runner.send(session_id, text, cwd, stopped_afterwards, **told)
         except Exception:
             logger.exception("Could not deliver a message to %s", session_id)
         finally:
@@ -4187,14 +5831,30 @@ class TelegramChannel:
                     delivered=delivered,
                 )
             )
-        if delivered and accepted is not None:
+        if delivered and landing is not None and landing.accepted is not None:
             # Whatever was waiting for it to land — a transition's round, counted
             # only now, so a message that reached nobody is not one. Failing
             # here costs that and nothing else: the message is in.
             try:
-                await accepted()
+                await landing.accepted()
             except Exception:
                 logger.exception("Could not note that a message reached %s", session_id)
+            if started is None:
+                # A runtime that never says a turn started: its turn is the one
+                # going in the session from acceptance.
+                self._step_turns[session_id] = landing
+        if not delivered and landing is not None and not await landing.still():
+            # Called back while it waited behind a turn: nothing reached the
+            # session, and whoever called it back has said so.
+            logger.info("A step for %s was called back before it was sent", session_id)
+            return
+        stops_after, stopped_by = self._stopped_in.get(session_id, (0, ""))
+        if not delivered and landing is not None and stops_after != stops_before:
+            # It waited behind a turn somebody stopped, and went with it: what
+            # they stopped is what happened, not a message that reached nobody.
+            logger.info("A step for %s went with a turn %s stopped", session_id, stopped_by)
+            await landing.dropped_by(stopped_by)
+            return
         if not delivered:
             # Name what was tried. "Check the log" is the message this project
             # keeps having to replace: the person reading it is on a phone,
@@ -4221,8 +5881,10 @@ class TelegramChannel:
                 chat_id,
                 thread_id,
             )
+            if landing is not None:
+                await landing.missed(_last_line(because) or "nothing was printed")
 
-    async def _status(self) -> str:
+    async def _status(self, here: str | None = None) -> str:
         state = await self._gate.state()
         open_requests = await self._store.list_open()
         lines = [
@@ -4230,6 +5892,8 @@ class TelegramChannel:
             "",
             f"Gate: {'⏸ paused' if state.paused else '▶️ running'}",
         ]
+        if here:
+            lines.append(self._whose_chat(here))
         if state.changed_by:
             lines.append(f"  last changed by {html.escape(state.changed_by)}")
 
@@ -4372,6 +6036,40 @@ class TelegramChannel:
         lines.append("\nAdd <code>default</code> to give a choice back to the session.")
         return "\n".join(lines)
 
+    def _whose_chat(self, here: str) -> str:
+        """This chat's id, and the agent it belongs to.
+
+        The id is what an agent's `chat:` needs, and a new group has no other
+        way to say it: reading it from Telegram's own API means stopping
+        Halyard first, because a running poll takes every update. Two agents
+        in one chat are said too — a typed message reaches only the first.
+        """
+        chat = html.escape(here)
+        owners = [
+            seat.label
+            for seat in self._seats
+            if seat.chat and (seat.chat == here or seat.chat.split(":")[0] == here)
+        ]
+        if not owners and (role := self._role_for_chat(here)):
+            owners = [role.value]
+        if not owners and here == self._chat_id:
+            return (
+                f"This chat: <code>{chat}</code> — the default group, where anything "
+                "unrouted lands."
+            )
+        if not owners:
+            return (
+                f"This chat: <code>{chat}</code> — no agent speaks here; give one "
+                f'<code>chat: "{chat}"</code> in <code>halyard.yaml</code>.'
+            )
+        if len(owners) == 1:
+            return f"This chat: <code>{chat}</code> — {html.escape(owners[0])}'s."
+        named = ", ".join(html.escape(label) for label in owners)
+        return (
+            f"This chat: <code>{chat}</code> — {named} all speak here, and a typed "
+            f"message reaches only {html.escape(owners[0])}."
+        )
+
     async def _describe_seats(self) -> list[str]:
         """One line per configured seat: what it is, and what is answering.
 
@@ -4422,23 +6120,38 @@ class TelegramChannel:
         thread_id: int | None = None,
         reply_markup: dict | None = None,
         reply_to_message_id: int | None = None,
-    ) -> None:
+        *,
+        kind: str = "",
+        key: str = "",
+        expires_at: datetime | None = None,
+        ending: Callable[[str, str | None], str] | None = None,
+    ) -> Card | None:
         """Answer in the conversation that asked.
 
         Not in the configured default chat, which is where this used to go: ask
         the navigator group something and the reply appeared in a private chat
         with the bot, which reads as the message having been lost.
+
+        Anything said with buttons under it is a card, kept by the desk so it
+        closes: `kind` and `key` say what it is about when the buttons do not,
+        `expires_at` when it stops meaning anything, and `ending` what it says
+        then. See `CardDesk`. The card, when it is one and it arrived.
         """
         try:
-            await self._api.send_message(
+            return await self._desk.open(
                 chat_id or self._chat_id,
                 text,
-                message_thread_id=thread_id,
-                reply_markup=reply_markup,
-                reply_to_message_id=reply_to_message_id,
+                reply_markup,
+                thread=thread_id,
+                reply_to=reply_to_message_id,
+                kind=kind,
+                key=key,
+                expires_at=expires_at,
+                ending=ending,
             )
         except Exception:
             logger.warning("Could not answer a command", exc_info=True)
+            return None
 
     async def _handle_callback(self, callback: dict) -> None:
         query_id = str(callback.get("id", ""))
@@ -4457,14 +6170,43 @@ class TelegramChannel:
             here = str((message.get("chat") or {}).get("id") or "") or None
             what, value = chosen
             await self._dismiss(query_id)
+            # Spent before it is acted on, whatever it is: a second press then
+            # finds nothing to press. Only a run's own buttons keep their card.
+            await self._spend(what, value, callback.get("data") or "", message, here)
             if what == "cancel":
-                await self._close_card(message, here)
+                return
+            if what in ("do", "prompt"):
+                # A command pressed on a menu card is that command typed: the
+                # same path, the same checks, the same log.
+                allowed = (*ACTIONS, *AGENT) if what == "do" else tuple(self._prompts)
+                if value not in allowed:
+                    return
+                await self._handle_message(
+                    {
+                        "message_id": message.get("message_id"),
+                        "from": callback.get("from"),
+                        "chat": message.get("chat"),
+                        "message_thread_id": message.get("message_thread_id"),
+                        "text": f"/{value}",
+                    }
+                )
                 return
             if what == "label":
                 await self._label_task(value, here or "", message.get("message_thread_id"))
                 return
             if what == "run":
                 await self._run_command(value, here or "", message.get("message_thread_id"))
+                return
+            if what == "commit":
+                # Detached, as `/commit` is: an option may run the project's
+                # gate and its inspections before there is a card.
+                thread = message.get("message_thread_id")
+                self._detach(
+                    self._propose_commit(here or "", thread)
+                    if value == cards.PLAIN_COMMIT
+                    else self._commit(value, here or "", thread),
+                    "/commit",
+                )
                 return
             if what in ("inspect", "check"):
                 # `check` is what a card said until 2026-09-23; its buttons still
@@ -4499,15 +6241,39 @@ class TelegramChannel:
                 # needed the label — a transition, a command, a workflow's step.
                 self._detach(
                     self._label_picked(
-                        value, here or "", message.get("message_thread_id"), f"tg:{user_id}"
+                        value,
+                        here or "",
+                        message.get("message_thread_id"),
+                        f"tg:{user_id}",
+                        card=message,
                     ),
                     "/pick",
+                )
+                return
+            if what == "flowto":
+                parts = value.split(">")
+                place = parts[1] if len(parts) > 1 else ""
+                self._detach(
+                    self._resume_workflow(
+                        "to",
+                        here or "",
+                        message.get("message_thread_id"),
+                        place=int(place) if place.isdigit() else -1,
+                        back=len(parts) > 2 and parts[2] == "b",
+                        speaker=parts[3] if len(parts) > 3 else "",
+                        card=self._desk.find(here, message.get("message_id")),
+                    ),
+                    "/workflow",
                 )
                 return
             if what in ("flowgo", "flowstop", "flowon", "flowpick"):
                 self._detach(
                     self._resume_workflow(
-                        what.removeprefix("flow"), here or "", message.get("message_thread_id")
+                        what.removeprefix("flow"),
+                        here or "",
+                        message.get("message_thread_id"),
+                        card=self._desk.find(here, message.get("message_id")),
+                        actor=f"tg:{user_id}",
                     ),
                     "/workflow",
                 )
@@ -4575,7 +6341,7 @@ class TelegramChannel:
 
         asked = cards.parse_question_data(callback.get("data") or "")
         if asked is not None:
-            await self._answer_question(asked, user_id, query_id)
+            await self._answer_question(asked, user_id, query_id, callback)
             return
 
         proposed = commit_card.parse_callback_data(callback.get("data") or "")
@@ -4611,6 +6377,7 @@ class TelegramChannel:
 
         if entry is None:
             await self._dismiss(query_id, "That request is no longer open.")
+            await self._close_pressed(callback, "⌛ <i>No longer open.</i>")
             return
 
         request, message_id, chat_id, thread_id = entry
@@ -4631,6 +6398,16 @@ class TelegramChannel:
                 request.request_id, nonce=nonce, decision=decision, decided_by=actor
             )
         except AlreadyResolvedError:
+            ended = await self._store.resolution_of(request.request_id)
+            late = self._too_late(ended.reason if ended else None)
+            if late:
+                # Not a second press: the first one, after nobody answered in
+                # time or after Halyard stopped. Recorded as what it is — the
+                # timeout already is — rather than as a replay.
+                decision, said = late
+                await self._settle_card(request, message_id, chat_id, decision, None)
+                await self._dismiss(query_id, said)
+                return
             await self._record(replayed_callback(actor=actor, request_id=request.request_id))
             await self._dismiss(query_id, "Already decided.")
             return
@@ -4647,6 +6424,7 @@ class TelegramChannel:
             # The store has evicted it, so nothing here can be resolved again.
             self._open.pop(handle, None)
             await self._dismiss(query_id, "That request is no longer open.")
+            await self._desk.close(chat_id, message_id, outcome="⌛ <i>No longer open.</i>")
             return
 
         if action == cards.STOP:
@@ -4674,40 +6452,110 @@ class TelegramChannel:
         decision: str,
         by: str | None,
     ) -> None:
-        """Rewrite the card to show the outcome and drop the buttons."""
-        try:
-            await self._api.edit_message_text(
-                chat_id,
-                message_id,
-                cards.render_resolved(
-                    request,
-                    decision=decision,
-                    by=by,
-                    inspection=self._inspection_named(request.session_id),
-                ),
-                reply_markup=None,
-            )
-        except Exception:
-            # Cosmetic. The decision is already recorded and the nonce is spent,
-            # so a stale-looking card is untidy rather than dangerous.
-            logger.warning("Could not update the card for %s", request.request_id, exc_info=True)
+        """Rewrite the card to show the outcome and drop the buttons.
 
-    async def _close_card(self, message: dict, chat_id: str | None) -> None:
-        """Take the buttons off a choice card, and say it was cancelled.
+        Cosmetic, through the desk: the decision is already recorded and the
+        nonce is spent, so a card that cannot be edited is untidy rather than
+        dangerous, and one already closed is left as it is.
+        """
+        await self._desk.close(
+            chat_id,
+            message_id,
+            text=cards.render_resolved(
+                request,
+                decision=decision,
+                by=by,
+                inspection=self._inspection_named(request.session_id),
+            ),
+        )
+
+    async def _spend(
+        self, what: str, value: str, data: str, message: dict, chat_id: str | None
+    ) -> None:
+        """Close the card a choice was pressed on, saying what was chosen.
+
+        Every choice is made once: a picker pressed twice ran its inspection
+        twice and handed the same reply on twice. So the card closes on the
+        press, before the choice is acted on. A workflow run's own buttons are
+        the exception — the run goes on after them, and so does its card. See
+        `STANDING`.
+        """
+        if what in STANDING:
+            return
+        card = self._desk.find(chat_id, message.get("message_id"))
+        if what == "cancel":
+            outcome = "✖️ Cancelled"
+        else:
+            chosen = self._chosen(what, value, self._desk.button(card, data))
+            if not chosen:
+                # A label picked for a command on a card from before a restart:
+                # which label it was is read from the project, and its handler
+                # closes the card once it knows. See `_label_picked`.
+                return
+            outcome = f"☑️ {html.escape(chosen)}"
+        await self._desk.close(
+            chat_id, message.get("message_id"), outcome=outcome, shown=message.get("text") or ""
+        )
+
+    @staticmethod
+    def _chosen(what: str, value: str, button: str) -> str:
+        """What a pressed choice was, in words, for the card it closes: the
+        value, where the value is readable, and the button's own label where it
+        is not — a step's place, a label's position in its group."""
+        if what in ("do", "prompt"):
+            return f"/{value}"
+        if what in ("handoff", "handto", "result"):
+            name, _, label = value.partition(">")
+            return f"{name} → {label}" if label else name
+        if what == "flowat":
+            if button:
+                return button
+            name, _, index = value.rpartition(">")
+            return f"{name}, step {int(index) + 1}" if index.isdigit() else name
+        if what == "pick":
+            return button
+        if what == "commit":
+            return "Commit" if value == cards.PLAIN_COMMIT else value
+        return value
+
+    async def _close_pressed(self, callback: dict, outcome: str) -> None:
+        """Close the card a button was pressed on, when what it asked is gone —
+        decided and forgotten, or from before a restart. It can do nothing
+        more, so it stops offering to."""
+        message = callback.get("message") or {}
+        await self._desk.close(
+            str((message.get("chat") or {}).get("id") or "") or None,
+            message.get("message_id"),
+            outcome=outcome,
+            shown=message.get("text") or "",
+        )
+
+    @staticmethod
+    def _too_late(reason: ResolutionReason | None) -> tuple[str, str] | None:
+        """How a card reads, and what its press is told, when the approval it
+        asked ended without anybody here: the deadline, or Halyard stopping.
+        None for an approval somebody decided."""
+        if reason in (ResolutionReason.TIMEOUT, ResolutionReason.EXPIRED):
+            return "expired", "Too late — that expired and was denied."
+        if reason is ResolutionReason.SHUTDOWN:
+            return "shutdown", "Too late — Halyard stopped, and it was denied."
+        return None
+
+    async def _close_card(
+        self, message: dict, chat_id: str | None, outcome: str = "✖️ Cancelled"
+    ) -> None:
+        """Take the buttons off a choice card, and say what became of it — that
+        it was cancelled, or what was chosen on it. `outcome` is HTML.
 
         The text stays, so the chat still shows what was offered; the buttons
         go, so nothing on it can be pressed by mistake afterwards.
         """
-        message_id = message.get("message_id")
-        if not chat_id or not message_id:
-            return
-        shown = html.escape((message.get("text") or "").strip())
-        try:
-            await self._api.edit_message_text(
-                chat_id, message_id, f"{shown}\n\n✖️ Cancelled" if shown else "✖️ Cancelled"
-            )
-        except Exception:
-            logger.debug("Could not close a choice card", exc_info=True)
+        await self._desk.close(
+            chat_id,
+            message.get("message_id"),
+            outcome=outcome,
+            shown=message.get("text") or "",
+        )
 
     async def _dismiss(self, query_id: str, text: str | None = None) -> None:
         if not query_id:
@@ -4724,7 +6572,7 @@ class TelegramChannel:
             logger.exception("Could not record %s", record.action.value)
 
     async def _answer_question(
-        self, asked: tuple[str, str, int], user_id: str, query_id: str
+        self, asked: tuple[str, str, int], user_id: str, query_id: str, callback: dict
     ) -> None:
         """Resolve a question from a tapped option."""
         handle, nonce, index = asked
@@ -4742,6 +6590,7 @@ class TelegramChannel:
 
         if entry is None:
             await self._dismiss(query_id, "That question is no longer open.")
+            await self._close_pressed(callback, "⌛ <i>No longer open.</i>")
             return
 
         request, message_id, chat_id = entry
@@ -4756,7 +6605,9 @@ class TelegramChannel:
             request, message_id, chat_id, nonce, answer, f"tg:{user_id}", handle, query_id
         )
 
-    async def _answer_open_question_with_text(self, here: str, text: str, user_id: str) -> bool:
+    async def _answer_open_question_with_text(
+        self, here: str, text: str, user_id: str, replied_to: int | None = None
+    ) -> bool:
         """Answer the question open in this chat with a typed reply.
 
         The "Other" path the tool always offers, and the reason a question card
@@ -4767,7 +6618,7 @@ class TelegramChannel:
         Returns whether a question was answered, so the caller knows not to treat
         the message as ordinary chat.
         """
-        entry = self._oldest_open_question_in(here)
+        entry = self._question_replied_to(here, replied_to) or self._oldest_open_question_in(here)
         if entry is None:
             return False
         handle, (request, message_id, chat_id) = entry
@@ -4799,6 +6650,14 @@ class TelegramChannel:
                 request.request_id, nonce=nonce, answer=answer, decided_by=actor
             )
         except AlreadyAnsweredError:
+            ended = await self._question_store.resolution_of(request.request_id)
+            if ended is not None and ended.answer is None:
+                # Nobody answered it here in time: it went back to the terminal,
+                # and this press is the first one, late — not a replay.
+                await self._settle_question_card(request, message_id, chat_id, None, None)
+                self._open_questions.pop(handle, None)
+                await self._dismiss(query_id, "Too late — that went back to the terminal.")
+                return
             await self._record(replayed_callback(actor=actor, request_id=request.request_id))
             await self._dismiss(query_id, "Already answered.")
             return
@@ -4814,11 +6673,31 @@ class TelegramChannel:
         except UnknownQuestionError:
             self._open_questions.pop(handle, None)
             await self._dismiss(query_id, "That question is no longer open.")
+            await self._desk.close(chat_id, message_id, outcome="⌛ <i>No longer open.</i>")
             return
 
         self._open_questions.pop(handle, None)
-        await self._settle_question_card(request, message_id, chat_id, answer, actor)
-        await self._dismiss(query_id, "Answered.")
+        # A question with no deadline was asked by an agent that carried on
+        # (Codex): its answer is queued behind whatever turn is running there.
+        queued = request.expires_at is None
+        await self._settle_question_card(request, message_id, chat_id, answer, actor, queued=queued)
+        await self._dismiss(query_id, "Queued for the agent." if queued else "Answered.")
+
+    async def close_question(
+        self, request: QuestionRequest, *, answer: str | None, by: str
+    ) -> None:
+        """Take the buttons off a question settled somewhere else, saying what
+        was answered there — or that it was left for something else — so the
+        phone stops asking a settled question."""
+        handle = cards.question_handle_of(request)
+        entry = self._open_questions.pop(handle, None)
+        if entry is None:
+            return
+        _, message_id, chat_id = entry
+        if answer is not None:
+            await self._settle_question_card(request, message_id, chat_id, answer, by)
+            return
+        await self._desk.close(chat_id, message_id, text=cards.render_question_set_aside(request))
 
     async def _settle_question_card(
         self,
@@ -4827,34 +6706,53 @@ class TelegramChannel:
         chat_id: str,
         answer: str | None,
         by: str | None,
+        *,
+        queued: bool = False,
     ) -> None:
-        try:
-            await self._api.edit_message_text(
-                chat_id,
-                message_id,
-                cards.render_question_resolved(request, answer=answer, by=by),
-                reply_markup=None,
-            )
-        except Exception:
-            logger.warning(
-                "Could not update the question card for %s", request.request_id, exc_info=True
-            )
+        await self._desk.close(
+            chat_id,
+            message_id,
+            text=cards.render_question_resolved(request, answer=answer, by=by, queued=queued),
+        )
 
     def _oldest_open_question_in(
         self, chat_id: str
     ) -> tuple[str, tuple[QuestionRequest, int, str]] | None:
-        """The longest-waiting question routed to this chat, if any."""
+        """The longest-waiting question routed to this chat, if any.
+
+        Only one with a deadline. A question with none — Codex's, waiting at
+        the desk for as long as it takes — would otherwise take every message
+        typed into the chat from then on as its answer, so it is answered by
+        replying to its card instead. See `_question_replied_to`.
+        """
         self._forget_expired_questions()
         candidates = [
-            (handle, entry) for handle, entry in self._open_questions.items() if entry[2] == chat_id
+            (handle, entry)
+            for handle, entry in self._open_questions.items()
+            if entry[2] == chat_id and entry[0].expires_at is not None
         ]
         if not candidates:
             return None
         return min(candidates, key=lambda item: item[1][0].created_at)
 
+    def _question_replied_to(
+        self, chat_id: str, replied_to: int | None
+    ) -> tuple[str, tuple[QuestionRequest, int, str]] | None:
+        """The open question whose card this message replies to, if any."""
+        if replied_to is None:
+            return None
+        for handle, entry in self._open_questions.items():
+            if entry[2] == chat_id and entry[1] == replied_to:
+                return handle, entry
+        return None
+
     def _forget_expired_questions(self) -> None:
         now = self._clock()
-        for handle in [h for h, (r, _, _) in self._open_questions.items() if now >= r.expires_at]:
+        for handle in [
+            h
+            for h, (r, _, _) in self._open_questions.items()
+            if r.expires_at is not None and now >= r.expires_at
+        ]:
             del self._open_questions[handle]
 
     def _forget_expired(self) -> None:
@@ -4868,5 +6766,9 @@ class TelegramChannel:
         them anyway.
         """
         now = self._clock()
-        for handle in [h for h, (r, _, _, _) in self._open.items() if now >= r.expires_at]:
+        for handle in [
+            h
+            for h, (r, _, _, _) in self._open.items()
+            if r.expires_at is not None and now >= r.expires_at
+        ]:
             del self._open[handle]

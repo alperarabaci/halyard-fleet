@@ -41,6 +41,9 @@ class Handed:
     text: str
     answers: tuple[Answer, ...] = ()
     ran: tuple[tuple[Command, Result], ...] = ()
+    #: Why it stopped before delivering anything, when a command produced no
+    #: result: that command's line. Empty for a transition that went.
+    stopped: str = ""
 
 
 @dataclass(frozen=True)

@@ -127,6 +127,10 @@ class _Watched:
     offset: int
     last_noted: datetime
     seen: set[str] = field(default_factory=set)
+    #: Where reading began, when questions written before it have still to be
+    #: looked for: a question left waiting before Halyard started is still
+    #: waiting. Zero once looked.
+    questions_before: int = 0
 
 
 class TranscriptWatcher:
@@ -146,8 +150,12 @@ class TranscriptWatcher:
         poll_seconds: float = DEFAULT_POLL_SECONDS,
         idle_ttl: timedelta = DEFAULT_IDLE_TTL,
         roots: tuple[Path, ...] | None = None,
+        questions=None,
     ) -> None:
         self._channel = channel
+        # Where a question found in a transcript goes: `LeftQuestions`, or
+        # nothing, in which case questions are not read at all.
+        self._questions = questions
         self._gate = gate or Gate()
         self._clock = clock
         self._poll_seconds = poll_seconds
@@ -164,8 +172,14 @@ class TranscriptWatcher:
         agent_id: str | None,
         role: Role | None = None,
         session_name: str | None = None,
+        refresh: bool = False,
     ) -> None:
         """Record that a session is active, so its transcript is watched.
+
+        `refresh` looks for the file again, for a session already watched: a
+        Codex Desktop thread moves on to a new rollout every so often, and the
+        old one simply stops growing. Asked on the slow adoption timer, not on
+        every approval, because it is a directory walk.
 
         Best-effort and total: any bad input is ignored rather than raised on,
         because this is called from inside the approval endpoint and must not be
@@ -186,6 +200,14 @@ class TranscriptWatcher:
                 existing.role = role
                 existing.session_name = session_name
                 existing.last_noted = now
+                if refresh:
+                    moved = find_transcript(session_id, watching, self._roots)
+                    if moved is not None and moved != existing.transcript:
+                        # From its start: a new rollout begins afresh rather
+                        # than repeating the last, so all of it is news.
+                        logger.info("%s moved on to %s", session_id, moved.name)
+                        existing.transcript = moved
+                        existing.offset = 0
                 return
             # New session: start from the end of the file, so history is not
             # replayed and the first read is not a scan of the whole transcript.
@@ -200,7 +222,7 @@ class TranscriptWatcher:
                     watching.home,
                 )
                 return
-            offset = self._size(found)
+            offset = self._size(found) or 0
             self._watched[session_id] = _Watched(
                 transcript=found,
                 agent_id=agent_id,
@@ -208,6 +230,11 @@ class TranscriptWatcher:
                 session_name=session_name,
                 offset=offset,
                 last_noted=now,
+                # Looked for on the next poll, off this call: the file can be
+                # a hundred megabytes, and this runs inside the approval path.
+                questions_before=offset
+                if watching.questions is not None and self._questions is not None
+                else 0,
             )
         except Exception:
             logger.debug("Could not note a session for transcript watching", exc_info=True)
@@ -278,6 +305,7 @@ class TranscriptWatcher:
                     agent_id=seat.runtime,
                     role=seat.role,
                     session_name=seat.session,
+                    refresh=True,
                 )
             except Exception:
                 logger.debug("Could not adopt the session for agent %s", seat.label, exc_info=True)
@@ -303,6 +331,8 @@ class TranscriptWatcher:
                 logger.debug("Transcript poll failed", exc_info=True)
 
     async def _scan(self, session_id: str, watched: _Watched) -> None:
+        if watched.questions_before:
+            await self._questions_waiting(session_id, watched)
         lines = self._read_new_lines(watched)
         if not lines:
             return
@@ -329,6 +359,8 @@ class TranscriptWatcher:
         for alert in watching.alerts(lines, watched.seen):
             watched.seen.add(alert.key)
             await self._relay(session_id, watched, alert.text)
+        if watching.questions is not None and self._questions is not None:
+            await self._hand_on(session_id, watched, watching.questions(lines))
         # Bound the memory a long-lived session's seen-set can take.
         if len(watched.seen) > MAX_SEEN:
             watched.seen = set(list(watched.seen)[-MAX_SEEN:])
@@ -354,14 +386,94 @@ class TranscriptWatcher:
             with watched.transcript.open("rb") as handle:
                 handle.seek(watched.offset)
                 raw = handle.read(MAX_READ_BYTES)
+                last_newline = raw.rfind(b"\n")
+                if last_newline == -1 and len(raw) == MAX_READ_BYTES:
+                    self._step_over_a_long_line(handle, watched)
+                    return []
         except OSError:
             return []
-        last_newline = raw.rfind(b"\n")
         if last_newline == -1:
             return []
         consumed = raw[: last_newline + 1]
         watched.offset += len(consumed)
         return consumed.decode("utf-8", "replace").split("\n")
+
+    async def _hand_on(self, session_id: str, watched: _Watched, reading) -> None:
+        """Pass what a reading says about questions to whoever cards them."""
+        if reading.set_aside:
+            await self._questions.set_aside(session_id)
+        for question in reading.asked:
+            if question.id in reading.answered:
+                # Asked and answered at the desk between two polls.
+                continue
+            await self._questions.asked(
+                session_id=session_id,
+                agent_id=watched.agent_id,
+                question=question,
+                role=watched.role,
+                session_name=watched.session_name,
+            )
+        for question, answer in reading.answered.items():
+            await self._questions.answered(question, answer)
+
+    async def _questions_waiting(self, session_id: str, watched: _Watched) -> None:
+        """Card the questions still waiting in what was written before watching.
+
+        Once per session, in a thread: the whole file up to where reading began
+        is gone through, and only lines that could be about a question are
+        parsed. What the person has since answered or moved on from is not
+        carded; see the runtime's own `questions`.
+        """
+        end, watched.questions_before = watched.questions_before, 0
+        watching = watching_for(watched.agent_id)
+        if watching is None or watching.questions is None or self._questions is None:
+            return
+        path = watched.transcript
+
+        def read():
+            with path.open("rb") as handle:
+                lines = iter(handle.readline, b"")
+                return watching.questions(
+                    line.decode("utf-8", "replace") for line in _until(lines, handle, end)
+                )
+
+        try:
+            reading = await asyncio.to_thread(read)
+        except OSError:
+            return
+        # Nothing before reading began is set aside by this: only the
+        # questions still open at its end are in it.
+        for question in reading.asked:
+            if question.id not in reading.answered:
+                await self._questions.asked(
+                    session_id=session_id,
+                    agent_id=watched.agent_id,
+                    question=question,
+                    role=watched.role,
+                    session_name=watched.session_name,
+                )
+
+    @staticmethod
+    def _step_over_a_long_line(handle, watched: _Watched) -> None:
+        """Move past one line longer than a whole read, once it is whole.
+
+        A tool's output can be a single line of megabytes. Measured on a Codex
+        rollout: 772 KB, and lines of 5 and 9 MB in the same file. Waiting for
+        a newline inside one read held the offset before it, so every poll read
+        the same half megabyte and nothing after it was ever seen — two
+        questions asked an hour later among them. Such a line is no question,
+        answer or usage reading; it is stepped over, not parsed.
+        """
+        while chunk := handle.read(MAX_READ_BYTES):
+            at = chunk.find(b"\n")
+            if at != -1:
+                skipped = handle.tell() - len(chunk) + at + 1 - watched.offset
+                logger.info(
+                    "Stepped over a line of %d bytes in %s", skipped, watched.transcript.name
+                )
+                watched.offset += skipped
+                return
+        # Still being written: the next poll looks again from the same place.
 
     async def _relay(self, session_id: str, watched: _Watched, text: str) -> None:
         if self._gate.paused:
@@ -397,6 +509,14 @@ class TranscriptWatcher:
             return path.stat().st_size
         except OSError:
             return None
+
+
+def _until(lines, handle, end: int):
+    """The lines of `handle` that start before byte `end`."""
+    for line in lines:
+        if handle.tell() - len(line) >= end:
+            return
+        yield line
 
 
 #: How much of a transcript's end to read when somebody asks where they stand.

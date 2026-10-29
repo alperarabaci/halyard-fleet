@@ -19,6 +19,7 @@ import logging
 import os
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from enum import StrEnum
 
 from halyard.core import grants, reads, refusals
@@ -34,6 +35,7 @@ from halyard.core.audit import (
     approval_requested,
     approval_resolved,
     bridge_error,
+    left_to_agent,
     question_answered,
     question_asked,
     refused_outright,
@@ -49,6 +51,10 @@ from halyard.core.redaction import Redactor
 from halyard.core.registry import SessionRegistry
 
 logger = logging.getLogger(__name__)
+
+#: How long the answer to a card with no deadline is kept for the call that
+#: asks it again. Comfortably longer than a bridge waits between two calls.
+ANSWER_KEPT_SECONDS = 600
 
 
 def project_name(project_dir: str | None, cwd: str | None, configured: str) -> str:
@@ -98,6 +104,35 @@ def seat_of(
     if not session_name or not seats:
         return None
     return seats.get(session_name.strip().casefold())
+
+
+def _card_ended(closing: set[asyncio.Task], channel, hook: str, request, resolution) -> None:
+    """Tell the channel how a request it carried ended, so its card can say so.
+
+    However it ended: a press closes its own card, but the deadline and a
+    shutdown reach no button, and a card nobody tells goes on asking a question
+    that is over. A channel without the hook has nothing to close; one that
+    fails is said in the log and changes nothing — the request is decided
+    and recorded already.
+
+    Beside the answer, not in front of it: the bridge waiting on this request
+    is answered first. Closing a card is an edit on Telegram, and one that
+    hangs there must not hold up a denial. `closing` holds the task until it
+    is done, since a task nobody holds can be collected before it finishes.
+    """
+    ending = getattr(channel, hook, None)
+    if ending is None:
+        return
+
+    async def close() -> None:
+        try:
+            await ending(request, resolution)
+        except Exception:
+            logger.warning("Could not close the card for %s", request.request_id, exc_info=True)
+
+    task = asyncio.get_running_loop().create_task(close())
+    closing.add(task)
+    task.add_done_callback(closing.discard)
 
 
 class BridgeDecision(StrEnum):
@@ -186,6 +221,8 @@ class QuestionService:
         self._registry = registry
         self._channel = channel
         self._project = project
+        #: Cards being closed beside their answers — see `_card_ended`.
+        self._closing: set[asyncio.Task] = set()
 
     async def ask(
         self,
@@ -283,6 +320,7 @@ class QuestionService:
         # unanswered resolution on timeout; it does not raise.
         resolution = await self._store.wait_for(request.request_id)
         await self._try_to_record(question_answered(request, resolution))
+        _card_ended(self._closing, self._channel, "question_ended", request, resolution)
         return QuestionOutcome(answer=resolution.answer)
 
     async def _try_to_record(self, record) -> bool:
@@ -457,11 +495,23 @@ class ApprovalService:
         allowed_writes: tuple[str, ...] = (),
         allowed_tools: tuple[str, ...] = (),
         refuse_agent_commits: bool = False,
+        override_agent_approvals: bool = False,
         allow_risk_at_or_below: RiskLevel | None = None,
         runs_by_project: Mapping[str, Sequence[str]] | None = None,
         trusted_runs: Callable[[str], Sequence[str]] | None = None,
+        questions_wait: frozenset[str] = frozenset(),
     ) -> None:
         self._seats = seats or {}
+        #: Runtimes whose own question stays open until answered, so their
+        #: cards have no deadline. See `RuntimeSpec.question_waits`.
+        self._questions_wait = questions_wait
+        #: Each such card's answer, worked out once by a task of its own and
+        #: awaited by every call that asks it. The call that carried the
+        #: question can be dropped long before anybody answers; the same
+        #: question asked again finds the card already out for it.
+        self._waiting: dict[str, asyncio.Task[ApprovalOutcome]] = {}
+        #: Cards being closed beside their answers — see `_card_ended`.
+        self._closing: set[asyncio.Task] = set()
         # Each configured project's `runs:`, by where the project is — every
         # project, since the table may hold entries for one the file has none
         # for. An entry that no longer reads is dropped here too.
@@ -480,6 +530,8 @@ class ApprovalService:
         #: Off unless somebody says otherwise, so nothing changes for anybody
         #: who has not asked for it. See `core/refusals.py`.
         self._refuse_agent_commits = refuse_agent_commits
+        #: Off unless asked for: a chat that approves for itself is left to it.
+        self._override_agent_approvals = override_agent_approvals
         #: What goes through without a card: paths under `writes:`, tools
         #: under `tools:`, and — with the setting on — shell commands `reads`
         #: understands. All empty or off by default, which is how this shipped.
@@ -594,6 +646,9 @@ class ApprovalService:
         asks: str | None = None,
         patterns: list[str] | None = None,
         file_paths: list[str] | None = None,
+        permission_mode: str | None = None,
+        hook_event: str | None = None,
+        agent_approves: bool = False,
     ) -> ApprovalOutcome:
         """Ask for permission, and answer. Never raises."""
         try:
@@ -613,6 +668,9 @@ class ApprovalService:
                 asks=asks,
                 patterns=patterns,
                 file_paths=file_paths,
+                permission_mode=permission_mode,
+                hook_event=hook_event,
+                agent_approves=agent_approves,
             )
         except Exception:
             # The outer net. Anything not handled below still has to come out of
@@ -680,6 +738,9 @@ class ApprovalService:
         asks: str | None = None,
         patterns: list[str] | None = None,
         file_paths: list[str] | None = None,
+        permission_mode: str | None = None,
+        hook_event: str | None = None,
+        agent_approves: bool = False,
     ) -> ApprovalOutcome:
         project = project_name(project_dir, cwd, self._project)
         role = seat_of(role, session_name, self._seats)
@@ -703,6 +764,13 @@ class ApprovalService:
                 cwd=cwd,
             )
 
+        # The same question again, from a runtime whose question outlives the
+        # call that carried it: back to the card already out for it, which is
+        # still the one that answers. Nothing is judged again and nothing new
+        # is put on the phone.
+        if tool_use_id and (waiting := self._waiting.get(tool_use_id)) is not None:
+            return await asyncio.shield(waiting)
+
         # Before anything is decided, including the pause. This is not an
         # approval somebody could be asked for and it is not a grant that could
         # be configured around — it is a standing answer, and a guard a pause
@@ -717,6 +785,14 @@ class ApprovalService:
                     act=act,
                 )
             )
+            self._uncarded(
+                session_id=session_id,
+                tool=tool,
+                command=self._redactor.prepare(command).full,
+                tool_use_id=tool_use_id,
+                allowed=False,
+                why=f"refused: agents do not {act} here",
+            )
             return ApprovalOutcome(decision=BridgeDecision.DENY, reason=refusals.why(act))
 
         if self._gate.paused:
@@ -727,6 +803,34 @@ class ApprovalService:
             return ApprovalOutcome(
                 decision=BridgeDecision.DEFER,
                 reason="Halyard is paused; this was not relayed for approval.",
+            )
+
+        # The chat approves for itself — the person chose that there, Codex's
+        # "approve for me" or Claude Code's auto mode — so this is left to it,
+        # as a pause leaves everything. Asking again on a phone made the
+        # ordinary way of working harder. Refusals above still stand, a turn of
+        # Halyard's own is never left to anyone, and
+        # `HALYARD_OVERRIDE_AGENT_APPROVALS` puts every call back here.
+        if (
+            agent_approves
+            and not self._override_agent_approvals
+            and self._registry.own(session_id) is None
+        ):
+            await self._try_to_record(
+                left_to_agent(
+                    session_id=session_id,
+                    agent_id=agent_id,
+                    project=project,
+                    tool=tool,
+                    command=self._redactor.prepare(command).full,
+                    cwd=cwd or project_dir or "",
+                    permission_mode=permission_mode,
+                    hook_event=hook_event,
+                )
+            )
+            return ApprovalOutcome(
+                decision=BridgeDecision.DEFER,
+                reason="Left to the agent's own approval setting.",
             )
 
         # What is shown and kept is redacted; what is judged is the command as
@@ -767,6 +871,14 @@ class ApprovalService:
             command=prepared.full,
             cwd=cwd or project_dir or "",
         ):
+            self._uncarded(
+                session_id=session_id,
+                tool=tool,
+                command=prepared.full,
+                tool_use_id=tool_use_id,
+                allowed=True,
+                why=f"pre-authorized ({grant.kind})",
+            )
             return ApprovalOutcome(
                 decision=BridgeDecision.ALLOW, reason=grant.reason, risk=classification.risk
             )
@@ -788,8 +900,66 @@ class ApprovalService:
             cwd=cwd,
             project_dir=project_dir,
             redacted=prepared.full != command,
+            expires=not (agent_id in self._questions_wait and tool_use_id),
+            permission_mode=(permission_mode or None) and permission_mode[:64],
+            hook_event=(hook_event or None) and hook_event[:64],
         )
 
+        if request.expires_at is not None:
+            return await self._carry(request)
+        # No deadline, so the call that carried the question may be dropped
+        # and the question asked again. The card is carried by a task of its
+        # own rather than by this call, and every call for it awaits that.
+        waiting = asyncio.create_task(self._carry(request))
+        self._waiting[tool_use_id] = waiting
+        # Kept a while once answered: an answer that lands between one call
+        # and the next is still the answer the next one gets, not a new card.
+        waiting.add_done_callback(
+            lambda done: asyncio.get_running_loop().call_later(
+                ANSWER_KEPT_SECONDS, self._forget_waiting, tool_use_id, done
+            )
+        )
+        return await asyncio.shield(waiting)
+
+    def _uncarded(
+        self,
+        *,
+        session_id: str,
+        tool: str,
+        command: str,
+        tool_use_id: str | None,
+        allowed: bool,
+        why: str,
+        request_id: str | None = None,
+    ) -> None:
+        """Tell the channel a call went through, or was refused, with nobody
+        asked — what an inspection's trace needs of the gate beside its cards:
+        a read Codex was denied is in no record of its own. A channel without
+        the hook hears nothing; one that fails changes nothing."""
+        hearing = getattr(self._channel, "decided_without_a_card", None)
+        if hearing is None:
+            return
+        try:
+            hearing(
+                session_id=session_id,
+                tool=tool,
+                command=command,
+                tool_use_id=tool_use_id,
+                allowed=allowed,
+                why=why,
+                request_id=request_id,
+            )
+        except Exception:
+            logger.warning(
+                "Could not tell the channel about a call in %s", session_id, exc_info=True
+            )
+
+    def _forget_waiting(self, tool_use_id: str, done: asyncio.Task[ApprovalOutcome]) -> None:
+        if self._waiting.get(tool_use_id) is done:
+            del self._waiting[tool_use_id]
+
+    async def _carry(self, request: ApprovalRequest) -> ApprovalOutcome:
+        """Put an open request in front of a person, and wait for the answer."""
         # Record that it was asked before anybody can act on it. An approval
         # that was never written down is one nobody can account for afterwards.
         if not await self._try_to_record(approval_requested(request)):
@@ -800,20 +970,36 @@ class ApprovalService:
             )
 
         try:
-            await self._channel.send_approval_request(request)
-        except Exception:
-            logger.exception("Channel refused the approval request; denying")
+            remaining = (
+                None
+                if request.expires_at is None
+                else max((request.expires_at - datetime.now(UTC)).total_seconds(), 0.0)
+            )
+            # Delivery, including any connection retries, uses the same deadline
+            # as the card. A slow channel must not outlive the waiting bridge.
+            if remaining == 0:
+                raise TimeoutError
+            async with asyncio.timeout(remaining):
+                await self._channel.send_approval_request(request)
+        except Exception as exc:
+            # Exception messages can contain request URLs and channel secrets.
+            # Its category explains the failure without copying those details.
+            detail = (
+                "approval delivery could not be confirmed by "
+                f"{self._channel.name} ({type(exc).__name__})"
+            )
+            logger.error("%s; denying", detail)
             await self._try_to_record(
                 bridge_error(
-                    message="approval could not be delivered to the channel",
-                    session_id=session_id,
+                    message=detail,
+                    session_id=request.session_id,
                     request_id=request.request_id,
                 )
             )
             return await self._fail_closed(
                 request,
                 ResolutionReason.SHUTDOWN,
-                "Denied: the approval could not be delivered to anyone, so nobody saw it.",
+                f"Denied: {detail}. Request approval again once the channel is working.",
             )
 
         # Blocks until a human answers or the deadline passes. Returns a
@@ -821,6 +1007,7 @@ class ApprovalService:
         resolution = await self._store.wait_for(request.request_id)
 
         recorded = await self._try_to_record(approval_resolved(request, resolution))
+        _card_ended(self._closing, self._channel, "approval_ended", request, resolution)
         if resolution.reason is ResolutionReason.ELSEWHERE:
             # Answered at the desk, in the runtime's own prompt, and acted on
             # there already. Handed back as an allow, anything able to post
@@ -863,6 +1050,15 @@ class ApprovalService:
             # Already resolved, or already gone. Either way the answer below is
             # the safe one, so there is nothing to do about it.
             logger.debug("Could not close out %s", request.request_id, exc_info=True)
+        self._uncarded(
+            session_id=request.session_id,
+            tool=request.tool,
+            command=request.command_full,
+            tool_use_id=request.tool_use_id,
+            allowed=False,
+            why="denied: it could not be put to anybody",
+            request_id=request.request_id,
+        )
         return ApprovalOutcome(
             decision=BridgeDecision.DENY,
             reason=message,

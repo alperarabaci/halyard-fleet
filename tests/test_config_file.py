@@ -9,6 +9,7 @@ of them — plus the precedence rule between the two files.
 from __future__ import annotations
 
 import contextlib
+import re
 from pathlib import Path
 
 import pytest
@@ -604,6 +605,90 @@ def test_an_empty_list_is_refused(tmp_path) -> None:
         a_project(tmp_path, lines=["commands:", "  nothing: []"])
 
 
+def test_everything_about_labels_is_one_block(tmp_path) -> None:
+    [project] = a_project(
+        tmp_path,
+        lines=[
+            "labels:",
+            "  who_worked: true",
+            "  groups: {level: [level::1, level::2]}",
+            "  offer: [andon, rework]",
+            '  exclude: ["wontfix"]',
+        ],
+    )
+
+    assert project.label_work is True
+    assert project.label_groups == {"level": ("level::1", "level::2")}
+    assert project.labels == ("andon", "rework")
+    assert project.labels_exclude == ("wontfix",)
+    assert project.older == ()
+
+
+def test_the_keys_labels_had_before_still_read_and_say_where_they_moved(tmp_path) -> None:
+    [project] = a_project(
+        tmp_path,
+        lines=[
+            "label_work: true",
+            "label_groups: {level: [level::1]}",
+            "labels: [andon]",
+        ],
+    )
+
+    assert project.label_work is True
+    assert project.label_groups == {"level": ("level::1",)}
+    assert project.labels == ("andon",)
+    assert "the project: `label_work:` is now `labels: who_worked:`" in project.older
+    assert "the project: `labels: [...]` is now `labels: offer: [...]`" in project.older
+
+
+def test_a_label_setting_written_twice_is_refused(tmp_path) -> None:
+    with pytest.raises(ValueError, match="`labels: who_worked:` and `label_work:`"):
+        a_project(tmp_path, lines=["label_work: true", "labels:", "  who_worked: true"])
+    with pytest.raises(ValueError, match="takes who_worked, groups, offer, exclude, not hide"):
+        a_project(tmp_path, lines=["labels:", "  hide: [x]"])
+
+
+def test_labels_left_out_of_label_are_patterns(tmp_path) -> None:
+    [one] = a_project(tmp_path, lines=['labels_exclude: ["halyard:*", "wontfix"]'])
+    [single] = a_project(tmp_path, lines=["labels_exclude: halyard:*"])
+
+    assert one.labels_exclude == ("halyard:*", "wontfix")
+    assert single.labels_exclude == ("halyard:*",)
+    with pytest.raises(ValueError, match="`labels: exclude:` must be a list of patterns"):
+        a_project(tmp_path, lines=["labels_exclude: {halyard: true}"])
+
+
+def test_a_command_can_say_which_of_its_codes_mean_it_did_not_run(tmp_path) -> None:
+    """Written beside its line; a plain line and a list still read as before."""
+    [project] = a_project(
+        tmp_path,
+        lines=[
+            "commands:",
+            "  test-fast: {run: scripts/check.sh test-fast, not_run: [2]}",
+            "  lint: make lint",
+            "  both: [test-fast, lint]",
+        ],
+    )
+
+    assert project.commands == {"test-fast": "scripts/check.sh test-fast", "lint": "make lint"}
+    assert project.commands_not_run == {"test-fast": (2,)}
+    assert project.command_lists == {"both": ("test-fast", "lint")}
+
+
+@pytest.mark.parametrize(
+    ("spec", "said"),
+    [
+        ("{not_run: [2]}", "needs `run:`"),
+        ("{run: make x, not_run: two}", "list of exit codes"),
+        ("{run: make x, not_run: [0]}", "list of exit codes"),
+        ("{run: make x, retry: 3}", "takes `run:` and `not_run:`, not retry"),
+    ],
+)
+def test_a_command_written_out_is_read_strictly(tmp_path, spec: str, said: str) -> None:
+    with pytest.raises(ValueError, match=re.escape(said)):
+        a_project(tmp_path, lines=["commands:", f"  test-fast: {spec}"])
+
+
 def test_a_transition_naming_a_list_is_told_to_name_its_commands(tmp_path) -> None:
     with pytest.raises(ValueError, match="which is a list of commands"):
         a_project(
@@ -632,35 +717,95 @@ def test_a_transition_cannot_run_a_command_that_asks_for_a_typed_value(tmp_path)
         )
 
 
-def test_validate_cannot_name_a_command_that_takes_a_label(tmp_path) -> None:
-    """A commit has nowhere to ask for one."""
-    with pytest.raises(ValueError, match="takes a value"):
-        a_project(
-            tmp_path,
-            lines=[
-                "label_groups:",
-                "  ddd-scope: [ddd:capstone]",
-                "commands:",
-                E2E,
-                "validate: e2e-scope",
-            ],
-        )
-
-
-def test_label_findings_are_read_as_phrases(tmp_path) -> None:
+def test_validate_can_name_a_command_that_takes_a_label(tmp_path) -> None:
+    """Read as a commit option, it asks for the label with a card, as a
+    transition does."""
     [project] = a_project(
         tmp_path,
-        lines=["label_findings:", '  - "status: candidate"', '  - "status: evidence missing"'],
+        lines=[
+            "label_groups:",
+            "  ddd-scope: [ddd:capstone]",
+            "commands:",
+            E2E,
+            "validate: e2e-scope",
+        ],
     )
 
-    assert project.label_findings == ("status: candidate", "status: evidence missing")
+    assert project.commit_options["review"].commands == ("e2e-scope",)
 
 
-def test_a_finding_phrase_left_unquoted_is_refused_with_why(tmp_path) -> None:
-    """`- status: candidate` is a mapping to YAML, and would otherwise become
-    text no answer ever contains."""
-    with pytest.raises(ValueError, match="has to be quoted"):
-        a_project(tmp_path, lines=["label_findings:", "  - status: candidate"])
+def commit_options(*options: str) -> list[str]:
+    """A project with two commands, two inspections, and these options."""
+    return [
+        "commands:",
+        "  test-fast: make test-fast",
+        "  lint: make lint",
+        "  both: [test-fast, lint]",
+        "  pull: make pull TASK={input.task}",
+        "inspections:",
+        "  destructive: NOTES/destructive.md",
+        "  claims: NOTES/claims.md",
+        "commit_options:",
+        *(f"  {option}" for option in options),
+    ]
+
+
+def test_commit_options_are_read_in_the_order_they_were_written(tmp_path) -> None:
+    from halyard.core.config_file import CommitOption
+
+    [project] = a_project(
+        tmp_path,
+        lines=commit_options(
+            "fast: {commands: [test-fast], inspect: [destructive]}",
+            "wide: {commands: [test-fast, lint]}",
+            "look: {inspect: [destructive, claims]}",
+        ),
+    )
+
+    assert project.commit_options == {
+        "fast": CommitOption("fast", commands=("test-fast",), inspections=("destructive",)),
+        "wide": CommitOption("wide", commands=("test-fast", "lint")),
+        "look": CommitOption("look", inspections=("destructive", "claims")),
+    }
+    assert project.older == ()
+
+
+@pytest.mark.parametrize(
+    ("option", "said"),
+    [
+        ("fast: {commands: [gone]}", "names commands this project does not define: gone"),
+        ("fast: {inspect: [proof]}", "names inspections this project does not define: proof"),
+        ("fast: {commands: [both]}", "names 'both', which is a list of commands"),
+        ("fast: {commands: [pull]}", "takes {input.task} — typed by somebody"),
+        ("fast: {}", "runs nothing"),
+        ("fast: {commands: [test-fast], to: navigator}", "unknown field(s) to"),
+        ("fast: {commands: test-fast}", "`commands:` must be a list of command names"),
+        ("fast: {inspect: claims}", "`inspect:` must be a list of inspection names"),
+        ("Fast: {commands: [test-fast]}", "needs a name of lowercase letters"),
+        ("fast: [test-fast]", "must be a mapping"),
+    ],
+)
+def test_a_commit_option_is_read_strictly(tmp_path, option: str, said: str) -> None:
+    """Refused when the file is read, rather than when somebody presses it with
+    a commit waiting."""
+    with pytest.raises(ValueError, match=re.escape(said)):
+        a_project(tmp_path, lines=commit_options(option))
+
+
+def test_commit_options_must_be_a_mapping(tmp_path) -> None:
+    with pytest.raises(ValueError, match="`commit_options:` must be a mapping"):
+        a_project(tmp_path, lines=["commit_options: [fast]"])
+
+
+def test_findings_are_no_longer_read_and_a_file_naming_them_still_starts(tmp_path) -> None:
+    """They labelled a task when an inspection's answer said one of them, and
+    nothing read those labels back. Refusing the file would keep the control
+    plane from starting over a line that now does nothing."""
+    [project] = a_project(tmp_path, lines=["label_findings:", '  - "status: candidate"'])
+    [inside] = a_project(tmp_path, lines=["labels:", '  findings: ["status: candidate"]'])
+
+    assert any("`label_findings:` is no longer read" in said for said in project.older)
+    assert any("`labels: findings:` is no longer read" in said for said in inside.older)
 
 
 def test_transitions_are_read_with_what_they_carry(tmp_path) -> None:
@@ -717,12 +862,34 @@ def test_a_transition_of_commands_alone_is_something_to_hand_on(tmp_path) -> Non
     assert project.transitions["tests"].include_last_message is False
 
 
-def test_validate_names_one_of_the_projects_commands(tmp_path) -> None:
+def test_validate_is_read_as_the_commit_option_review(tmp_path) -> None:
+    """It works, and `doctor` says what it is called now."""
+    from halyard.core.config_file import CommitOption
+
     [project] = a_project(
         tmp_path, lines=["commands:", "  test-fast: make test-fast", "validate: test-fast"]
     )
 
-    assert project.validate == "test-fast"
+    assert project.commit_options == {"review": CommitOption("review", commands=("test-fast",))}
+    assert project.older == (
+        "the project: `validate: test-fast` is now `commit_options: review: commands: [test-fast]`",
+    )
+
+
+def test_validate_goes_first_beside_commit_options_of_its_own(tmp_path) -> None:
+    [project] = a_project(
+        tmp_path, lines=[*commit_options("wide: {commands: [lint]}"), "validate: test-fast"]
+    )
+
+    assert list(project.commit_options) == ["review", "wide"]
+
+
+def test_validate_and_an_option_called_review_is_refused(tmp_path) -> None:
+    """Two places saying what `review` runs; neither is quietly dropped."""
+    with pytest.raises(ValueError, match="has one by that name already"):
+        a_project(
+            tmp_path, lines=[*commit_options("review: {commands: [lint]}"), "validate: test-fast"]
+        )
 
 
 def test_validate_written_as_a_command_line_is_refused(tmp_path) -> None:
@@ -866,6 +1033,99 @@ def test_a_step_cannot_act_on_its_own_decision(tmp_path) -> None:
         with_workflows(tmp_path, "  steps:", "    review: {decided_by: review}", "  l3: [review]")
 
 
+def test_a_step_can_work_on_an_earlier_step(tmp_path) -> None:
+    [project] = with_workflows(
+        tmp_path,
+        "  steps:",
+        "    discover: {transition: driver_discover, seat: reviewer}",
+        "    review: {}",
+        "    close: {transition: review, works_on: discover}",
+        "  level3: [[discover, review], close]",
+    )
+
+    assert project.workflows.steps["close"].works_on == "discover"
+    assert project.workflows.steps["review"].works_on is None
+
+
+def test_works_on_naming_no_step_or_itself_is_refused(tmp_path) -> None:
+    for named in ("gone", "close"):
+        with pytest.raises(ValueError, match="`works_on:` must name another step"):
+            with_workflows(
+                tmp_path,
+                "  steps:",
+                f"    close: {{transition: review, works_on: {named}}}",
+                "  level3: [close]",
+            )
+
+
+def test_a_workflow_without_the_step_worked_on_before_it_is_refused(tmp_path) -> None:
+    """Said when the file is read, not when the step comes round with nothing
+    to carry."""
+    for flow in ("[close]", "[close, discover]"):
+        with pytest.raises(ValueError, match="close works on discover, which does not come"):
+            with_workflows(
+                tmp_path,
+                "  steps:",
+                "    discover: {transition: driver_discover, seat: reviewer}",
+                "    close: {transition: review, works_on: discover}",
+                f"  level3: {flow}",
+            )
+
+
+def test_a_step_cannot_both_act_on_the_step_before_and_work_on_an_earlier_one(
+    tmp_path,
+) -> None:
+    """Together the review it is meant to act on would never reach it."""
+    with pytest.raises(ValueError, match="both `decided_by:` and `works_on:`"):
+        with_workflows(
+            tmp_path,
+            "  steps:",
+            "    discover: {transition: driver_discover, seat: reviewer}",
+            "    review: {}",
+            "    reviewed: {transition: review, decided_by: review, works_on: discover}",
+            "  level3: [discover, review, reviewed]",
+        )
+
+
+def test_a_step_sent_to_an_agent_of_another_role_is_said(tmp_path) -> None:
+    """alpha-engine#453: the driver's discovery named the navigator, and went
+    to it in both phases. Said, not refused — it may be meant."""
+    [project] = with_workflows(
+        tmp_path,
+        "  steps:",
+        "    discover: {transition: driver_discover, seat: reviewer}",
+        "    review: {}",
+        "  level3: [discover, review]",
+    )
+
+    assert project.workflows.astray == ()
+
+    from halyard.core.config_file import projects_from_yaml
+
+    [project] = projects_from_yaml(
+        "projects:\n"
+        "  alpha-engine:\n"
+        f"    path: {tmp_path}\n"
+        "    transitions:\n"
+        "      driver_discover: {prompt: NOTES/transitions/forward.md, to: driver}\n"
+        "    workflows:\n"
+        "      steps:\n"
+        "        discover_x: {transition: driver_discover, agent: xnav}\n"
+        "        discover_d: {transition: driver_discover, agent: xdrv}\n"
+        "        discover_r: {transition: driver_discover, agent: navigator}\n"
+        "      level3: [discover_x, discover_d, discover_r]\n"
+        "    agents:\n"
+        "      xnav: {runtime: codex, role: navigator}\n"
+        "      xdrv: {runtime: codex, role: driver}\n"
+    )
+
+    assert project.workflows.astray == (
+        "step discover_x goes to xnav, a navigator, while its transition driver_discover "
+        "goes to a driver",
+        "step discover_r goes to navigator, while its transition driver_discover goes to a driver",
+    )
+
+
 def test_decisions_are_their_own_names_unless_a_project_renames_them(tmp_path) -> None:
     """Like a key written once standing for its own value: nothing to write
     for `forward`, `back` and `wait`, and any of them can be renamed."""
@@ -881,6 +1141,22 @@ def test_decisions_are_their_own_names_unless_a_project_renames_them(tmp_path) -
 
     assert project.workflows.decisions == Decisions(forward="go", back="back", wait="hold")
     assert set(project.workflows.flows) == {"level3"}, "`decisions` is not a workflow"
+
+
+def test_the_word_that_ends_a_workflow_can_be_renamed_too(tmp_path) -> None:
+    from halyard.core.config_file import Decisions
+
+    [project] = with_workflows(
+        tmp_path, "  decisions: {done: closed}", "  steps:", "    review: {}", "  l2: [review]"
+    )
+
+    assert project.workflows.decisions == Decisions(done="closed")
+
+
+def test_done_cannot_share_a_word_with_forward(tmp_path) -> None:
+    """A last step saying it could mean it ended the workflow or did not."""
+    with pytest.raises(ValueError, match="cannot share a word"):
+        with_workflows(tmp_path, "  decisions: {done: forward}")
 
 
 def test_an_unknown_decision_is_refused(tmp_path) -> None:
@@ -1191,3 +1467,36 @@ def test_runs_that_are_not_a_list_ask_rather_than_fail() -> None:
 
     assert project.runs == ()
     assert project.runs_refused
+
+
+def test_a_project_setting_at_the_top_of_the_file_is_named_and_placed(tmp_path) -> None:
+    """Found on a Mac mini: `runs:` written flush left, every command in it
+    still asking, and nothing said why."""
+    from halyard.core.config_file import stray_keys
+
+    (tmp_path / "halyard.yaml").write_text(
+        "projects:\n  alpha-engine:\n    path: /x\n"
+        "runs:\n  - bash scripts/check-work-item-reference.sh --base main\n"
+        "upkeep:\n  runs-advice: {days: 14}\n"
+        "upkep:\n  runs-advice: {days: 7}\n"
+    )
+
+    said = stray_keys(tmp_path)
+
+    assert [level for level, _ in said] == ["fail", "warn"]
+    assert "`runs:` is at the top of halyard.yaml" in said[0][1]
+    assert "beside its `path:`" in said[0][1]
+    assert "`upkep:` at the top of halyard.yaml is read by nothing" in said[1][1]
+
+
+def test_what_the_top_of_the_file_holds_says_nothing(tmp_path) -> None:
+    from halyard.core.config_file import stray_keys
+
+    (tmp_path / "halyard.yaml").write_text(
+        "settings: {}\nprojects: {}\nruntimes: {}\ntools: []\nwrites: []\nprompts: {}\nupkeep: {}\n"
+        # Read by /open, so not a key nobody reads.
+        "applications: {}\n"
+    )
+
+    assert stray_keys(tmp_path) == []
+    assert stray_keys(tmp_path / "nowhere") == []

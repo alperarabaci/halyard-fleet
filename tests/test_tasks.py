@@ -129,22 +129,24 @@ def test_a_host_that_cannot_name_itself_has_to_be_told() -> None:
 
     assert registry.kind_of(private) is None
     assert registry.kind_of(private, declared="gitlab") == "gitlab"
-    assert isinstance(registry.build(private, "t", declared="gitlab"), Forge)
+    assert isinstance(registry.build(private, {"gitlab": "t"}, declared="gitlab"), Forge)
 
 
 def test_an_unknown_host_says_what_to_write() -> None:
-    with pytest.raises(ForgeError, match="forge:"):
-        registry.build(remotes.Origin(host="git.example.com", path="a/b"), "t")
+    with pytest.raises(ForgeError, match="`forge: github` or `forge: gitlab`"):
+        registry.build(remotes.Origin(host="git.example.com", path="a/b"), {"gitlab": "t"})
 
 
 def test_a_provider_nobody_has_written_yet_says_so() -> None:
-    with pytest.raises(ForgeError, match="No support for 'github'"):
-        registry.build(ORIGIN, "t", declared="github")
+    with pytest.raises(ForgeError, match=r"No support for 'gitea'.*`forge: github`"):
+        registry.build(ORIGIN, {"gitlab": "t"}, declared="gitea")
 
 
 def test_no_token_is_its_own_answer() -> None:
-    with pytest.raises(ForgeError, match="No token"):
-        registry.build(ORIGIN, "")
+    with pytest.raises(
+        ForgeError, match=r"No GitLab token for gitlab\.com: set HALYARD_GITLAB_TOKEN"
+    ):
+        registry.build(ORIGIN, {})
 
 
 # --- talking to GitLab ------------------------------------------------------
@@ -273,6 +275,17 @@ def test_a_project_can_narrow_what_is_offered() -> None:
     assert offered == ("andon", "rework")
 
 
+def test_a_project_can_leave_labels_out_by_pattern() -> None:
+    """The ones nobody puts on a task by hand, whatever their case."""
+    offered = labelling.worth_offering(
+        a_task(),
+        ["andon", "halyard:proof", "Halyard:Claims", "rework"],
+        exclude=["halyard:*"],
+    )
+
+    assert offered == ("andon", "rework")
+
+
 def test_narrowing_to_nothing_means_everything() -> None:
     """Empty is the right default until a project has more labels than a phone
     can show."""
@@ -307,3 +320,243 @@ async def test_a_task_wearing_everything_leaves_nothing_to_offer() -> None:
 
     assert choice.offer == ()
     assert choice.anything_left is False
+
+
+# --- talking to GitHub ------------------------------------------------------
+
+GITHUB = remotes.Origin(host="github.com", path="alperarabaci/halyard-fleet")
+REPO = "https://api.github.com/repos/alperarabaci/halyard-fleet"
+
+#: GitHub's shape: `number`, labels as objects with a `name`, `html_url`.
+GH_ISSUE = {
+    "number": 42,
+    "title": "Label tasks on GitHub",
+    "labels": [{"id": 1, "name": "backend", "color": "ededed"}],
+    "html_url": "https://github.com/alperarabaci/halyard-fleet/issues/42",
+}
+
+
+class GitHubAnswering:
+    """Stands in for GitHub's API: routes by method and path, each answered
+    in turn by the next of its responses, and every request recorded."""
+
+    def __init__(self, routes: dict[tuple[str, str], list[tuple[int, object]]]) -> None:
+        self.routes = {key: list(answers) for key, answers in routes.items()}
+        self.seen: list[httpx.Request] = []
+
+    def handler(self, request: httpx.Request) -> httpx.Response:
+        self.seen.append(request)
+        answers = self.routes.get((request.method, request.url.raw_path.decode()), [])
+        if not answers:
+            return httpx.Response(404, json={"message": "Not Found"})
+        status, body = answers.pop(0) if len(answers) > 1 else answers[0]
+        return httpx.Response(status, json=body)
+
+    def client(self) -> httpx.AsyncClient:
+        return httpx.AsyncClient(transport=httpx.MockTransport(self.handler))
+
+    def asked(self) -> list[tuple[str, str]]:
+        return [(r.method, r.url.raw_path.decode()) for r in self.seen]
+
+
+def github(answering: GitHubAnswering, host: str = "github.com", path: str = GITHUB.path):
+    from halyard.tasks.github import GitHub
+
+    return GitHub(host, path, "github_pat_x", client=answering.client())
+
+
+PATH = "/repos/alperarabaci/halyard-fleet"
+
+
+async def test_a_github_issue_is_read_with_its_labels_and_where_it_lives() -> None:
+    answering = GitHubAnswering({("GET", f"{PATH}/issues/42"): [(200, GH_ISSUE)]})
+
+    task = await github(answering).task(42)
+
+    assert task == Task(42, GH_ISSUE["title"], ("backend",), GH_ISSUE["html_url"])
+    [request] = answering.seen
+    assert str(request.url) == f"{REPO}/issues/42"
+    assert request.headers["Authorization"] == "Bearer github_pat_x"
+    assert request.headers["Accept"] == "application/vnd.github+json"
+    assert request.headers["X-GitHub-Api-Version"] == "2022-11-28"
+
+
+async def test_github_labels_are_listed_a_hundred_to_a_page() -> None:
+    answering = GitHubAnswering(
+        {("GET", f"{PATH}/labels?per_page=100"): [(200, [{"name": "andon"}, {"name": "a::b"}])]}
+    )
+
+    assert await github(answering).labels() == ("andon", "a::b")
+    assert answering.seen[0].method == "GET"
+
+
+async def test_a_github_label_is_added_and_the_rest_left_alone() -> None:
+    """`POST`, which adds — never `PUT`, which replaces every label the issue
+    has. Colons are part of the name: GitHub has no scoped labels."""
+    labelled = {**GH_ISSUE, "labels": [*GH_ISSUE["labels"], {"name": "navigator:claude"}]}
+    answering = GitHubAnswering(
+        {
+            ("POST", f"{PATH}/issues/42/labels"): [(200, [{"name": "navigator:claude"}])],
+            ("GET", f"{PATH}/issues/42"): [(200, labelled)],
+        }
+    )
+
+    task = await github(answering).add_label(42, "navigator:claude")
+
+    assert answering.asked() == [("POST", f"{PATH}/issues/42/labels"), ("GET", f"{PATH}/issues/42")]
+    assert json.loads(answering.seen[0].content) == {"labels": ["navigator:claude"]}
+    assert task.labels == ("backend", "navigator:claude")
+
+
+async def test_a_label_the_repository_lacks_is_made_then_added() -> None:
+    """Whether GitHub makes it on its own was not measured, so a refusal
+    because it does not exist is answered by making it and adding it again."""
+    labelled = {**GH_ISSUE, "labels": [{"name": "navigator:claude"}]}
+    answering = GitHubAnswering(
+        {
+            ("POST", f"{PATH}/issues/42/labels"): [
+                (422, {"message": "Validation Failed", "errors": [{"code": "invalid"}]}),
+                (200, [{"name": "navigator:claude"}]),
+            ],
+            ("GET", f"{PATH}/labels/navigator%3Aclaude"): [(404, {"message": "Not Found"})],
+            ("GET", f"{PATH}/issues/42"): [(200, GH_ISSUE), (200, labelled)],
+            ("POST", f"{PATH}/labels"): [(201, {"name": "navigator:claude"})],
+        }
+    )
+
+    task = await github(answering).add_label(42, "navigator:claude")
+
+    assert answering.asked() == [
+        ("POST", f"{PATH}/issues/42/labels"),
+        ("GET", f"{PATH}/labels/navigator%3Aclaude"),
+        ("GET", f"{PATH}/issues/42"),
+        ("POST", f"{PATH}/labels"),
+        ("POST", f"{PATH}/issues/42/labels"),
+        ("GET", f"{PATH}/issues/42"),
+    ]
+    assert json.loads(answering.seen[3].content) == {"name": "navigator:claude"}
+    assert task.labels == ("navigator:claude",)
+
+
+async def test_a_label_somebody_made_in_the_meantime_is_still_added() -> None:
+    answering = GitHubAnswering(
+        {
+            ("POST", f"{PATH}/issues/42/labels"): [(404, {}), (200, [])],
+            ("GET", f"{PATH}/labels/andon"): [(404, {"message": "Not Found"})],
+            ("GET", f"{PATH}/issues/42"): [(200, GH_ISSUE)],
+            ("POST", f"{PATH}/labels"): [
+                (422, {"message": "Validation Failed", "errors": [{"code": "already_exists"}]})
+            ],
+        }
+    )
+
+    await github(answering).add_label(42, "andon")
+
+    assert answering.asked().count(("POST", f"{PATH}/issues/42/labels")) == 2
+
+
+async def test_a_refusal_for_a_label_that_exists_is_not_answered_by_making_it() -> None:
+    answering = GitHubAnswering(
+        {
+            ("POST", f"{PATH}/issues/42/labels"): [(422, {"message": "Validation Failed"})],
+            ("GET", f"{PATH}/labels/andon"): [(200, {"name": "andon"})],
+        }
+    )
+
+    with pytest.raises(ForgeError, match="GitHub said 422: Validation Failed"):
+        await github(answering).add_label(42, "andon")
+
+    assert ("POST", f"{PATH}/labels") not in answering.asked()
+
+
+async def test_no_label_is_made_for_an_issue_that_is_not_there() -> None:
+    answering = GitHubAnswering(
+        {
+            ("POST", f"{PATH}/issues/999/labels"): [(404, {"message": "Not Found"})],
+            ("GET", f"{PATH}/labels/andon"): [(404, {"message": "Not Found"})],
+        }
+    )
+
+    with pytest.raises(ForgeError, match="no such repository, issue or label"):
+        await github(answering).add_label(999, "andon")
+
+    assert ("POST", f"{PATH}/labels") not in answering.asked()
+
+
+async def test_github_enterprise_is_reached_under_its_own_host() -> None:
+    answering = GitHubAnswering({("GET", "/api/v3/repos/team/thing/issues/42"): [(200, GH_ISSUE)]})
+
+    await github(answering, host="ghe.example.com", path="team/thing").task(42)
+
+    assert str(answering.seen[0].url) == "https://ghe.example.com/api/v3/repos/team/thing/issues/42"
+
+
+@pytest.mark.parametrize(
+    ("status", "body", "said"),
+    [
+        (401, {"message": "Bad credentials"}, "GitHub refused the token: Bad credentials"),
+        (
+            403,
+            {"message": "Resource not accessible by personal access token"},
+            "That token is not allowed to do this on this repository: "
+            "Resource not accessible by personal access token",
+        ),
+        (404, {"message": "Not Found"}, "GitHub has no such repository, issue or label"),
+        (500, {"message": "Server Error"}, "GitHub said 500: Server Error"),
+        (
+            422,
+            {"message": "Validation Failed", "errors": [{"message": "name is too long"}]},
+            "GitHub said 422: Validation Failed (name is too long)",
+        ),
+    ],
+)
+async def test_githubs_own_words_come_back_as_a_forge_error(status, body, said) -> None:
+    answering = GitHubAnswering({("GET", f"{PATH}/issues/42"): [(status, body)]})
+
+    with pytest.raises(ForgeError) as refused:
+        await github(answering).task(42)
+
+    assert said in str(refused.value)
+
+
+async def test_a_github_that_is_not_there_is_answered_not_raised_raw() -> None:
+    from halyard.tasks.github import GitHub
+
+    def refuse(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("nothing listening")
+
+    broken = GitHub(
+        "github.com", "a/b", "t", client=httpx.AsyncClient(transport=httpx.MockTransport(refuse))
+    )
+
+    with pytest.raises(ForgeError, match="GitHub could not be reached"):
+        await broken.task(1)
+
+
+def test_github_com_names_itself_and_an_enterprise_host_is_told() -> None:
+    from halyard.tasks.github import GitHub
+
+    enterprise = remotes.Origin(host="ghe.example.com", path="team/thing")
+
+    assert registry.kind_of(GITHUB) == "github"
+    assert isinstance(registry.build(GITHUB, {"github": "t"}), GitHub)
+    assert registry.kind_of(enterprise) is None
+    assert isinstance(registry.build(enterprise, {"github": "t"}, declared="github"), GitHub)
+
+
+def test_each_forge_is_built_with_its_own_token_alone() -> None:
+    """One machine can label a GitHub project and a GitLab one; neither token
+    reaches the other forge."""
+    tokens = {"github": "github_pat_x", "gitlab": "glpat-x"}
+
+    assert registry.build(GITHUB, tokens)._token == "github_pat_x"
+    assert registry.build(ORIGIN, tokens)._token == "glpat-x"
+    with pytest.raises(
+        ForgeError, match=r"No GitHub token for github\.com: set HALYARD_GITHUB_TOKEN"
+    ):
+        registry.build(GITHUB, {"gitlab": "glpat-x"})
+
+
+def test_a_github_branch_named_for_an_issue_gives_its_number() -> None:
+    """GitHub names a branch made from an issue `<number>-<title-slug>`."""
+    assert branches.number_of("42-label-tasks-on-github") == 42

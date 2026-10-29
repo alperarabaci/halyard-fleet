@@ -170,6 +170,92 @@ async def test_a_cli_that_cannot_be_started_is_not_delivered(monkeypatch) -> Non
     assert await turns().start("s-1", ["claude", "-p"]) is False
 
 
+# --- when a message's turn starts ---------------------------------------------
+
+
+async def test_a_message_behind_a_turn_is_said_to_start_when_that_turn_is_over(
+    monkeypatch,
+) -> None:
+    """Until then, what the session says is the turn ahead of it talking."""
+    first = asyncio.Event()
+    starting(monkeypatch, FakeProcess(until=first), FakeProcess())
+    turning = turns()
+    told: list[str] = []
+
+    async def started(session_id: str) -> None:
+        told.append(session_id)
+
+    await turning.start("s-1", ["claude", "-p", "first"])
+    queued = asyncio.ensure_future(
+        turning.start("s-1", ["claude", "-p", "second"], started=started)
+    )
+    await settles()
+
+    assert told == [], "said to start while the turn ahead of it was still going"
+
+    first.set()
+    assert await asyncio.wait_for(queued, timeout=1) is True
+    assert told == ["s-1"]
+
+
+async def test_a_turn_over_inside_the_window_is_said_to_start_before_it_is_accepted(
+    monkeypatch,
+) -> None:
+    """Its reply has been relayed by the time it counts as accepted, so
+    acceptance is too late to say the message got there."""
+    starting(monkeypatch, FakeProcess())
+    order: list[str] = []
+
+    async def started(_session_id: str) -> None:
+        order.append("started")
+
+    assert await turns().start("s-1", ["claude", "-p"], started=started) is True
+    order.append("accepted")
+
+    assert order == ["started", "accepted"]
+
+
+async def test_a_message_called_back_while_it_waited_never_starts(monkeypatch) -> None:
+    """It waited behind another turn, and whoever sent it no longer wants it:
+    asked as its turn would begin, it answers so, and nothing is started."""
+    first = asyncio.Event()
+    started = starting(monkeypatch, FakeProcess(until=first), FakeProcess())
+    turning = turns()
+
+    async def called_back(_session_id: str) -> bool:
+        return False
+
+    await turning.start("s-1", ["claude", "-p", "first"])
+    queued = asyncio.ensure_future(
+        turning.start("s-1", ["claude", "-p", "second"], started=called_back)
+    )
+    await settles()
+    first.set()
+
+    assert await asyncio.wait_for(queued, timeout=1) is False
+    assert len(started) == 1, "the message called back was started anyway"
+
+
+async def test_a_message_dropped_behind_a_stopped_turn_is_never_said_to_start(
+    monkeypatch,
+) -> None:
+    working = asyncio.Event()
+    starting(monkeypatch, FakeProcess(returncode=-9, until=working), FakeProcess())
+    ending(monkeypatch, working)
+    turning = turns()
+    told: list[str] = []
+
+    await turning.start("s-1", ["claude", "-p", "first"])
+    queued = asyncio.ensure_future(
+        turning.start("s-1", ["claude", "-p", "second"], started=told.append)
+    )
+    await settles()
+    turning.stop("s-1")
+
+    assert await asyncio.wait_for(queued, timeout=1) is False
+    assert told == []
+
+
 # --- what happens after the answer --------------------------------------------
 
 
@@ -311,3 +397,92 @@ async def test_two_sessions_do_not_wait_for_each_other(monkeypatch) -> None:
 
     working.set()
     await settles()
+
+
+# --- stopping a turn from the phone -------------------------------------------
+
+
+def ending(monkeypatch, until: asyncio.Event) -> list:
+    """`end_group`, without a real process group: what it was handed, and the
+    turn ends as a killed one would."""
+    import halyard.agents.turns as running
+
+    ended: list = []
+
+    def end_group(process) -> None:
+        ended.append(process)
+        until.set()
+
+    monkeypatch.setattr(running, "end_group", end_group)
+    return ended
+
+
+async def test_a_stopped_turn_ends_and_is_not_reported_as_a_failure(monkeypatch) -> None:
+    """Sent to the wrong agent, say. Stopped on purpose is not a turn that
+    failed, and saying so on the phone would be a second wrong message."""
+    working = asyncio.Event()
+    process = FakeProcess(returncode=-9, until=working)
+    starting(monkeypatch, process)
+    ended = ending(monkeypatch, working)
+    failures: list[str] = []
+
+    async def told(reason: str) -> None:
+        failures.append(reason)
+
+    turning = turns()
+    await turning.start("s-1", ["codex", "exec", "resume"], when_done=told)
+    stopped = turning.stop("s-1")
+    await settles()
+
+    assert stopped is True
+    assert ended == [process]
+    assert turning.busy("s-1") is False
+    assert failures == []
+    assert turning.last_error("s-1") is None
+
+
+async def test_a_turn_stopped_before_it_was_accepted_still_reached(monkeypatch) -> None:
+    working = asyncio.Event()
+    starting(monkeypatch, FakeProcess(returncode=-9, until=working))
+    ending(monkeypatch, working)
+    turning = turns()
+
+    sending = asyncio.ensure_future(turning.start("s-1", ["claude", "-p"]))
+    await settles()
+    turning.stop("s-1")
+
+    assert await asyncio.wait_for(sending, timeout=1) is True
+
+
+async def test_a_message_waiting_behind_a_stopped_turn_never_starts(monkeypatch) -> None:
+    """Somebody stopping a session wants it quiet, not the next message begun."""
+    working = asyncio.Event()
+    started = starting(monkeypatch, FakeProcess(returncode=-9, until=working), FakeProcess())
+    ending(monkeypatch, working)
+    turning = turns()
+
+    await turning.start("s-1", ["claude", "-p", "first"])
+    queued = asyncio.ensure_future(turning.start("s-1", ["claude", "-p", "second"]))
+    await settles()
+    turning.stop("s-1")
+
+    assert await asyncio.wait_for(queued, timeout=1) is False
+    assert len(started) == 1
+
+
+async def test_a_stopped_session_takes_the_next_message(monkeypatch) -> None:
+    working = asyncio.Event()
+    started = starting(monkeypatch, FakeProcess(returncode=-9, until=working), FakeProcess())
+    ending(monkeypatch, working)
+    turning = turns()
+
+    await turning.start("s-1", ["claude", "-p", "first"])
+    turning.stop("s-1")
+    await settles()
+
+    assert await turning.start("s-1", ["claude", "-p", "again"]) is True
+    assert len(started) == 2
+
+
+async def test_nothing_to_stop_says_so() -> None:
+    assert turns().stop("s-1") is False

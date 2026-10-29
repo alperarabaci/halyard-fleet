@@ -219,6 +219,31 @@ async def test_the_card_shows_what_is_needed_to_decide(setup) -> None:
     assert "Expires in" in text
 
 
+def test_a_card_with_no_deadline_says_it_stays_open() -> None:
+    """opencode's: its question waits on the screen, and so does the card."""
+    from halyard.core.approvals import ApprovalRequest
+
+    request = ApprovalRequest(
+        request_id="req_1",
+        nonce="n",
+        session_id="ses_1",
+        agent_id="opencode",
+        project="p",
+        tool="bash",
+        command_summary="make deploy",
+        command_full="make deploy",
+        risk=RiskLevel.LOW,
+        created_at=NOW,
+        expires_at=None,
+    )
+
+    text = cards.render(request, now=NOW + timedelta(hours=3))
+
+    assert "Expires in" not in text
+    assert "Open until it is answered, here or at the desk." in text
+    assert cards.format_remaining(None, NOW) == "until answered"
+
+
 async def test_a_command_from_a_turn_of_halyard_s_own_says_whose_it_is(setup) -> None:
     """A repeat started from the command line: marked as Halyard's own, its
     card says which inspection it is rather than AGENT over a session nobody
@@ -884,6 +909,7 @@ class FakeRunner:
         self.working: set[str] = set()
         self.models: dict[str, str] = {}
         self.efforts: dict[str, str] = {}
+        self.stops: list[str] = []
         self._works = works
 
     def options(self, session_id: str | None = None) -> dict[str, tuple[tuple[str, ...], bool]]:
@@ -899,6 +925,13 @@ class FakeRunner:
 
     def busy(self, session_id: str) -> bool:
         return session_id in self.working
+
+    def stop(self, session_id: str, cwd: str | None = None) -> bool:
+        if session_id not in self.working:
+            return False
+        self.working.discard(session_id)
+        self.stops.append(session_id)
+        return True
 
     def preferences(self, session_id: str) -> tuple[str | None, str | None]:
         return self.models.get(session_id) or self.default_model, self.efforts.get(session_id)
@@ -921,12 +954,15 @@ class FakeRunner:
         text: str,
         cwd: str | None = None,
         when_done=None,
+        started=None,
     ) -> bool:
         self.sent.append((session_id, text))
         self.directories.append(cwd)
         # Kept so a test can drive the after-acceptance path, which is the one
         # a real runtime reaches minutes later and nothing else can reach here.
         self.stopped_afterwards = when_done
+        if started is not None and await started(session_id) is False:
+            return False
         return self._works
 
 
@@ -989,6 +1025,60 @@ async def test_typing_in_a_seat_reaches_that_seat_s_session(tmp_path: Path) -> N
     # The message lands in the session itself, not a side conversation, so it
     # is in the history when that session is opened at a desk later.
     assert runner.sent == [("session-nav", "run the tests")]
+
+
+async def test_stop_ends_the_turn_sent_from_here_and_closes_its_cards(tmp_path: Path) -> None:
+    """Sent to the wrong agent: the turn is ended, and a card it left open is
+    closed rather than asking about a command nobody is waiting on."""
+    channel, api, runner, _ = await wired(tmp_path)
+    runner.working.add("session-nav")
+    request = await an_approval(channel._store, session_id="session-nav", role=Role.NAVIGATOR)
+    await channel.send_approval_request(request)
+
+    await channel._handle_message(typed_in("/stop", NAV_CHAT))
+
+    assert runner.stops == ["session-nav"]
+    assert (await channel._store.resolution_of(request.request_id)).decision is Decision.DENY
+    assert "⏹ STOPPED" in api.edits[-1]["text"]
+    assert "Stopped." in api.sent[-1]["text"]
+    assert "1 open card closed" in api.sent[-1]["text"]
+
+
+async def test_stop_with_nothing_running_says_so(tmp_path: Path) -> None:
+    channel, api, runner, _ = await wired(tmp_path)
+
+    await channel._handle_message(typed_in("/stop", NAV_CHAT))
+
+    assert runner.stops == []
+    assert "Nothing that can be stopped from here is running" in api.sent[-1]["text"]
+
+
+async def test_stop_says_when_a_runtime_cannot_be_stopped_yet(tmp_path: Path) -> None:
+    channel, api, runner, _ = await wired(tmp_path)
+    runner.stop = None
+    runner.working.add("session-nav")
+
+    await channel._handle_message(typed_in("/stop", NAV_CHAT))
+
+    assert "cannot be stopped from here yet" in api.sent[-1]["text"]
+
+
+async def test_stop_waits_for_a_runtime_that_has_to_ask(tmp_path: Path) -> None:
+    """opencode's stop is a call to opencode, and it gets the session's
+    directory, which is how opencode tells one project's sessions from another's."""
+    channel, api, runner, _ = await wired(tmp_path)
+    asked: list[tuple[str, str | None]] = []
+
+    async def stop(session_id: str, cwd: str | None = None) -> bool:
+        asked.append((session_id, cwd))
+        return True
+
+    runner.stop = stop
+
+    await channel._handle_message(typed_in("/stop", NAV_CHAT))
+
+    assert [session for session, _ in asked] == ["session-nav"]
+    assert "Stopped." in api.sent[-1]["text"]
 
 
 async def test_each_seat_reaches_its_own_session(tmp_path: Path) -> None:
@@ -1306,6 +1396,41 @@ async def test_a_missing_seat_is_reported_rather_than_hidden(
     # A name copied slightly wrong routes nothing and explains nothing, so the
     # place you go to check has to say it could not find it.
     assert "not found" in api.sent[-1]["text"]
+
+
+async def test_status_says_which_chat_it_is_and_whose(tmp_path: Path) -> None:
+    """A new group's id is what an agent's `chat:` needs, and /status is the one
+    place that can say it while Halyard runs."""
+    from halyard.core.seats import Seat
+
+    channel, api, _, _ = await wired(tmp_path)
+    channel._seats = [Seat("nav", "claude-code", "session-nav", NAV_CHAT, Role.NAVIGATOR)]
+
+    await channel._handle_message(typed_in("/status", NAV_CHAT))
+    owned = api.sent[-1]["text"]
+    await channel._handle_message(typed_in("/status", "-1009999999999"))
+    new = api.sent[-1]["text"]
+    await channel._handle_message(typed_in("/status", CHAT))
+    default = api.sent[-1]["text"]
+
+    assert f"This chat: <code>{NAV_CHAT}</code> — nav's." in owned
+    assert "no agent speaks here" in new and 'chat: "-1009999999999"' in new
+    assert "the default group" in default
+
+
+async def test_status_says_when_two_agents_share_a_chat(tmp_path: Path) -> None:
+    """A typed message reaches only the first of them, which nothing else says."""
+    from halyard.core.seats import Seat
+
+    channel, api, _, _ = await wired(tmp_path)
+    channel._seats = [
+        Seat("dev", "claude-code", "session-nav", NAV_CHAT, None),
+        Seat("other", "codex", "session-drv", NAV_CHAT, None),
+    ]
+
+    await channel._handle_message(typed_in("/status", NAV_CHAT))
+
+    assert "dev, other all speak here, and a typed message reaches only dev" in api.sent[-1]["text"]
 
 
 async def test_the_bot_answers_in_the_chat_that_asked(tmp_path: Path) -> None:
@@ -1831,6 +1956,42 @@ def test_to_answers_when_typed_but_is_off_the_menu() -> None:
     assert "to" in adapter.reserved_names()
 
 
+async def test_the_simple_menu_is_short_and_help_still_lists_everything(
+    tmp_path: Path,
+) -> None:
+    """A first setup does not need twenty commands on a phone. Off the menu is
+    not gone: every command answers when typed, and `/help` names them all."""
+    channel, api, _ = await routed(tmp_path)
+    channel._menu_kind = "simple"
+    await channel.start()
+    await channel.stop()
+
+    await channel._handle_message(typed_in("/help", DRV_CHAT))
+
+    assert [name for name, _ in api.commands] == list(adapter.SIMPLE)
+    for name in ("transition", "command", "label", "status", "model", "actions"):
+        assert f"/{name} — " in api.sent[-1]["text"]
+
+
+def test_an_unknown_menu_is_the_full_one() -> None:
+    from halyard.core.approvals import ApprovalStore as Store
+
+    channel = adapter.TelegramChannel(
+        api=FakeTelegramApi(),
+        store=Store(ttl=timedelta(minutes=5)),
+        audit=AuditLog([]),
+        chat_id=CHAT,
+        authorized_user_ids=frozenset({APPROVER}),
+        menu="tiny",
+    )
+
+    assert channel._menu_kind == "full"
+
+
+def test_the_card_commands_are_names_a_prompt_cannot_take() -> None:
+    assert {"actions", "agent", "prompts"} <= set(adapter.reserved_names())
+
+
 async def test_a_refused_registration_does_not_stop_the_gate(tmp_path: Path) -> None:
     """Trading the thing for the label on it. The bot answers every command
     whether Telegram knows about them or not."""
@@ -1938,7 +2099,8 @@ async def test_a_bare_to_offers_the_seats(tmp_path: Path) -> None:
     await channel._handle_message(typed_in("/to", DRV_CHAT))
 
     keyboard = api.sent[-1].get("reply_markup")
-    assert [b["text"] for b in keyboard["inline_keyboard"][0]] == ["drv", "xnav"]
+    # Not `drv`, whose chat this is: that would be typing here with extra steps.
+    assert [b["text"] for b in keyboard["inline_keyboard"][0]] == ["xnav"]
 
 
 async def test_plain_text_that_answers_nothing_still_goes_to_this_seat(tmp_path: Path) -> None:
@@ -2118,7 +2280,7 @@ async def test_a_reply_without_a_seat_offers_the_buttons(tmp_path: Path) -> None
     await channel._handle_message(replying("/to", "hand this over", DRV_CHAT, message_id=42))
 
     last = api.sent[-1]
-    assert [b["text"] for b in last["reply_markup"]["inline_keyboard"][0]] == ["drv", "xnav"]
+    assert [b["text"] for b in last["reply_markup"]["inline_keyboard"][0]] == ["xnav"]
     # Attached to the message that holds the text, so the press can read it
     # back exactly rather than from the shortened preview.
     assert last["reply_to_message_id"] == 42
@@ -2330,6 +2492,65 @@ async def test_configured_prompts_appear_in_the_menu_and_in_help(tmp_path: Path)
     assert "/md — Write it to a file." in api.sent[-1]["text"]
 
 
+def buttons_of(sent: dict) -> list[str]:
+    return [b["text"] for row in sent["reply_markup"]["inline_keyboard"] for b in row]
+
+
+def pressed_in(chat: str, data: str, *, message_id: int = 77) -> dict:
+    return {
+        "id": "cb-menu",
+        "from": {"id": int(APPROVER)},
+        "message": {"message_id": message_id, "chat": {"id": chat}, "text": "a card"},
+        "data": data,
+    }
+
+
+async def test_actions_is_a_card_whose_buttons_are_those_commands(tmp_path: Path) -> None:
+    channel, api, _, _ = await wired(tmp_path)
+
+    await channel._handle_message(typed_in("/actions", NAV_CHAT))
+    card = api.sent[-1]
+    await channel._handle_callback(pressed_in(NAV_CHAT, cards.choice_data("do", "pause")))
+
+    assert buttons_of(card)[:4] == ["/status", "/pause", "/resume", "/stop"]
+    assert channel._gate.paused
+    assert any(e["message_id"] == 77 and "☑️ /pause" in e["text"] for e in api.edits)
+
+
+async def test_agent_is_a_card_of_options_model_and_effort(tmp_path: Path) -> None:
+    channel, api, _, _ = await wired(tmp_path)
+
+    await channel._handle_message(typed_in("/agent", NAV_CHAT))
+
+    assert buttons_of(api.sent[-1])[:3] == ["/options", "/model", "/effort"]
+
+
+async def test_a_prompt_pressed_on_prompts_reaches_the_session(tmp_path: Path) -> None:
+    """The same as typing it: the session gets the prompt's text."""
+    channel, api, runner, _ = await wired(tmp_path)
+    channel._prompts = {"md": "Write it to a file.", "sample_01": "Add a Reset button."}
+
+    await channel._handle_message(typed_in("/prompts", NAV_CHAT))
+    card = api.sent[-1]
+    await channel._handle_callback(pressed_in(NAV_CHAT, cards.choice_data("prompt", "sample_01")))
+    await drain()
+
+    assert buttons_of(card)[:2] == ["/md", "/sample_01"]
+    assert runner.sent == [("session-nav", "Add a Reset button.")]
+
+
+async def test_a_menu_button_naming_nothing_it_offers_does_nothing(tmp_path: Path) -> None:
+    """A button is checked against what its card offers, never run as given."""
+    channel, _, runner, _ = await wired(tmp_path)
+
+    await channel._handle_callback(pressed_in(NAV_CHAT, cards.choice_data("do", "commit")))
+    await channel._handle_callback(pressed_in(NAV_CHAT, cards.choice_data("prompt", "nope")))
+    await drain()
+
+    assert runner.sent == []
+    assert not channel._gate.paused
+
+
 async def test_a_built_in_command_is_not_shadowed_by_a_prompt(tmp_path: Path) -> None:
     """Configuration refuses the collision, and the dispatch order refuses it
     again: a `prompts:` block cannot take `/pause` away from the gate."""
@@ -2428,6 +2649,99 @@ async def test_a_typed_answer_is_not_forwarded_as_a_message(tmp_path: Path) -> N
     await channel._handle_message(typed_in("teal", CHAT))
 
     assert forwarded == []
+
+
+async def a_question_with_no_deadline(tmp_path: Path):
+    """Codex's, left waiting at the desk: free text, and no expiry."""
+    channel, api, qstore, request = await with_a_question(
+        tmp_path, agent_id="codex", question="Which branch?", options=[], expires=False
+    )
+    [(_, (_, card, _))] = channel._open_questions.items()
+    return channel, api, qstore, request, card
+
+
+async def test_a_card_with_no_deadline_says_it_waits_and_how_to_answer(tmp_path: Path) -> None:
+    _channel, api, _qstore, _request, _card = await a_question_with_no_deadline(tmp_path)
+
+    text = api.sent[-1]["text"]
+    assert "Open until it is answered, here or at the desk." in text
+    assert "Reply with your answer." in text
+
+
+async def test_a_question_with_no_deadline_takes_only_a_reply_to_its_card(
+    tmp_path: Path,
+) -> None:
+    """It may wait for hours. Any message typed into the chat meanwhile is a
+    new instruction, not its answer — only a reply to its card is that."""
+    channel, _api, qstore, request, card = await a_question_with_no_deadline(tmp_path)
+    forwarded = []
+
+    async def forward(*args, **kwargs) -> None:
+        forwarded.append(args[0])
+
+    channel._forward_to_session = forward  # type: ignore[assignment]
+
+    await channel._handle_message(typed_in("run the tests", CHAT))
+    still_open = [r.request_id for r in await qstore.list_open()]
+    await channel._handle_message(
+        {**typed_in("main", CHAT), "reply_to_message": {"message_id": card}}
+    )
+
+    assert forwarded == ["run the tests"]
+    assert still_open == [request.request_id]
+    assert (await qstore.wait_for(request.request_id)).answer == "main"
+
+
+async def test_an_answer_to_a_question_with_no_deadline_says_it_is_queued(
+    tmp_path: Path,
+) -> None:
+    """Codex carried on after asking, so the answer waits behind the turn
+    running there. The card says so rather than reading as though it had
+    arrived."""
+    channel, api, qstore, request, card = await a_question_with_no_deadline(tmp_path)
+
+    await channel._handle_message(
+        {**typed_in("main", CHAT), "reply_to_message": {"message_id": card}}
+    )
+
+    assert (await qstore.wait_for(request.request_id)).answer == "main"
+    settled = api.edits[-1]
+    assert settled["message_id"] == card
+    assert "<b>main</b>" in settled["text"]
+    assert cards.QUEUED in settled["text"]
+
+
+async def test_an_answer_an_agent_waits_for_is_not_called_queued(tmp_path: Path) -> None:
+    channel, api, _qstore, request = await with_a_question(tmp_path)
+
+    await channel._handle_callback(question_press(request, 0))
+
+    assert "<b>Red</b>" in api.edits[-1]["text"]
+    assert cards.QUEUED not in api.edits[-1]["text"]
+
+
+async def test_a_question_answered_at_the_desk_closes_its_card(tmp_path: Path) -> None:
+    channel, api, _qstore, request, card = await a_question_with_no_deadline(tmp_path)
+
+    await channel.close_question(request, answer="main", by="at the desk")
+
+    assert api.edits[-1]["message_id"] == card
+    assert "main" in api.edits[-1]["text"]
+    assert "at the desk" in api.edits[-1]["text"]
+    assert cards.QUEUED not in api.edits[-1]["text"], "answered there, it queued nothing"
+    assert channel._open_questions == {}
+
+
+async def test_a_question_the_conversation_moved_on_from_closes_unanswered(
+    tmp_path: Path,
+) -> None:
+    channel, api, _qstore, request, card = await a_question_with_no_deadline(tmp_path)
+
+    await channel.close_question(request, answer=None, by="at the desk")
+
+    assert api.edits[-1]["message_id"] == card
+    assert "Not answered: the conversation moved on." in api.edits[-1]["text"]
+    assert channel._open_questions == {}
 
 
 async def test_a_stranger_cannot_answer_a_question(tmp_path: Path) -> None:

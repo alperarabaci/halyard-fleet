@@ -490,11 +490,23 @@ def test_a_name_from_before_a_rename_is_a_warning_that_says_what_to_rename() -> 
     assert doctor._older_spellings(projects_from_yaml("projects:\n  a:\n    path: /x\n")) == []
 
 
+def test_validate_is_said_as_the_commit_option_it_is_read_as() -> None:
+    from halyard.core.config_file import projects_from_yaml
+
+    [project] = projects_from_yaml(
+        "projects:\n  alpha-engine:\n    commands: {test-fast: make test-fast}\n"
+        "    validate: test-fast\n"
+    )
+
+    assert doctor._older_spellings([project]) == [
+        f"{doctor.WARN}alpha-engine — the project: `validate: test-fast` is now "
+        "`commit_options: review: commands: [test-fast]`; the old name still works"
+    ]
+
+
 def test_an_effort_the_runtime_does_not_take_is_named_where_it_was_written() -> None:
     """Such an inspection still runs, at the model's own effort, and says so in
     a log nobody reads. The doctor is where somebody looks."""
-    from types import SimpleNamespace
-
     from halyard.core.config_file import projects_from_yaml
 
     [project] = projects_from_yaml(
@@ -503,16 +515,134 @@ def test_an_effort_the_runtime_does_not_take_is_named_where_it_was_written() -> 
         "      bounded-context: {file: NOTES/bc.md, model: opus, effort: hihg}\n"
     )
 
-    lines = doctor._inspection_efforts(
-        SimpleNamespace(inspection_effort="Max", claude_models=None, claude_binary=None,
-                        claude_default_model=None, claude_oauth_token=None,
-                        db_path=Path("halyard.db")),
-        [project],
-    )  # fmt: skip
+    lines = doctor._one_shot_efforts(one_shot_settings(inspection_effort="Max"), [project])
 
     [warning] = lines
     assert "alpha-engine's inspection bounded-context asks for effort 'hihg'" in warning
     assert "max" in warning
+
+
+def one_shot_settings(**chosen):
+    """What the checks of Halyard's own turns read, with nothing chosen unless said."""
+    from types import SimpleNamespace
+
+    unset = dict.fromkeys(
+        (
+            "default_model",
+            "default_effort",
+            "commit_model",
+            "commit_effort",
+            "compaction_model",
+            "compaction_effort",
+            "inspection_model",
+            "inspection_effort",
+            "claude_models",
+            "claude_binary",
+            "claude_default_model",
+            "claude_oauth_token",
+        )
+    )
+    return SimpleNamespace(**{**unset, "db_path": Path("halyard.db"), **chosen})
+
+
+def test_an_effort_for_a_model_another_runtime_claims_is_left_to_that_runtime() -> None:
+    """`ultra` is not Claude Code's word, and it is Codex's: a GPT model runs
+    there, and is checked there."""
+    lines = doctor._one_shot_efforts(
+        one_shot_settings(default_model="gpt-5.6-terra", default_effort="ultra"), []
+    )
+
+    assert lines == []
+
+
+def codex_knows(monkeypatch, models: dict[str, tuple[str, ...]] | None, binary="/bin/codex"):
+    """What `codex debug models --bundled` would say here, without running it."""
+    import halyard.agents.codex as codex
+
+    monkeypatch.setattr(codex, "find_codex_binary", lambda *_: binary)
+    monkeypatch.setattr(codex, "read_catalog", lambda *_: models)
+
+
+def test_a_gpt_model_the_codex_cli_here_cannot_run_fails_the_check(monkeypatch) -> None:
+    """A turn on it would fail at once, every time, from the phone."""
+    codex_knows(monkeypatch, {"gpt-6-sol": ("high",), "gpt-5.6-terra": ("high",)})
+
+    lines, failed = doctor._one_shot_models(
+        one_shot_settings(default_model="gpt-6.1-sol", inspection_model="gpt-5.6-terra"), []
+    )
+
+    assert failed == 1
+    assert "HALYARD_DEFAULT_MODEL: the codex CLI here cannot run gpt-6.1-sol" in lines[0]
+    assert "gpt-6-sol" in lines[1], "and says which it can"
+
+
+def test_a_gpt_model_with_an_effort_it_does_not_take_is_warned(monkeypatch) -> None:
+    from halyard.core.config_file import projects_from_yaml
+
+    codex_knows(monkeypatch, {"gpt-6-sol": ("low", "high")})
+    [project] = projects_from_yaml(
+        "projects:\n  alpha-engine:\n    inspections:\n"
+        "      thin-bff: {file: NOTES/t.md, model: gpt-6-sol, effort: max}\n"
+    )
+
+    lines, failed = doctor._one_shot_models(one_shot_settings(), [project])
+
+    assert failed == 0
+    [warning] = lines
+    assert "alpha-engine's inspection thin-bff: gpt-6-sol takes effort low, high" in warning
+
+
+def test_a_gpt_model_with_no_codex_cli_here_fails_the_check(monkeypatch) -> None:
+    codex_knows(monkeypatch, None, binary=None)
+
+    lines, failed = doctor._one_shot_models(one_shot_settings(compaction_model="gpt-6-sol"), [])
+
+    assert failed == 1
+    assert "codex CLI is not on this machine" in lines[0]
+
+
+def test_models_the_default_runtime_runs_are_not_its_to_check(monkeypatch) -> None:
+    codex_knows(monkeypatch, {})
+
+    assert doctor._one_shot_models(one_shot_settings(default_model="haiku"), []) == ([], 0)
+
+
+def test_a_default_effort_the_runtime_does_not_take_is_named_too() -> None:
+    """The commit message and the compaction record run on it."""
+    lines = doctor._one_shot_efforts(one_shot_settings(default_effort="ultra"), [])
+
+    [warning] = lines
+    assert "HALYARD_DEFAULT_EFFORT asks for effort 'ultra'" in warning
+
+
+def test_commit_and_compaction_models_are_checked_at_their_own_efforts(monkeypatch):
+    codex_knows(monkeypatch, {"gpt-6-luna": ("low", "medium", "high")})
+    settings = one_shot_settings(
+        default_model="gpt-5.6-terra",
+        default_effort="high",
+        commit_model="gpt-6-luna",
+        commit_effort="low",
+        compaction_model="gpt-6-luna",
+        compaction_effort="ultra",
+    )
+    lines, failed = doctor._one_shot_models(settings, [])
+    assert failed == 1  # The unrelated default is absent from this catalog.
+    assert not any("HALYARD_COMMIT_MODEL" in line for line in lines)
+    assert any("HALYARD_COMPACTION_MODEL: gpt-6-luna takes effort" in line for line in lines)
+
+
+def test_commit_effort_only_is_checked_against_the_inherited_model(monkeypatch):
+    codex_knows(monkeypatch, {"gpt-6-luna": ("low", "medium")})
+    lines, failed = doctor._one_shot_models(
+        one_shot_settings(
+            default_model="gpt-6-luna",
+            default_effort="medium",
+            commit_effort="ultra",
+        ),
+        [],
+    )
+    assert failed == 0
+    assert any("HALYARD_COMMIT_MODEL: gpt-6-luna takes effort" in line for line in lines)
 
 
 def test_a_projects_runs_are_named_and_what_was_refused_is_said() -> None:
@@ -550,3 +680,143 @@ def test_what_halyard_rules_keeps_is_named_beside_the_file(tmp_path) -> None:
     assert (
         line == f"{doctor.OK}a runs without asking: make test-fast, uv run pytest * (halyard rules)"
     )
+
+
+def test_telegram_values_left_as_an_example_wrote_them_are_failures() -> None:
+    """Left in, Halyard starts and nothing reaches a phone — measured with the
+    first sample, whose block was taken as it came."""
+    from types import SimpleNamespace
+
+    from halyard.doctor import example_values
+
+    settings = SimpleNamespace(
+        telegram_bot_token="123456:replace-me",
+        telegram_chat_id="-1001234567890",
+        telegram_authorized_user_ids=frozenset({"11111111"}),
+    )
+    seats = [SimpleNamespace(label="dev", chat="-1001234567890:7")]
+    real = SimpleNamespace(
+        telegram_bot_token="7012345:AAH-real",
+        telegram_chat_id="-1009876543210",
+        telegram_authorized_user_ids=frozenset({"42"}),
+    )
+
+    said = example_values(settings, seats)
+
+    assert len(said) == 4
+    assert any(line.startswith("TELEGRAM_BOT_TOKEN") for line in said)
+    assert any("agent dev's chat" in line for line in said)
+    assert example_values(real, [SimpleNamespace(label="dev", chat="-1009876543210")]) == []
+
+
+def _forge_settings(**tokens: str):
+    from halyard.config import Settings
+
+    return Settings(_env_file=None, HALYARD_CHANNEL="stub_deny", **tokens)
+
+
+def _on(host: str):
+    """Every project's remote, as `origin_of` would read it."""
+    from halyard.tasks import Origin
+
+    return lambda path: Origin(host=host, path="team/thing")
+
+
+def test_the_old_forge_token_is_a_warning_that_says_what_to_rename() -> None:
+    """As a renamed key in `halyard.yaml` is: it still works, so this only
+    says what to rename."""
+    lines = doctor._forge_tokens(_forge_settings(HALYARD_FORGE_TOKEN="glpat-old"), [])
+
+    assert lines == [
+        f"{doctor.WARN}HALYARD_FORGE_TOKEN is now HALYARD_GITLAB_TOKEN, and is still read "
+        "as GitLab's; the old name still works"
+    ]
+    both = doctor._forge_tokens(
+        _forge_settings(HALYARD_FORGE_TOKEN="glpat-old", HALYARD_GITLAB_TOKEN="glpat-new"), []
+    )
+    assert both == [
+        f"{doctor.WARN}HALYARD_FORGE_TOKEN is now HALYARD_GITLAB_TOKEN, which is set, so "
+        "the old one is not used and can go"
+    ]
+
+
+def test_a_project_that_asks_for_labels_is_told_the_token_its_forge_needs() -> None:
+    from halyard.core.config_file import projects_from_yaml
+
+    [writes, reads, both] = projects_from_yaml(
+        "projects:\n"
+        "  alpha-engine:\n    path: /x\n    labels:\n      who_worked: true\n"
+        "  halyard:\n    path: /y\n    labels:\n      groups:\n        level: [level:1]\n"
+        "  fleet:\n    path: /z\n    labels:\n      who_worked: true\n"
+        "      groups:\n        level: [level:1]\n"
+    )
+    settings = _forge_settings(HALYARD_GITLAB_TOKEN="glpat-x")
+
+    lines = doctor._forge_tokens(settings, [writes, reads, both], origin_of=_on("github.com"))
+
+    assert lines == [
+        f"{doctor.WARN}alpha-engine is on GitHub (github.com), and HALYARD_GITHUB_TOKEN is not "
+        "set, so labels: who_worked writes nothing",
+        f"{doctor.WARN}halyard is on GitHub (github.com), and HALYARD_GITHUB_TOKEN is not "
+        "set, so labels: groups reads nothing from its tasks",
+        f"{doctor.WARN}fleet is on GitHub (github.com), and HALYARD_GITHUB_TOKEN is not "
+        "set, so labels: who_worked writes nothing and labels: groups reads nothing from its "
+        "tasks",
+    ]
+    assert doctor._forge_tokens(settings, [writes], origin_of=_on("gitlab.com")) == []
+
+
+def test_a_project_that_asks_for_no_labels_is_not_told_about_tokens() -> None:
+    """A GitHub project with no `labels:` block and no token: `/label` says
+    which token is missing if somebody uses it, and doctor says nothing — or
+    every project on github.com would warn on every run."""
+    from halyard.core.config_file import projects_from_yaml
+
+    [plain] = projects_from_yaml("projects:\n  alpha-engine:\n    path: /x\n")
+
+    assert doctor._forge_tokens(_forge_settings(), [plain], origin_of=_on("github.com")) == []
+
+
+def test_a_project_whose_remote_names_no_forge_is_left_alone() -> None:
+    """Unless it says `forge:` — then its token is the one asked for."""
+    from halyard.core.config_file import projects_from_yaml
+
+    [unknown, declared] = projects_from_yaml(
+        "projects:\n"
+        "  a:\n    path: /x\n    labels:\n      who_worked: true\n"
+        "  b:\n    path: /y\n    forge: github\n    labels:\n      who_worked: true\n"
+    )
+
+    lines = doctor._forge_tokens(
+        _forge_settings(), [unknown, declared], origin_of=_on("git.example.com")
+    )
+
+    assert lines == [
+        f"{doctor.WARN}b is on GitHub (git.example.com), and HALYARD_GITHUB_TOKEN is not set, "
+        "so labels: who_worked writes nothing"
+    ]
+
+
+def test_a_setting_that_was_ignored_is_a_warning_in_doctor() -> None:
+    """A warning, not a problem: what runs is the stricter gate."""
+    from halyard.config import Settings
+
+    medium = Settings(
+        _env_file=None, HALYARD_CHANNEL="stub_deny", HALYARD_ALLOW_RISK_AT_OR_BELOW="medium"
+    )
+    low = Settings(
+        _env_file=None, HALYARD_CHANNEL="stub_deny", HALYARD_ALLOW_RISK_AT_OR_BELOW="low"
+    )
+
+    [line] = doctor._ignored(medium)
+    assert line.startswith(f"{doctor.WARN}HALYARD_ALLOW_RISK_AT_OR_BELOW is 'medium'")
+    assert doctor._ignored(low) == []
+
+
+def test_a_log_level_that_was_ignored_is_a_warning_in_doctor() -> None:
+    from halyard.config import Settings
+
+    typo = Settings(_env_file=None, HALYARD_CHANNEL="stub_deny", HALYARD_LOG_LEVEL="DEBUGG")
+
+    [line] = doctor._ignored(typo)
+    assert line.startswith(f"{doctor.WARN}HALYARD_LOG_LEVEL is 'DEBUGG', which is not a level")

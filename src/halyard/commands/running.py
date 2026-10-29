@@ -14,13 +14,15 @@ where the code is.
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import os
 import re
+import signal
 import subprocess
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -95,6 +97,36 @@ class Result:
     timed_out: bool = False
     #: What it exited with. None when it never started, or was stopped.
     exit_code: int | None = None
+    #: True when somebody stopped it from the chat. Like a run out of time,
+    #: nothing is known about how it would have ended.
+    stopped: bool = False
+
+
+#: How a command ended, as the line after it says and a transition reads it.
+PASSED, FAILED, NOT_RUN = "passed", "failed", "not run"
+
+
+def outcome(result: Result, not_run: Sequence[int] = ()) -> str:
+    """Passed, failed, or not run — which is no result at all.
+
+    Failed is a result: something ran and said red, and whoever reads it next
+    decides what that means. Not run is the absence of one, and reading
+    inspections over it would find green in nothing. So it is told apart:
+
+    - by Halyard, for every command: it could not start, was stopped at the
+      clock, was not found or could not be executed (127, 126), or was ended by
+      a signal (128 and up, or the negative code Python reports one with);
+    - by the command, for the codes it declares under `not_run:` — only it can
+      know that its 2 means "nothing here to run" and not "red".
+    """
+    code = result.exit_code
+    if result.timed_out or result.stopped or code is None:
+        return NOT_RUN
+    if code == 0:
+        return PASSED
+    if code in (126, 127) or code >= 128 or code < 0 or code in not_run:
+        return NOT_RUN
+    return FAILED
 
 
 def _tail(text: str, lines: int) -> str:
@@ -104,19 +136,50 @@ def _tail(text: str, lines: int) -> str:
 
 
 def _environment() -> dict[str, str]:
-    """The shell's environment, with anything interactive shut off.
+    """The shell's environment, with anything interactive shut off, and without
+    Halyard's own virtual environment.
 
     Nothing running this has a terminal. A `make` target that shells out to git
     for a credential, or a test runner that offers to open a browser, would
     otherwise block until the timeout for an answer nobody is there to give.
+
+    Halyard runs inside a virtual environment of its own, and the project's
+    commands were handed it: `VIRTUAL_ENV`, and its `bin` first on `PATH`.
+    Measured on a project's e2e run: uv warned that `VIRTUAL_ENV` did not match
+    the project's `.venv` on every run, and that warning was the only line the
+    run printed, so the progress said it over and over. A bare `python` in a
+    project's makefile would have found Halyard's.
     """
-    return {
+    environment = {
         **os.environ,
         "GIT_TERMINAL_PROMPT": "0",
         "GIT_ASKPASS": "",
         "SSH_ASKPASS": "",
         "CI": "1",
     }
+    if own := environment.pop("VIRTUAL_ENV", None):
+        environment.pop("VIRTUAL_ENV_PROMPT", None)
+        own_bin = os.path.join(own, "bin")
+        environment["PATH"] = os.pathsep.join(
+            part
+            for part in environment.get("PATH", "").split(os.pathsep)
+            if part and os.path.normpath(part) != os.path.normpath(own_bin)
+        )
+    return environment
+
+
+def _end(process: subprocess.Popen) -> None:
+    """End a command and everything it started.
+
+    The shell alone is not the command: `make e2e` is a shell, make, a test
+    runner and a browser. Killing the first left the rest running for nobody —
+    a run stopped at its deadline went on until the machine was restarted.
+    """
+    try:
+        os.killpg(process.pid, signal.SIGKILL)
+    except OSError:
+        with contextlib.suppress(OSError):
+            process.kill()
 
 
 def _drain(stream, into: list[str]) -> None:
@@ -139,8 +202,11 @@ def run(
     *,
     timeout: float = DEFAULT_TIMEOUT,
     on_progress: Callable[[float, str], None] | None = None,
+    stop: threading.Event | None = None,
 ) -> Result:
     """Run it in `path`, and say what happened.
+
+    `stop`, once set, ends it and everything it started — `/stop` from a chat.
 
     `on_progress` is called every `PROGRESS_EVERY` seconds with how long it has
     been going and the newest line of output — from this thread, not the
@@ -165,6 +231,8 @@ def run(
             stderr=subprocess.STDOUT,
             text=True,
             env=environment,
+            # A group of its own, so the whole of it can be ended. See `_end`.
+            start_new_session=True,
         )
     except OSError as refused:
         return Result(ok=False, output=str(refused), seconds=time.monotonic() - started)
@@ -176,8 +244,20 @@ def run(
     said_at = started
     while process.poll() is None:
         now = time.monotonic()
+        if stop is not None and stop.is_set():
+            _end(process)
+            process.wait()
+            logger.warning(
+                "Command stopped from the chat after %.0fs in %s: %s", now - started, path, command
+            )
+            return Result(
+                ok=False,
+                output=_tail("\n".join(lines), LINES_WHEN_IT_FAILED),
+                seconds=now - started,
+                stopped=True,
+            )
         if now - started > timeout:
-            process.kill()
+            _end(process)
             process.wait()
             logger.warning("Command stopped after %.0fs in %s: %s", timeout, path, command)
             return Result(
@@ -234,19 +314,27 @@ def run(
     )
 
 
-def summary(name: str, line: str, result: Result) -> str:
+def summary(name: str, line: str, result: Result, not_run: Sequence[int] = ()) -> str:
     """One line saying what a command did, for whoever reads it next.
 
-    Which command, how it ended, how long it took, and the last thing it
-    printed — where a test runner puts its count, and where a project's own
+    Which command, how it ended — the exit code and what it means, in words, so
+    nobody reading the line has to guess — how long it took, and the last thing
+    it printed: where a test runner puts its count, and where a project's own
     target puts its status and the file the whole run went to. What it printed
     before that travels separately, for whoever needs more than the line.
     """
-    if result.timed_out:
-        how = f"stopped after {result.seconds:.0f}s"
+    ended = outcome(result, not_run)
+    if result.stopped:
+        how = f"stopped from the chat after {result.seconds:.0f}s ({ended})"
+    elif result.timed_out:
+        how = f"stopped after {result.seconds:.0f}s ({ended})"
     elif result.exit_code is None:
-        how = f"could not start: {result.output}"
+        how = f"could not start: {result.output} ({ended})"
     else:
-        how = f"exit {result.exit_code} · {result.seconds:.0f}s"
-    last = result.output.splitlines()[-1] if result.output and result.exit_code is not None else ""
+        how = f"exit {result.exit_code} ({ended}) · {result.seconds:.0f}s"
+    last = (
+        result.output.splitlines()[-1]
+        if result.output and (result.exit_code is not None or result.stopped)
+        else ""
+    )
     return f"Ran {name}: {line} · {how}" + (f" · last line: {last}" if last else "")

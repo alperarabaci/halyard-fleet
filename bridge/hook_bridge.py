@@ -39,6 +39,7 @@ import urllib.request
 
 from _settings import (
     antigravity_title,
+    codex_approvals_reviewer,
     codex_thread_name,
     control_plane_url,
     last_assistant_text,
@@ -290,7 +291,34 @@ def build_body(payload: dict) -> dict:
         # bounded: a bare command on a phone is a thing to approve with the
         # intent guessed from the shell.
         "reason": _context(tool_input, transcript),
+        # The approval setting the chat itself is in, and which hook asked:
+        # `PreToolUse` is Halyard's own gate, `PermissionRequest` is the agent
+        # asking because its own setting says to. Kept beside the card, so
+        # how many cards the chat's own setting would have asked for can be
+        # counted rather than guessed.
+        "permission_mode": _text(payload.get("permission_mode")),
+        "hook_event": _text(payload.get("hook_event_name")),
+        # Whether the chat has its own reviewer approving for it — what the
+        # person chose there. The control plane decides what to do with it.
+        "agent_approves": _approves_itself(runtime, payload, transcript),
     }
+
+
+def _approves_itself(runtime: str, payload: dict, transcript: str | None) -> bool:
+    """Whether the chat this call came from approves its own calls: Codex's
+    "approve for me" (`approvals_reviewer: auto_review` in its rollout), or
+    Claude Code's auto mode (`permission_mode: auto` in the payload). Anything
+    else — asked of the person, or unreadable — is not."""
+    if runtime == "codex":
+        return codex_approvals_reviewer(transcript) == "auto_review"
+    if runtime == "claude-code":
+        return payload.get("permission_mode") == "auto"
+    return False
+
+
+def _text(value: object) -> str | None:
+    """A short string from the payload, or None. Bounded: it is a label."""
+    return value[:64] if isinstance(value, str) and value else None
 
 
 def ask(url: str, body: dict, timeout: float, endpoint: str = "/v1/approvals") -> dict:

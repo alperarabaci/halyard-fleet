@@ -4,16 +4,31 @@ One function, and no side effects: everything a run does is decided here and
 carried out by whoever drives it. A flow that went round three times when it
 should have gone round twice is the failure this exists to make testable.
 
-**Forward is the default.** A decision Halyard could not read carries the work
-to the next step rather than stopping — most transitions ask for no decision at
-all — and whoever drives this says so in the chat. The one exception is the end
-of a phase, below.
+**No decision stops.** Every step is told the words it decides in, so a reply
+without one is something gone wrong — a step sent to the wrong agent, a turn
+that ended on a question — and carrying it on handed the next agent a reply
+that was never meant for it. It stops the run the way a wait does: the agent's
+own decision afterwards moves it, and the card offers where its words would
+have taken the work. A review whose decision the next step acts on still goes
+to that step, and that step still goes on the review's decision.
+
+**The end is `done`.** Leaving the last step says the work is finished, which
+is a claim, so only `done` makes it. A `forward` there, written out of habit,
+or a reply that decided nothing, stops the run with the way out offered, and
+the seat's own `done` afterwards ends it too. Anywhere else a reply that ends
+in "Done." is as often a sentence as a decision, and decides nothing.
 
 **Back is one step.** The step before is the one that produced what was just
 judged: a navigator's back lands on the driver whose report it read. It is that
 step's next round, so what the seat receives is the project's own text for
 going round again. From the step a later phase started at, the step before is
 the end of the phase before it.
+
+**A step can work on an earlier step's work.** `close` after `developed` goes to
+the navigator who just read the driver's report, so the step before it is the
+navigator's own, and its back would hand the navigator its own reply. A step
+that names `works_on: develop` carries that step's agent's last reply instead,
+and its back goes there: what close sends back is the driver's to fix.
 
 **A step can act on the decision made before it.** A reviewer's back is for the
 navigator to act on — the navigator holds the context, so the review goes to
@@ -83,9 +98,26 @@ class Next:
     entered: int | None = None
     #: The steps a `next` that named where to start went past.
     skipped: tuple[str, ...] = ()
-    #: For a stop at the end of a phase: where `forward` out of the phases goes
-    #: — the length of the flow when nothing comes after them.
+    #: For a stop that can be left rather than sent on — the end of a phase,
+    #: or the last step without `done` — where leaving goes: the length of the
+    #: flow when that is the end.
     leaving: int | None = None
+    #: The stop is the seat's to lift as well as the operator's: it asked to
+    #: wait, or ended the flow without `done`. Its own decision afterwards
+    #: takes the run on from where it stopped.
+    liftable: bool = False
+
+
+def taken_as(decision: Decision | None, *, step: int, flow: Sequence[str]) -> Decision | None:
+    """What a decision read off a reply counts as at this step of the flow.
+
+    Only `done` depends on where it is said: a reply that ends in "Done." is as
+    often a sentence as a decision, so anywhere but the flow's last step it
+    decides nothing, as any sentence does.
+    """
+    if decision is Decision.DONE and step != len(flow) - 1:
+        return None
+    return decision
 
 
 def after(
@@ -107,11 +139,14 @@ def after(
     may go through. `named` is the step a `next` named, if it named one.
     """
     here = steps.get(flow[run.step]) if 0 <= run.step < len(flow) else None
-    deciding = decision
+    deciding = taken_as(decision, step=run.step, flow=flow)
     if deciding is None and here is not None and here.decided_by:
         deciding = carried(run.carried)
     ending = stretch is not None and run.step == stretch[1]
+    last = run.step == len(flow) - 1
     lending = lends(run.step, flow=flow, steps=steps)
+    if deciding is Decision.DONE:
+        return Next(done=True, decided=deciding)
     if deciding is Decision.WAIT and ending and not lending:
         # A wait at the end of a phase is the operator's moment between parts —
         # applying what was made, before the next one starts on it — and what
@@ -119,9 +154,15 @@ def after(
         # that happens to follow in the list.
         ready = _next_phase(run, flow=flow, steps=steps, taken=taken, stretch=stretch, most=most)
         assert stretch is not None  # `ending` said so
-        return replace(ready, stop="it was asked to wait", decided=deciding, leaving=stretch[1] + 1)
+        return replace(
+            ready,
+            stop="it was asked to wait",
+            decided=deciding,
+            leaving=stretch[1] + 1,
+            liftable=True,
+        )
     if deciding is Decision.WAIT:
-        return Next(stop="it was asked to wait", decided=deciding)
+        return Next(stop="it was asked to wait", decided=deciding, liftable=True)
     if deciding is Decision.NEXT:
         return _next_phase(
             run, flow=flow, steps=steps, taken=taken, stretch=stretch, most=most, named=named
@@ -137,11 +178,33 @@ def after(
             stop=f"phase {run.phase} ended with no decision",
             decided=None,
             leaving=stretch[1] + 1,
+            liftable=last,
         )
+    if deciding is None and not last and not lending:
+        # Told the words it decides in, and used none of them. A review whose
+        # decision the next step acts on goes there whichever way it went.
+        return Next(stop=f"{flow[run.step]} ended with no decision", decided=None, liftable=True)
+    if last and deciding in (None, Decision.FORWARD):
+        # Ending the workflow is a claim that the work is finished, made in
+        # `done`. A habitual forward, or no word at all, leaves the end to the
+        # operator — or to the seat's own `done`, once it has said it.
+        said = "with no decision" if deciding is None else f"on {deciding}"
+        why = f"{flow[run.step]} ended {said}, and only done ends the workflow"
+        if ending:
+            ready = _next_phase(
+                run, flow=flow, steps=steps, taken=taken, stretch=stretch, most=most
+            )
+            return replace(ready, stop=why, decided=deciding, leaving=len(flow), liftable=True)
+        return Next(stop=why, decided=deciding, leaving=len(flow), liftable=True)
 
     going_back = deciding is Decision.BACK and not lending
     phase, entered = run.phase, None
-    if going_back and stretch is not None and run.phase > 1 and run.step == run.entered:
+    worked_on = _worked_on(run.step, flow=flow, steps=steps) if going_back else None
+    if worked_on is not None:
+        # Back to the step whose work this one took, in the phase the run is in:
+        # after the phases, that is the last one, where the work was made.
+        target = worked_on
+    elif going_back and stretch is not None and run.phase > 1 and run.step == run.entered:
         # The first step of a later phase was handed the end of the one before.
         # Where that one started is not kept, and the phases' first step is
         # where a phase starts unless a `next` said otherwise.
@@ -182,6 +245,16 @@ def after(
     if would_be > step.rounds:
         return replace(going, stop=f"{step.name} would go for round {would_be} of {step.rounds}")
     return going
+
+
+def _worked_on(place: int, *, flow: Sequence[str], steps: Mapping[str, Step]) -> int | None:
+    """Where in the flow the step at `place` takes its work from — the nearest
+    place before it of the step its `works_on:` names — or None."""
+    here = steps.get(flow[place]) if 0 <= place < len(flow) else None
+    if here is None or here.works_on is None:
+        return None
+    earlier = [at for at in range(place) if flow[at] == here.works_on]
+    return earlier[-1] if earlier else None
 
 
 def _next_phase(

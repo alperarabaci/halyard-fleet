@@ -2,10 +2,91 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
+from enum import StrEnum
 from pathlib import Path
 from typing import Protocol, runtime_checkable
+
+
+class Status(StrEnum):
+    """How an inspection's answer stands, from what the turn read — never
+    from what the model says it read."""
+
+    #: Every read it asked for ran.
+    COMPLETE = "complete"
+    #: At least one did not, and the answer was given without it.
+    INCOMPLETE = "incomplete"
+    #: There is no answer.
+    UNMEASURED = "unmeasured"
+
+
+class Outcome(StrEnum):
+    """What became of one read."""
+
+    #: It ran.
+    RAN = "ran"
+    #: It ran, and its tool said it failed — a file that is not there.
+    ERROR = "error"
+    #: The gate let it through, and the runtime does not say what came of it.
+    ALLOWED = "allowed"
+    #: Refused: by a person, a standing rule, or the hook.
+    DENIED = "denied"
+    #: Its card expired before anybody answered.
+    EXPIRED = "expired"
+    #: Its card was still open when the inspection ended.
+    ENDED = "ended"
+    #: It started, and had not come back when the inspection ended.
+    UNFINISHED = "unfinished"
+
+
+#: The outcomes of a read that ran — a command that exited 1 among them.
+_RAN = frozenset({Outcome.RAN, Outcome.ERROR, Outcome.ALLOWED})
+
+
+@dataclass(frozen=True)
+class Read:
+    """One read an inspection asked for, and what became of it."""
+
+    #: `Read`, `Grep`, `Glob`, `Bash`.
+    tool: str
+    #: A path, a pattern or a command. Never what came back.
+    what: str
+    outcome: Outcome
+    #: Who decided, an exit code, or why it did not run: "denied by tg:4242",
+    #: "exit 1", "pre-authorized (reads)".
+    detail: str = ""
+
+    @property
+    def ran(self) -> bool:
+        return self.outcome in _RAN
+
+
+@dataclass(frozen=True)
+class Decided:
+    """What the gate made of one call an inspection's turn asked to make: a
+    card and its answer, or a call let through or refused with nobody asked.
+    The gate's side of a read, where the runtime's stream has the other."""
+
+    #: The id the call's hook carried — Claude Code's `tool_use` id, which its
+    #: stream carries too. Empty when there was none.
+    ref: str
+    tool: str
+    what: str
+    #: None when the gate let it through; otherwise why it never ran.
+    stopped: Outcome | None
+    detail: str = ""
+
+
+@dataclass(frozen=True)
+class NotRun:
+    """A read an inspection asked for that never ran: the command, and why not
+    — what became of the card that asked a person to allow it."""
+
+    command: str
+    #: "denied by …", "expired before anybody answered", "still waiting for
+    #: approval when the inspection ended".
+    why: str
 
 
 @runtime_checkable
@@ -19,7 +100,8 @@ class Asker(Protocol):
     `cwd` is where the turn runs. `name` is what it goes by wherever it is shown
     to a person — a command it asks to run is a card, and the card has to say
     whose. `edits=False` is a turn with no tool that edits a file: it may still
-    read, and run commands, which the project's gate puts in front of somebody.
+    search and read files and inspect diffs. The inspection prompt limits shell
+    use to reads; the runtime sandbox and project's gate remain in force.
     `session_id` is the id the turn runs under, chosen by the inspection, so
     that the record kept of it and the tokens it used can be found together.
     `effort` is how hard the model thinks, in the runtime's own words; None
@@ -40,15 +122,40 @@ class Asker(Protocol):
     ) -> str | None: ...
 
 
-@runtime_checkable
-class Labeller(Protocol):
-    """What an inspection may do to the task it ran on: put one more label on it.
+@dataclass(frozen=True)
+class Trace:
+    """Every read one inspection's turn asked for, each once, with what became
+    of it: what the runtime reported, merged with the gate's record."""
 
-    The channel answers it — it knows which task, which tracker and which
-    token. An inspection knows only what it found, and never waits on the writing.
+    reads: tuple[Read, ...] = ()
+    #: Whether the runtime said what the turn read. When it did not —
+    #: opencode — only the reads that met the gate are here.
+    reported: bool = False
+
+    @property
+    def not_run(self) -> tuple[NotRun, ...]:
+        """The reads that did not run, and why, in the order they were asked."""
+        return tuple(
+            NotRun(read.what, read.detail or read.outcome.value)
+            for read in self.reads
+            if not read.ran
+        )
+
+
+@runtime_checkable
+class Gated(Protocol):
+    """An `Asker` whose turns can stop a read to ask a person first.
+
+    A read whose card was denied, expired or still open when the turn ended
+    never ran, and a model may answer without it: Codex goes on with other
+    reads and answers while a card is still open. Once a turn is over, this
+    says what it read and what became of each — from the runtime's own report
+    and the gate's record, never from the model — so the answer can be marked
+    complete or not, and carry the reads that did not run in Halyard's own
+    words rather than the model's.
     """
 
-    async def label(self, label: str) -> None: ...
+    def trace(self, session_id: str) -> Trace: ...
 
 
 @dataclass(frozen=True)
@@ -80,12 +187,20 @@ class Kept:
     answer: str | None
     #: Why there is no answer, when there is none.
     why: str
-    #: The project's own finding phrase the answer said, if it said one.
+    #: Left empty since findings stopped labelling tasks; older runs carry
+    #: the phrase their answer said.
     finding: str | None
     took: float
     #: How hard the model was asked to think, or None when that was left to the
     #: runtime — whose default is not the same for every model.
     effort: str | None = None
+    #: What Halyard said under the answer about reads that did not run — see
+    #: `not_run_block` — or empty when every read it asked for ran.
+    not_run: str = ""
+    #: `Status`'s value, or empty for a run that was not given one — a repeat.
+    status: str = ""
+    #: What the turn read, or None where nothing could say — a repeat.
+    trace: Trace | None = None
 
 
 @runtime_checkable
@@ -121,9 +236,24 @@ class Answer:
     why: str = ""
     #: How long the model took, in seconds.
     took: float = 0.0
+    #: What it read, and what became of each read.
+    trace: Trace = field(default_factory=Trace)
 
     @property
     def measured(self) -> bool:
         """Whether there is anything to read. An unmeasured inspection is never a
         clean one."""
         return self.text is not None
+
+    @property
+    def not_run(self) -> tuple[NotRun, ...]:
+        """The reads it asked for that did not run, in the order it asked."""
+        return self.trace.not_run
+
+    @property
+    def status(self) -> Status:
+        """Complete when every read it asked for ran, incomplete when one did
+        not, unmeasured when there is no answer."""
+        if not self.measured:
+            return Status.UNMEASURED
+        return Status.INCOMPLETE if self.not_run else Status.COMPLETE

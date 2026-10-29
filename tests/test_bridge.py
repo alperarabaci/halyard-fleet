@@ -155,6 +155,11 @@ def test_the_payload_is_forwarded_without_being_reinterpreted() -> None:
         # before, which a Bash call does not have, so every card arrived as a
         # bare command with the intent left to be guessed from the shell.
         "reason": "Stop the stack",
+        # The chat's own approval setting, and the hook that asked.
+        "permission_mode": "default",
+        "hook_event": "PreToolUse",
+        # Asked of the person in this chat, so Halyard decides.
+        "agent_approves": False,
     }
 
 
@@ -384,6 +389,25 @@ def test_a_turn_that_said_nothing_is_not_forwarded(payload: dict) -> None:
     assert received == []
 
 
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {**STOP_PAYLOAD, "transcript_path": None},
+        {**STOP_PAYLOAD, "transcript_path": ""},
+        {k: v for k, v in STOP_PAYLOAD.items() if k != "transcript_path"},
+    ],
+)
+def test_a_thread_nobody_keeps_is_not_forwarded(payload: dict) -> None:
+    """Codex Desktop's own side turns, such as the one drafting the next
+    prompt: they say something, and nobody is having that conversation."""
+    with control_plane(body={"delivered": True}) as (url, received):
+        result = run_relay(payload, HALYARD_URL=url)
+
+    assert result.returncode == 0
+    assert result.stdout == ""
+    assert received == []
+
+
 @pytest.mark.parametrize("stdin", ["", "not json", "[]", "null"])
 def test_an_unreadable_payload_is_dropped_quietly(stdin: str) -> None:
     result = run_relay(stdin, HALYARD_URL="http://127.0.0.1:1")
@@ -415,6 +439,80 @@ def test_a_slow_control_plane_does_not_hold_the_turn_open() -> None:
 
     assert result.returncode == 0
     assert result.stdout == ""
+
+
+@pytest.mark.parametrize(
+    ("payload", "hook"),
+    [(PAYLOAD, "PreToolUse"), (PERMISSION_PAYLOAD, "PermissionRequest")],
+)
+def test_the_bridge_says_which_setting_the_chat_is_in_and_which_hook_asked(
+    payload: dict, hook: str
+) -> None:
+    """So the cards the chat's own setting would have asked for — the ones
+    that came by `PermissionRequest` — can be counted against Halyard's own."""
+    with control_plane(body={"decision": "allow", "reason": "ok"}) as (url, received):
+        run(BRIDGE, payload, HALYARD_URL=url)
+
+    assert received[0]["permission_mode"] == "default"
+    assert received[0]["hook_event"] == hook
+
+
+def a_codex_rollout(tmp_path: Path, *reviewers: str) -> Path:
+    """A rollout where Codex keeps it, with a `turn_context` per reviewer in
+    turn, the last the chat's setting now, and a long tool output after it."""
+    rollout = tmp_path / ".codex" / "sessions" / "2026" / "10" / "17" / "rollout-x.jsonl"
+    rollout.parent.mkdir(parents=True)
+    lines = [
+        json.dumps(
+            {
+                "type": "turn_context",
+                "payload": {"approval_policy": "on-request", "approvals_reviewer": who},
+            },
+            separators=(",", ":"),
+        )
+        for who in reviewers
+    ]
+    lines.append(json.dumps({"type": "event_msg", "payload": {"output": "x" * 300_000}}))
+    rollout.write_text("\n".join(lines) + "\n")
+    return rollout
+
+
+@pytest.mark.parametrize(
+    ("reviewers", "approves"),
+    [(("user", "auto_review"), True), (("auto_review", "user"), False), ((), False)],
+)
+def test_codex_s_approve_for_me_is_read_from_its_rollout(
+    tmp_path: Path, reviewers: tuple, approves: bool
+) -> None:
+    """Its payload says `default` either way; the newest turn says who approves."""
+    rollout = a_codex_rollout(tmp_path, *reviewers)
+    payload = {
+        **PERMISSION_PAYLOAD,
+        "hook_event_name": "PreToolUse",
+        "transcript_path": str(rollout),
+    }
+    with control_plane(body={"decision": "allow", "reason": "ok"}) as (url, received):
+        run(BRIDGE, payload, HALYARD_URL=url)
+
+    assert received[0]["agent_id"] == "codex"
+    assert received[0]["agent_approves"] is approves
+
+
+@pytest.mark.parametrize(("mode", "approves"), [("auto", True), ("default", False)])
+def test_claude_code_s_auto_mode_is_read_from_its_payload(mode: str, approves: bool) -> None:
+    with control_plane(body={"decision": "allow", "reason": "ok"}) as (url, received):
+        run(BRIDGE, {**PAYLOAD, "permission_mode": mode}, HALYARD_URL=url)
+
+    assert received[0]["agent_approves"] is approves
+
+
+def test_a_payload_without_a_mode_sends_none() -> None:
+    bare = {k: v for k, v in PAYLOAD.items() if k not in ("permission_mode", "hook_event_name")}
+    with control_plane(body={"decision": "allow", "reason": "ok"}) as (url, received):
+        run(BRIDGE, bare, HALYARD_URL=url)
+
+    assert received[0]["permission_mode"] is None
+    assert received[0]["hook_event"] is None
 
 
 def test_the_bridge_reports_which_project_the_call_came_from() -> None:
