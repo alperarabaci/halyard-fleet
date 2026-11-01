@@ -681,12 +681,54 @@ def test_a_command_can_say_which_of_its_codes_mean_it_did_not_run(tmp_path) -> N
         ("{not_run: [2]}", "needs `run:`"),
         ("{run: make x, not_run: two}", "list of exit codes"),
         ("{run: make x, not_run: [0]}", "list of exit codes"),
-        ("{run: make x, retry: 3}", "takes `run:` and `not_run:`, not retry"),
+        ("{run: make x, retry: 3}", "takes `run:`, `not_run:` and `timeout:`, not retry"),
     ],
 )
 def test_a_command_written_out_is_read_strictly(tmp_path, spec: str, said: str) -> None:
     with pytest.raises(ValueError, match=re.escape(said)):
         a_project(tmp_path, lines=["commands:", f"  test-fast: {spec}"])
+
+
+def test_a_command_can_name_how_long_it_may_run(tmp_path) -> None:
+    """Seconds, minutes or hours; one that names none has the default."""
+    [project] = a_project(
+        tmp_path,
+        lines=[
+            "commands:",
+            "  test-fast: {run: scripts/check.sh test-fast, not_run: [2], timeout: 30m}",
+            "  quick: {run: make quick, timeout: 90s}",
+            "  e2e: {run: make e2e, timeout: 1.5h}",
+            "  lint: make lint",
+        ],
+    )
+
+    assert project.command_limits == {"test-fast": 1800, "quick": 90, "e2e": 5400}
+    assert project.commands_not_run == {"test-fast": (2,)}
+
+
+@pytest.mark.parametrize(
+    "written", ["900", '"900"', "30", "30 minutes", "0m", "-5m", "true", "[30m]", "30x"]
+)
+def test_a_limit_without_its_unit_or_above_nothing_is_refused(tmp_path, written: str) -> None:
+    """A bare 900 reads as seconds to one person and minutes to the next."""
+    with pytest.raises(ValueError, match=re.escape("`timeout:` is how long it may run")):
+        a_project(
+            tmp_path, lines=["commands:", f"  test-fast: {{run: make x, timeout: {written}}}"]
+        )
+
+
+def test_doctor_is_refused_a_malformed_limit_as_it_is_any_command_field(tmp_path) -> None:
+    """`doctor` reads the agents with `configured()`, and says what it raises."""
+    from halyard.core.seats import configured
+
+    (tmp_path / "halyard.yaml").write_text(
+        "projects:\n  alpha-engine:\n    path: /code\n"
+        "    commands:\n      test-fast: {run: make test-fast, timeout: 900}\n"
+        "    agents:\n      nav: {runtime: claude-code}\n"
+    )
+
+    with pytest.raises(ValueError, match="command 'test-fast': `timeout:` is how long"):
+        configured(tmp_path)
 
 
 def test_a_transition_naming_a_list_is_told_to_name_its_commands(tmp_path) -> None:

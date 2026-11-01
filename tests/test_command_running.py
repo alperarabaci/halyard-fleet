@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from halyard.commands import Result, outcome, run, summary
+from halyard.commands import Result, limit_said, outcome, run, summary
 
 
 def test_a_command_says_it_started_before_anything_else(tmp_path: Path, caplog) -> None:
@@ -37,6 +37,48 @@ def test_a_command_out_of_time_says_so_in_the_log(tmp_path: Path, caplog) -> Non
     assert result.timed_out
     assert result.exit_code is None
     assert any("Command stopped after" in record.getMessage() for record in caplog.records)
+
+
+def test_a_command_out_of_time_carries_the_limit_it_ran_out_of(tmp_path: Path) -> None:
+    result = run("sleep 5", tmp_path, timeout=2)
+
+    assert result.limit == 2
+    assert result.output == "It printed nothing before its 2 s limit."
+
+
+def test_a_command_out_of_time_keeps_where_it_had_got_to(tmp_path: Path) -> None:
+    """Its last lines, as a failed run's are kept: a suite stopped at its
+    limit 85% through says how far it got."""
+    result = run("echo collected 1520; echo 1290 passed; sleep 5", tmp_path, timeout=2)
+
+    assert result.timed_out
+    assert result.output == "collected 1520\n1290 passed"
+
+
+@pytest.mark.parametrize(
+    ("seconds", "said"),
+    [
+        (0.5, "0.5 s"),
+        (45, "45 s"),
+        (90, "90 s"),
+        (600, "10 min"),
+        (1800, "30 min"),
+        (3600, "1 h"),
+        (5400, "1 h 30 min"),
+        (7200, "2 h"),
+    ],
+)
+def test_a_limit_is_said_as_it_was_likely_written(seconds: float, said: str) -> None:
+    assert limit_said(seconds) == said
+
+
+def test_one_line_for_a_run_out_of_time_names_its_limit() -> None:
+    """ "stopped after 600s" read as a hang; the limit is what stopped it."""
+    out_of_time = Result(ok=False, output="...", seconds=1800.4, timed_out=True, limit=1800)
+
+    assert summary("test-fast", "make test-fast", out_of_time).endswith(
+        "· stopped after its 30 min limit (not run)"
+    )
 
 
 def test_one_line_says_how_it_ended_and_the_last_thing_it_printed() -> None:

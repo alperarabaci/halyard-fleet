@@ -4003,7 +4003,7 @@ async def test_a_transition_runs_its_commands_and_says_how_they_went(
     await channel._run_transition("close", CHAT, None, f"tg:{APPROVER}")
     await settled(channel)
 
-    assert ran == [("make test-fast", repo, 600.0)]
+    assert ran == [("make test-fast", repo, 3600.0)], "the hour /command has"
     [(_, text)] = runner.sent
     assert "Ran test-fast: make test-fast · exit 0 (passed) · 94s · last line: 1420 passed" in text
     assert any("<b>test-fast</b>: passed" in sent["text"] for sent in api.sent)
@@ -4214,6 +4214,134 @@ def scoped(channel: TelegramChannel, monkeypatch) -> list:
 
     monkeypatch.setattr(under_test.commands_running, "run", running)
     return ran
+
+
+#: The last lines of a suite stopped at its limit.
+WHERE_IT_GOT_TO = "collected 1520 items\n1290 passed · 85% <e2e>"
+
+
+def timed(channel: TelegramChannel, monkeypatch, *, limits=None, runs_out: str = "") -> dict:
+    """Two commands, the limits given, and runs that answer at once — or run
+    out of time, for the line `runs_out` names. What each line ran with."""
+    from halyard.channels.telegram import adapter as under_test
+    from halyard.commands import Result
+
+    found = channel._repositories["alpha-engine"]
+    channel._repositories["alpha-engine"] = replace(
+        found,
+        commands={"test-fast": "make test-fast", "lint": "make lint"},
+        command_limits=dict(limits or {}),
+    )
+    given: dict[str, float | None] = {}
+
+    def running(line, path, *, timeout=None, on_progress=None, stop=None):
+        given[line] = timeout
+        if line == runs_out:
+            return Result(
+                ok=False,
+                output=WHERE_IT_GOT_TO,
+                seconds=timeout,
+                timed_out=True,
+                limit=timeout,
+            )
+        return Result(ok=True, output="12 passed", seconds=3.0, exit_code=0)
+
+    monkeypatch.setattr(under_test.commands_running, "run", running)
+    return given
+
+
+async def test_a_transition_s_commands_have_the_hour_command_has(
+    tmp_path: Path, wired, monkeypatch
+) -> None:
+    """A suite that takes sixteen minutes was stopped at ten in a transition."""
+    channel, _, runner, repo = wired
+    transitions_in(
+        channel, repo, tmp_path, runner, close={"commands": ("test-fast", "lint"), "to": "xrev"}
+    )
+    given = timed(channel, monkeypatch, limits={"lint": 90})
+
+    await channel._run_transition("close", CHAT, None, f"tg:{APPROVER}")
+    await settled(channel)
+
+    assert given == {"make test-fast": 3600, "make lint": 90}
+
+
+async def test_a_transition_s_command_out_of_time_says_its_limit(
+    tmp_path: Path, wired, monkeypatch
+) -> None:
+    channel, api, runner, repo = wired
+    transitions_in(
+        channel, repo, tmp_path, runner, close={"commands": ("test-fast",), "to": "xrev"}
+    )
+    timed(channel, monkeypatch, limits={"test-fast": 1800}, runs_out="make test-fast")
+
+    await channel._run_transition("close", CHAT, None, f"tg:{APPROVER}")
+    await settled(channel)
+
+    [stop] = [m["text"] for m in api.sent if "stopped before reaching" in m["text"]]
+    assert "· stopped after its 30 min limit (not run)</code>\n<pre>" in stop, "its lines under it"
+    assert stop.endswith("<pre>collected 1520 items\n1290 passed · 85% &lt;e2e&gt;</pre>")
+    assert runner.sent == []
+
+
+async def test_command_runs_with_the_limit_its_command_names(wired, monkeypatch) -> None:
+    channel, api, _, _ = wired
+    given = timed(channel, monkeypatch, limits={"test-fast": 1800}, runs_out="make test-fast")
+
+    await channel._run_command("test-fast", CHAT, None)
+    await settled(channel)
+    await channel._run_command("lint", CHAT, None)
+    await settled(channel)
+
+    assert given == {"make test-fast": 1800, "make lint": 3600}
+    [stop] = [m["text"] for m in api.sent if m["text"].startswith("⏱")]
+    assert stop == (
+        "⏱ <b>test-fast</b> was stopped after its 30 min limit.\n\n"
+        "<pre>collected 1520 items\n1290 passed · 85% &lt;e2e&gt;</pre>"
+    )
+
+
+async def test_a_commit_option_s_command_has_its_limit_and_says_it(
+    tmp_path: Path, wired, monkeypatch
+) -> None:
+    from halyard.core.config_file import CommitOption
+
+    channel, api, _, repo = wired
+    given = timed(channel, monkeypatch, limits={"test-fast": 1800}, runs_out="make test-fast")
+    found = channel._repositories["alpha-engine"]
+    channel._repositories["alpha-engine"] = replace(
+        found, commit_options={"fast": CommitOption("fast", commands=("test-fast",))}
+    )
+    wrote(repo, "loader.py", "x = 1\n")
+
+    await deliver(channel, typed("/commit fast"))
+
+    assert given == {"make test-fast": 1800}
+    assert api.sent[-1]["text"] == (
+        "🚫 <b>test-fast</b> was stopped after its 30 min limit, so <b>fast</b> stopped there. "
+        "Nothing was committed.\n\n"
+        "<pre>collected 1520 items\n1290 passed · 85% &lt;e2e&gt;</pre>"
+    )
+    assert len(channel._proposals) == 0
+
+
+async def test_a_commit_option_s_command_has_the_hour_by_default(
+    tmp_path: Path, wired, monkeypatch
+) -> None:
+    from halyard.core.config_file import CommitOption
+
+    channel, _, _, repo = wired
+    given = timed(channel, monkeypatch)
+    found = channel._repositories["alpha-engine"]
+    channel._repositories["alpha-engine"] = replace(
+        found, commit_options={"fast": CommitOption("fast", commands=("test-fast",))}
+    )
+    wrote(repo, "loader.py", "x = 1\n")
+
+    await deliver(channel, typed("/commit fast"))
+
+    assert given == {"make test-fast": 3600}
+    assert len(channel._proposals) == 1
 
 
 def picked(value: str) -> dict:
