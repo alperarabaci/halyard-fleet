@@ -303,7 +303,7 @@ def test_a_run_that_outlives_its_clock_is_reported_as_stopped(tmp_path: Path) ->
 
     assert result.timed_out is True
     assert result.ok is False
-    assert "still running" in result.output
+    assert result.output == "It printed nothing before its 0.2 s limit."
 
 
 def test_a_passing_run_keeps_only_its_last_lines(tmp_path: Path) -> None:

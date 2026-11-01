@@ -28,7 +28,9 @@ from pathlib import Path
 
 #: Long enough for a full test suite with a browser in it, because that is
 #: exactly what somebody will point this at. Bounded all the same: a command
-#: that has been going an hour has stopped being something you wait for.
+#: that has been going an hour has stopped being something you wait for. The
+#: same for `/command`, a transition and a commit option; a command can name
+#: its own with `timeout:` in `commands:`.
 DEFAULT_TIMEOUT = 3600.0
 
 #: How much of a run to carry back. Little on success, because "it passed" is
@@ -100,6 +102,20 @@ class Result:
     #: True when somebody stopped it from the chat. Like a run out of time,
     #: nothing is known about how it would have ended.
     stopped: bool = False
+    #: The limit it ran out of, in seconds, when it ran out of time — said with
+    #: it, so a stop at ten minutes reads as a limit and not as a hang.
+    limit: float | None = None
+
+
+def limit_said(seconds: float) -> str:
+    """A limit as it was likely written: `45 s`, `30 min`, `1 h`, `1 h 30 min`."""
+    whole = round(seconds)
+    if whole != seconds or whole % 60:
+        return f"{seconds:g} s"
+    hours, minutes = divmod(whole // 60, 60)
+    if not hours:
+        return f"{minutes} min"
+    return f"{hours} h {minutes} min" if minutes else f"{hours} h"
 
 
 #: How a command ended, as the line after it says and a transition reads it.
@@ -259,12 +275,17 @@ def run(
         if now - started > timeout:
             _end(process)
             process.wait()
+            # What it had printed, as a failed run's is kept: where a suite
+            # stopped at its limit had got to is the first thing to ask.
+            reader.join(timeout=2.0)
             logger.warning("Command stopped after %.0fs in %s: %s", timeout, path, command)
             return Result(
                 ok=False,
-                output=f"It was still running after {timeout:.0f}s and was stopped.",
+                output=_tail("\n".join(lines), LINES_WHEN_IT_FAILED)
+                or f"It printed nothing before its {limit_said(timeout)} limit.",
                 seconds=now - started,
                 timed_out=True,
+                limit=timeout,
             )
         if on_progress and now - said_at >= PROGRESS_EVERY:
             said_at = now
@@ -326,6 +347,8 @@ def summary(name: str, line: str, result: Result, not_run: Sequence[int] = ()) -
     ended = outcome(result, not_run)
     if result.stopped:
         how = f"stopped from the chat after {result.seconds:.0f}s ({ended})"
+    elif result.timed_out and result.limit is not None:
+        how = f"stopped after its {limit_said(result.limit)} limit ({ended})"
     elif result.timed_out:
         how = f"stopped after {result.seconds:.0f}s ({ended})"
     elif result.exit_code is None:

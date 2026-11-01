@@ -243,11 +243,6 @@ TREE_TIMEOUT_SECONDS = 5.0
 #: waits on it.
 LABELS_TIMEOUT_SECONDS = 10.0
 
-#: How long one of a transition's commands may run. The bound `validate:` has:
-#: somebody is holding a phone waiting for the transition to go, and the long
-#: suites are for `/command`, which reports when it is done.
-TRANSITION_COMMAND_TIMEOUT_SECONDS = 600.0
-
 #: What each chat last heard, each chat's last answer per inspection, and where each
 #: piece of work's workflow has got to, with its rounds. Kept per project — see
 #: `_kept`.
@@ -881,7 +876,7 @@ class _Running:
             self._project,
             command.line,
             self._path,
-            timeout=TRANSITION_COMMAND_TIMEOUT_SECONDS,
+            timeout=self._channel._limit_for(self._project, command.name),
             on_progress=progress,
         )
 
@@ -2607,13 +2602,32 @@ class TelegramChannel:
             if self._stops.get(project) is stop:
                 del self._stops[project]
 
+    def _limit_for(self, project: str, command: str) -> float:
+        """How long one of a project's commands may run: its own `timeout:`, or
+        the hour every command has — wherever it runs, `/command`, a transition
+        or a commit option. A suite that takes sixteen minutes on a good day
+        was stopped at ten in a transition while `/command` would have let it
+        finish, and nothing about running it from a step makes it shorter."""
+        found = self._repositories.get(project)
+        limits = found.command_limits if found is not None else {}
+        return limits.get(command, commands_running.DEFAULT_TIMEOUT)
+
+    def _took_or_limit(self, result: commands_running.Result) -> str:
+        """How long a command ran — or, when it ran out of time, which limit it
+        was: `its 30 min limit`, so a stop reads as a limit and not a hang."""
+        if result.timed_out and result.limit is not None:
+            return f"its {commands_running.limit_said(result.limit)} limit"
+        return self._elapsed(result.seconds)
+
     async def _run_and_say(
         self, path: Path, command, chat_id: str, thread_id: int | None, project: str = ""
     ) -> commands_running.Result | None:
         """Run one command to the end, and say what happened. None when it
         could not be started at all."""
         try:
-            result = await self._command_run(project, command.line, path)
+            result = await self._command_run(
+                project, command.line, path, timeout=self._limit_for(project, command.name)
+            )
         except Exception:
             logger.warning("A command from Telegram could not be run", exc_info=True)
             await self._say(
@@ -2631,7 +2645,7 @@ class TelegramChannel:
             head = f"\u2705 <b>{html.escape(command.name)}</b> finished in "
         else:
             head = f"\U0001f6ab <b>{html.escape(command.name)}</b> failed after "
-        said = head + self._elapsed(result.seconds) + "."
+        said = head + self._took_or_limit(result) + "."
         if result.output:
             said += f"\n\n<pre>{html.escape(result.output)}</pre>"
         await self._say(said, chat_id, thread_id)
@@ -3069,7 +3083,7 @@ class TelegramChannel:
         if result.stopped:
             how = f"was stopped from the chat after {took}"
         elif result.timed_out:
-            how = f"was stopped after {took}, out of time"
+            how = f"was stopped after {self._took_or_limit(result)}"
         elif result.exit_code is None:
             how = "could not be started"
         elif commands_running.outcome(result, command.not_run) == commands_running.FAILED:
@@ -4422,12 +4436,19 @@ class TelegramChannel:
             return handed
         if handed.stopped:
             # Nothing went, and nothing is counted: a round is the seat
-            # taking a message. Fixed and pressed again is the way on.
+            # taking a message. Fixed and pressed again is the way on. One
+            # that ran out of time shows where it had got to under its line.
+            last = handed.ran[-1][1] if handed.ran else None
+            tail = (
+                f"\n<pre>{html.escape(last.output)}</pre>"
+                if last is not None and last.timed_out and last.output
+                else ""
+            )
             await self._say(
                 f"⏹ <b>{html.escape(name)}</b> stopped before reaching "
                 f"<b>{html.escape(_seat_name(seat))}</b>: a command did not run, so "
                 "nothing was inspected or sent.\n"
-                f"<code>{html.escape(handed.stopped)}</code>",
+                f"<code>{html.escape(handed.stopped)}</code>{tail}",
                 chat_id,
                 thread_id,
             )

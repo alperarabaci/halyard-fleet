@@ -365,13 +365,19 @@ A command that did not run stops the transition there: the commands after it, th
 inspections and the message are skipped, and the chat is told which command and
 why. Inspections over a run that never happened would read green in nothing. Not
 run is a command that could not start, was not found or could not be executed (exit
-127, 126), was ended by a signal (128 and up), or was still running after ten
-minutes — and any exit code the command itself says means it had nothing to run:
+127, 126), was ended by a signal (128 and up), or was still running at its time
+limit — and any exit code the command itself says means it had nothing to run:
 
 ```yaml
 commands:
-  test-fast: {run: scripts/check.sh test-fast, not_run: [2]}
+  test-fast: {run: scripts/check.sh test-fast, not_run: [2], timeout: 30m}
 ```
+
+The limit is an hour unless the command names its own with `timeout:` — `90s`, `30m`
+or `2h` — and it is the same wherever the command runs: `/command`, a transition or a
+commit option. One that runs out says which limit it was — "stopped after its 30 min
+limit (not run)" — with the last lines it printed under it, so you can see where it had
+got to.
 
 A workflow whose step stopped this way is held there, as for any other stop: fix
 what was missing and pick the step again. Nothing is counted for it; a round is

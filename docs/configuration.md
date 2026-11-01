@@ -76,7 +76,7 @@ projects:
   alpha-engine:
     path: ~/code/alpha-engine
     commands:                         # what /command offers, by name
-      test-all: make test-all
+      test-all: {run: make test-all, timeout: 2h}   # an hour unless it says
       test-fast: make test-fast
       bootstrap: make bootstrap-up
     commit_options:                   # what /commit can check first, a button each
@@ -94,7 +94,11 @@ projects:
 `/command` runs in the background and reports the tail when it finishes, one at a time
 per project. Exit 0 is passed and any other code failed, unless the command lists it
 under `not_run:` — a transition stops at a command that did not run, rather than hand on
-a result that is not there. In a transition, a command's last line is the one shown and
+a result that is not there. A command may run for an hour, or for what its own
+`timeout:` says — `90s`, `30m`, `2h`, the unit always written — wherever it runs:
+`/command`, a transition or a commit option. One that runs out of time did not run, and
+the chat says which limit stopped it, with the last lines it printed under that — where
+the suite had got to. In a transition, a command's last line is the one shown and
 the only one its inspections read, so a command that ends on its own verdict reads
 better than one that ends on `make: *** … Error 1`.
 

@@ -292,6 +292,11 @@ class Project:
     #: `{run: …, not_run: [2]}`. A transition stops at one; see
     #: `commands.running.outcome`.
     commands_not_run: dict[str, tuple[int, ...]] = field(default_factory=dict)
+    #: How long a command may run, in seconds, by command — written
+    #: `{run: …, timeout: 30m}`. The same wherever it runs: `/command`, a
+    #: transition, a commit option. One not named here has
+    #: `commands.running.DEFAULT_TIMEOUT`.
+    command_limits: dict[str, float] = field(default_factory=dict)
     #: Which kind of issue tracker this project's remote points at — `gitlab`
     #: or `github`. Only needed for a host that does not name itself:
     #: `gitlab.com` and `github.com` do, and `git.example.com` cannot.
@@ -912,9 +917,11 @@ def _steps_from(
 
 def _commands_from(
     project: str, value: Any
-) -> tuple[dict[str, str], dict[str, tuple[str, ...]], dict[str, tuple[int, ...]]]:
-    """`commands:` as command lines by name, the lists of them by name, and the
-    exit codes each says mean it did not run.
+) -> tuple[
+    dict[str, str], dict[str, tuple[str, ...]], dict[str, tuple[int, ...]], dict[str, float]
+]:
+    """`commands:` as command lines by name, the lists of them by name, the
+    exit codes each says mean it did not run, and the limits they name.
 
     A command is a line — `cleanup: make cleanup` — or the names of other
     commands to run in order: `next-task: [cleanup, pull-branch]`. A list names
@@ -922,22 +929,26 @@ def _commands_from(
 
     A line can also say which of its exit codes mean it produced no result —
     `test-fast: {run: scripts/check.sh test-fast, not_run: [2]}` — which only
-    the command itself can know. See `commands.running.outcome`.
+    the command itself can know. See `commands.running.outcome`. And how long
+    it may run — `timeout: 30m` — when the default hour is the wrong length.
     """
     if value is None:
-        return {}, {}, {}
+        return {}, {}, {}, {}
     if not isinstance(value, dict):
         raise ValueError(f"Project {project!r}: `commands:` must be a mapping of name to command.")
     lines: dict[str, str] = {}
     lists: dict[str, tuple[str, ...]] = {}
     not_run: dict[str, tuple[int, ...]] = {}
+    limits: dict[str, float] = {}
     for raw, spec in value.items():
         if isinstance(spec, list):
             lists[str(raw)] = tuple(str(name).strip() for name in spec if str(name).strip())
         elif isinstance(spec, dict):
-            lines[str(raw)], codes = _command_with_codes(project, str(raw), spec)
+            lines[str(raw)], codes, limit = _command_with_codes(project, str(raw), spec)
             if codes:
                 not_run[str(raw)] = codes
+            if limit is not None:
+                limits[str(raw)] = limit
         else:
             lines[str(raw)] = str(spec)
     for name, listed in lists.items():
@@ -953,14 +964,39 @@ def _commands_from(
             raise ValueError(
                 f"{where} runs commands this project does not define: {', '.join(missing)}"
             )
-    return lines, lists, not_run
+    return lines, lists, not_run, limits
 
 
-def _command_with_codes(project: str, name: str, spec: dict) -> tuple[str, tuple[int, ...]]:
-    """`{run: <line>, not_run: [<exit code>, ...]}`, read strictly."""
+#: A command's `timeout:` — a number and its unit.
+_DURATION = re.compile(r"^\s*(\d+(?:\.\d+)?)\s*(s|m|h)\s*$")
+_UNIT_SECONDS = {"s": 1, "m": 60, "h": 3600}
+
+
+def _limit_from(where: str, value: Any) -> float:
+    """`timeout: 30m` as seconds — `s`, `m` or `h`, and more than nothing.
+
+    The unit is required: a bare `900` reads as seconds to one person and as
+    minutes to the next, and the difference is a suite killed at a quarter
+    of an hour or left running for half a day.
+    """
+    found = _DURATION.match(value) if isinstance(value, str) else None
+    seconds = float(found.group(1)) * _UNIT_SECONDS[found.group(2)] if found else 0.0
+    if seconds <= 0:
+        raise ValueError(
+            f"{where}: `timeout:` is how long it may run, with its unit — 90s, 30m or 2h."
+        )
+    return seconds
+
+
+def _command_with_codes(
+    project: str, name: str, spec: dict
+) -> tuple[str, tuple[int, ...], float | None]:
+    """`{run: <line>, not_run: [<exit code>, ...], timeout: 30m}`, read strictly."""
     where = f"Project {project!r}: command {name!r}"
-    if stray := sorted(str(key) for key in spec if key not in ("run", "not_run")):
-        raise ValueError(f"{where} takes `run:` and `not_run:`, not {', '.join(stray)}.")
+    if stray := sorted(str(key) for key in spec if key not in ("run", "not_run", "timeout")):
+        raise ValueError(
+            f"{where} takes `run:`, `not_run:` and `timeout:`, not {', '.join(stray)}."
+        )
     line = spec.get("run")
     if not isinstance(line, str) or not line.strip():
         raise ValueError(f"{where} needs `run:`, the command line.")
@@ -971,7 +1007,8 @@ def _command_with_codes(project: str, name: str, spec: dict) -> tuple[str, tuple
         raise ValueError(
             f"{where}: `not_run:` is a list of exit codes between 1 and 255, like [2]."
         )
-    return line, tuple(dict.fromkeys(codes))
+    limit = _limit_from(where, spec["timeout"]) if "timeout" in spec else None
+    return line, tuple(dict.fromkeys(codes)), limit
 
 
 def _not_a_list(
@@ -1347,7 +1384,9 @@ def projects_from_yaml(text: str) -> list[Project]:
         if spelled is not None:
             older.append(spelled)
         inspections, inspection_models = _inspections_from(project, written)
-        commands, command_lists, commands_not_run = _commands_from(project, body.get("commands"))
+        commands, command_lists, commands_not_run, command_limits = _commands_from(
+            project, body.get("commands")
+        )
         moves, spelled = _spelled(project, body, "transitions", "handoffs", "the project")
         if spelled is not None:
             older.append(spelled)
@@ -1392,6 +1431,7 @@ def projects_from_yaml(text: str) -> list[Project]:
                 commands=commands,
                 command_lists=command_lists,
                 commands_not_run=commands_not_run,
+                command_limits=command_limits,
                 forge=_as_text(body.get("forge")),
                 labels=_patterns_from(project, "labels: offer", tagged["offer"]),
                 labels_exclude=_patterns_from(project, "labels: exclude", tagged["exclude"]),
