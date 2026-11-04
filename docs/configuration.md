@@ -98,7 +98,10 @@ a result that is not there. A command may run for an hour, or for what its own
 `timeout:` says — `90s`, `30m`, `2h`, the unit always written — wherever it runs:
 `/command`, a transition or a commit option. One that runs out of time did not run, and
 the chat says which limit stopped it, with the last lines it printed under that — where
-the suite had got to. In a transition, a command's last line is the one shown and
+the suite had got to. A command that is stopped — by its limit, `/stop`, or a workflow's
+Stop — gets the Ctrl-C you would press at the desk first, and 15 seconds to end itself, so
+a test runner's teardowns close the servers it started; whatever is left is killed. In a
+transition, a command's last line is the one shown and
 the only one its inspections read, so a command that ends on its own verdict reads
 better than one that ends on `make: *** … Error 1`.
 
