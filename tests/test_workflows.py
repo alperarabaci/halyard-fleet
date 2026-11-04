@@ -12,6 +12,7 @@ from pathlib import Path
 from halyard.core.config_file import Decisions, Step
 from halyard.workflows import (
     Decision,
+    Limit,
     Next,
     Round,
     Run,
@@ -447,6 +448,42 @@ def test_the_phases_stop_past_their_count_with_that_phase_ready() -> None:
     assert (moving.step, moving.phase, moving.leaving) == (1, 4, 4)
 
 
+def test_a_limit_is_said_as_data_and_not_only_in_its_sentence() -> None:
+    """The channel asks a person to decide on a limit, and tells it apart from
+    every other stop without reading the sentence back."""
+    rounds = next_after(Decision.FORWARD, step=0, review=2)
+    phases = phased_after(Decision.NEXT, 3, phase=3)
+    next_phase = phased_after(Decision.NEXT, 3, phase=1, taken={"discover@2": 2})
+
+    assert rounds.limit == Limit(step="review", would_be=3, allowed=2)
+    assert phases.limit == Limit(step="discover", would_be=4, allowed=3, phases=True)
+    assert next_phase.stop == "discover would go for round 3 of 2"
+    assert next_phase.limit == Limit(step="discover", would_be=3, allowed=2)
+
+
+def test_a_stop_that_is_not_a_limit_has_none() -> None:
+    """A wait or no decision where the phases end has the next phase ready —
+    past the allowed, here — and is held for the wait, not for the phases."""
+    waited = phased_after(Decision.WAIT, 3, phase=3)
+    undecided = phased_after(None, 3, phase=3)
+    unended = after(
+        Decision.FORWARD,
+        run=a_run(4, phase=3),
+        flow=PHASED,
+        steps=PHASED_STEPS,
+        taken={},
+        stretch=(1, 4),
+        most=3,
+    )
+
+    assert (waited.stop, waited.limit) == ("it was asked to wait", None)
+    assert (undecided.stop, undecided.limit) == ("phase 3 ended with no decision", None)
+    assert unended.stop.endswith("only done ends the workflow")
+    assert unended.limit is None
+    assert next_after(Decision.WAIT, step=0).limit is None
+    assert next_after(Decision.FORWARD, step=0).limit is None, "nothing stopped"
+
+
 def test_rounds_start_again_in_each_phase() -> None:
     """Phase 2's discover is not phase 1's going round again."""
     fresh = phased_after(Decision.BACK, 2, phase=2, entered=1, taken={"discover@1": 2})
@@ -804,6 +841,34 @@ def test_where_a_phase_end_would_leave_to_is_kept_only_until_the_run_moves(tmp_p
     assert stopped.at(2).leaving == -1
     assert stopped.waiting_on("xdrv").leaving == -1
     assert stopped.held("it was asked to wait").leaving == -1
+
+
+def test_a_limit_is_kept_with_the_run_until_it_moves(tmp_path: Path) -> None:
+    """So `/workflow` later shows the card that asked for a decision."""
+    kept = tmp_path / "workflow-runs.json"
+    used = Limit(step="develop", would_be=3, allowed=2, by="xnav", said="back")
+    stopped = a_run(2).held("develop would go for round 3 of 2", limit=used)
+
+    save(kept, "alpha-engine#501", stopped)
+
+    assert current(kept, "alpha-engine#501").limit == used
+    assert stopped.at(2).limit is None
+    assert stopped.waiting_on("xdrv").limit is None
+    assert stopped.sending("xdrv").limit is None
+    assert stopped.held("it was asked to wait").limit is None
+
+
+def test_a_run_kept_before_limits_were_has_none(tmp_path: Path) -> None:
+    import json
+
+    kept = tmp_path / "workflow-runs.json"
+    save(kept, "alpha-engine#502", a_run(2).held("develop would go for round 3 of 2"))
+    written = json.loads(kept.read_text())
+    del written["alpha-engine#502"]["limit"]
+    kept.write_text(json.dumps(written))
+
+    assert current(kept, "alpha-engine#502").limit is None
+    assert current(kept, "alpha-engine#502").stopped == "develop would go for round 3 of 2"
 
 
 def test_the_step_that_asked_to_wait_is_kept_only_until_the_run_moves(tmp_path: Path) -> None:

@@ -287,6 +287,52 @@ def _named(run: flowing.Run) -> str:
     return f"{run.workflow} (run {run.ident})" if run.ident else run.workflow
 
 
+def _counted(number: int, thing: str) -> str:
+    """`2 rounds`, `1 round`."""
+    return f"{number} {thing}{'' if number == 1 else 's'}"
+
+
+def _waiting_for_you(run: flowing.Run, limit: flowing.Limit, *, go: bool, on: str) -> str:
+    """The card of a run held on what the project allowed: a step that has had
+    its rounds, or a flow through its phases.
+
+    Said as the person's decision it is. A held run's card read like any other
+    run's line, and a round limit reached at night was found the next morning
+    by typing `/workflow`. What it offers is said in the words its buttons use.
+    """
+    if limit.phases:
+        used = f"it has been through the {_counted(limit.allowed, 'phase')} it allows"
+        would, again = f"phase {limit.would_be} of {limit.allowed}", "one more phase"
+    else:
+        used = f"{html.escape(limit.step)} has had its {_counted(limit.allowed, 'round')}"
+        would, again = f"round {limit.would_be} of {limit.allowed}", "one more round"
+    lines = [f"⛔ <b>{html.escape(run.workflow)}</b> is waiting for you — {used}."]
+    if limit.by and limit.said:
+        lines.append(
+            f"<b>{html.escape(limit.by)}</b> said <b>{html.escape(limit.said)}</b>, "
+            f"which would be {would}."
+        )
+    else:
+        lines.append(f"Going on would be {would}.")
+    choices = [
+        *([again] if go else []),
+        *([f"on to <b>{html.escape(on)}</b>"] if on else []),
+        "another step",
+    ]
+    lines.append(f"Choose: {', '.join(choices)}, or stop.")
+    if run.ident:
+        lines.append(f"run <code>{html.escape(run.ident)}</code>")
+    return "\n".join(lines)
+
+
+def _past_the_limit(limit: flowing.Limit, step: str) -> str:
+    """The button that sends a held run on past its limit, naming what it sends:
+    `▶️ develop_x round 3 of 2`, `↻ Phase 4 of 3 at discover`."""
+    if limit.phases:
+        return f"↻ Phase {limit.would_be} of {limit.allowed} at {step}"
+    return f"▶️ {step} round {limit.would_be} of {limit.allowed}"
+
+
 def _seat_name(seat: Seat | None) -> str:
     """A seat the way a sentence names it: `drv (driver)`, or just `drv`."""
     if seat is None:
@@ -1482,16 +1528,11 @@ class TelegramChannel:
                 head=files.head if files else None,
                 content=files.content if files else None,
             )
-        # A workflow waiting on this seat takes its next step — off this path,
-        # which is relaying a reply: the step ahead may run commands and inspections,
-        # and none of that should hold up what the seat just said.
         speaking = for_session(self._seats, agent_id, session_name, session_id)
         # Only the seat the session is known to be: the project-wide guess
         # below is good enough to wake a workflow, not to say who worked last.
         self._worked_with(speaking)
         answered = speaking or for_project(self._seats, agent_id, project)
-        if answered is not None:
-            self._detach(self._advance_workflow(answered, text), "/workflow")
         # A provider that has stopped answering is the one message worth a
         # button. Somebody reading "the limit resets at 03:30" on a phone can
         # do exactly one useful thing about it, and typing a model id with a
@@ -1500,16 +1541,27 @@ class TelegramChannel:
 
         chunks = cards.split_for_telegram(text)
         message = None
-        for index, chunk in enumerate(chunks, start=1):
-            marker = f"<i>({index}/{len(chunks)})</i>\n" if len(chunks) > 1 else ""
-            said = marker + html.escape(chunk)
-            if keyboard is not None and index == len(chunks):
-                # On the last one, where somebody's thumb already is — and a
-                # card, so the button goes once it is pressed.
-                card = await self._desk.open(chat_id, said, keyboard, thread=thread_id)
-                message = {"message_id": card.message_id} if card is not None else message
-                continue
-            message = await self._api.send_message(chat_id, said, message_thread_id=thread_id)
+        try:
+            for index, chunk in enumerate(chunks, start=1):
+                marker = f"<i>({index}/{len(chunks)})</i>\n" if len(chunks) > 1 else ""
+                said = marker + html.escape(chunk)
+                if keyboard is not None and index == len(chunks):
+                    # On the last one, where somebody's thumb already is — and a
+                    # card, so the button goes once it is pressed.
+                    card = await self._desk.open(chat_id, said, keyboard, thread=thread_id)
+                    message = {"message_id": card.message_id} if card is not None else message
+                    continue
+                message = await self._api.send_message(chat_id, said, message_thread_id=thread_id)
+        finally:
+            # A workflow waiting on this seat takes its next step — off this
+            # path, which is relaying a reply: the step ahead may run commands
+            # and inspections, and none of that should hold up what the seat
+            # just said. Once the reply is out, so what the run says about it
+            # comes after it: a card about the reply, started before it, landed
+            # above it, and a long reply buried it. And whatever became of the
+            # reply, so a send that failed does not lose the step.
+            if answered is not None:
+                self._detach(self._advance_workflow(answered, text), "/workflow")
         return str(message["message_id"]) if message else ""
 
     def _offer_another_model(self, text: str, agent_id: str | None) -> dict | None:
@@ -5024,6 +5076,13 @@ class TelegramChannel:
             )
         if go is None:
             go = not offers and run.step < len(flow)
+        if run.limit is not None and run.step < len(flow):
+            # Held on what the project allowed: a person's decision, so the
+            # card says it is waiting for one, and its button names the round
+            # — or the phase — it would send.
+            agent = self._step_seats(found, flow).get(flow[run.step], "")
+            go_text = _past_the_limit(run.limit, flow[run.step]) + (f" → {agent}" if agent else "")
+            said = _waiting_for_you(run, run.limit, go=go, on=on)
         if go and not go_text and run.step < len(flow):
             agent = self._step_seats(found, flow).get(flow[run.step], "")
             go_text = f"▶️ {flow[run.step]}" + (f" → {agent}" if agent else "")
@@ -5354,6 +5413,18 @@ class TelegramChannel:
                 if moving.liftable and moving.leaving is None
                 else ()
             )
+            limit = moving.limit
+            if limit is not None and moving.decided is not None:
+                # Whose word it was: this reply's own, or the step's before it
+                # that this one acts on (`decided_by:`).
+                by = answered.label
+                if decision is None and here is not None and here.decided_by:
+                    by = self._step_seats(found, flow).get(here.decided_by, "")
+                limit = replace(
+                    limit,
+                    by=by,
+                    said=flowing.word_for(moving.decided, found.workflows.decisions),
+                )
             await self._stopped(
                 found,
                 work,
@@ -5361,6 +5432,7 @@ class TelegramChannel:
                     moving.stop,
                     leaving=moving.leaving if moving.leaving is not None else -1,
                     waited=run.step if moving.liftable else -1,
+                    limit=limit,
                 ),
                 go=target is not None and not offers,
                 go_text=go_text,

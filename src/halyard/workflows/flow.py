@@ -64,7 +64,7 @@ from dataclasses import dataclass, replace
 
 from halyard.core.config_file import Step
 from halyard.workflows.decisions import Decision, carried
-from halyard.workflows.runs import Run, counted_as
+from halyard.workflows.runs import Limit, Run, counted_as
 
 #: How many phases a flow goes through unasked when nobody configured it.
 PHASES = 3
@@ -106,6 +106,9 @@ class Next:
     #: wait, or ended the flow without `done`. Its own decision afterwards
     #: takes the run on from where it stopped.
     liftable: bool = False
+    #: What was used up, when that is why it stopped: the step's rounds, or the
+    #: phases. A person's decision, and told as one. None for any other stop.
+    limit: Limit | None = None
 
 
 def taken_as(decision: Decision | None, *, step: int, flow: Sequence[str]) -> Decision | None:
@@ -160,6 +163,7 @@ def after(
             decided=deciding,
             leaving=stretch[1] + 1,
             liftable=True,
+            limit=None,
         )
     if deciding is Decision.WAIT:
         return Next(stop="it was asked to wait", decided=deciding, liftable=True)
@@ -179,6 +183,7 @@ def after(
             decided=None,
             leaving=stretch[1] + 1,
             liftable=last,
+            limit=None,
         )
     if deciding is None and not last and not lending:
         # Told the words it decides in, and used none of them. A review whose
@@ -194,7 +199,9 @@ def after(
             ready = _next_phase(
                 run, flow=flow, steps=steps, taken=taken, stretch=stretch, most=most
             )
-            return replace(ready, stop=why, decided=deciding, leaving=len(flow), liftable=True)
+            return replace(
+                ready, stop=why, decided=deciding, leaving=len(flow), liftable=True, limit=None
+            )
         return Next(stop=why, decided=deciding, leaving=len(flow), liftable=True)
 
     going_back = deciding is Decision.BACK and not lending
@@ -243,7 +250,11 @@ def after(
         entered=entered,
     )
     if would_be > step.rounds:
-        return replace(going, stop=f"{step.name} would go for round {would_be} of {step.rounds}")
+        return replace(
+            going,
+            stop=f"{step.name} would go for round {would_be} of {step.rounds}",
+            limit=Limit(step=step.name, would_be=would_be, allowed=step.rounds),
+        )
     return going
 
 
@@ -307,13 +318,17 @@ def _next_phase(
     would_be = taken.get(counted_as(step.name, target, phase=phase, stretch=stretch), 0) + 1
     if phase > most:
         return replace(
-            going, stop=f"phase {phase} would be past the {most} allowed", leaving=last + 1
+            going,
+            stop=f"phase {phase} would be past the {most} allowed",
+            leaving=last + 1,
+            limit=Limit(step=step.name, would_be=phase, allowed=most, phases=True),
         )
     if would_be > step.rounds:
         return replace(
             going,
             stop=f"{step.name} would go for round {would_be} of {step.rounds}",
             leaving=last + 1,
+            limit=Limit(step=step.name, would_be=would_be, allowed=step.rounds),
         )
     return going
 

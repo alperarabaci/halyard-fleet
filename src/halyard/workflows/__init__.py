@@ -43,6 +43,7 @@ from halyard.workflows.decisions import Decision, decided, read, word_for
 from halyard.workflows.envelope import lines_for
 from halyard.workflows.flow import PHASES, Next, after, taken_as
 from halyard.workflows.runs import (
+    Limit,
     Round,
     Run,
     answered,
@@ -60,6 +61,7 @@ from halyard.workflows.runs import (
 __all__ = [
     "PHASES",
     "Decision",
+    "Limit",
     "Next",
     "Round",
     "Run",

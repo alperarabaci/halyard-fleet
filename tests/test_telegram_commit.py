@@ -22,7 +22,7 @@ import pytest
 
 from halyard.agents.base import SessionRef
 from halyard.channels.telegram import commit_card
-from halyard.channels.telegram.adapter import TelegramChannel
+from halyard.channels.telegram.adapter import RUN_SUPERSEDED, TelegramChannel
 from halyard.core.approvals import ApprovalStore
 from halyard.core.audit import AuditLog, JsonlAuditSink
 from halyard.core.config_file import Project
@@ -1495,19 +1495,149 @@ async def stopped_on_the_round_limit(channel) -> None:
     await answered(channel, "nav", "Not yet.\nDECISION: back")
 
 
+def waiting_for_you(ident: str) -> str:
+    """The card of the run ONE_REVIEW holds on its round limit."""
+    return (
+        "⛔ <b>level3</b> is waiting for you — review has had its 1 round.\n"
+        "<b>nav</b> said <b>back</b>, which would be round 2 of 1.\n"
+        "Choose: one more round, another step, or stop.\n"
+        f"run <code>{ident}</code>"
+    )
+
+
+async def test_a_round_limit_asks_for_a_decision_in_a_card_of_its_own(
+    tmp_path: Path, wired
+) -> None:
+    """Held on its round limit, the run said so in a line like any other run's,
+    and was found waiting seven minutes later by typing /workflow."""
+    channel, api, runner, repo = wired
+    flow_in(channel, repo, tmp_path, runner, **ONE_REVIEW)
+    await started(channel)
+    await answered(channel, "xrev", "Reviewed.\nDECISION: forward")
+    before = [m for m in channel._desk.of("run", (await run_of(channel)).ident)]
+    edited = len(api.edits)
+
+    await answered(channel, "nav", "Not yet.\nDECISION: back")
+
+    run = await run_of(channel)
+    card = api.sent[-1]
+    assert card["text"] == waiting_for_you(run.ident), "a new message, so Telegram notifies"
+    assert keys_of(card) == [
+        "▶️ review round 2 of 1 → xrev",
+        "🧭 Pick a step",
+        "⏹ Stop the workflow",
+    ]
+    assert run.stopped == "review would go for round 2 of 1", "the stop itself is as it was"
+    # The run's one live card: the one before it closes, as when any card supersedes it.
+    assert [m.message_id for m in channel._desk.of("run", run.ident)] == [101 + len(api.sent) - 1]
+    assert {e["message_id"] for e in api.edits[edited:] if e["text"].endswith(RUN_SUPERSEDED)} == {
+        old.message_id for old in before
+    }
+
+
+async def test_its_button_sends_the_round_past_the_limit(tmp_path: Path, wired) -> None:
+    channel, _, runner, repo = wired
+    flow_in(channel, repo, tmp_path, runner, **ONE_REVIEW)
+    await stopped_on_the_round_limit(channel)
+
+    await channel._handle_callback(pressed_transition("flowgo", "level3"))
+    await settled(channel)
+
+    assert [session for session, _ in runner.sent] == ["id-rev", "id-nav", "id-rev"]
+    assert (await run_of(channel)).limit is None, "gone once the run moves"
+
+
 async def test_workflow_shows_a_stopped_run_the_card_its_stop_showed(tmp_path: Path, wired) -> None:
     """Asked again later, the card offered only the round it had stopped on
-    and Stop: nothing to send the run on with."""
+    and Stop: nothing to send the run on with. Held on its limit, it is the
+    same card that asked for a decision."""
     channel, api, runner, repo = wired
     flow_in(channel, repo, tmp_path, runner, **ONE_REVIEW)
     await stopped_on_the_round_limit(channel)
-    at_the_stop = keys_of(api.sent[-1])
+    at_the_stop = api.sent[-1]
 
     await channel._run_workflow("", CHAT, None, f"tg:{APPROVER}")
 
-    assert "review would go for round 2 of 1" in api.sent[-1]["text"]
-    assert keys_of(api.sent[-1]) == at_the_stop
-    assert keys_of(api.sent[-1]) == ["▶️ review → xrev", "🧭 Pick a step", "⏹ Stop the workflow"]
+    assert api.sent[-1]["text"] == at_the_stop["text"]
+    assert api.sent[-1]["text"] == waiting_for_you((await run_of(channel)).ident)
+    assert keys_of(api.sent[-1]) == keys_of(at_the_stop)
+
+
+async def test_the_card_comes_after_the_reply_it_is_about(tmp_path: Path, wired) -> None:
+    """Started before the reply was sent, it landed above it, and a long reply
+    buried it."""
+    channel, api, runner, repo = wired
+    flow_in(channel, repo, tmp_path, runner, **ONE_REVIEW)
+    await started(channel)
+    await answered(channel, "xrev", "Reviewed.\nDECISION: forward")
+    sent = len(api.sent)
+    long = "\n".join(f"finding {n}: " + "x" * 80 for n in range(120)) + "\nDECISION: back"
+    sending = api.send_message
+
+    async def over_the_network(chat_id, text, **kwargs):
+        # Each piece takes a moment to reach Telegram, as it does: the moment
+        # anything started beside the reply had to land its card above it.
+        await asyncio.sleep(0.05)
+        return await sending(chat_id, text, **kwargs)
+
+    api.send_message = over_the_network
+
+    await answered(channel, "nav", long)
+
+    after = api.sent[sent:]
+    pieces = [i for i, m in enumerate(after) if "finding " in m["text"]]
+    assert len(pieces) > 1, "the reply went in pieces"
+    assert after[-1]["text"].startswith("⛔ <b>level3</b> is waiting for you")
+    assert max(pieces) < len(after) - 1, "after every piece of the reply"
+
+
+async def test_a_reply_that_could_not_be_sent_still_moves_the_run(tmp_path: Path, wired) -> None:
+    channel, api, runner, repo = wired
+    flow_in(channel, repo, tmp_path, runner, **ONE_REVIEW)
+    await started(channel)
+    await answered(channel, "xrev", "Reviewed.\nDECISION: forward")
+    sending = api.send_message
+
+    async def refusing(chat_id, text, **kwargs):
+        if "Not yet." in text:
+            raise RuntimeError("Telegram said no")
+        return await sending(chat_id, text, **kwargs)
+
+    api.send_message = refusing
+
+    with pytest.raises(RuntimeError):
+        await channel.send_message(
+            *SESSIONS["nav"][:1],
+            "Not yet.\nDECISION: back",
+            agent_id="claude-code",
+            session_name=SESSIONS["nav"][1],
+            project="alpha-engine",
+        )
+    await settled(channel)
+
+    assert api.sent[-1]["text"] == waiting_for_you((await run_of(channel)).ident)
+
+
+async def test_other_holds_keep_the_card_they_had(tmp_path: Path, wired) -> None:
+    """A wait and a reply that decided nothing are the agent's to lift, and
+    say so as they did."""
+    channel, api, runner, repo = wired
+    flow_in(channel, repo, tmp_path, runner, **TWO_STEPS)
+    await started(channel)
+
+    await answered(channel, "xrev", "Which schema?\nDECISION: wait")
+    waited = api.sent[-1]["text"]
+    await channel._handle_callback(pressed_transition("flowstop", "level3"))
+    await settled(channel)
+    await started(channel)
+    await answered(channel, "xrev", "All 42 tests pass.")
+    undecided = api.sent[-1]["text"]
+
+    for said in (waited, undecided):
+        assert said.startswith("⏸ <b>level3</b> ")
+        assert "is waiting for you" not in said
+    assert "— it was asked to wait." in waited
+    assert "— review ended with no decision." in undecided
 
 
 async def test_workflow_offers_what_an_agent_said_since_the_stop(tmp_path: Path, wired) -> None:
@@ -1790,6 +1920,25 @@ async def test_a_review_s_back_reaches_the_navigator_and_its_reply_goes_back(
     assert "Sent back by: nav (navigator)" in text
     assert "- Round: 2/2" in text
     assert any("<b>review</b>'s <b>back</b> stands" in sent["text"] for sent in api.sent)
+
+
+async def test_a_limit_reached_on_the_review_s_word_names_the_reviewer(
+    tmp_path: Path, wired
+) -> None:
+    """The navigator's reply carried no decision: the back that would go past
+    the review's rounds is the reviewer's."""
+    channel, api, runner, repo = wired
+    once = {
+        **REVIEWED,
+        "steps": {**REVIEWED["steps"], "review": {**REVIEWED["steps"]["review"], "rounds": 1}},
+    }
+    flow_in(channel, repo, tmp_path, runner, **once)
+    await started(channel)
+    await answered(channel, "xrev", "The loader skips a row.\nDECISION: back")
+
+    await answered(channel, "nav", "Fixed the loader; the row is read now.")
+
+    assert "<b>xrev</b> said <b>back</b>, which would be round 2 of 1." in api.sent[-1]["text"]
 
 
 async def test_a_decision_the_navigator_acted_on_is_kept_as_the_review_s(
@@ -2335,6 +2484,8 @@ async def test_a_stopped_run_another_workflow_replaces_closes_its_cards(
 async def test_the_phases_stop_past_their_count_and_can_be_sent_anyway(
     tmp_path: Path, wired
 ) -> None:
+    """The phases used up is the same decision a step's rounds are, and asked
+    for the same way."""
     channel, api, runner, repo = wired
     flow_in(channel, repo, tmp_path, runner, **PHASED, phases=1)
     await started(channel)
@@ -2343,8 +2494,40 @@ async def test_the_phases_stop_past_their_count_and_can_be_sent_anyway(
     await answered(channel, "nav", "DECISION: next")
 
     assert len(runner.sent) == 2
-    keys = [key["text"] for key in api.sent[-1]["reply_markup"]["inline_keyboard"][0]]
-    assert keys == ["↻ Phase 2 at review anyway", "⏭ On to the end"]
+    card = api.sent[-1]
+    assert card["text"] == (
+        "⛔ <b>level3</b> is waiting for you — it has been through the 1 phase it allows.\n"
+        "<b>nav</b> said <b>next</b>, which would be phase 2 of 1.\n"
+        "Choose: one more phase, on to <b>the end</b>, another step, or stop.\n"
+        f"run <code>{(await run_of(channel)).ident}</code>"
+    )
+    assert keys_of(card) == [
+        "↻ Phase 2 of 1 at review → xrev",
+        "⏭ On to the end",
+        "🧭 Pick a step",
+        "⏹ Stop the workflow",
+    ]
+
+    await channel._run_workflow("", CHAT, None, f"tg:{APPROVER}")
+
+    assert api.sent[-1]["text"] == card["text"], "/workflow shows the same card"
+    assert keys_of(api.sent[-1]) == keys_of(card)
+
+
+async def test_a_wait_where_the_phases_run_out_is_still_a_wait(tmp_path: Path, wired) -> None:
+    """The phase it would start is past the allowed, but what holds the run is
+    the agent asking to wait: its card is a wait's."""
+    channel, api, runner, repo = wired
+    flow_in(channel, repo, tmp_path, runner, **PHASED, phases=1)
+    await started(channel)
+    await answered(channel, "xrev", "DECISION: forward")
+
+    await answered(channel, "nav", "Apply part one first.\nDECISION: wait")
+
+    said = api.sent[-1]["text"]
+    assert "— it was asked to wait." in said
+    assert "is waiting for you" not in said
+    assert (await run_of(channel)).limit is None
 
 
 async def test_a_step_of_the_phases_can_be_started_in_the_phase_it_names(
