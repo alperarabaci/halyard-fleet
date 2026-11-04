@@ -146,7 +146,8 @@ the list.
 
 `phases:` under `workflows:` says how many phases go before the run stops and asks —
 three unless a project writes another number. Past it, the next phase is the
-operator's to send, the way a round past `rounds:` is.
+operator's to send, the way a round past `rounds:` is, and the run asks for that the
+same way.
 
 Inside the phases a step's rounds are counted per phase: the second phase's `discover`
 starts from its first round, whatever the first phase's took. `back` from the step a
@@ -261,7 +262,21 @@ its own prompt every time, and says no round. Two steps naming one transition do
 a count either.
 
 A step that would go past its rounds does not go: the run stops, and the chat offers to
-send it anyway.
+send it anyway. That stop is a decision only you can make, so it comes as a card of its
+own, the last thing in the chat, after the reply that reached the limit — a new message,
+so Telegram notifies:
+
+```
+⛔ level2X is waiting for you — develop_x has had its 2 rounds.
+xnav said back, which would be round 3 of 2.
+Choose: one more round, another step, or stop.
+run eb786af9
+```
+
+Its button names the round it sends — **▶️ develop_x round 3 of 2 → xdrv** — beside
+**🧭 Pick a step** and **⏹ Stop the workflow**. The phases running out asks the same way,
+with **↻ Phase 4 of 3 at discover** and the way out of them. `/workflow` shows the same
+card for as long as the run is held there. Every other stop keeps its usual card.
 
 ## Stopping, steering, and asking where it is
 
@@ -325,6 +340,8 @@ the run:
   step and its agent named. A move a button cannot make as it is — into another phase,
   or past a step's rounds — is left to picking a step;
 - **▶️ develop → xdrv** — or **↻ Phase 2 at discover** — sends what is ready, named;
+  past a step's rounds or the phases, the round or the phase it would be is named too:
+  **▶️ develop round 3 of 2 → xdrv**, **↻ Phase 4 of 3 at discover**;
 - **⏭ On to close** leaves the phases instead, where a phase just ended or waited, and
   **⏭ On to the end** ends the workflow where its last step ended without `done`;
 - **🧭 Pick a step** offers the flow's steps, and the one pressed goes next, with the

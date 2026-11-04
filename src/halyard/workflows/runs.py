@@ -66,6 +66,30 @@ class Round:
 
 
 @dataclass(frozen=True)
+class Limit:
+    """A stop on what the project allowed: a step's rounds, or the phases.
+
+    Held as data so the card that asks a person to decide can say what was
+    used up without reading it back out of the stop's sentence. Every other
+    stop — a wait, no decision, a missing label, a restart — has none.
+    """
+
+    #: The step that would go: the one whose rounds are used up, or the step
+    #: the next phase would start at.
+    step: str
+    #: The round, or the phase, it would be.
+    would_be: int
+    #: How many the project allows.
+    allowed: int
+    #: The phases are what is used up, not the step's rounds.
+    phases: bool = False
+    #: The seat whose word it was, and the word in the project's own terms —
+    #: `xnav` said `back`. Empty when the move was nobody's word.
+    by: str = ""
+    said: str = ""
+
+
+@dataclass(frozen=True)
 class Run:
     """One workflow, part-way through its steps."""
 
@@ -125,16 +149,29 @@ class Run:
     #: run is `waiting`, and whenever it is not going. `waiting_for` is still
     #: the seat the step carries the reply of until then.
     sending_to: str = ""
+    #: For a run stopped because a step used its rounds or the phases ran out,
+    #: what was used up — the stop that is a person's decision. None for every
+    #: other stop, and gone as soon as the run moves.
+    limit: Limit | None = None
 
-    def held(self, why: str, *, leaving: int = -1, waited: int = -1) -> Run:
+    def held(
+        self, why: str, *, leaving: int = -1, waited: int = -1, limit: Limit | None = None
+    ) -> Run:
         """The same run, stopped for this reason — `waited` is the step whose
-        seat's reply stopped it, when that seat can lift the stop.
+        seat's reply stopped it, when that seat can lift the stop, and `limit`
+        what was used up, when that is why.
 
         The seat it last dealt with is kept: what it carries on with, if
         somebody sends the step it stopped before, is that seat's reply.
         """
         return replace(
-            self, waiting=False, stopped=why, leaving=leaving, waited=waited, sending_to=""
+            self,
+            waiting=False,
+            stopped=why,
+            leaving=leaving,
+            waited=waited,
+            sending_to="",
+            limit=limit,
         )
 
     def as_it_stood(self, stretch: tuple[int, int] | None) -> Run:
@@ -159,6 +196,7 @@ class Run:
             leaving=-1,
             waited=-1,
             sending_to="",
+            limit=None,
         )
 
     def sending(self, label: str) -> Run:
@@ -173,6 +211,7 @@ class Run:
             leaving=-1,
             waited=-1,
             stopped_at=None,
+            limit=None,
         )
 
     def waiting_on(self, label: str) -> Run:
@@ -187,6 +226,7 @@ class Run:
             waited=-1,
             stopped_at=None,
             sending_to="",
+            limit=None,
         )
 
     def at(
@@ -216,6 +256,7 @@ class Run:
             waited=-1,
             stopped_at=None,
             sending_to="",
+            limit=None,
         )
 
     def taken(self) -> dict[str, int]:
@@ -321,6 +362,29 @@ def current(where: Path, work: str) -> Run | None:
         # Absent from a run written before steps were on their way: one that
         # was waiting is waiting still.
         sending_to=str(entry.get("sending_to") or ""),
+        # Absent from a run held before limits were kept: its card reads as
+        # any other stop's did.
+        limit=_limit_from(entry.get("limit")),
+    )
+
+
+def _limit_from(value: object) -> Limit | None:
+    """A limit written into the file, or None for one that is not there or
+    cannot be read."""
+    if not isinstance(value, dict):
+        return None
+    step, would_be, allowed = value.get("step"), value.get("would_be"), value.get("allowed")
+    if not isinstance(step, str) or not step:
+        return None
+    if not isinstance(would_be, int) or not isinstance(allowed, int):
+        return None
+    return Limit(
+        step=step,
+        would_be=would_be,
+        allowed=allowed,
+        phases=bool(value.get("phases")),
+        by=str(value.get("by") or ""),
+        said=str(value.get("said") or ""),
     )
 
 
@@ -357,6 +421,18 @@ def save(where: Path, work: str, run: Run) -> None:
         "ident": run.ident,
         "stopped_at": run.stopped_at.isoformat() if run.stopped_at else None,
         "sending_to": run.sending_to,
+        "limit": (
+            {
+                "step": run.limit.step,
+                "would_be": run.limit.would_be,
+                "allowed": run.limit.allowed,
+                "phases": run.limit.phases,
+                "by": run.limit.by,
+                "said": run.limit.said,
+            }
+            if run.limit is not None
+            else None
+        ),
         "rounds": {
             key: [
                 {
