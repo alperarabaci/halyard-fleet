@@ -51,6 +51,13 @@ PROGRESS_EVERY = 45.0
 #: promptly, long enough that waiting costs nothing.
 POLL_EVERY = 0.2
 
+#: How long a command that is being stopped gets to end itself, after the
+#: Ctrl-C somebody at the desk would press, before what is left of it is
+#: killed. A test runner that is interrupted runs its teardowns, and the
+#: servers and browsers it started for the suite go with it. Killed outright it
+#: runs none: a stopped E2E run left its preview server running for nobody.
+STOP_GRACE = 15.0
+
 logger = logging.getLogger(__name__)
 
 #: Terminal colour, which a phone renders as litter.
@@ -185,14 +192,37 @@ def _environment() -> dict[str, str]:
 
 
 def _end(process: subprocess.Popen) -> None:
-    """End a command and everything it started.
+    """End a command and everything it started, the way somebody at the desk would.
+
+    First the interrupt Ctrl-C sends, to the whole of it, so it can tidy up
+    after itself: a test runner's teardowns close what it started outside its
+    own process group, where nothing else can reach it. Then, once all of it
+    has ended or `STOP_GRACE` has passed, what is left is killed: whatever
+    ignored the interrupt, or was still winding down.
 
     The shell alone is not the command: `make e2e` is a shell, make, a test
     runner and a browser. Killing the first left the rest running for nobody —
-    a run stopped at its deadline went on until the machine was restarted.
+    a run stopped at its deadline went on until the machine was restarted. So
+    the wait is for the whole group, not the shell: the shell can end at the
+    interrupt while the runner under it is still tearing down.
     """
+    with contextlib.suppress(OSError):
+        os.killpg(process.pid, signal.SIGINT)
+    deadline = time.monotonic() + STOP_GRACE
+    while time.monotonic() < deadline:
+        # Reaped once it has gone, or the shell would count as still there.
+        process.poll()
+        try:
+            os.killpg(process.pid, 0)
+        except ProcessLookupError:
+            return
+        except OSError:
+            break
+        time.sleep(POLL_EVERY)
     try:
         os.killpg(process.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        return
     except OSError:
         with contextlib.suppress(OSError):
             process.kill()
@@ -263,6 +293,9 @@ def run(
         if stop is not None and stop.is_set():
             _end(process)
             process.wait()
+            # What an interrupted runner printed on its way out — where it had
+            # got to — is the last of what it said.
+            reader.join(timeout=2.0)
             logger.warning(
                 "Command stopped from the chat after %.0fs in %s: %s", now - started, path, command
             )
