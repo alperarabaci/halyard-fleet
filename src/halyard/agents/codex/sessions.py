@@ -148,11 +148,116 @@ def _context_of(transcript: Path) -> tuple[str | None, str | None, str | None]:
     return cwd, model, effort
 
 
-def describe(session_id: str, name: str, *, root: Path | None = None) -> SessionRef:
-    """Everything known about one session, with whatever is missing left None."""
-    transcript = rollout_for(session_id, root)
+def describe(
+    session_id: str, name: str, *, root: Path | None = None, transcript: Path | None = None
+) -> SessionRef:
+    """Everything known about one session, with whatever is missing left None.
+    `transcript` is its rollout, when the caller has found it already."""
+    transcript = transcript or rollout_for(session_id, root)
     cwd, model, effort = _context_of(transcript) if transcript else (None, None, None)
     return SessionRef(session_id=session_id, name=name, cwd=cwd, model=model, effort=effort)
+
+
+def _current(root: Path | None = None) -> dict[str, dict]:
+    """Each thread's index line as it stands now: the last one for its id.
+
+    A thread renamed keeps its earlier lines, so a name is only a thread's
+    while its latest line says it. Read line by line into a name → id map, a
+    renamed thread went on answering to its old name too: a fork renamed
+    `… (2)` after it was made could keep the name it was made under, and the
+    agent's messages with it.
+    """
+    return _latest_per_id(_index_entries(root))
+
+
+def _latest_per_id(entries: list[dict]) -> dict[str, dict]:
+    current: dict[str, dict] = {}
+    for entry in entries:
+        current[str(entry["id"])] = entry
+    return current
+
+
+def _named(name: str, root: Path | None = None) -> list[tuple[str, dict, Path | None]]:
+    """The threads called `name` now, with each one's index line and the rollout
+    it is being written to — None for a thread whose transcript is gone.
+
+    Exactly as written, or failing that the same but for case, because the name
+    is copied by hand.
+    """
+    wanted = name.strip()
+    current = _current(root)
+    exact = [
+        (session_id, entry)
+        for session_id, entry in current.items()
+        if str(entry.get("thread_name") or "") == wanted
+    ]
+    if not exact:
+        folded = wanted.casefold()
+        exact = [
+            (session_id, entry)
+            for session_id, entry in current.items()
+            if str(entry.get("thread_name") or "").casefold() == folded
+        ]
+    return [(session_id, entry, rollout_for(session_id, root)) for session_id, entry in exact]
+
+
+def _forked_from(transcript: Path) -> str | None:
+    """The thread a rollout was forked from, as its first record says. Codex
+    Desktop wrote `forked_from_id` into the `session_meta` of a side chat."""
+    try:
+        with transcript.open("rb") as handle:
+            first = handle.readline(MAX_CONTEXT_RECORD_BYTES + 1)
+    except OSError:
+        return None
+    if len(first) > MAX_CONTEXT_RECORD_BYTES:
+        return None
+    try:
+        record = json.loads(first)
+    except ValueError:
+        return None
+    if not isinstance(record, dict) or record.get("type") != "session_meta":
+        return None
+    payload = record.get("payload")
+    parent = payload.get("forked_from_id") if isinstance(payload, dict) else None
+    return str(parent) if parent else None
+
+
+def _short(session_id: str, others: set[str]) -> str:
+    """As much of an id as tells it apart from the others, eight characters at
+    least. The ids are UUIDv7, whose first characters are the time it was made,
+    so two threads opened a minute apart share them."""
+    for length in range(8, len(session_id)):
+        prefix = session_id[:length]
+        if not any(other != session_id and other.startswith(prefix) for other in others):
+            return prefix
+    return session_id
+
+
+def name_clash(name: str, *, root: Path | None = None) -> str | None:
+    """Why `name` addresses no one thread: more than one is called it now. None
+    when one is, or none.
+
+    Measured on 2026-11-05: a side chat opened by a stray click took its main
+    thread's name and no ` (2)`, and a workflow step went into it — answered
+    where nobody was looking, in a chat the Desktop app did not show. Two
+    threads under one name is something only a person can put right, so it is
+    said, with what tells the two apart, rather than guessed between. A thread
+    whose transcript is gone — deleted, archived — holds no name.
+    """
+    named = [(session_id, entry, path) for session_id, entry, path in _named(name, root) if path]
+    if len(named) < 2:
+        return None
+    ids = {session_id for session_id, _, _ in named}
+    told = []
+    for session_id, entry, path in named:
+        said = _short(session_id, ids)
+        if (at := _as_time(entry.get("updated_at"))) is not None:
+            local = at.astimezone()
+            said += f", named {local:%b} {local.day} {local:%H:%M}"
+        if (parent := _forked_from(path)) in ids:
+            said += f", a fork of {_short(parent, ids)}"
+        told.append(said)
+    return f"{len(named)} Codex threads are named {name.strip()}: " + "; ".join(told)
 
 
 def find_session(name: str, *, root: Path | None = None) -> SessionRef | None:
@@ -160,25 +265,28 @@ def find_session(name: str, *, root: Path | None = None) -> SessionRef | None:
 
     Both are accepted because `codex exec resume` accepts both, and somebody
     holding an id should not be told to go and find a name for it first.
+
+    A name is the one thread called it now. Two of them is no session at all —
+    `name_clash` says which — rather than the newest, because the newest was a
+    side chat opened by accident. A name is handed to a new thread on purpose
+    by renaming the one that had it.
     """
     wanted = name.strip()
     if not wanted:
         return None
 
-    latest: dict[str, str] = {}
-    for entry in _index_entries(root):
-        thread_name = entry.get("thread_name")
-        if thread_name:
-            # Append-only: a later line for the same id supersedes an earlier
-            # one, and a name reused on a new session moves to the new id.
-            latest[str(thread_name)] = str(entry["id"])
-
-    if wanted in latest:
-        return describe(latest[wanted], wanted, root=root)
-
-    folded = {key.casefold(): value for key, value in latest.items()}
-    if wanted.casefold() in folded:
-        return describe(folded[wanted.casefold()], wanted, root=root)
+    named = _named(wanted, root)
+    there = [(session_id, path) for session_id, _, path in named if path is not None]
+    if len(there) == 1:
+        [(session_id, path)] = there
+        return describe(session_id, wanted, root=root, transcript=path)
+    if there:
+        logger.warning("%d Codex threads are named %r; none of them is used", len(there), wanted)
+        return None
+    if named:
+        # Named, with no transcript left to say where it runs: found, so what
+        # is refused is refused for that, and not as a name nobody knows.
+        return describe(named[-1][0], wanted, root=root)
 
     if rollout_for(wanted, root) is not None:
         return describe(wanted, wanted, root=root)
@@ -208,10 +316,13 @@ def list_named_sessions(*, root: Path | None = None) -> list[SessionRef]:
     in the rollout and is not worth opening one per thread just to list them.
     `cwd` is left unset rather than guessed.
     """
+    entries = _index_entries(root)
+    current = _latest_per_id(entries)
     latest: dict[str, SessionRef] = {}
-    for entry in _index_entries(root):
+    for entry in entries:
         thread_name = entry.get("thread_name")
-        if not thread_name:
+        if not thread_name or current.get(str(entry["id"])) is not entry:
+            # Only the name each thread has now: an old one is nobody's.
             continue
         # Append-only, so a later line for the same name supersedes an earlier.
         latest[str(thread_name)] = SessionRef(

@@ -4356,6 +4356,142 @@ async def test_a_workflow_step_that_could_not_be_delivered_holds_the_run(
     assert run.stopped == "review: Halyard is paused. Send /resume first"
 
 
+def two_threads_named(runner, name: str) -> str:
+    """The runtime finding two threads under that name now, and so neither, as
+    Codex does after a side chat took its thread's name. What it says of them."""
+    clash = (
+        f"2 Codex threads are named {name}: 01a1747a, named Oct 25 22:12; "
+        "01a1ac2a, named Nov 5 17:43, a fork of 01a1747a"
+    )
+    runner.sessions.pop(name, None)
+    runner.name_clash = lambda asked: clash if asked == name else None
+    return clash
+
+
+async def test_a_step_to_an_agent_whose_name_two_threads_have_waits_for_you(
+    tmp_path: Path, wired
+) -> None:
+    """Measured: a side chat opened by a stray click took its thread's name,
+    and a workflow step went into it — answered where nobody was looking. Now
+    nothing runs and nothing goes, and the run's card says it is waiting for
+    somebody to put that right, with the step to send once they have."""
+    channel, api, runner, repo = wired
+    flow_in(channel, repo, tmp_path, runner, **TWO_STEPS)
+    clash = two_threads_named(runner, "alpha-engine-xreview")
+
+    await started(channel)
+    run = await run_of(channel)
+
+    assert runner.sent == []
+    assert run is not None and run.unreached
+    assert run.stopped == f"review: {clash}. Rename or delete the one xrev should not use"
+    card = api.sent[-1]
+    assert card["text"] == (
+        f"⛔ <b>level3</b> is waiting for you — review: {clash}. "
+        "Rename or delete the one xrev should not use.\n"
+        "Once that is put right, choose: <b>review</b> again, another step, or stop.\n"
+        f"run <code>{run.ident}</code>"
+    )
+    keys = [key["text"] for row in card["reply_markup"]["inline_keyboard"] for key in row]
+    assert "▶️ review → xrev" in keys
+    assert sum(clash in sent["text"] for sent in api.sent) == 1, "said once, on the card"
+    said, _ = channel._run_card(channel._repositories["alpha-engine"], run)
+    assert said == card["text"], "and /workflow shows the same card"
+
+    runner.name_clash = lambda _: None
+    runner.sessions["alpha-engine-xreview"] = SessionRef(
+        "id-rev", "alpha-engine-xreview", str(repo), None, None
+    )
+    await tap(channel, pressed_transition("flowgo", "level3"))
+    assert runner.sent[-1][0] == "id-rev"
+
+
+async def test_a_message_to_an_agent_whose_name_two_threads_have_goes_to_neither(wired) -> None:
+    """Nor to the session last heard from in that role — the guess that, with
+    the name on two threads, is the side chat as often as not."""
+    channel, api, runner, _ = wired
+    clash = two_threads_named(runner, "alpha-engine-navigator")
+    await channel._registry.observe(
+        session_id="id-side",
+        agent_id="claude-code",
+        project="alpha-engine",
+        role=Role.NAVIGATOR,
+        session_name="alpha-engine-navigator",
+    )
+
+    await deliver(channel, typed("Is the loader done?"))
+
+    assert runner.sent == []
+    assert api.sent[-1]["text"] == (
+        f"⚠️ Nothing was sent to <b>nav</b>: {clash}.\n\n"
+        "Rename or delete the one nav should not use."
+    )
+
+
+async def test_a_reply_from_another_thread_with_the_agents_name_moves_nothing(
+    tmp_path: Path, wired
+) -> None:
+    """Shown, marked, and nothing more: not the agent's last reply for a
+    transition to hand on, and not an answer to the run waiting on it."""
+    from halyard.channels.telegram.adapter import SAID_FILE
+    from halyard.core import last_said
+
+    channel, api, runner, repo = wired
+    flow_in(channel, repo, tmp_path, runner, **TWO_STEPS)
+    runner.name_clash = lambda _: None
+    await started(channel)
+    sent = len(runner.sent)
+
+    await channel.send_message(
+        "id-side",
+        "Side question answered.\nDECISION: forward",
+        agent_id="claude-code",
+        session_name="alpha-engine-xreview",
+        project="alpha-engine",
+    )
+    await settled(channel)
+
+    assert len(runner.sent) == sent, "the run still waits on xrev"
+    said = api.sent[-1]["text"]
+    assert said.startswith(
+        "↪️ <i>Not taken as xrev's reply: it came from another session named "
+        "alpha-engine-xreview (id-side), not the one xrev is on.</i>\n\n"
+    )
+    assert "Side question answered." in said
+    kept = last_said.last(channel._kept("-100888", SAID_FILE), "-100888")
+    assert kept is None or "Side question" not in kept.text
+
+    await answered(channel, "xrev", "DECISION: forward")
+    assert runner.sent[-1][0] == "id-nav"
+
+
+async def test_while_two_threads_have_its_name_the_one_its_step_went_to_answers(
+    tmp_path: Path, wired
+) -> None:
+    """The name can come to be on two threads while the agent works on a
+    step: its answer is still its answer, and the other thread's is not."""
+    channel, api, runner, repo = wired
+    flow_in(channel, repo, tmp_path, runner, **TWO_STEPS)
+    await started(channel)
+    clash = two_threads_named(runner, "alpha-engine-xreview")
+
+    await channel.send_message(
+        "id-side",
+        "DECISION: back",
+        agent_id="claude-code",
+        session_name="alpha-engine-xreview",
+        project="alpha-engine",
+    )
+    await settled(channel)
+    assert api.sent[-1]["text"].startswith(
+        f"↪️ <i>Not taken as xrev's reply: {clash}. "
+        "Rename or delete the one xrev should not use.</i>"
+    )
+
+    await answered(channel, "xrev", "DECISION: forward")
+    assert runner.sent[-1][0] == "id-nav"
+
+
 async def test_a_transition_with_commands_does_not_go_while_another_runs(
     tmp_path: Path, wired, monkeypatch
 ) -> None:

@@ -31,7 +31,7 @@ import subprocess
 from collections.abc import Callable
 from pathlib import Path
 
-from halyard.agents.codex.sessions import find_session
+from halyard.agents.codex.sessions import find_session, name_clash
 from halyard.agents.turns import (
     WEDGED_AFTER_SECONDS,
     LateFailure,
@@ -284,6 +284,10 @@ class CodexRunner:
     def resolve(self, name: str):
         """Find a session by its thread name, or by its id."""
         return find_session(name)
+
+    def name_clash(self, name: str) -> str | None:
+        """Why that name finds no session, when several threads are called it."""
+        return name_clash(name)
 
     def preferences(self, session_id: str) -> tuple[str | None, str | None]:
         return self._models.get(session_id) or self._default_model, self._efforts.get(session_id)

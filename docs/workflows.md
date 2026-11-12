@@ -276,7 +276,8 @@ run eb786af9
 Its button names the round it sends — **▶️ develop_x round 3 of 2 → xdrv** — beside
 **🧭 Pick a step** and **⏹ Stop the workflow**. The phases running out asks the same way,
 with **↻ Phase 4 of 3 at discover** and the way out of them. `/workflow` shows the same
-card for as long as the run is held there. Every other stop keeps its usual card.
+card for as long as the run is held there. A step that reached nobody asks the same way —
+below; every other stop keeps its usual card.
 
 ## Stopping, steering, and asking where it is
 
@@ -420,8 +421,20 @@ was, and there is one run per piece of work: a project has one working tree, and
 branch says which work that is. A run waiting on an agent goes on waiting: its card
 closes saying the run is kept, and `/workflow` gives it a card again.
 
-A step that reached nobody — Halyard paused, a session that could not be found, a
-runtime that refused the message — stops the run under the chat's own warning. So does a
+A step that reached nobody — Halyard paused, a session that could not be found, two
+Codex threads with the agent's name, a runtime that refused the message — holds the run
+until you have put that right, and its card says so:
+
+```
+⛔ level2X is waiting for you — discovered_x: 2 Codex threads are named alpha-engine-xnav: …
+Once that is put right, choose: discovered_x again, another step, or stop.
+run 424ac040
+```
+
+Its **▶️ discovered_x → xnav** sends the step again, and `/workflow` shows the same card for
+as long as the run is held there. A step whose turn started and then ended without an answer
+stops the run under the chat's own warning, out of usage halfway most
+often: *develop's turn in xdrv ended without an answer*. So does a
 step whose turn started and then ended without an answer, out of usage halfway most
 often: *develop's turn in xdrv ended without an answer*. So does `/stop` in the agent's
 chat while the run waits on it: *develop's turn in xdrv was stopped by … before it

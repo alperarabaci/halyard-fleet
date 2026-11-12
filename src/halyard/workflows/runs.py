@@ -153,13 +153,25 @@ class Run:
     #: what was used up — the stop that is a person's decision. None for every
     #: other stop, and gone as soon as the run moves.
     limit: Limit | None = None
+    #: For a run stopped because its step reached nobody — the agent's session
+    #: could not be found, two sessions had its name, the gate was paused —
+    #: true: something a person puts right before choosing how it goes on.
+    #: False for every other stop, and gone as soon as the run moves.
+    unreached: bool = False
 
     def held(
-        self, why: str, *, leaving: int = -1, waited: int = -1, limit: Limit | None = None
+        self,
+        why: str,
+        *,
+        leaving: int = -1,
+        waited: int = -1,
+        limit: Limit | None = None,
+        unreached: bool = False,
     ) -> Run:
         """The same run, stopped for this reason — `waited` is the step whose
-        seat's reply stopped it, when that seat can lift the stop, and `limit`
-        what was used up, when that is why.
+        seat's reply stopped it, when that seat can lift the stop, `limit`
+        what was used up, when that is why, and `unreached` whether its step
+        reached nobody.
 
         The seat it last dealt with is kept: what it carries on with, if
         somebody sends the step it stopped before, is that seat's reply.
@@ -172,6 +184,7 @@ class Run:
             waited=waited,
             sending_to="",
             limit=limit,
+            unreached=unreached,
         )
 
     def as_it_stood(self, stretch: tuple[int, int] | None) -> Run:
@@ -197,6 +210,7 @@ class Run:
             waited=-1,
             sending_to="",
             limit=None,
+            unreached=False,
         )
 
     def sending(self, label: str) -> Run:
@@ -212,6 +226,7 @@ class Run:
             waited=-1,
             stopped_at=None,
             limit=None,
+            unreached=False,
         )
 
     def waiting_on(self, label: str) -> Run:
@@ -227,6 +242,7 @@ class Run:
             stopped_at=None,
             sending_to="",
             limit=None,
+            unreached=False,
         )
 
     def at(
@@ -257,6 +273,7 @@ class Run:
             stopped_at=None,
             sending_to="",
             limit=None,
+            unreached=False,
         )
 
     def taken(self) -> dict[str, int]:
@@ -365,6 +382,7 @@ def current(where: Path, work: str) -> Run | None:
         # Absent from a run held before limits were kept: its card reads as
         # any other stop's did.
         limit=_limit_from(entry.get("limit")),
+        unreached=bool(entry.get("unreached")),
     )
 
 
@@ -433,6 +451,7 @@ def save(where: Path, work: str, run: Run) -> None:
             if run.limit is not None
             else None
         ),
+        "unreached": run.unreached,
         "rounds": {
             key: [
                 {
@@ -486,7 +505,14 @@ def still_sending(where: Path, work: str, sent: Run) -> bool:
 
 
 def missed(
-    where: Path, work: str, sent: Run, why: str, *, key: str = "", there: bool = False
+    where: Path,
+    work: str,
+    sent: Run,
+    why: str,
+    *,
+    key: str = "",
+    there: bool = False,
+    unreached: bool = False,
 ) -> Run | None:
     """The run stopped for `why`, when a step never got an answer — it reached
     nobody, or its turn ended without one — or None when the run has moved past
@@ -499,7 +525,8 @@ def missed(
     waited on already and still have reached nobody. It is stopped as it was
     sent: whose reply it carries, and whether it is a return, are what sending
     it again needs — and the round its turn counted under `key` is given back,
-    so sending it again is the same round.
+    so sending it again is the same round. `unreached` says it reached
+    nobody, rather than that its turn ended without an answer.
     """
     run = current(where, work)
     if run is None or not sent.sending_to or not _on_the_step(run, sent):
@@ -514,7 +541,9 @@ def missed(
             rounds[key] = entries[:-1]
         else:
             del rounds[key]
-    return replace(run, waiting_for=sent.waiting_for, back=sent.back, rounds=rounds).held(why)
+    return replace(run, waiting_for=sent.waiting_for, back=sent.back, rounds=rounds).held(
+        why, unreached=unreached
+    )
 
 
 def _on_the_step(run: Run, sent: Run) -> bool:

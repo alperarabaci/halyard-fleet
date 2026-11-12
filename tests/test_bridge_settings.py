@@ -407,3 +407,23 @@ def test_a_correctly_wired_project_passes(
 
     assert problems == 0
     assert any("PreToolUse" in line for line in lines)
+
+
+def test_a_codex_name_two_threads_have_is_said_as_that(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Not as a name nobody knows: one too many threads know it, and nothing
+    is sent until one of them is renamed or deleted."""
+    from halyard import doctor
+
+    monkeypatch.setattr("halyard.agents.codex.runner.find_codex_binary", lambda: "/usr/bin/codex")
+    monkeypatch.setattr("halyard.agents.codex.find_session", lambda name: None)
+    monkeypatch.setattr(
+        "halyard.agents.codex.name_clash",
+        lambda name: f"2 Codex threads are named {name}: 01a1747a; 01a1ac2a",
+    )
+
+    lines, problems = doctor._check_seat(a_seat("codex"))
+
+    assert problems == 1
+    assert any("2 Codex threads are named a-session: 01a1747a; 01a1ac2a" in line for line in lines)
+    assert any("rename or delete the one this agent should not use" in line for line in lines)
+    assert not any("no session named" in line for line in lines)

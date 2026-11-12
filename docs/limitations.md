@@ -48,6 +48,14 @@ on it.
   turn you started over Telegram.** A Telegram-initiated turn runs headless, where
   Claude Code does not load `AskUserQuestion` — so it asks in prose you can just reply
   to, rather than as buttons.
+- **A Codex agent is the one thread its name is on.** Codex Desktop can give a new thread
+  the name of the one it came from — a side chat opened by a stray click did, without the
+  ` (2)` a fork gets. Two threads with an agent's name get nothing from Halyard: the chat,
+  and a workflow's card, say which two, and nothing goes until one is renamed or deleted.
+  A reply from the other one is shown, marked, and is neither the agent's last reply nor an
+  answer to a run. Handing an agent's name to a new thread on purpose is renaming the old
+  one first. Claude Code is not held to this: it resumes one conversation under a new id
+  each time, so its name is on several and the newest is the one in use.
 - **An answer to a Codex question waits for the turn running in its thread.** Codex
   carries on after asking, and Halyard hands the answer in with `codex queue`, which
   cannot steer a turn that is running: Codex takes it when that turn ends, and the card

@@ -275,6 +275,11 @@ class RuntimeSpec:
     #: its sessions somewhere else, and "no session named X" is only useful
     #: next to where X was supposed to come from.
     sessions_hint: str = ""
+    #: Why a name addresses no one session, for a runtime where one session
+    #: keeps one name: several sessions are called it now. None from a runtime
+    #: that has none — Claude Code resumes one conversation under a new id
+    #: every time it restarts, so a name on several sessions is how it works.
+    name_clash: Callable[[str], str | None] | None = None
     #: Can this runtime be reached at all, right now? Returns `(level, text)`
     #: pairs; a `fail` stops the seat being checked further. Called before the
     #: session is looked up, because a missing CLI makes every later answer

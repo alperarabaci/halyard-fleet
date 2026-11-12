@@ -325,12 +325,40 @@ def _waiting_for_you(run: flowing.Run, limit: flowing.Limit, *, go: bool, on: st
     return "\n".join(lines)
 
 
+def _waiting_on_a_fix(run: flowing.Run, step: str, *, go: bool, on: str) -> str:
+    """The card of a run whose step reached nobody: two sessions with the
+    agent's name, a paused gate, a session that is not there — something a
+    person puts right, and then a choice of how the run goes on.
+
+    Said as the wait it is. A step that reached nobody stopped its run under
+    the line any stop has, which read as a run that had ended rather than one
+    waiting for somebody. What it offers is said in the words its buttons use.
+    """
+    lines = [
+        f"⛔ <b>{html.escape(run.workflow)}</b> is waiting for you — {html.escape(run.stopped)}."
+    ]
+    choices = [
+        *([f"<b>{html.escape(step)}</b> again"] if go else []),
+        *([f"on to <b>{html.escape(on)}</b>"] if on else []),
+        "another step",
+    ]
+    lines.append(f"Once that is put right, choose: {', '.join(choices)}, or stop.")
+    if run.ident:
+        lines.append(f"run <code>{html.escape(run.ident)}</code>")
+    return "\n".join(lines)
+
+
 def _past_the_limit(limit: flowing.Limit, step: str) -> str:
     """The button that sends a held run on past its limit, naming what it sends:
     `▶️ develop_x round 3 of 2`, `↻ Phase 4 of 3 at discover`."""
     if limit.phases:
         return f"↻ Phase {limit.would_be} of {limit.allowed} at {step}"
     return f"▶️ {step} round {limit.would_be} of {limit.allowed}"
+
+
+def _rename_one(seat: Seat) -> str:
+    """What to do about a name several sessions have, in a sentence."""
+    return f"Rename or delete the one {seat.label} should not use."
 
 
 def _seat_name(seat: Seat | None) -> str:
@@ -1051,6 +1079,10 @@ class TelegramChannel:
         #: The workflow step whose turn went into each session last, by session
         #: id, so `/stop` there can stop that step's run too — see `_stop_turn`.
         self._step_turns: dict[str, _Landing] = {}
+        #: The session each seat's last message went to, by seat label: a reply
+        #: from there is that seat's even while its name is on two sessions —
+        #: see `_astray`.
+        self._sent_to: dict[str, str] = {}
         #: How often `/stop` stopped a turn in each session, and who did last,
         #: by session id — so a message dropped from behind that turn can say
         #: who stopped it.
@@ -1515,9 +1547,16 @@ class TelegramChannel:
         the whole message.
         """
         chat_id, thread_id = self._route(role, session_name, agent_id, session_id, project)
+        speaking = for_session(self._seats, agent_id, session_name, session_id)
+        # A reply that names a seat's session and comes from another: shown,
+        # and nothing more — not the seat's last reply, and no answer to a run.
+        astray = await self._astray(speaking, session_id)
+        named = speaking
+        if astray is not None:
+            speaking = None
         # Kept before the split, because what somebody wants to hand on is the
         # whole report and a fragment of one would look complete.
-        if (said_path := self._kept(chat_id, SAID_FILE)) is not None:
+        if astray is None and (said_path := self._kept(chat_id, SAID_FILE)) is not None:
             files = await self._files_at_reply(project, agent_id, session_id)
             last_said.remember(
                 said_path,
@@ -1528,11 +1567,12 @@ class TelegramChannel:
                 head=files.head if files else None,
                 content=files.content if files else None,
             )
-        speaking = for_session(self._seats, agent_id, session_name, session_id)
         # Only the seat the session is known to be: the project-wide guess
         # below is good enough to wake a workflow, not to say who worked last.
         self._worked_with(speaking)
-        answered = speaking or for_project(self._seats, agent_id, project)
+        answered = (
+            None if astray is not None else speaking or for_project(self._seats, agent_id, project)
+        )
         # A provider that has stopped answering is the one message worth a
         # button. Somebody reading "the limit resets at 03:30" on a phone can
         # do exactly one useful thing about it, and typing a model id with a
@@ -1544,6 +1584,11 @@ class TelegramChannel:
         try:
             for index, chunk in enumerate(chunks, start=1):
                 marker = f"<i>({index}/{len(chunks)})</i>\n" if len(chunks) > 1 else ""
+                if astray is not None and named is not None and index == 1:
+                    marker = (
+                        f"↪️ <i>Not taken as {html.escape(named.label)}'s reply: "
+                        f"{html.escape(astray)}</i>\n\n{marker}"
+                    )
                 said = marker + html.escape(chunk)
                 if keyboard is not None and index == len(chunks):
                     # On the last one, where somebody's thumb already is — and a
@@ -4336,11 +4381,14 @@ class TelegramChannel:
         # inspections, and only then said to send /resume — the work done for
         # nothing, and nothing delivered.
         if why := await self._what_stops_delivery(seat, chat_id):
-            await self._say(
-                f"{lead}⏸ <b>{html.escape(name)}</b> did not start: {why} Nothing was run.",
-                chat_id,
-                thread_id,
-            )
+            if not card_key:
+                # A run's step is held instead, and its card says why — once.
+                await self._say(
+                    f"{lead}⏸ <b>{html.escape(name)}</b> did not start: {html.escape(why)} "
+                    "Nothing was run.",
+                    chat_id,
+                    thread_id,
+                )
             return transitioning.Handed("", stopped=why)
 
         # One at a time per project, as for `/command`: two `make` runs in one
@@ -4822,18 +4870,34 @@ class TelegramChannel:
         async def still() -> bool:
             return await asyncio.to_thread(flowing.still_sending, kept, work, sent)
 
-        async def stop_as(reason: str, *, go: bool, there: bool = False) -> None:
+        async def stop_as(
+            reason: str, *, go: bool, there: bool = False, unreached: bool = False
+        ) -> None:
             """Stopped as it was sent, any round its turn counted given back —
             unless the run has moved past the step, when it is left alone, and
-            `there` asks for a step whose turn started."""
+            `there` asks for a step whose turn started. `unreached`: it reached
+            nobody, and waits on whoever puts that right."""
             held = await asyncio.to_thread(
-                partial(flowing.missed, kept, work, sent, reason, key=key, there=there)
+                partial(
+                    flowing.missed,
+                    kept,
+                    work,
+                    sent,
+                    reason,
+                    key=key,
+                    there=there,
+                    unreached=unreached,
+                )
             )
             if held is not None:
                 await self._stopped(found, work, held, go=go)
 
         async def missed(why: str) -> None:
-            await stop_as(f"{step.name} did not reach {seat.label}: {why.rstrip('.')}", go=True)
+            await stop_as(
+                f"{step.name} did not reach {seat.label}: {why.rstrip('.')}",
+                go=True,
+                unreached=True,
+            )
 
         async def failed(why: str) -> None:
             await stop_as(
@@ -4909,12 +4973,14 @@ class TelegramChannel:
             return
         handed = going.result()
         if handed is not None and handed.stopped:
-            # Held where it is, as for any other stop: fixed, the step is
-            # picked again and the run goes on with its rounds as they were.
-            # A transition that ran commands stopped at one that did not run;
-            # one that ran nothing could not have reached the seat at all.
+            # Held where it is, as for any other stop: fixed, the step goes
+            # again and the run goes on with its rounds as they were. A
+            # transition that ran commands stopped at one that did not run, and
+            # is picked again. One that ran nothing could not have reached the
+            # seat at all: it waits on whoever puts that right, and offers the
+            # same step as a button.
             why = "a command did not run" if handed.ran else handed.stopped.rstrip(".")
-            await stop_as(f"{step.name}: {why}", go=False)
+            await stop_as(f"{step.name}: {why}", go=not handed.ran, unreached=not handed.ran)
 
     @staticmethod
     def _phase_of(found: Project, run: flowing.Run) -> str:
@@ -5083,6 +5149,8 @@ class TelegramChannel:
             agent = self._step_seats(found, flow).get(flow[run.step], "")
             go_text = _past_the_limit(run.limit, flow[run.step]) + (f" → {agent}" if agent else "")
             said = _waiting_for_you(run, run.limit, go=go, on=on)
+        elif run.unreached and run.step < len(flow):
+            said = _waiting_on_a_fix(run, flow[run.step], go=go, on=on)
         if go and not go_text and run.step < len(flow):
             agent = self._step_seats(found, flow).get(flow[run.step], "")
             go_text = f"▶️ {flow[run.step]}" + (f" → {agent}" if agent else "")
@@ -5614,7 +5682,8 @@ class TelegramChannel:
         """Why a message to this seat could not be delivered now, or None.
 
         The same refusals the delivery itself makes, asked up front: paused, no
-        way to send at all, or no session to send to. A sentence for the chat.
+        way to send at all, or no session to send to. A sentence for the chat,
+        in plain text: a run keeps it as why it stopped, and its card escapes it.
         """
         if self._gate.paused:
             return "Halyard is paused. Send /resume first."
@@ -5622,10 +5691,9 @@ class TelegramChannel:
             return "this control plane cannot send messages into a session."
         destination, _ = parse_destination(seat.chat) or (chat_id, None)
         if await self._session_for(destination) is None:
-            return (
-                f"the <b>{html.escape(seat.label)}</b> agent's session could not be found "
-                "— /status says more."
-            )
+            if clash := await self._name_clash(seat):
+                return f"{clash}. {_rename_one(seat)}"
+            return f"the {seat.label} agent's session could not be found — /status says more."
         return None
 
     async def _forward_to_session(
@@ -5678,12 +5746,18 @@ class TelegramChannel:
             # information nobody can look up from where they are standing — it
             # is not shown anywhere in Telegram's own interface.
             seat = self._seat_for_chat(chat_id)
-            why = await self._why_unreachable(seat) if seat is not None else None
+            clash = await self._name_clash(seat)
+            why = await self._why_unreachable(seat) if seat is not None and not clash else None
             if seat is None:
                 said = (
                     f"No agent owns this chat (<code>{chat_id}</code>). Add it to a "
                     "seat's <code>chat:</code> in your seat configuration, then "
                     "restart — seats are read at startup."
+                )
+            elif clash:
+                said = (
+                    f"⚠️ Nothing was sent to <b>{html.escape(seat.label)}</b>: "
+                    f"{html.escape(clash)}.\n\n{html.escape(_rename_one(seat))}"
                 )
             elif why:
                 # The runtime could not be asked at all, which is a different
@@ -5705,10 +5779,17 @@ class TelegramChannel:
                 )
             await self._say(said, chat_id, thread_id)
             if landing is not None:
-                await landing.missed("its session could not be found")
+                await landing.missed(
+                    f"{clash}. {_rename_one(seat)}"
+                    if clash and seat
+                    else "its session could not be found"
+                )
             return
 
-        self._worked_with(self._seat_for_chat(chat_id))
+        seat = self._seat_for_chat(chat_id)
+        self._worked_with(seat)
+        if seat is not None:
+            self._sent_to[seat.label] = found.session_id
         task = asyncio.create_task(self._deliver(found, text, actor, chat_id, thread_id, landing))
         # Held so the loop does not drop the only reference and cancel it.
         self._sending.add(task)
@@ -5736,6 +5817,17 @@ class TelegramChannel:
                 runner = self._runner_for(seat)
                 if runner is not None:
                     return _SessionTarget(found.session_id, self._project, found.cwd, runner)
+            if await self._name_clash(seat):
+                # Several sessions have its name, and none of them is this
+                # chat's. Not the guesses below either: the session heard from
+                # last is how a workflow step reached a side chat opened by
+                # accident, under the name of the thread it came from.
+                logger.warning(
+                    "More than one session is named %r; nothing goes to the %s agent",
+                    name,
+                    seat.label if seat else role,
+                )
+                return None
             logger.warning(
                 "No session named %r for the %s agent", name, seat.label if seat else role
             )
@@ -5822,6 +5914,59 @@ class TelegramChannel:
         if runner is None:
             return None
         return await asyncio.to_thread(runner.resolve, name)
+
+    async def _name_clash(self, seat: Seat | None) -> str | None:
+        """Why that seat's name finds no session, when several sessions have it.
+
+        Asked of the seat's runtime, and only one where a session keeps one
+        name can say: Codex. A Claude Code conversation is a new id every time
+        it restarts, so its name on several is how it works.
+        """
+        if seat is None or not seat.session:
+            return None
+        asking = getattr(self._runner_for(seat), "name_clash", None)
+        if asking is None:
+            return None
+        try:
+            return await asyncio.to_thread(asking, seat.session)
+        except Exception:
+            logger.exception("Could not ask whether %s's name is on more than one session", seat)
+            return None
+
+    async def _astray(self, seat: Seat | None, session_id: str | None) -> str | None:
+        """Why a reply found by `seat`'s name is not that seat's, or None when it is.
+
+        A reply finds its seat by the name of the session it came from, and a
+        Codex name can be on two threads at once: a side chat opened by
+        accident took its thread's name. What a reply from there said would
+        have been the agent's last word — handed on by its next transition,
+        and read as its decision by a run waiting on it. So it is the seat's
+        when it comes from the session the seat's name finds, or from the one
+        its last message went to, which is the one a run waits on; any other
+        is shown, marked, and nothing more.
+
+        Only for a runtime where one session keeps one name. Claude Code
+        resumes one conversation under a new id each time, and its replies
+        come from whichever id it is on now.
+        """
+        if seat is None or not session_id or not seat.session:
+            return None
+        if getattr(self._runner_for(seat), "name_clash", None) is None:
+            return None
+        if self._sent_to.get(seat.label) == session_id:
+            return None
+        found = await self._resolve(seat, seat.session)
+        if found is not None:
+            if found.session_id == session_id:
+                return None
+            return (
+                f"it came from another session named {seat.session} "
+                f"({session_id[:8]}), not the one {seat.label} is on."
+            )
+        if clash := await self._name_clash(seat):
+            return f"{clash}. {_rename_one(seat)}"
+        # Not found at all: nothing to tell it apart from, so it routes as before.
+        return None
 
     async def _why_unreachable(self, seat: Seat) -> str | None:
         """Why a seat's runtime could not be asked, if that is what happened.
