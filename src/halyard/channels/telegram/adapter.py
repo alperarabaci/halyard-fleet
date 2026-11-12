@@ -1539,24 +1539,31 @@ class TelegramChannel:
         agent_id: str | None = None,
         session_name: str | None = None,
         project: str | None = None,
+        kind: str = last_said.AGENT,
     ) -> str:
         """Send an agent's own words, split across messages if they are long.
 
         Escaped, because this is somebody else's prose: a reply mentioning a
         `<div>` is not markup, and sending it as markup makes Telegram refuse
         the whole message.
+
+        Or, with `kind` `halyard`, what Halyard says about that agent in its
+        chat — compacting, nearly out of usage, an answer that did not reach
+        it. Markup of Halyard's own, and nobody's reply: not kept to hand on,
+        and no answer to a run waiting on the agent. A compaction notice taken
+        for the driver's reply was handed on as its report and judged.
         """
         chat_id, thread_id = self._route(role, session_name, agent_id, session_id, project)
         speaking = for_session(self._seats, agent_id, session_name, session_id)
-        # A reply that names a seat's session and comes from another: shown,
-        # and nothing more — not the seat's last reply, and no answer to a run.
-        astray = await self._astray(speaking, session_id)
-        named = speaking
-        if astray is not None:
-            speaking = None
+        # Halyard's words about a seat, or a reply that names a seat's session
+        # and comes from another: shown, and nothing more — not the seat's last
+        # reply, and no answer to a run.
+        ours = kind != last_said.AGENT
+        astray = None if ours else await self._astray(speaking, session_id)
+        reply = not ours and astray is None
         # Kept before the split, because what somebody wants to hand on is the
         # whole report and a fragment of one would look complete.
-        if astray is None and (said_path := self._kept(chat_id, SAID_FILE)) is not None:
+        if reply and (said_path := self._kept(chat_id, SAID_FILE)) is not None:
             files = await self._files_at_reply(project, agent_id, session_id)
             last_said.remember(
                 said_path,
@@ -1566,13 +1573,13 @@ class TelegramChannel:
                 agent_id=agent_id,
                 head=files.head if files else None,
                 content=files.content if files else None,
+                kind=kind,
             )
         # Only the seat the session is known to be: the project-wide guess
         # below is good enough to wake a workflow, not to say who worked last.
-        self._worked_with(speaking)
-        answered = (
-            None if astray is not None else speaking or for_project(self._seats, agent_id, project)
-        )
+        if reply:
+            self._worked_with(speaking)
+        answered = (speaking or for_project(self._seats, agent_id, project)) if reply else None
         # A provider that has stopped answering is the one message worth a
         # button. Somebody reading "the limit resets at 03:30" on a phone can
         # do exactly one useful thing about it, and typing a model id with a
@@ -1584,12 +1591,12 @@ class TelegramChannel:
         try:
             for index, chunk in enumerate(chunks, start=1):
                 marker = f"<i>({index}/{len(chunks)})</i>\n" if len(chunks) > 1 else ""
-                if astray is not None and named is not None and index == 1:
+                if astray is not None and speaking is not None and index == 1:
                     marker = (
-                        f"↪️ <i>Not taken as {html.escape(named.label)}'s reply: "
+                        f"↪️ <i>Not taken as {html.escape(speaking.label)}'s reply: "
                         f"{html.escape(astray)}</i>\n\n{marker}"
                     )
-                said = marker + html.escape(chunk)
+                said = marker + (chunk if ours else html.escape(chunk))
                 if keyboard is not None and index == len(chunks):
                     # On the last one, where somebody's thumb already is — and a
                     # card, so the button goes once it is pressed.

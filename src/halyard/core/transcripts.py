@@ -31,12 +31,14 @@ dropped, and a transcript is located once rather than on every approval.
 from __future__ import annotations
 
 import asyncio
+import html
 import logging
 import re
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+from halyard.core import last_said
 from halyard.core.events import Role
 from halyard.core.gate import Gate
 
@@ -495,10 +497,12 @@ class TranscriptWatcher:
             await self._channel.send_message(
                 # Routes to wherever this session's replies already go.
                 session_id,
-                f"⚠️ <b>{where}</b> {text}",
+                f"⚠️ <b>{html.escape(where, quote=False)}</b> {html.escape(text, quote=False)}",
                 watched.role,
                 agent_id=watched.agent_id,
                 session_name=watched.session_name,
+                # Halyard's, about the session: never its reply.
+                kind=last_said.HALYARD,
             )
         except Exception:
             logger.debug("Could not relay a transcript error", exc_info=True)

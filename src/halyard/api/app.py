@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import html
 import logging
 import os
 from contextlib import asynccontextmanager
@@ -29,7 +30,7 @@ from halyard.channels.stub import StubChannel
 from halyard.channels.telegram import TelegramApi, TelegramChannel
 from halyard.config import ChannelKind, Settings
 from halyard.core import compaction as after_compaction
-from halyard.core import credentials, trusted_runs
+from halyard.core import credentials, last_said, trusted_runs
 from halyard.core import tools as configured_tools
 from halyard.core import writes as configured_writes
 from halyard.core.approvals import ApprovalStore, Decision
@@ -654,12 +655,22 @@ def create_app(settings: Settings, *, channel=None) -> FastAPI:
         if aged and aged.worth_saying(_now()):
             logger.warning("%s", aged.wording(_now()))
             with contextlib.suppress(Exception):
-                await resolved_channel.send_message("halyard", aged.wording(_now()), Role.NAVIGATOR)
+                await resolved_channel.send_message(
+                    "halyard",
+                    html.escape(aged.wording(_now()), quote=False),
+                    Role.NAVIGATOR,
+                    kind=last_said.HALYARD,
+                )
         # The same for a setting that was ignored: the person who can fix it
         # is on the phone, not reading this machine's log.
         for sentence in settings.ignored:
             with contextlib.suppress(Exception):
-                await resolved_channel.send_message("halyard", f"⚠️ {sentence}", Role.NAVIGATOR)
+                await resolved_channel.send_message(
+                    "halyard",
+                    f"⚠️ {html.escape(sentence, quote=False)}",
+                    Role.NAVIGATOR,
+                    kind=last_said.HALYARD,
+                )
         # The watcher's own loop, alongside the channel's. A best-effort courier,
         # so a failure to start it is logged and shrugged off rather than kept
         # from serving.

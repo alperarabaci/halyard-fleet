@@ -49,6 +49,7 @@ class ChannelAdapter(Protocol):
         agent_id: str | None = None,
         session_name: str | None = None,
         project: str | None = None,
+        kind: str = "agent",
     ) -> str:
         """Send plain text. Returns a channel-side message id.
 
@@ -62,6 +63,11 @@ class ChannelAdapter(Protocol):
         replies carry an id nobody configured, so the name matches nothing and
         the message falls through to whatever the role happens to point at —
         which is how a reply meant for one group arrived in another.
+
+        `kind` says who wrote it: `agent` for an agent's own words, `halyard`
+        for what Halyard says about one in its chat — see
+        `halyard.core.last_said`. Only an agent's words are its reply: kept to
+        hand on, and read by a workflow waiting on it.
         """
         ...
 
