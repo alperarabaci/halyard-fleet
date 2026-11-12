@@ -858,6 +858,26 @@ def test_a_limit_is_kept_with_the_run_until_it_moves(tmp_path: Path) -> None:
     assert stopped.held("it was asked to wait").limit is None
 
 
+def test_a_step_that_reached_nobody_is_kept_with_the_run_until_it_moves(tmp_path: Path) -> None:
+    """So `/workflow` later shows the card that says the run waits for somebody."""
+    import json
+
+    kept = tmp_path / "workflow-runs.json"
+    stopped = a_run(2).held("develop did not reach xdrv: Halyard is paused", unreached=True)
+
+    save(kept, "alpha-engine#503", stopped)
+
+    assert current(kept, "alpha-engine#503").unreached
+    assert not stopped.at(2).unreached
+    assert not stopped.waiting_on("xdrv").unreached
+    assert not stopped.sending("xdrv").unreached
+    assert not stopped.held("it was asked to wait").unreached
+    written = json.loads(kept.read_text())
+    del written["alpha-engine#503"]["unreached"]
+    kept.write_text(json.dumps(written))
+    assert not current(kept, "alpha-engine#503").unreached, "a run kept before it was"
+
+
 def test_a_run_kept_before_limits_were_has_none(tmp_path: Path) -> None:
     import json
 
