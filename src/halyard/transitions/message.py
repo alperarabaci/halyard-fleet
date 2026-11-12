@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 
 from halyard import frame, inspections
 from halyard.commands import Command, Result
@@ -25,6 +25,7 @@ def compose(
     ran: Sequence[tuple[Command, Result]] = (),
     previous: Previous | None = None,
     step: str = "",
+    given: Mapping[str, str] | None = None,
 ) -> str:
     """Everything a seat needs to act on a transition, in the order it reads it.
 
@@ -40,7 +41,8 @@ def compose(
     headed with its status, from what it read: complete, incomplete or
     unmeasured. Then, on a
     round after the first, what the seat said back to the round before. Then
-    the reply itself, last, where the prompt said it would be.
+    the reply itself, last, where the prompt said it would be. `given` is the
+    range each inspection was given, by name, said in its heading.
     """
     parts = [
         f"To {recipient}, from Halyard workflow {step} — transition: {name}."
@@ -66,7 +68,12 @@ def compose(
         # Its status from what it read, not from what it says it read: an
         # incomplete answer goes on, marked.
         status = inspections.said(answer, why=False)
-        heading = f"Inspection {answer.name} — {answer.path} @ {answer.version} · {status}:"
+        on = (given or {}).get(answer.name, "")
+        heading = (
+            f"Inspection {answer.name} — {answer.path} @ {answer.version} · {status}"
+            + (f" · on {on}" if on else "")
+            + ":"
+        )
         parts += ["", heading, ""]
         parts.append(answer.text if answer.measured else f"unmeasured — {answer.why}")
         if answer.not_run:

@@ -64,6 +64,7 @@ _PROJECT_FIELDS = {
     "warn_if",
     "commands",
     "forge",
+    "base",
     "labels",
     "labels_exclude",
     "label_groups",
@@ -301,6 +302,9 @@ class Project:
     #: or `github`. Only needed for a host that does not name itself:
     #: `gitlab.com` and `github.com` do, and `git.example.com` cannot.
     forge: str | None = None
+    #: What a branch is measured against in a transition's envelope — `main`,
+    #: `origin/develop`. Unset, the remote's own default branch: `origin/HEAD`.
+    base: str | None = None
     #: Which labels `/label` offers. Empty means every label the project has,
     #: which is the right default until a project has more of them than a phone
     #: keyboard can show.
@@ -1433,6 +1437,7 @@ def projects_from_yaml(text: str) -> list[Project]:
                 commands_not_run=commands_not_run,
                 command_limits=command_limits,
                 forge=_as_text(body.get("forge")),
+                base=_as_text(body.get("base")),
                 labels=_patterns_from(project, "labels: offer", tagged["offer"]),
                 labels_exclude=_patterns_from(project, "labels: exclude", tagged["exclude"]),
                 label_groups=label_groups,

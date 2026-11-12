@@ -248,6 +248,9 @@ LABELS_TIMEOUT_SECONDS = 10.0
 #: `_kept`.
 SAID_FILE = "last-said.json"
 RESULTS_FILE = "check-results.json"
+#: Where each inspection last read each branch, per project — see
+#: `halyard.inspections.shares`.
+SHARES_FILE = "inspection-shares.json"
 WORKFLOW_FILE = flowing.runs.FILE
 
 #: What a run's older card says once a newer card for the run has taken its
@@ -4523,6 +4526,8 @@ class TelegramChannel:
                 previous=previous,
                 keeper=keeper,
                 step=step_line,
+                shares=self._kept_for(found.name, SHARES_FILE),
+                base=found.base or "",
             )
         except Exception:
             # Broken before it was sent, it reached nobody, and whatever waits

@@ -56,6 +56,15 @@ def test_more_than_one_project_is_just_another_block() -> None:
     assert [len(p.seats) for p in projects] == [2, 1]
 
 
+def test_a_project_says_what_its_branches_are_measured_against() -> None:
+    """Unset, a transition measures a branch against the remote's own default
+    branch; a project that merges into another names it."""
+    projects = projects_from_yaml(TWO_PROJECTS + "    base: origin/develop\n")
+
+    assert projects[0].base is None
+    assert projects[1].base == "origin/develop"
+
+
 def test_a_project_carries_where_to_wire_it() -> None:
     """`~` expanded here rather than by whoever reads it later — a path that
     works in a shell and not in the process is the kind of difference nobody

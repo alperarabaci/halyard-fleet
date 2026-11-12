@@ -3483,6 +3483,40 @@ async def test_a_transition_runs_its_checks_before_it_goes(tmp_path: Path, wired
     assert any("<b>proof</b>: complete" in sent["text"] for sent in api.sent)
 
 
+async def test_a_transition_s_inspections_read_their_share_of_the_project_s_branch(
+    tmp_path: Path, wired
+) -> None:
+    """Measured against the project's own `base:`, and each inspection's mark
+    kept with the project: the second close reads what changed since the
+    first, with the answer it gave then."""
+    from halyard.channels.telegram.adapter import SHARES_FILE
+
+    channel, _, runner, repo = wired
+    transitions_in(channel, repo, tmp_path, runner, close={"inspections": ("proof",), "to": "xrev"})
+    git(repo, "branch", "release")
+    wrote(repo, "port.py", "class Port: ...\n")
+    git(repo, "add", ".")
+    git(repo, "commit", "-qm", "a port")
+    found = channel._repositories["alpha-engine"]
+    channel._repositories["alpha-engine"] = replace(found, base="release")
+
+    await channel._run_transition("close", CHAT, None, f"tg:{APPROVER}")
+    await settled(channel)
+    wrote(repo, "port.py", "class Port:\n    rows = 1\n")
+    await channel._run_transition("close", CHAT, None, f"tg:{APPROVER}")
+    await settled(channel)
+
+    first, second = runner.asked
+    assert "\n- Transition: close\n" in first
+    assert "\n- Base: release at " in first and " · 1 commit since · " in first
+    assert "Since this inspection last ran here: it has not, on this branch" in first
+    assert "\n- Since this inspection last ran here: " in second
+    assert " · 1 file changed, " in second
+    assert "last answer here, at " in second and runner.says in second
+    kept = channel._kept_for("alpha-engine", SHARES_FILE)
+    assert kept is not None and "281-power-gen-minor-fixes|close|proof" in kept.read_text()
+
+
 class CheckAsking:
     """A check that asks to run a command half way through its turn, the way
     the gate brings one in — and, told to, waits on it until it is stopped."""

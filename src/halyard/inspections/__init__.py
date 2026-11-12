@@ -44,7 +44,7 @@ inspections; nothing here hands anything on. `tests/test_layering.py` keeps it
 that way.
 """
 
-from halyard.inspections import record, trace
+from halyard.inspections import record, shares, trace
 from halyard.inspections.spec import (
     Answer,
     Asker,
@@ -82,6 +82,7 @@ __all__ = [
     "record",
     "run",
     "said",
+    "shares",
     "trace",
     "unfenced",
 ]

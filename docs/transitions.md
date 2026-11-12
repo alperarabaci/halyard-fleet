@@ -253,6 +253,47 @@ task carries from each group goes on the envelope too — `level: level::3`. It
 only reports: a task with none of them, or a tracker that cannot be read, adds
 nothing.
 
+### What a transition's inspections read
+
+What is uncommitted is not the work. A delivery committed before its close left
+the close's inspections three uncommitted lines to read, and none of the 28
+files it was about. So a transition's envelope names the transition, and the
+branch since its base, as two commits anybody can diff:
+
+```
+- Transition: close
+- Base: origin/main at 1a2b3c4d5e6f · 11 commits since · 161 files changed, … — git diff 1a2b3c4d5e6f 9f8e7d6c5b4a
+```
+
+The base is the remote's own default branch, `origin/HEAD`, or a local `main` or
+`master` without one; a project that merges into another names it with `base:`
+(see [Configuring a project](configuration.md)). The branch is measured from the
+commit it shares with the base, so a base that moved on since does not show up
+as the branch undoing it.
+
+Each inspection is told its own share too: what changed since it last ran here,
+for this transition, and the answer it gave then, with the range it was on.
+
+```
+- Since this inspection last ran here: Nov 11 15:47 · 28 files changed, … — git diff 46bba67e1181 9f8e7d6c5b4a
+```
+
+Its mark moves only when every read it asked for ran. One whose model did not
+answer, or whose reads did not all run, keeps its mark, and its next share is
+wider; the others move on, so one inspection's trouble makes none of the rest
+read again. What its answer said — a finding still open, a range it could not
+measure — is the inspection's to carry from its last answer: Halyard reads none
+of it, and a project's inspection files say what to do with it. The mark is the
+files it was given, not a commit, so work inspected before it was committed is
+not its share again for being committed after.
+
+Marks are kept on the machine that ran them. A machine that has not run an
+inspection on a branch says so, and its share is the base's range — the whole
+branch, the first time. A mark whose files git has since cleared counts from
+the commit under them, and a base merged in since is said, because its changes
+are then in the share. The navigator's message says which range each inspection
+was given, in its heading.
+
 ## Every inspection can be kept
 
 Turned on with one setting, and off until it is:
