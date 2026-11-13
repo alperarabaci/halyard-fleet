@@ -4356,6 +4356,66 @@ async def test_a_workflow_step_that_could_not_be_delivered_holds_the_run(
     assert run.stopped == "review: Halyard is paused. Send /resume first"
 
 
+async def test_a_compaction_notice_is_not_the_agents_reply(tmp_path: Path, wired) -> None:
+    """Measured: the driver compacted, its turn found no usage left after it, and
+    the notice was the last thing in its chat — the close handed it on as the
+    driver's report. Halyard's words in an agent's chat are shown, as markup of
+    its own, and are nobody's reply: not kept, and no answer to the run."""
+    from halyard.channels.telegram.adapter import SAID_FILE
+    from halyard.core import last_said
+
+    channel, api, runner, repo = wired
+    flow_in(channel, repo, tmp_path, runner, **TWO_STEPS)
+    await started(channel)
+    await answered(channel, "xrev", "Two findings, both fixed.")
+    run = await run_of(channel)
+    assert run is not None and run.stopped == "review ended with no decision"
+    sent = len(runner.sent)
+
+    await channel.send_message(
+        "id-rev",
+        "✅ <b>xrev</b> finished compacting in 41s.",
+        agent_id="claude-code",
+        session_name="alpha-engine-xreview",
+        project="alpha-engine",
+        kind=last_said.HALYARD,
+    )
+    await settled(channel)
+
+    assert api.sent[-1]["text"] == "✅ <b>xrev</b> finished compacting in 41s."
+    kept = last_said.last(channel._kept("-100888", SAID_FILE), "-100888")
+    assert kept is not None and kept.text == "Two findings, both fixed."
+    assert len(runner.sent) == sent
+    assert (await run_of(channel)).stopped == "review ended with no decision"
+
+
+async def test_a_compaction_while_a_step_is_waited_on_does_not_stop_the_run(
+    tmp_path: Path, wired
+) -> None:
+    """Read as the agent's reply, the notice had no decision on its last line,
+    and the run waiting on the agent stopped as though it had answered."""
+    from halyard.core import last_said
+
+    channel, _, runner, repo = wired
+    flow_in(channel, repo, tmp_path, runner, **TWO_STEPS)
+    await started(channel)
+
+    await channel.send_message(
+        "id-rev",
+        "🗜 <b>xrev</b> is compacting. The session is paused until it finishes.",
+        agent_id="claude-code",
+        session_name="alpha-engine-xreview",
+        project="alpha-engine",
+        kind=last_said.HALYARD,
+    )
+    await settled(channel)
+
+    run = await run_of(channel)
+    assert run is not None and (run.waiting, run.waiting_for, run.stopped) == (True, "xrev", "")
+    await answered(channel, "xrev", "DECISION: forward")
+    assert runner.sent[-1][0] == "id-nav"
+
+
 def two_threads_named(runner, name: str) -> str:
     """The runtime finding two threads under that name now, and so neither, as
     Codex does after a side chat took its thread's name. What it says of them."""

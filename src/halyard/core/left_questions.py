@@ -21,6 +21,7 @@ import logging
 from collections.abc import Awaitable, Callable
 
 from halyard.agents.spec import AskedQuestion
+from halyard.core import last_said
 from halyard.core.approvals import ResolutionReason
 from halyard.core.audit import AuditLog, question_answered, question_asked
 from halyard.core.events import Role
@@ -166,6 +167,7 @@ class LeftQuestions:
                 agent_id=request.agent_id,
                 session_name=request.session_name,
                 project=request.project,
+                kind=last_said.HALYARD,
             )
         except Exception:
             logger.debug("Could not say an answer was not delivered", exc_info=True)

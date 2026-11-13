@@ -483,9 +483,12 @@ class Chatty:
 
     def __init__(self) -> None:
         self.said: list[str] = []
+        #: Who each one says wrote it.
+        self.kinds: list[str] = []
 
-    async def send_message(self, session_id, text, role=None, **_) -> str:
+    async def send_message(self, session_id, text, role=None, *, kind="agent", **_) -> str:
         self.said.append(text)
+        self.kinds.append(kind)
         return "ok"
 
 
@@ -519,6 +522,9 @@ async def test_the_seat_is_told_a_compaction_started_and_finished(tmp_path: Path
     assert "finished compacting" in channel.said[1]
     # The numbers, because the question after "what happened" is "how long".
     assert "characters across" in channel.said[1]
+    # Halyard's words about the seat: taken for its reply, the notice was
+    # handed on as the driver's report.
+    assert channel.kinds == ["halyard", "halyard"]
 
 
 async def test_a_seat_with_nothing_configured_is_still_told(tmp_path: Path) -> None:
