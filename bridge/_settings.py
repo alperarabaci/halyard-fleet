@@ -420,6 +420,48 @@ def zcode_title(session_id: str | None, home: Path | None = None) -> str | None:
     return str(found[1])
 
 
+#: The ZCode modes that ask the person before what matters, as the payload
+#: spells them: "Ask before changes" (`build`) asks before every edit and
+#: command, "Edit automatically" (`edit`) applies edits and asks before
+#: commands. Both measured. Full access asks almost nothing, so it stays on the
+#: gate, as does any mode not measured here.
+ZCODE_ASKING_MODES = frozenset({"build", "edit"})
+
+
+def zcode_asks_through_halyard(project_dir: str | None) -> bool:
+    """Whether ZCode's own questions in this project reach Halyard: its
+    `.zcode/config.json` switches hooks on and runs this checkout's
+    `permission_hook.sh` on `PermissionRequest`.
+
+    A call is left to ZCode's mode only then. Without that hook, a command ZCode
+    asks about waits on a prompt at the desk that no phone sees, so a project
+    that has not been wired again keeps the gate it had.
+    """
+    if not project_dir:
+        return False
+    ours = str(Path(__file__).resolve().parent / "permission_hook.sh")
+    try:
+        loaded = json.loads(
+            (Path(project_dir) / ".zcode" / "config.json").read_text(encoding="utf-8")
+        )
+    except (OSError, ValueError):
+        return False
+    hooks = loaded.get("hooks") if isinstance(loaded, dict) else None
+    if not isinstance(hooks, dict) or hooks.get("enabled") is not True:
+        return False
+    events = hooks.get("events") if isinstance(hooks.get("events"), dict) else {}
+    groups = events.get("PermissionRequest")
+    for group in groups if isinstance(groups, list) else []:
+        handlers = group.get("hooks") if isinstance(group, dict) else None
+        for handler in handlers if isinstance(handlers, list) else []:
+            if not isinstance(handler, dict):
+                continue
+            arguments = handler.get("args") if isinstance(handler.get("args"), list) else []
+            if ours in (handler.get("command"), *arguments):
+                return True
+    return False
+
+
 def session_name(transcript_path: str | None) -> str | None:
     """The name shown on a session in the desktop app, if it can be found.
 

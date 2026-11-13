@@ -807,7 +807,8 @@ class ApprovalService:
 
         # The chat approves for itself — the person chose that there, Codex's
         # "approve for me" or Claude Code's auto mode — so this is left to it,
-        # as a pause leaves everything. Asking again on a phone made the
+        # as a pause leaves everything. A ZCode chat is left to its mode, whose
+        # own question comes back here as a `PermissionRequest`. Asking again on a phone made the
         # ordinary way of working harder. Refusals above still stand, a turn of
         # Halyard's own is never left to anyone, and
         # `HALYARD_OVERRIDE_AGENT_APPROVALS` puts every call back here.

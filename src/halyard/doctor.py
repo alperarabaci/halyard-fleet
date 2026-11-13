@@ -834,7 +834,7 @@ def run() -> int:
         else:
             print(
                 f'{OK}a chat that approves for itself (Codex "approve for me", Claude Code'
-                " auto mode) is left to it"
+                " auto mode) is left to it, and a ZCode chat to its mode, which asks here"
             )
     except ValidationError as exc:
         problems += 1
