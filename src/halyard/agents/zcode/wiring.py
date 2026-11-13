@@ -42,8 +42,19 @@ RELAY_TIMEOUT_MS = 15_000
 #: What each hook says it is. See the module docstring.
 DECLARATION = "HALYARD_RUNTIME=zcode"
 
-#: The gate and the relay, by bridge script.
-SCRIPTS = {"PreToolUse": ("hook.sh", GATE_TIMEOUT_MS), "Stop": ("relay.py", RELAY_TIMEOUT_MS)}
+#: The gate, ZCode's own questions, and the relay, by bridge script.
+#:
+#: `PermissionRequest` fires only when ZCode is about to ask the person, by the
+#: mode chosen in the chat. With it here, a chat in a mode that asks before what
+#: matters has its calls left to that mode, and what the mode asks reaches the
+#: phone rather than a prompt at the desk. It takes the gate's matcher: ZCode
+#: puts its question tool through the same request, and without one a question
+#: with options arrived on the phone as a card to allow or deny.
+SCRIPTS = {
+    "PreToolUse": ("hook.sh", GATE_TIMEOUT_MS),
+    "PermissionRequest": ("permission_hook.sh", GATE_TIMEOUT_MS),
+    "Stop": ("relay.py", RELAY_TIMEOUT_MS),
+}
 
 
 def groups(bridges: Path) -> dict[str, dict]:
@@ -56,7 +67,7 @@ def groups(bridges: Path) -> dict[str, dict]:
             "args": [DECLARATION, str(bridges / script)],
             "timeoutMs": timeout,
         }
-        matcher = {"matcher": MATCHER} if event == "PreToolUse" else {}
+        matcher = {"matcher": MATCHER} if event in ("PreToolUse", "PermissionRequest") else {}
         wanted[event] = {**matcher, "hooks": [handler]}
     return wanted
 
@@ -81,7 +92,8 @@ def _dead(handler: object) -> bool:
     left beside this machine's own.
     """
     return any(
-        word.endswith(("/bridge/hook.sh", "/bridge/relay.py")) and not Path(word).exists()
+        word.endswith(tuple(f"/bridge/{script}" for script, _ in SCRIPTS.values()))
+        and not Path(word).exists()
         for word in _words(handler)
     )
 
@@ -117,7 +129,7 @@ def _left_alone(document: dict) -> list[tuple[str, str]]:
 
 
 def install(project: Path, bridges: Path) -> list[tuple[str, str]]:
-    """Write the gate and the relay, and switch hooks on."""
+    """Write the gate, the question hook and the relay, and switch hooks on."""
     for script, _ in SCRIPTS.values():
         if not (bridges / script).is_file():
             return [("fail", f"{bridges / script} is missing from this install")]

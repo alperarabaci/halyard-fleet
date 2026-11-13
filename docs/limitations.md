@@ -36,7 +36,9 @@ on it.
 - **A chat that approves for itself is left to it.** Codex's "approve for me" and
   Claude Code's auto mode were chosen in the chat, so their calls are not asked
   again on the phone: the runtime's own reviewer decides, and the audit log says
-  `call.left_to_agent`. Refusals such as `HALYARD_REFUSE_AGENT_COMMITS` still
+  `call.left_to_agent`. A ZCode chat in "Ask before changes" or "Edit
+  automatically" is left to its mode, and what the mode asks reaches the phone.
+  Refusals such as `HALYARD_REFUSE_AGENT_COMMITS` still
   apply, and Halyard's own turns are always asked. `HALYARD_OVERRIDE_AGENT_APPROVALS:
   true` puts every call back on the gate; `halyard doctor` says which way it is.
 - **The gate covers what the matcher covers** — Bash, the file tools, the

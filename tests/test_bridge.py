@@ -765,6 +765,80 @@ def test_a_runtime_that_has_no_reason_to_declare_itself_cannot(bridge_module, mo
     assert bridge_module.build_body(ZCODE_PAYLOAD)["agent_id"] == "claude-code"
 
 
+def a_zcode_project(tmp_path: Path, *, asks_here: bool = True) -> Path:
+    """A project wired as `halyard wire` wires it, with or without the hook that
+    brings ZCode's own questions here."""
+    from halyard.agents.zcode import wiring
+
+    project = tmp_path / "project"
+    (project / ".git").mkdir(parents=True)
+    wiring.install(project, REPO.resolve() / "bridge")
+    if not asks_here:
+        document = json.loads((project / wiring.CONFIG).read_text())
+        del document["hooks"]["events"]["PermissionRequest"]
+        (project / wiring.CONFIG).write_text(json.dumps(document))
+    return project
+
+
+@pytest.mark.parametrize(
+    ("mode", "event", "asks_here", "approves"),
+    [
+        ("edit", "PreToolUse", True, True),
+        ("build", "PreToolUse", True, True),
+        # Full access asks almost nothing, and a mode not measured is not guessed.
+        ("yolo", "PreToolUse", True, False),
+        (None, "PreToolUse", True, False),
+        # ZCode's own question is the person being asked: never left to anyone.
+        ("edit", "PermissionRequest", True, False),
+        # Left to the mode, a command would wait on a prompt at the desk.
+        ("edit", "PreToolUse", False, False),
+    ],
+)
+def test_a_zcode_chat_is_left_to_a_mode_that_asks_here(
+    tmp_path: Path, mode: str | None, event: str, asks_here: bool, approves: bool
+) -> None:
+    project = a_zcode_project(tmp_path, asks_here=asks_here)
+    payload = {**ZCODE_PAYLOAD, "hook_event_name": event, "permission_mode": mode}
+    with control_plane(body={"decision": "allow", "reason": "ok"}) as (url, received):
+        run(
+            BRIDGE,
+            payload,
+            HALYARD_URL=url,
+            HALYARD_RUNTIME="zcode",
+            CLAUDE_PROJECT_DIR=str(project),
+            HOME=str(tmp_path),
+        )
+
+    assert received[0]["agent_id"] == "zcode"
+    assert received[0]["agent_approves"] is approves
+
+
+@pytest.mark.parametrize(
+    ("decision", "said"),
+    [
+        ("allow", {"behavior": "allow"}),
+        ("deny", {"behavior": "deny", "message": "not on main"}),
+    ],
+)
+def test_zcode_s_question_is_answered_in_its_own_schema(
+    tmp_path: Path, decision: str, said: dict
+) -> None:
+    """Strict: one key it does not know fails the answer, and its allow is
+    documented without a message."""
+    payload = {**ZCODE_PAYLOAD, "hook_event_name": "PermissionRequest", "permission_mode": "edit"}
+    with control_plane(body={"decision": decision, "reason": "not on main"}) as (url, _):
+        result = run(
+            PERMISSION_WRAPPER,
+            payload,
+            HALYARD_URL=url,
+            HALYARD_RUNTIME="zcode",
+            HOME=str(tmp_path),
+            HALYARD_PYTHON=sys.executable,
+        )
+
+    assert decision_of(result) == {"hookEventName": "PermissionRequest", "decision": said}
+
+
 def zcode_stop() -> dict:
     """The `Stop` that goes with `ZCODE_PAYLOAD`."""
     return {

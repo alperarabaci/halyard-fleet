@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import sqlite3
 from contextlib import closing
 from pathlib import Path
@@ -66,7 +67,31 @@ def test_wiring_writes_the_gate_the_relay_and_the_switch(tmp_path: Path) -> None
     }
     [relay] = hooks["events"]["Stop"]
     assert relay["hooks"][0]["args"] == ["HALYARD_RUNTIME=zcode", str(BRIDGES / "relay.py")]
-    assert ("ok", "wrote PreToolUse, Stop into .zcode/config.json") in said
+    assert ("ok", "wrote PreToolUse, PermissionRequest, Stop into .zcode/config.json") in said
+
+
+def test_wiring_brings_zcode_s_own_questions_here(tmp_path: Path) -> None:
+    """What the chat's mode asks about the tools the gate covers. ZCode puts its
+    question tool through the same request, and that is not one to allow or
+    deny: the gate's matcher leaves it to ZCode."""
+    project = repo(tmp_path)
+
+    wiring.install(project, BRIDGES)
+
+    [asks] = config(project)["hooks"]["events"]["PermissionRequest"]
+    assert re.search(asks["matcher"], "AskUserQuestion") is None
+    assert re.search(asks["matcher"], "Bash")
+    assert asks == {
+        "matcher": wiring.MATCHER,
+        "hooks": [
+            {
+                "type": "process",
+                "command": "/usr/bin/env",
+                "args": ["HALYARD_RUNTIME=zcode", str(BRIDGES / "permission_hook.sh")],
+                "timeoutMs": 600_000,
+            }
+        ],
+    }
 
 
 def test_wiring_twice_writes_nothing_the_second_time(tmp_path: Path) -> None:
@@ -130,7 +155,10 @@ def test_unwiring_takes_out_only_what_was_written(tmp_path: Path) -> None:
     said = wiring.uninstall(project, BRIDGES)
 
     assert config(project)["hooks"]["events"] == {"PreToolUse": [OWN]}
-    assert said[0] == ("ok", "removed PreToolUse, Stop from .zcode/config.json")
+    assert said[0] == (
+        "ok",
+        "removed PermissionRequest, PreToolUse, Stop from .zcode/config.json",
+    )
 
 
 def test_unwiring_the_last_hook_takes_the_switch_with_it(tmp_path: Path) -> None:
@@ -198,6 +226,54 @@ def test_hooks_zcode_trusts_are_fine(tmp_path: Path, monkeypatch) -> None:
     assert trust.check_wired(project / wiring.CONFIG, project) == [
         ("ok", "ZCode trusts Halyard's hooks here")
     ]
+
+
+def test_a_project_wired_before_its_questions_came_here_is_told_to_wire_again(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Gated still, on every call whatever the chat's mode: a warning, not a failure."""
+    project = repo(tmp_path)
+    wiring.install(project, BRIDGES)
+    document = config(project)
+    del document["hooks"]["events"]["PermissionRequest"]
+    with_config(project, document)
+    monkeypatch.setattr(trust, "status", lambda where: status_saying("trusted_persistent"))
+
+    findings = trust.check_wired(project / wiring.CONFIG, project)
+
+    assert findings[0] == ("ok", "ZCode trusts Halyard's hooks here")
+    assert findings[1][0] == "warn"
+    assert "mode is not followed" in findings[1][1]
+    assert findings[2] == ("", f"wire them with: halyard wire {project}")
+
+
+def test_a_question_hook_still_waiting_for_trust_is_named(tmp_path: Path, monkeypatch) -> None:
+    """The gate's own hook is trusted and runs; the new one does not yet."""
+    project = repo(tmp_path)
+    wiring.install(project, BRIDGES)
+    answer = status_saying("trusted_persistent")
+    answer["items"].append(
+        {
+            "event": "PermissionRequest",
+            "displayCommand": (
+                f"/usr/bin/env HALYARD_RUNTIME=zcode {BRIDGES / 'permission_hook.sh'}"
+            ),
+            "hookDeclarationDigest": "d" * 64,
+            "trustState": "pending_trust",
+        }
+    )
+    monkeypatch.setattr(trust, "status", lambda where: answer)
+
+    findings = trust.check_wired(project / wiring.CONFIG, project)
+
+    assert findings[0] == (
+        "fail",
+        "ZCode has not trusted Halyard's hooks for PermissionRequest here (pending_trust), "
+        "so it runs none of them",
+    )
+    grant = findings[-1][1]
+    assert f"--hook-digest {'d' * 64}" in grant
+    assert "a" * 64 not in grant
 
 
 def test_a_file_that_does_not_switch_hooks_on_fails(tmp_path: Path) -> None:
