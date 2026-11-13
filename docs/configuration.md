@@ -79,6 +79,8 @@ projects:
       test-all: {run: make test-all, timeout: 2h}   # an hour unless it says
       test-fast: make test-fast
       bootstrap: make bootstrap-up
+    base: origin/develop              # what a transition measures a branch against;
+                                      # origin/HEAD unless it says
     commit_options:                   # what /commit can check first, a button each
       fast: {commands: [test-fast]}
       wide: {commands: [test-all], inspect: [destructive]}   # from inspections:
