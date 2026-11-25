@@ -900,6 +900,46 @@ class _Keeping:
         self._channel._detach(write, f"keep inspection {kept.name}")
 
 
+class _Progress:
+    """How one command is getting on, in one message rewritten as it goes.
+
+    It was a new message every 45 seconds, and Telegram rang for each: a suite
+    that ran forty minutes rang fifty times, once per percentage it printed. An
+    edit rings for nobody, so the rest rewrite the first, and the first goes out
+    silently unless `TELEGRAM_QUIET_STATUS` is off. What comes after the command
+    is a message of its own, sent as any other.
+    """
+
+    def __init__(self, api, chat_id: str, thread_id: int | None, *, silent: bool) -> None:
+        self._api = api
+        self._chat_id = chat_id
+        self._thread_id = thread_id
+        self._silent = silent
+        self._message_id: int | None = None
+        self._said = ""
+        self._lock = asyncio.Lock()
+
+    async def say(self, text: str) -> None:
+        """Never raises: a line that could not be shown holds up no command.
+        Nothing is sent when the text is what the message says already, since
+        Telegram refuses an edit that changes nothing."""
+        async with self._lock:
+            if text == self._said:
+                return
+            try:
+                if self._message_id is None:
+                    sent = await self._api.send_message(
+                        self._chat_id, text, message_thread_id=self._thread_id, silent=self._silent
+                    )
+                    self._message_id = int(sent["message_id"])
+                else:
+                    await self._api.edit_message_text(self._chat_id, self._message_id, text)
+            except Exception:
+                logger.debug("Could not say how a command is getting on", exc_info=True)
+                return
+            self._said = text
+
+
 class _Running:
     """The channel's side of `transitions.Runner`: a project command, run where the
     project is, with how it is getting on said in the chat the transition came from.
@@ -933,18 +973,22 @@ class _Running:
         status = self._status
         if status is not None:
             await status.running(command.name)
+        told = _Progress(
+            self._channel._api,
+            self._chat_id,
+            self._thread_id,
+            silent=self._channel._quiet_status,
+        )
 
         def progress(seconds: float, latest: str) -> None:
             if status is not None:
                 status.printed(latest)
                 return
             asyncio.run_coroutine_threadsafe(
-                self._channel._say(
+                told.say(
                     f"… <b>{html.escape(command.name)}</b> "
                     f"{self._channel._elapsed(seconds)} — "
-                    f"<code>{html.escape(latest[:150])}</code>",
-                    self._chat_id,
-                    self._thread_id,
+                    f"<code>{html.escape(latest[:150])}</code>"
                 ),
                 loop,
             )
@@ -985,6 +1029,9 @@ class TelegramChannel:
         #: Which menu Telegram is given: `full`, every command, or `simple`.
         #: See `SIMPLE`. Anything else is `full`, said in the log.
         menu: str = "full",
+        #: Whether what only says how something is getting on arrives without
+        #: a sound. See `Settings.telegram_quiet_status`.
+        quiet_status: bool = True,
         repositories: Mapping[str, Project] | None = None,
         forge_tokens: Mapping[str, str] | None = None,
         #: Where the last thing said in each chat is kept, so `/forward`
@@ -1057,6 +1104,7 @@ class TelegramChannel:
         if menu not in MENUS:
             logger.warning("TELEGRAM_MENU %r is not one of %s; using full", menu, ", ".join(MENUS))
         self._menu_kind = menu if menu in MENUS else "full"
+        self._quiet_status = quiet_status
         self._sending: set[asyncio.Task] = set()
         #: Each run's step line, by the run's card key — one at a time, the
         #: step it is on. See `StepStatus`.
@@ -2639,7 +2687,7 @@ class TelegramChannel:
         else:
             steps = " then ".join(html.escape(command.name) for command in order)
             said = f"\u25b6\ufe0f Running <b>{html.escape(name)}</b>: {steps}\u2026"
-        await self._say(said, chat_id, thread_id)
+        await self._say(said, chat_id, thread_id, status=True)
         # Detached, because this can run for the better part of an hour and the
         # poller has approval cards to keep delivering while it does.
         task = asyncio.create_task(
@@ -2666,6 +2714,7 @@ class TelegramChannel:
                         f"▶️ Running <code>{html.escape(command.line)}</code>…",
                         chat_id,
                         thread_id,
+                        status=True,
                     )
                 result = await self._run_and_say(path, command, chat_id, thread_id, project)
                 if result is not None and result.ok:
@@ -3134,7 +3183,9 @@ class TelegramChannel:
                     thread_id,
                 )
                 return None
-            await self._say(f"⏳ {name} — {', then '.join(steps)}…", chat_id, thread_id)
+            await self._say(
+                f"⏳ {name} — {', then '.join(steps)}…", chat_id, thread_id, status=True
+            )
             ran, stopped = await transitioning.run_commands(
                 option.commands,
                 lines=lines.lines,
@@ -3673,6 +3724,7 @@ class TelegramChannel:
             f"<code>{html.escape(str(path))}</code>…",
             chat_id,
             thread_id,
+            status=True,
         )
         labels = await self._task_labels(found)
         known = await asyncio.to_thread(
@@ -4466,7 +4518,7 @@ class TelegramChannel:
                 self._statuses[card_key] = status
                 status.start()
         else:
-            await self._say(line, chat_id, thread_id, reply_markup=buttons)
+            await self._say(line, chat_id, thread_id, reply_markup=buttons, status=True)
         landing = (
             _Landing(
                 started=reached,
@@ -6375,6 +6427,7 @@ class TelegramChannel:
         key: str = "",
         expires_at: datetime | None = None,
         ending: Callable[[str, str | None], str] | None = None,
+        status: bool = False,
     ) -> Card | None:
         """Answer in the conversation that asked.
 
@@ -6386,6 +6439,9 @@ class TelegramChannel:
         closes: `kind` and `key` say what it is about when the buttons do not,
         `expires_at` when it stops meaning anything, and `ending` what it says
         then. See `CardDesk`. The card, when it is one and it arrived.
+
+        `status` marks a message that only says how something is getting on,
+        which arrives without a sound unless `TELEGRAM_QUIET_STATUS` is off.
         """
         try:
             return await self._desk.open(
@@ -6398,6 +6454,7 @@ class TelegramChannel:
                 key=key,
                 expires_at=expires_at,
                 ending=ending,
+                silent=status and self._quiet_status,
             )
         except Exception:
             logger.warning("Could not answer a command", exc_info=True)

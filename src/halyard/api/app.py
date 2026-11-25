@@ -366,6 +366,7 @@ def _build_channel(
         seats=seats,
         prompts=prompts,
         menu=settings.telegram_menu,
+        quiet_status=settings.telegram_quiet_status,
         # Where each project's code is, for `/commit`. Read here rather than in
         # the channel so a malformed `projects:` block cannot take the gate
         # down — the same reason `prompts:` is loaded defensively above.
