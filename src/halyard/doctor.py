@@ -497,6 +497,14 @@ def _check_seat(
         return lines, 1
 
     ref = spec.find_session(seat.session)
+    clashing = getattr(spec, "name_clash", None)
+    if ref is None and clashing is not None and (clash := clashing(seat.session)):
+        # Not an unknown name: one too many sessions know it, and nothing is
+        # sent to either until one of them is renamed or deleted.
+        lines.append(f"{FAIL}{label}: {clash}")
+        lines.append("        rename or delete the one this agent should not use —")
+        lines.append("        nothing is sent to it while two sessions have its name")
+        return lines, 1
     if ref is None:
         lines.append(f"{FAIL}{label}: no session named {seat.session!r}")
         lines.append(f"        {seat.runtime} does not know that name — check it against")
@@ -826,7 +834,7 @@ def run() -> int:
         else:
             print(
                 f'{OK}a chat that approves for itself (Codex "approve for me", Claude Code'
-                " auto mode) is left to it"
+                " auto mode) is left to it, and a ZCode chat to its mode, which asks here"
             )
     except ValidationError as exc:
         problems += 1

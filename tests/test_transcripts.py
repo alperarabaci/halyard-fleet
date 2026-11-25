@@ -41,10 +41,24 @@ class RecordingChannel:
         self.messages: list[dict] = []
 
     async def send_message(
-        self, session_id, text, role=None, *, agent_id=None, session_name=None, project=None
+        self,
+        session_id,
+        text,
+        role=None,
+        *,
+        agent_id=None,
+        session_name=None,
+        project=None,
+        kind="agent",
     ) -> str:
         self.messages.append(
-            {"session_id": session_id, "text": text, "role": role, "session_name": session_name}
+            {
+                "session_id": session_id,
+                "text": text,
+                "role": role,
+                "session_name": session_name,
+                "kind": kind,
+            }
         )
         return "ok"
 
@@ -142,6 +156,8 @@ async def test_only_errors_appended_after_watching_are_relayed(tmp_path: Path) -
     assert len(channel.messages) == 1
     assert "session limit" in channel.messages[0]["text"]
     assert channel.messages[0]["session_id"] == tx.stem
+    # Halyard's alert about the session, not its reply to hand on.
+    assert channel.messages[0]["kind"] == "halyard"
 
 
 async def test_a_partial_final_line_waits_until_it_is_whole(tmp_path: Path) -> None:
@@ -465,3 +481,20 @@ async def test_the_poll_loop_adopts_before_it_waits(
         await task
 
     assert tx.stem in w._watched, "the loop never adopted the configured seats"
+
+
+async def test_an_alert_is_markup_of_halyards_with_what_it_quotes_escaped(tmp_path: Path) -> None:
+    """Sent as Halyard's, the alert is markup now; what the transcript said is
+    not, and a `<` in it would make Telegram refuse the message."""
+    channel = RecordingChannel()
+    w = watcher(channel, roots=(tmp_path,))
+    tx = tmp_path / "9f1c2b3a-0000-0000-0000-000000000000.jsonl"
+    append(tx, error_line(uuid="old"))
+    w.note(session_id=tx.stem, agent_id="claude-code", session_name="drv<2>")
+    await w.poll_once()
+
+    append(tx, error_line(uuid="new", text="hit your session limit <soon>"))
+    await w.poll_once()
+
+    assert channel.messages[0]["text"].startswith("⚠️ <b>drv&lt;2&gt;</b> ")
+    assert "&lt;soon&gt;" in channel.messages[0]["text"]

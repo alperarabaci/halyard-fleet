@@ -191,6 +191,33 @@ async def test_a_command_that_passes_reports_its_tail(wired) -> None:
     assert "three" in api.sent[-1]["text"]
 
 
+@pytest.mark.parametrize("quiet", [True, False])
+async def test_a_command_starting_rings_only_when_asked_and_its_end_always(
+    wired, quiet: bool
+) -> None:
+    """`TELEGRAM_QUIET_STATUS`: "Running …" only says it began, so it arrives
+    without a sound unless the setting is off. How it ended always rings."""
+    channel, api, _ = wired
+    channel._quiet_status = quiet
+    teach(channel, greet="echo one")
+    silent: list[str] = []
+    sending = api.send_message
+
+    async def send_message(chat_id, text, **kwargs):
+        if kwargs.get("silent"):
+            silent.append(text)
+        return await sending(chat_id, text, **kwargs)
+
+    api.send_message = send_message
+
+    await deliver(channel, typed("/command greet"))
+    await finished(channel)
+
+    assert "Running" in api.sent[0]["text"]
+    assert "finished in" in api.sent[-1]["text"]
+    assert silent == ([api.sent[0]["text"]] if quiet else [])
+
+
 async def test_a_command_that_fails_says_so_and_shows_more(wired) -> None:
     """A test runner puts what broke at the end, and one line of it is a riddle."""
     channel, api, _ = wired
@@ -303,7 +330,7 @@ def test_a_run_that_outlives_its_clock_is_reported_as_stopped(tmp_path: Path) ->
 
     assert result.timed_out is True
     assert result.ok is False
-    assert "still running" in result.output
+    assert result.output == "It printed nothing before its 0.2 s limit."
 
 
 def test_a_passing_run_keeps_only_its_last_lines(tmp_path: Path) -> None:

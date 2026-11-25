@@ -38,6 +38,7 @@ import urllib.error
 import urllib.request
 
 from _settings import (
+    ZCODE_ASKING_MODES,
     antigravity_title,
     codex_approvals_reviewer,
     codex_thread_name,
@@ -46,6 +47,7 @@ from _settings import (
     note,
     runtime_of,
     session_name,
+    zcode_asks_through_halyard,
     zcode_title,
 )
 from _settings import timeout as lookup_timeout
@@ -95,14 +97,17 @@ def emit(
     """Print a hook decision and nothing else.
 
     PreToolUse and PermissionRequest look similar on input but deliberately use
-    different decision schemas. The former gates every tool call. The latter is
-    Codex's separate answer to a native sandbox-escalation prompt.
+    different decision schemas. The former gates every tool call. The latter
+    answers the agent's own question: Codex's native sandbox-escalation prompt,
+    or the one ZCode's mode asks.
     """
     if event == "PermissionRequest":
-        specific = {
-            "hookEventName": "PermissionRequest",
-            "decision": {"behavior": decision, "message": reason},
-        }
+        verdict = {"behavior": decision, "message": reason}
+        if runtime == "zcode" and decision == "allow":
+            # ZCode's schema is strict, one unknown key fails an answer, and
+            # its allow is documented without a message.
+            del verdict["message"]
+        specific = {"hookEventName": "PermissionRequest", "decision": verdict}
     else:
         specific = {
             "hookEventName": "PreToolUse",
@@ -305,14 +310,27 @@ def build_body(payload: dict) -> dict:
 
 
 def _approves_itself(runtime: str, payload: dict, transcript: str | None) -> bool:
-    """Whether the chat this call came from approves its own calls: Codex's
+    """Whether the chat this call came from decides its own calls: Codex's
     "approve for me" (`approvals_reviewer: auto_review` in its rollout), or
     Claude Code's auto mode (`permission_mode: auto` in the payload). Anything
-    else — asked of the person, or unreadable — is not."""
+    else — asked of the person, or unreadable — is not.
+
+    ZCode has no reviewer of its own, but a mode that says what it asks about.
+    In one that asks before what matters, the gate's call is left to the mode,
+    and what ZCode then asks comes back here as a `PermissionRequest` — itself
+    never left to anyone, since it is the person being asked."""
     if runtime == "codex":
         return codex_approvals_reviewer(transcript) == "auto_review"
     if runtime == "claude-code":
         return payload.get("permission_mode") == "auto"
+    if runtime == "zcode":
+        return (
+            payload.get("hook_event_name") == "PreToolUse"
+            and payload.get("permission_mode") in ZCODE_ASKING_MODES
+            and zcode_asks_through_halyard(
+                os.environ.get("ZCODE_PROJECT_DIR") or os.environ.get("CLAUDE_PROJECT_DIR")
+            )
+        )
     return False
 
 

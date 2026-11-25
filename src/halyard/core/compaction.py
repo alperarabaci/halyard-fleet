@@ -40,6 +40,7 @@ import time
 from collections.abc import Mapping
 from pathlib import Path
 
+from halyard.core import last_said
 from halyard.core.seats import Seat, for_session
 from halyard.core.transcripts import find_transcript, watching_for
 
@@ -489,6 +490,9 @@ class Recorder:
                 seat.role,
                 agent_id=seat.runtime,
                 session_name=seat.session,
+                # Halyard's words about the seat, not the seat's: kept as its
+                # reply, a compaction notice was handed on as its report.
+                kind=last_said.HALYARD,
             )
         except Exception:
             logger.debug("Could not announce a compaction", exc_info=True)

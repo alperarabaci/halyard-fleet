@@ -149,6 +149,7 @@ class CardDesk:
         key: str = "",
         expires_at: datetime | None = None,
         ending: Callable[[str, str | None], str] | None = None,
+        silent: bool = False,
     ) -> Card | None:
         """Send a message and, when it has buttons, keep it as a card.
 
@@ -157,6 +158,7 @@ class CardDesk:
         is kept only when it is about something — `key` — as a question with
         nothing to tap still asks until it is answered or its deadline passes.
         None for any other message, which is not a card and is not kept.
+        `silent` delivers it without a sound.
         """
         message = await self._api.send_message(
             chat,
@@ -164,6 +166,7 @@ class CardDesk:
             reply_markup=keyboard,
             message_thread_id=thread,
             reply_to_message_id=reply_to,
+            **({"silent": True} if silent else {}),
         )
         if not has_buttons(keyboard) and not key:
             return None

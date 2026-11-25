@@ -5,11 +5,15 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Collection, Mapping, Sequence
+from datetime import UTC, datetime
+from functools import partial
 from pathlib import Path
 
 from halyard import frame, inspections
 from halyard.commands import NOT_RUN, Command, Result, outcome, summary
 from halyard.core.config_file import ModelChoice, Transition
+from halyard.inspections import shares as sharing
+from halyard.tasks.branches import current
 from halyard.transitions import rounds
 from halyard.transitions.message import compose
 from halyard.transitions.spec import Delivery, Handed, Previous, Runner
@@ -43,6 +47,8 @@ async def take(
     previous: Previous | None = None,
     keeper: inspections.Keeper | None = None,
     step: str = "",
+    shares: Path | None = None,
+    base: str = "",
 ) -> Handed:
     """Run a transition's commands, then its inspections, write the message, deliver it.
 
@@ -75,6 +81,13 @@ async def take(
 
     Each inspection runs on `model` at `effort`, unless `models` — the
     project's own, by inspection — names another for it.
+
+    The envelope names the transition, and the branch since its `base` — the
+    project's `base:`, or the remote's default branch. With `shares`, the file
+    where each inspection's mark is kept, every inspection is also told its own
+    share — what changed since it last ran here for this transition — and given
+    its own last answer; the mark of each whose reads all ran moves to the
+    files it was given. See `halyard.inspections.shares`.
     """
     ran, stopped = await run_commands(
         transition.commands,
@@ -85,11 +98,30 @@ async def take(
     )
     if stopped is not None:
         return Handed("", (), ran, stopped=stopped)
+    # Where the files stand once the commands have run: what the inspections
+    # are given, and what each one's mark moves to.
+    now = await asyncio.to_thread(frame.tree, project)
+    branched = await asyncio.to_thread(frame.base, project, base) if now is not None else None
     envelope = [
         *context,
+        f"Transition: {transition.name}",
+        *([sharing.base_line(project, branched, now)] if now is not None else []),
         *([f"Round: {rounds.shown(round_number, expected)}"] if round_number else []),
         *(summary(c.name, c.line, r, c.not_run) for c, r in ran),
     ]
+    branch = await asyncio.to_thread(current, project) if shares is not None else None
+    marked = shares if branch else None
+    told: dict[str, sharing.Share] = {}
+    if now is not None and transition.inspections:
+        for name in transition.inspections:
+            mark = (
+                await asyncio.to_thread(sharing.last, marked, branch, transition.name, name)
+                if marked is not None and branch
+                else None
+            )
+            told[name] = await asyncio.to_thread(
+                partial(sharing.share, project, mark, base=branched, now=now)
+            )
 
     answers = await run_inspections(
         transition.inspections,
@@ -106,7 +138,28 @@ async def take(
         about=f"transition {transition.name}, {sender}'s reply from {arrived}",
         transition=transition.name,
         keeper=keeper,
+        shares=told,
     )
+    if marked is not None and branch and now is not None:
+        for answer in answers:
+            if answer.status is not inspections.Status.COMPLETE:
+                # Not read whole: its share stays, and the next run's is wider.
+                continue
+            await asyncio.to_thread(
+                sharing.keep,
+                marked,
+                branch,
+                transition.name,
+                answer.name,
+                sharing.Mark(
+                    at=datetime.now(UTC),
+                    head=now.head_id,
+                    tree=now.content_id,
+                    base=branched.commit if branched is not None else "",
+                    given=told[answer.name].given if answer.name in told else "",
+                    answer=answer.text or "",
+                ),
+            )
 
     written = transition.prompt
     if round_number is not None and round_number > 1 and transition.followup_prompt:
@@ -131,6 +184,7 @@ async def take(
         ran=ran,
         previous=previous,
         step=step,
+        given={name: share.given for name, share in told.items()},
     )
     await delivery.to_seat(recipient_label, text)
     logger.info(
@@ -207,13 +261,15 @@ async def run_inspections(
     models: Mapping[str, ModelChoice] | None = None,
     transition: str = "",
     keeper: inspections.Keeper | None = None,
+    shares: Mapping[str, sharing.Share] | None = None,
 ) -> tuple[inspections.Answer, ...]:
     """Run inspections side by side over `reply`, each a turn of its own.
 
     Each on `model` at `effort`, unless `models` — the project's own, by
     inspection — names another for it. With nothing to take a turn, or nothing
     to read, each comes back not run, saying why, rather than being left out:
-    a missing answer reads exactly like a clean one.
+    a missing answer reads exactly like a clean one. `shares` is each one's own
+    share and last answer, when a transition keeps them.
     """
     if not names:
         return ()
@@ -232,7 +288,7 @@ async def run_inspections(
                     name,
                     project_inspections[name],
                     project=project,
-                    context=context,
+                    context=[*context, *([shares[name].line] if name in (shares or {}) else [])],
                     note=note,
                     reply=reply,
                     asker=asker,
@@ -242,6 +298,7 @@ async def run_inspections(
                     about=about,
                     transition=transition,
                     keeper=keeper,
+                    earlier=shares[name].earlier if name in (shares or {}) else "",
                 )
                 for name in names
             )

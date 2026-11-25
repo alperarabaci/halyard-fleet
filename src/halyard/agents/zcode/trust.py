@@ -96,15 +96,26 @@ def _read(path: Path) -> dict:
     return loaded if isinstance(loaded, dict) else {}
 
 
-def _is_the_gate(handler: object) -> bool:
-    """A handler running this checkout's `hook.sh`."""
+def _runs(handler: object, script: str) -> bool:
+    """A handler running this checkout's `script`."""
     if not isinstance(handler, dict):
         return False
     arguments = handler.get("args") if isinstance(handler.get("args"), list) else []
     words = [handler.get("command"), *arguments]
     return any(
-        isinstance(word, str) and word.startswith(str(BRIDGE_DIR)) and word.endswith("hook.sh")
+        isinstance(word, str) and word.startswith(str(BRIDGE_DIR)) and word.endswith(f"/{script}")
         for word in words
+    )
+
+
+def _wired(events: dict, event: str, script: str) -> bool:
+    """Whether `event` runs this checkout's `script`."""
+    groups = events.get(event) if isinstance(events.get(event), list) else []
+    return any(
+        _runs(handler, script)
+        for group in groups
+        if isinstance(group, dict)
+        for handler in group.get("hooks") or []
     )
 
 
@@ -116,8 +127,9 @@ def check_wired(hooks_file: Path, project_dir: Path) -> list[tuple[str, str]]:
     """Everything that can leave a wired ZCode project with no gate.
 
     Three, all of them silent: the file not switching hooks on, the gate missing
-    from it, and ZCode not trusting what is there. Returned as `(level, text)`
-    so that `wire` and `doctor` say the same thing.
+    from it, and ZCode not trusting what is there. And one that leaves the gate
+    on but deaf to the chat's mode: ZCode's own questions not coming here.
+    Returned as `(level, text)` so that `wire` and `doctor` say the same thing.
     """
     hooks = _read(hooks_file).get("hooks")
     if not isinstance(hooks, dict) or hooks.get("enabled") is not True:
@@ -126,18 +138,26 @@ def check_wired(hooks_file: Path, project_dir: Path) -> list[tuple[str, str]]:
             ("", f"put the gate back with: halyard wire {project_dir}"),
         ]
     events = hooks.get("events") if isinstance(hooks.get("events"), dict) else {}
-    groups = events.get("PreToolUse") if isinstance(events.get("PreToolUse"), list) else []
-    if not any(
-        _is_the_gate(handler)
-        for group in groups
-        if isinstance(group, dict)
-        for handler in group.get("hooks") or []
-    ):
+    if not _wired(events, "PreToolUse", "hook.sh"):
         return [
             ("fail", "no Halyard gate among its PreToolUse hooks, so nothing is asked for"),
             ("", f"put it back with: halyard wire {project_dir}"),
         ]
+    # Without it the gate asks about every call, whatever mode the chat is in:
+    # a project as it was, not one without a gate.
+    questions = (
+        []
+        if _wired(events, "PermissionRequest", "permission_hook.sh")
+        else [
+            ("warn", "ZCode's own questions do not come here, so the chat's mode is not followed"),
+            ("", f"wire them with: halyard wire {project_dir}"),
+        ]
+    )
+    return _trusted(project_dir) + questions
 
+
+def _trusted(project_dir: Path) -> list[tuple[str, str]]:
+    """Whether ZCode runs the Halyard hooks it lists for this project."""
     answer = status(project_dir)
     if answer is None:
         return [
@@ -152,11 +172,16 @@ def check_wired(hooks_file: Path, project_dir: Path) -> list[tuple[str, str]]:
     if not waiting:
         return [("ok", "ZCode trusts Halyard's hooks here")]
     states = ", ".join(sorted({str(item.get("trustState")) for item in waiting}))
+    named = ", ".join(sorted({str(item.get("event")) for item in waiting}))
     digests = [
         str(item["hookDeclarationDigest"]) for item in waiting if item.get("hookDeclarationDigest")
     ]
     return [
-        ("fail", f"ZCode has not trusted Halyard's hooks here ({states}), so it runs none"),
+        (
+            "fail",
+            f"ZCode has not trusted Halyard's hooks for {named} here ({states}), "
+            "so it runs none of them",
+        ),
         ("", "Review them in ZCode, or trust exactly these and no others with:"),
         ("", f"    {command(project_dir, 'grant', *digests)}"),
     ]

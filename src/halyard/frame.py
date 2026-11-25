@@ -118,6 +118,9 @@ class Tree:
     content: str
     #: The tree is HEAD's own: nothing changed on top of it, nothing untracked.
     clean: bool = False
+    #: Both in full, for what is kept and compared later: the commit, and the tree.
+    head_id: str = ""
+    content_id: str = ""
 
 
 def tree(path: Path) -> Tree | None:
@@ -139,6 +142,7 @@ def tree(path: Path) -> Tree | None:
     for a clean tree.
     """
     head = _git(path, "rev-parse", "--short", "HEAD")
+    head_id = _git(path, "rev-parse", "HEAD")
     under = _git(path, "rev-parse", "HEAD^{tree}")
     index = _git(path, "rev-parse", "--git-path", "index")
     if not head or not under or not index:
@@ -163,7 +167,73 @@ def tree(path: Path) -> Tree | None:
         written = _git(path, "write-tree", env=separate)
     if not written:
         return None
-    return Tree(head=head, content=written[:SHOWN], clean=written == under)
+    return Tree(
+        head=head,
+        content=written[:SHOWN],
+        clean=written == under,
+        head_id=head_id,
+        content_id=written,
+    )
+
+
+@dataclass(frozen=True)
+class Base:
+    """Where a branch left the line it will join: the ref it is measured
+    against, and the last commit the two share."""
+
+    #: `origin/main`, or what the project's `base:` names.
+    ref: str
+    #: The commit both share — `git merge-base HEAD <ref>` — in full.
+    commit: str
+    #: How many commits the branch has on top of it.
+    commits: int
+
+
+def base(path: Path, configured: str = "") -> Base | None:
+    """What a branch is measured against: the project's `base:`, or the remote's
+    own default branch, or a local `main` or `master` — and the commit HEAD
+    shares with it.
+
+    The shared commit rather than the base's tip, because a base that moved on
+    since would otherwise show its own changes as the branch's, undone. Given as
+    a commit, so whoever reads it runs the same diff on any machine, fetched or
+    not. None when there is nothing to measure against.
+    """
+    ref = configured.strip() or _git(
+        path, "symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD"
+    )
+    if not ref:
+        ref = next(
+            (
+                name
+                for name in ("main", "master")
+                if _run(path, "rev-parse", "--verify", "--quiet", f"refs/heads/{name}") is not None
+            ),
+            "",
+        )
+    if not ref:
+        return None
+    shared = _git(path, "merge-base", "HEAD", ref)
+    if not shared:
+        return None
+    counted = _git(path, "rev-list", "--count", f"{shared}..HEAD")
+    return Base(ref=ref, commit=shared, commits=int(counted) if counted.isdigit() else 0)
+
+
+def changed(path: Path, before: str, after: str) -> str:
+    """What changed from one commit or tree to another, as git's one-line
+    summary — `nothing` when nothing did. Compared object to object, so no
+    index or working tree is touched."""
+    return _git(path, "diff-tree", "-r", "-M", "--shortstat", before, after) or "nothing"
+
+
+def kept(path: Path, ident: str) -> bool:
+    """Whether the repository still has this commit or tree.
+
+    A tree written for `Content` belongs to no commit, and git's own
+    collection clears such objects after two weeks unless told otherwise.
+    """
+    return bool(ident) and _run(path, "cat-file", "-e", ident) is not None
 
 
 def envelope(facts: Sequence[str]) -> list[str]:
