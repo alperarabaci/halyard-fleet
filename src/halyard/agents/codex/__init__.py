@@ -5,7 +5,7 @@ from pathlib import Path
 from halyard.agents.base import SessionRef
 from halyard.agents.codex import trust
 from halyard.agents.codex.runner import CodexRunner, find_codex_binary, read_catalog
-from halyard.agents.codex.sessions import find_session, list_named_sessions
+from halyard.agents.codex.sessions import find_session, list_named_sessions, name_clash
 from halyard.agents.codex.watching import WATCHING
 from halyard.agents.spec import Hooks, RuntimeSpec, Verification, late
 
@@ -125,6 +125,7 @@ RUNTIME = RuntimeSpec(
     runner=_runner,
     find_session=late("halyard.agents.codex", "find_session"),
     list_sessions=late("halyard.agents.codex", "list_named_sessions"),
+    name_clash=late("halyard.agents.codex", "name_clash"),
     sessions_hint="the Codex thread names on this machine",
     check_available=_check_available,
     check_session=_check_session,
@@ -179,4 +180,5 @@ __all__ = [
     "find_codex_binary",
     "find_session",
     "list_named_sessions",
+    "name_clash",
 ]

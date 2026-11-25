@@ -24,8 +24,13 @@ from halyard.inspections.spec import (
 logger = logging.getLogger(__name__)
 
 
-def prompt(instructions: str, *, context: list[str], note: str, text: str) -> str:
+def prompt(
+    instructions: str, *, context: list[str], note: str, text: str, earlier: str = ""
+) -> str:
     """One inspection's turn: its own instructions, what Halyard knows, and the text.
+
+    `earlier` is its own last answer on this branch, introduced — see
+    `halyard.inspections.shares` — and goes between the envelope and the text.
 
     It said "check" to the model until 2026-10-24, a month after these were
     renamed inspections, so that answers from either side of the rename could
@@ -72,6 +77,7 @@ def prompt(instructions: str, *, context: list[str], note: str, text: str) -> st
         "",
         *frame.envelope([*context, *([f"Said by whoever asked: {note}"] if note else [])]),
         "",
+        *([earlier, ""] if earlier else []),
         "Text to inspect:",
         "",
         text,
@@ -164,6 +170,7 @@ async def run(
     about: str = "",
     transition: str = "",
     keeper: Keeper | None = None,
+    earlier: str = "",
 ) -> Answer:
     """Run one inspection over a reply: its own text, what Halyard can see, the reply.
 
@@ -191,6 +198,9 @@ async def run(
     carries its trace, and a status from it: complete when every read it asked
     for ran, incomplete when one did not, said under the answer in Halyard's
     words — see `not_run_block`. Unmeasured when there is no answer.
+
+    `earlier` is its own last answer on this branch, for a transition that
+    keeps where each inspection last read — see `halyard.inspections.shares`.
     """
     instructions = frame.read(path, project)
     version = await asyncio.to_thread(frame.version, path, project)
@@ -209,7 +219,7 @@ async def run(
         model,
         f" · effort {effort}" if effort else "",
     )
-    asked = prompt(instructions, context=context, note=note, text=reply)
+    asked = prompt(instructions, context=context, note=note, text=reply, earlier=earlier)
     session = str(uuid.uuid4())
     at = datetime.now(UTC)
 

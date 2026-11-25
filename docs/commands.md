@@ -33,6 +33,11 @@ What you press on your phone, and what you run on the machine.
 every command and prompt, is the default. Every command answers when typed either way,
 and `/help` lists them all. `halyard init` and the examples start on the short one.
 
+Messages that only say how something is getting on arrive without a sound: a command,
+an inspection or a transition starting, and a running command's progress, which is one
+message rewritten every 45 seconds rather than a new one. A card that needs you, and
+what comes of the work, still rings. `TELEGRAM_QUIET_STATUS: false` makes them ring too.
+
 `/md` is one of the `prompts:` in `halyard.yaml` — a sentence you say often
 enough to want a name for. Each key there becomes a command. It exists because
 a phone is bad at moving text: a long answer arrives split into three messages,

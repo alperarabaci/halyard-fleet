@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from halyard.commands import Result, outcome, run, summary
+from halyard.commands import Result, limit_said, outcome, run, running, summary
 
 
 def test_a_command_says_it_started_before_anything_else(tmp_path: Path, caplog) -> None:
@@ -37,6 +37,48 @@ def test_a_command_out_of_time_says_so_in_the_log(tmp_path: Path, caplog) -> Non
     assert result.timed_out
     assert result.exit_code is None
     assert any("Command stopped after" in record.getMessage() for record in caplog.records)
+
+
+def test_a_command_out_of_time_carries_the_limit_it_ran_out_of(tmp_path: Path) -> None:
+    result = run("sleep 5", tmp_path, timeout=2)
+
+    assert result.limit == 2
+    assert result.output == "It printed nothing before its 2 s limit."
+
+
+def test_a_command_out_of_time_keeps_where_it_had_got_to(tmp_path: Path) -> None:
+    """Its last lines, as a failed run's are kept: a suite stopped at its
+    limit 85% through says how far it got."""
+    result = run("echo collected 1520; echo 1290 passed; sleep 5", tmp_path, timeout=2)
+
+    assert result.timed_out
+    assert result.output == "collected 1520\n1290 passed"
+
+
+@pytest.mark.parametrize(
+    ("seconds", "said"),
+    [
+        (0.5, "0.5 s"),
+        (45, "45 s"),
+        (90, "90 s"),
+        (600, "10 min"),
+        (1800, "30 min"),
+        (3600, "1 h"),
+        (5400, "1 h 30 min"),
+        (7200, "2 h"),
+    ],
+)
+def test_a_limit_is_said_as_it_was_likely_written(seconds: float, said: str) -> None:
+    assert limit_said(seconds) == said
+
+
+def test_one_line_for_a_run_out_of_time_names_its_limit() -> None:
+    """ "stopped after 600s" read as a hang; the limit is what stopped it."""
+    out_of_time = Result(ok=False, output="...", seconds=1800.4, timed_out=True, limit=1800)
+
+    assert summary("test-fast", "make test-fast", out_of_time).endswith(
+        "· stopped after its 30 min limit (not run)"
+    )
 
 
 def test_one_line_says_how_it_ended_and_the_last_thing_it_printed() -> None:
@@ -142,7 +184,16 @@ def child_of(tmp_path: Path) -> int:
     raise AssertionError("the command never started its child")
 
 
-def test_a_command_stopped_from_the_chat_ends_with_what_it_started(tmp_path: Path) -> None:
+@pytest.fixture
+def short_grace(monkeypatch) -> None:
+    """What these commands start ignores the interrupt, as a shell's
+    background job does, so each waits out the grace before it is killed."""
+    monkeypatch.setattr(running, "STOP_GRACE", 0.5)
+
+
+def test_a_command_stopped_from_the_chat_ends_with_what_it_started(
+    tmp_path: Path, short_grace
+) -> None:
     import threading
     import time
 
@@ -159,7 +210,7 @@ def test_a_command_stopped_from_the_chat_ends_with_what_it_started(tmp_path: Pat
     assert not still_running(child_of(tmp_path))
 
 
-def test_a_command_out_of_time_ends_with_what_it_started(tmp_path: Path) -> None:
+def test_a_command_out_of_time_ends_with_what_it_started(tmp_path: Path, short_grace) -> None:
     import time
 
     result = run(started_child(tmp_path), tmp_path, timeout=0.5)
@@ -167,3 +218,63 @@ def test_a_command_out_of_time_ends_with_what_it_started(tmp_path: Path) -> None
 
     assert result.timed_out
     assert not still_running(child_of(tmp_path))
+
+
+def test_a_stopped_command_gets_to_tidy_up_after_itself(tmp_path: Path, monkeypatch) -> None:
+    """Measured on an E2E run stopped from the chat: killed outright, the test
+    runner's teardown never ran, and the preview server it had started in a
+    process group of its own was left running for nobody. Interrupted first,
+    the way Ctrl-C at the desk does, it tidies up — even though the shell
+    above it ends at the interrupt and leaves it still winding down."""
+    import shlex
+    import sys
+    import threading
+    import time
+
+    monkeypatch.setattr(running, "STOP_GRACE", 10.0)
+    ready, tidied = tmp_path / "ready", tmp_path / "tidied"
+    runner = tmp_path / "runner.py"
+    runner.write_text(
+        "import signal, sys, time\n"
+        "from pathlib import Path\n"
+        "def tidy(*_):\n"
+        "    time.sleep(1)\n"
+        f"    Path({str(tidied)!r}).write_text('yes')\n"
+        "    sys.exit(0)\n"
+        "signal.signal(signal.SIGINT, tidy)\n"
+        f"Path({str(ready)!r}).write_text('yes')\n"
+        "time.sleep(30)\n"
+    )
+    stop = threading.Event()
+
+    def once_it_is_going() -> None:
+        for _ in range(250):
+            if ready.exists():
+                break
+            time.sleep(0.02)
+        stop.set()
+
+    threading.Thread(target=once_it_is_going, daemon=True).start()
+    command = f"{shlex.quote(sys.executable)} {shlex.quote(str(runner))} & wait"
+
+    result = run(command, tmp_path, stop=stop)
+
+    assert result.stopped
+    assert tidied.read_text() == "yes"
+
+
+def test_a_command_that_ends_at_the_interrupt_is_not_kept_waiting(
+    tmp_path: Path, monkeypatch
+) -> None:
+    import threading
+    import time
+
+    monkeypatch.setattr(running, "STOP_GRACE", 10.0)
+    stop = threading.Event()
+    threading.Timer(0.5, stop.set).start()
+    began = time.monotonic()
+
+    result = run("sleep 30", tmp_path, stop=stop)
+
+    assert result.stopped
+    assert time.monotonic() - began < 5

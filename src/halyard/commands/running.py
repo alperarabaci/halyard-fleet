@@ -28,7 +28,9 @@ from pathlib import Path
 
 #: Long enough for a full test suite with a browser in it, because that is
 #: exactly what somebody will point this at. Bounded all the same: a command
-#: that has been going an hour has stopped being something you wait for.
+#: that has been going an hour has stopped being something you wait for. The
+#: same for `/command`, a transition and a commit option; a command can name
+#: its own with `timeout:` in `commands:`.
 DEFAULT_TIMEOUT = 3600.0
 
 #: How much of a run to carry back. Little on success, because "it passed" is
@@ -48,6 +50,13 @@ PROGRESS_EVERY = 45.0
 #: How often the run is looked in on. Short enough that a timeout is honoured
 #: promptly, long enough that waiting costs nothing.
 POLL_EVERY = 0.2
+
+#: How long a command that is being stopped gets to end itself, after the
+#: Ctrl-C somebody at the desk would press, before what is left of it is
+#: killed. A test runner that is interrupted runs its teardowns, and the
+#: servers and browsers it started for the suite go with it. Killed outright it
+#: runs none: a stopped E2E run left its preview server running for nobody.
+STOP_GRACE = 15.0
 
 logger = logging.getLogger(__name__)
 
@@ -100,6 +109,20 @@ class Result:
     #: True when somebody stopped it from the chat. Like a run out of time,
     #: nothing is known about how it would have ended.
     stopped: bool = False
+    #: The limit it ran out of, in seconds, when it ran out of time — said with
+    #: it, so a stop at ten minutes reads as a limit and not as a hang.
+    limit: float | None = None
+
+
+def limit_said(seconds: float) -> str:
+    """A limit as it was likely written: `45 s`, `30 min`, `1 h`, `1 h 30 min`."""
+    whole = round(seconds)
+    if whole != seconds or whole % 60:
+        return f"{seconds:g} s"
+    hours, minutes = divmod(whole // 60, 60)
+    if not hours:
+        return f"{minutes} min"
+    return f"{hours} h {minutes} min" if minutes else f"{hours} h"
 
 
 #: How a command ended, as the line after it says and a transition reads it.
@@ -169,14 +192,37 @@ def _environment() -> dict[str, str]:
 
 
 def _end(process: subprocess.Popen) -> None:
-    """End a command and everything it started.
+    """End a command and everything it started, the way somebody at the desk would.
+
+    First the interrupt Ctrl-C sends, to the whole of it, so it can tidy up
+    after itself: a test runner's teardowns close what it started outside its
+    own process group, where nothing else can reach it. Then, once all of it
+    has ended or `STOP_GRACE` has passed, what is left is killed: whatever
+    ignored the interrupt, or was still winding down.
 
     The shell alone is not the command: `make e2e` is a shell, make, a test
     runner and a browser. Killing the first left the rest running for nobody —
-    a run stopped at its deadline went on until the machine was restarted.
+    a run stopped at its deadline went on until the machine was restarted. So
+    the wait is for the whole group, not the shell: the shell can end at the
+    interrupt while the runner under it is still tearing down.
     """
+    with contextlib.suppress(OSError):
+        os.killpg(process.pid, signal.SIGINT)
+    deadline = time.monotonic() + STOP_GRACE
+    while time.monotonic() < deadline:
+        # Reaped once it has gone, or the shell would count as still there.
+        process.poll()
+        try:
+            os.killpg(process.pid, 0)
+        except ProcessLookupError:
+            return
+        except OSError:
+            break
+        time.sleep(POLL_EVERY)
     try:
         os.killpg(process.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        return
     except OSError:
         with contextlib.suppress(OSError):
             process.kill()
@@ -247,6 +293,9 @@ def run(
         if stop is not None and stop.is_set():
             _end(process)
             process.wait()
+            # What an interrupted runner printed on its way out — where it had
+            # got to — is the last of what it said.
+            reader.join(timeout=2.0)
             logger.warning(
                 "Command stopped from the chat after %.0fs in %s: %s", now - started, path, command
             )
@@ -259,12 +308,17 @@ def run(
         if now - started > timeout:
             _end(process)
             process.wait()
+            # What it had printed, as a failed run's is kept: where a suite
+            # stopped at its limit had got to is the first thing to ask.
+            reader.join(timeout=2.0)
             logger.warning("Command stopped after %.0fs in %s: %s", timeout, path, command)
             return Result(
                 ok=False,
-                output=f"It was still running after {timeout:.0f}s and was stopped.",
+                output=_tail("\n".join(lines), LINES_WHEN_IT_FAILED)
+                or f"It printed nothing before its {limit_said(timeout)} limit.",
                 seconds=now - started,
                 timed_out=True,
+                limit=timeout,
             )
         if on_progress and now - said_at >= PROGRESS_EVERY:
             said_at = now
@@ -326,6 +380,8 @@ def summary(name: str, line: str, result: Result, not_run: Sequence[int] = ()) -
     ended = outcome(result, not_run)
     if result.stopped:
         how = f"stopped from the chat after {result.seconds:.0f}s ({ended})"
+    elif result.timed_out and result.limit is not None:
+        how = f"stopped after its {limit_said(result.limit)} limit ({ended})"
     elif result.timed_out:
         how = f"stopped after {result.seconds:.0f}s ({ended})"
     elif result.exit_code is None:

@@ -49,6 +49,15 @@ CHATS = 40
 #: Long enough to read a report, walk away and come back to it.
 STALE_AFTER_HOURS = 24
 
+#: Who wrote what arrives in an agent's chat. The agent, whose words this file
+#: keeps — or Halyard, which says things about the agent in the same chat:
+#: that it is compacting, that its usage is nearly gone, that an answer did
+#: not reach it. Those arrived by the agent's own path once, and a compaction
+#: notice was kept as the driver's reply: a transition handed it on as the
+#: driver's report, and the inspections judged the notice.
+AGENT = "agent"
+HALYARD = "halyard"
+
 
 @dataclass(frozen=True)
 class Said:
@@ -67,6 +76,8 @@ class Said:
     #: hours later can tell whether it is still looking at the same code.
     head: str | None = None
     content: str | None = None
+    #: Who wrote it — always `AGENT` for what `last` returns.
+    kind: str = AGENT
 
     def stale(self, now: datetime, hours: int = STALE_AFTER_HOURS) -> bool:
         return (now - self.at).total_seconds() > hours * 3600
@@ -93,6 +104,7 @@ def remember(
     head: str | None = None,
     content: str | None = None,
     now: datetime | None = None,
+    kind: str = AGENT,
 ) -> None:
     """Note what an agent just said in this chat.
 
@@ -100,8 +112,11 @@ def remember(
     reply, and a file that cannot be written must cost the convenience and
     nothing else — a reply that reached somebody is worth more than a note
     about it.
+
+    Only an agent's words: `kind` says who wrote it, and anything Halyard said
+    is left out, because it would take the place of the reply it is about.
     """
-    if not chat_id or not (text or "").strip():
+    if kind != AGENT or not chat_id or not (text or "").strip():
         return
     noted = _load(where)
     noted[str(chat_id)] = {
@@ -111,6 +126,7 @@ def remember(
         "agent_id": agent_id,
         "head": head,
         "content": content,
+        "kind": kind,
     }
     if len(noted) > CHATS:
         # Oldest out. Sorted on the stored timestamp rather than on insertion
@@ -125,9 +141,14 @@ def remember(
 
 
 def last(where: Path, chat_id: str) -> Said | None:
-    """What was last said in this chat, or None."""
+    """What an agent last said in this chat, or None.
+
+    An entry written before entries said who wrote them is read as an agent's:
+    nothing else was meant to be written, so that is what it was, save for the
+    Halyard notices that slipped in by the agent's path.
+    """
     entry = _load(where).get(str(chat_id or ""))
-    if not isinstance(entry, dict):
+    if not isinstance(entry, dict) or entry.get("kind", AGENT) != AGENT:
         return None
     text = entry.get("text")
     if not isinstance(text, str) or not text.strip():

@@ -36,7 +36,9 @@ on it.
 - **A chat that approves for itself is left to it.** Codex's "approve for me" and
   Claude Code's auto mode were chosen in the chat, so their calls are not asked
   again on the phone: the runtime's own reviewer decides, and the audit log says
-  `call.left_to_agent`. Refusals such as `HALYARD_REFUSE_AGENT_COMMITS` still
+  `call.left_to_agent`. A ZCode chat in "Ask before changes" or "Edit
+  automatically" is left to its mode, and what the mode asks reaches the phone.
+  Refusals such as `HALYARD_REFUSE_AGENT_COMMITS` still
   apply, and Halyard's own turns are always asked. `HALYARD_OVERRIDE_AGENT_APPROVALS:
   true` puts every call back on the gate; `halyard doctor` says which way it is.
 - **The gate covers what the matcher covers** — Bash, the file tools, the
@@ -48,6 +50,14 @@ on it.
   turn you started over Telegram.** A Telegram-initiated turn runs headless, where
   Claude Code does not load `AskUserQuestion` — so it asks in prose you can just reply
   to, rather than as buttons.
+- **A Codex agent is the one thread its name is on.** Codex Desktop can give a new thread
+  the name of the one it came from — a side chat opened by a stray click did, without the
+  ` (2)` a fork gets. Two threads with an agent's name get nothing from Halyard: the chat,
+  and a workflow's card, say which two, and nothing goes until one is renamed or deleted.
+  A reply from the other one is shown, marked, and is neither the agent's last reply nor an
+  answer to a run. Handing an agent's name to a new thread on purpose is renaming the old
+  one first. Claude Code is not held to this: it resumes one conversation under a new id
+  each time, so its name is on several and the newest is the one in use.
 - **An answer to a Codex question waits for the turn running in its thread.** Codex
   carries on after asking, and Halyard hands the answer in with `codex queue`, which
   cannot steer a turn that is running: Codex takes it when that turn ends, and the card

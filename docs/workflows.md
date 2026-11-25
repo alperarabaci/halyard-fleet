@@ -146,7 +146,8 @@ the list.
 
 `phases:` under `workflows:` says how many phases go before the run stops and asks —
 three unless a project writes another number. Past it, the next phase is the
-operator's to send, the way a round past `rounds:` is.
+operator's to send, the way a round past `rounds:` is, and the run asks for that the
+same way.
 
 Inside the phases a step's rounds are counted per phase: the second phase's `discover`
 starts from its first round, whatever the first phase's took. `back` from the step a
@@ -261,7 +262,22 @@ its own prompt every time, and says no round. Two steps naming one transition do
 a count either.
 
 A step that would go past its rounds does not go: the run stops, and the chat offers to
-send it anyway.
+send it anyway. That stop is a decision only you can make, so it comes as a card of its
+own, the last thing in the chat, after the reply that reached the limit — a new message,
+so Telegram notifies:
+
+```
+⛔ level2X is waiting for you — develop_x has had its 2 rounds.
+xnav said back, which would be round 3 of 2.
+Choose: one more round, another step, or stop.
+run eb786af9
+```
+
+Its button names the round it sends — **▶️ develop_x round 3 of 2 → xdrv** — beside
+**🧭 Pick a step** and **⏹ Stop the workflow**. The phases running out asks the same way,
+with **↻ Phase 4 of 3 at discover** and the way out of them. `/workflow` shows the same
+card for as long as the run is held there. A step that reached nobody asks the same way —
+below; every other stop keeps its usual card.
 
 ## Stopping, steering, and asking where it is
 
@@ -289,8 +305,11 @@ that prints nothing still shows how long it has run — and a command that does 
 its newest line under its time. Its inspections are counted as they answer, since they
 run side by side. The time moves once a minute, and once every ten after the first hour.
 The line stops when the card closes: the next step's card, or the one the run stops with,
-says the rest. A step's command no longer posts a message of its own every 45 seconds;
-a transition pressed by hand, which has no run card, still does.
+says the rest. A step's command no longer posts a message of its own every 45 seconds.
+A transition pressed by hand has no run card, so each of its commands keeps one message
+of its own, sent without a sound and rewritten every 45 seconds, so a long suite does not
+ring the phone once a minute. What comes after the command still rings. See
+`TELEGRAM_QUIET_STATUS` in [commands.md](commands.md).
 
 **A step on its way can be called back.** **⏹ Stop the workflow** clears the run, as it
 always has. Steering it sends the run to another step instead: **🧭 Pick a step** on the
@@ -325,6 +344,8 @@ the run:
   step and its agent named. A move a button cannot make as it is — into another phase,
   or past a step's rounds — is left to picking a step;
 - **▶️ develop → xdrv** — or **↻ Phase 2 at discover** — sends what is ready, named;
+  past a step's rounds or the phases, the round or the phase it would be is named too:
+  **▶️ develop round 3 of 2 → xdrv**, **↻ Phase 4 of 3 at discover**;
 - **⏭ On to close** leaves the phases instead, where a phase just ended or waited, and
   **⏭ On to the end** ends the workflow where its last step ended without `done`;
 - **🧭 Pick a step** offers the flow's steps, and the one pressed goes next, with the
@@ -403,8 +424,20 @@ was, and there is one run per piece of work: a project has one working tree, and
 branch says which work that is. A run waiting on an agent goes on waiting: its card
 closes saying the run is kept, and `/workflow` gives it a card again.
 
-A step that reached nobody — Halyard paused, a session that could not be found, a
-runtime that refused the message — stops the run under the chat's own warning. So does a
+A step that reached nobody — Halyard paused, a session that could not be found, two
+Codex threads with the agent's name, a runtime that refused the message — holds the run
+until you have put that right, and its card says so:
+
+```
+⛔ level2X is waiting for you — discovered_x: 2 Codex threads are named alpha-engine-xnav: …
+Once that is put right, choose: discovered_x again, another step, or stop.
+run 424ac040
+```
+
+Its **▶️ discovered_x → xnav** sends the step again, and `/workflow` shows the same card for
+as long as the run is held there. A step whose turn started and then ended without an answer
+stops the run under the chat's own warning, out of usage halfway most
+often: *develop's turn in xdrv ended without an answer*. So does a
 step whose turn started and then ended without an answer, out of usage halfway most
 often: *develop's turn in xdrv ended without an answer*. So does `/stop` in the agent's
 chat while the run waits on it: *develop's turn in xdrv was stopped by … before it

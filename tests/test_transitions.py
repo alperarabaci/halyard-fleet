@@ -291,7 +291,10 @@ async def test_the_seat_reads_an_envelope_one_fact_to_a_line(tmp_path: Path) -> 
     )
 
     [(_, text)] = delivery.sent
-    assert "Envelope:\n- Work item: alpha-engine#355\n- Prompt: NOTES/discovery.md @ " in text
+    assert (
+        "Envelope:\n- Work item: alpha-engine#355\n- Transition: discovery\n"
+        "- Prompt: NOTES/discovery.md @ "
+    ) in text
     assert "\n- From: drv (driver), reply from 00:21" in text
 
 

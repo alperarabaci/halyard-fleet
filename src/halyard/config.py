@@ -255,6 +255,11 @@ class Settings(BaseSettings):
     #: command is answered when typed either way. A value this does not know
     #: is `full`, said in the log and by doctor.
     telegram_menu: str = Field(default="full", validation_alias="TELEGRAM_MENU")
+    #: Whether a message that only says how something is getting on — a
+    #: command's progress, a check starting — arrives without a sound. On,
+    #: because a forty-minute suite rang the phone once a minute. What needs
+    #: somebody, and how a thing ended, rings either way.
+    telegram_quiet_status: bool = Field(default=True, validation_alias="TELEGRAM_QUIET_STATUS")
     telegram_chat_id: str | None = Field(default=None, validation_alias="TELEGRAM_CHAT_ID")
     #: `NoDecode` because pydantic-settings otherwise tries to JSON-decode any
     #: set-typed environment variable before a validator can see it. A single

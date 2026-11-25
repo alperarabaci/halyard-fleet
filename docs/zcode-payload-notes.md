@@ -156,6 +156,12 @@ its project, as it was before.
         "hooks": [{"type": "process", "command": "/usr/bin/env",
                    "args": ["HALYARD_RUNTIME=zcode", "/…/bridge/hook.sh"], "timeoutMs": 600000}]
       }],
+      "PermissionRequest": [{
+        "matcher": "Bash|Write|Edit|MultiEdit|NotebookEdit|WebFetch|WebSearch|mcp__.*",
+        "hooks": [{"type": "process", "command": "/usr/bin/env",
+                   "args": ["HALYARD_RUNTIME=zcode", "/…/bridge/permission_hook.sh"],
+                   "timeoutMs": 600000}]
+      }],
       "Stop": [{
         "hooks": [{"type": "process", "command": "/usr/bin/env",
                    "args": ["HALYARD_RUNTIME=zcode", "/…/bridge/relay.py"], "timeoutMs": 15000}]
@@ -169,6 +175,25 @@ its project, as it was before.
 the temporary transcript reads as Claude Code's, and the camelCase copies read as
 Antigravity's. Then `wire` asks ZCode whether it trusts the result, and prints the
 `grant` command for Halyard's hooks when it does not.
+
+**The chat's mode is followed.** Every call carries the mode as `permission_mode`:
+`build` for "Ask before changes" (measured 2026-09-15) and `edit` for "Edit
+automatically" (every ZCode card on one machine, October–November 2026). In those
+two, the bridge leaves the `PreToolUse` call to ZCode — and only in a project whose
+`.zcode/config.json` runs this checkout's `permission_hook.sh` on `PermissionRequest`,
+so that what ZCode then asks reaches the phone rather than a prompt at the desk.
+ZCode's guide documents the answer that hook gives — `hookSpecificOutput.decision`
+with `behavior` `allow` or `deny`, and a `message` on a deny — and runs it "only when
+the permission outcome would prompt the user". Full access, and any mode not measured
+here, stays on the gate.
+
+Seen live on 2026-11-13, in "Edit automatically": ZCode asked before
+`uv run --no-sync pytest …`, the question became a card, and the allow from the phone
+was taken — the agent went on. It did not ask before `cp` inside the project or a
+`uv run … python` that read a file, so those ran with no card. It also sends its
+question tool, `AskUserQuestion`, through `PermissionRequest`; with no matcher that
+question reached the phone as a card to allow or deny, so the hook takes the gate's
+matcher and leaves it to ZCode.
 
 ## Delivery (measured, 2026-09-19 and 2026-09-20, engine 0.16.5)
 
@@ -253,7 +278,8 @@ and an `app-server` Halyard starts does not write there.
 
 ## Still to measure
 
-- The answer a `PermissionRequest` hook accepts. Not needed while `PreToolUse` gates.
+- The `permission_mode` of Plan and Full access, and whether "Edit automatically" asks
+  before an MCP call or a web fetch: what it does not ask about makes no card.
 - Whether a hook that times out or fails blocks the call or lets it through.
 - Whether a trusted workspace `PreToolUse` hook decides before the permission
   client in `app-server` mode, or both fire — which decides whether a tool can

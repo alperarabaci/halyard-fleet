@@ -269,6 +269,12 @@ ZCode's hooks are Claude Code's with three differences, measured on ZCode 3.11.2
   that trusts exactly those; Halyard never trusts them itself.
 - Sessions are found by the title in ZCode's own list. Rename a session there to match the
   agent's `session:` — a title set by hand stays, and one ZCode generated changes.
+- The chat's own mode is followed. In "Ask before changes" or "Edit automatically" the gate
+  leaves each call to ZCode, and what ZCode then asks — every command, and in the first every
+  edit too — comes to your phone as a `PermissionRequest`, on the same card. Reads and edits
+  the mode lets through make no card. Full access asks almost nothing, so there, and in a mode
+  not measured, the gate asks about every call. A project wired before this keeps asking about
+  every call until `halyard wire` adds the hook and ZCode trusts it.
 
 A message from the phone needs a key of its own. ZCode has no port and no send command, so
 Halyard starts ZCode's engine and drives it the way the application does, answering its gate

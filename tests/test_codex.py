@@ -15,7 +15,7 @@ from pathlib import Path
 
 from halyard.agents import codex
 from halyard.agents.base import SessionRef
-from halyard.agents.codex import CodexRunner, find_session, list_named_sessions
+from halyard.agents.codex import CodexRunner, find_session, list_named_sessions, name_clash
 from halyard.agents.codex.runner import held_by_another
 
 
@@ -128,7 +128,97 @@ def test_a_renamed_session_resolves_to_its_latest_name(tmp_path: Path) -> None:
     )
 
     assert find_session("new", root=root) is not None
-    assert list_named_sessions(root=root)[0].name == "new"
+    assert find_session("old", root=root) is None, "an old name is nobody's"
+    assert [ref.name for ref in list_named_sessions(root=root)] == ["new"]
+
+
+def a_rollout(root: Path, session_id: str, *, forked_from: str | None = None) -> None:
+    """A thread's rollout as Codex Desktop starts one, forked from another if said."""
+    day = root / "sessions" / "2026" / "11" / "05"
+    day.mkdir(parents=True, exist_ok=True)
+    meta = {"id": session_id, "cwd": "/repo"}
+    if forked_from:
+        meta["forked_from_id"] = forked_from
+    (day / f"rollout-2026-11-05T17-43-56-{session_id}.jsonl").write_text(
+        json.dumps({"type": "session_meta", "payload": meta}) + "\n"
+    )
+
+
+def test_a_fork_renamed_after_it_was_made_leaves_the_name_to_its_thread(tmp_path: Path) -> None:
+    """Read line by line, a thread renamed `… (2)` kept the name it had
+    before as well — and took the agent's messages with it."""
+    root = codex_home(
+        tmp_path,
+        sessions=[
+            {"id": "main", "thread_name": "xnav", "updated_at": "2026-10-25T12:00:00Z"},
+            {"id": "fork", "thread_name": "xnav", "updated_at": "2026-11-04T12:00:00Z"},
+            {"id": "fork", "thread_name": "xnav (2)", "updated_at": "2026-11-04T12:00:01Z"},
+        ],
+        rollouts={"main": {"cwd": "/repo"}, "fork": {"cwd": "/repo"}},
+    )
+
+    assert find_session("xnav", root=root).session_id == "main"
+    assert find_session("xnav (2)", root=root).session_id == "fork"
+    assert name_clash("xnav", root=root) is None
+
+
+MAIN = "01a1747a-3273-7c52-b86c-0c3ee981c903"
+SIDE = "01a1ac2a-9bfe-77e2-ba0c-c19b3e1c107e"
+
+
+def test_two_threads_with_one_name_are_neither(tmp_path: Path) -> None:
+    """Measured: a side chat took its thread's name, with no ` (2)`, and the
+    newest-wins lookup sent a workflow step into it. Nothing is guessed
+    between the two, and what tells them apart is said."""
+    root = codex_home(
+        tmp_path,
+        sessions=[
+            {"id": MAIN, "thread_name": "xnav", "updated_at": "2026-10-25T12:00:00Z"},
+            {"id": SIDE, "thread_name": "xnav", "updated_at": "2026-11-05T12:00:00Z"},
+        ],
+        rollouts={MAIN: {"cwd": "/repo"}},
+    )
+    a_rollout(root, SIDE, forked_from=MAIN)
+
+    assert find_session("xnav", root=root) is None
+    said = name_clash("xnav", root=root)
+    assert said is not None
+    assert said.startswith("2 Codex threads are named xnav: 01a1747a, named Oct 25 ")
+    assert "; 01a1ac2a, named Nov 5 " in said
+    assert said.endswith(", a fork of 01a1747a")
+
+
+def test_a_thread_whose_transcript_is_gone_holds_no_name(tmp_path: Path) -> None:
+    """Deleted or archived, the index can still name it, and nothing can be
+    sent to it — so it takes the name from nobody."""
+    root = codex_home(
+        tmp_path,
+        sessions=[{"id": "gone", "thread_name": "xnav"}, {"id": "here", "thread_name": "xnav"}],
+        rollouts={"here": {"cwd": "/repo"}},
+    )
+
+    assert find_session("xnav", root=root).session_id == "here"
+    assert name_clash("xnav", root=root) is None
+
+
+def test_threads_opened_a_minute_apart_are_told_apart(tmp_path: Path) -> None:
+    """The ids are UUIDv7, which begin with the time they were made."""
+    first, second = "01a1ac2a-9bfe-77e2-ba0c-c19b3e1c107e", "01a1ac2a-a011-7000-8000-000000000000"
+    root = codex_home(
+        tmp_path,
+        sessions=[{"id": first, "thread_name": "xnav"}, {"id": second, "thread_name": "xnav"}],
+        rollouts={first: {"cwd": "/repo"}, second: {"cwd": "/repo"}},
+    )
+
+    assert name_clash("xnav", root=root) == "2 Codex threads are named xnav: 01a1ac2a-9; 01a1ac2a-a"
+
+
+def test_the_runner_says_why_a_name_finds_no_session(tmp_path: Path, monkeypatch) -> None:
+    from halyard.agents.codex import runner as codex_runner
+
+    monkeypatch.setattr(codex_runner, "name_clash", lambda name: f"two named {name}")
+
+    assert CodexRunner().name_clash("xnav") == "two named xnav"
 
 
 def test_the_newest_turn_wins_over_the_first(tmp_path: Path) -> None:
