@@ -95,7 +95,10 @@ class TelegramApi:
         parse_mode: str | None = "HTML",
         message_thread_id: int | None = None,
         reply_to_message_id: int | None = None,
+        silent: bool = False,
     ) -> dict:
+        """`silent` delivers it without a sound, for what only says how
+        something is getting on."""
         return await self._call(
             "sendMessage",
             chat_id=chat_id,
@@ -104,6 +107,7 @@ class TelegramApi:
             reply_markup=reply_markup,
             message_thread_id=message_thread_id,
             reply_to_message_id=reply_to_message_id,
+            disable_notification=True if silent else None,
         )
 
     async def edit_message_text(

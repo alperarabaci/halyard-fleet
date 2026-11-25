@@ -6181,7 +6181,8 @@ async def test_a_command_from_transition_by_hand_still_says_how_it_is_getting_on
     tmp_path: Path, wired, monkeypatch
 ) -> None:
     """A transition pressed by hand has no run card: its command says how it
-    is getting on in a message of its own, as before."""
+    is getting on in one message of its own, rewritten as it goes, rather than
+    a new one every 45 seconds through a forty-minute suite."""
     from halyard.channels.telegram import adapter as under_test
     from halyard.commands import Result
 
@@ -6194,6 +6195,51 @@ async def test_a_command_from_transition_by_hand_still_says_how_it_is_getting_on
 
     def running(line, path, *, timeout, on_progress=None, stop=None):
         on_progress(60.0, "collected 12 items")
+        on_progress(105.0, "[ 4%]")
+        on_progress(105.0, "[ 4%]")
+        return Result(ok=True, output="12 passed", seconds=151.0, exit_code=0)
+
+    monkeypatch.setattr(under_test.commands_running, "run", running)
+
+    await channel._run_transition("close", CHAT, None, f"tg:{APPROVER}")
+    await settled(channel)
+
+    [first] = [sent for sent in api.sent if sent["text"].startswith("… <b>test-fast</b>")]
+    assert "collected 12 items" in first["text"]
+    rewritten = [edit["text"] for edit in api.edits if edit["text"].startswith("… <b>test-fast")]
+    assert len(rewritten) == 1 and "[ 4%]" in rewritten[0], "an unchanged line is not sent again"
+    assert not any("⏳" in (edit["text"] or "") for edit in api.edits)
+
+
+@pytest.mark.parametrize("quiet", [True, False])
+async def test_what_only_says_how_a_transition_is_getting_on_rings_only_when_asked(
+    tmp_path: Path, wired, monkeypatch, quiet: bool
+) -> None:
+    """`TELEGRAM_QUIET_STATUS`: on, the transition's start and its command's
+    progress arrive without a sound, and the transition's outcome still rings;
+    off, every one of them rings, as before."""
+    from halyard.channels.telegram import adapter as under_test
+    from halyard.commands import Result
+
+    channel, api, runner, repo = wired
+    channel._quiet_status = quiet
+    transitions_in(
+        channel, repo, tmp_path, runner, close={"commands": ("test-fast",), "to": "xrev"}
+    )
+    found = channel._repositories["alpha-engine"]
+    channel._repositories["alpha-engine"] = replace(found, commands={"test-fast": "make test-fast"})
+    silent: list[str] = []
+    sending = api.send_message
+
+    async def send_message(chat_id, text, **kwargs):
+        if kwargs.get("silent"):
+            silent.append(text)
+        return await sending(chat_id, text, **kwargs)
+
+    api.send_message = send_message
+
+    def running(line, path, *, timeout, on_progress=None, stop=None):
+        on_progress(60.0, "collected 12 items")
         return Result(ok=True, output="12 passed", seconds=61.0, exit_code=0)
 
     monkeypatch.setattr(under_test.commands_running, "run", running)
@@ -6201,8 +6247,10 @@ async def test_a_command_from_transition_by_hand_still_says_how_it_is_getting_on
     await channel._run_transition("close", CHAT, None, f"tg:{APPROVER}")
     await settled(channel)
 
-    assert any(
-        sent["text"].startswith("… <b>test-fast</b>") and "collected 12 items" in sent["text"]
-        for sent in api.sent
-    )
-    assert not any("⏳" in (edit["text"] or "") for edit in api.edits)
+    started = [sent["text"] for sent in api.sent if "\U0001f91d <b>close</b>" in sent["text"]]
+    progress = [sent["text"] for sent in api.sent if sent["text"].startswith("… <b>test-fast")]
+    assert started and progress
+    if quiet:
+        assert silent == [*started, *progress]
+    else:
+        assert silent == []

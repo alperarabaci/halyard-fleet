@@ -305,8 +305,11 @@ that prints nothing still shows how long it has run — and a command that does 
 its newest line under its time. Its inspections are counted as they answer, since they
 run side by side. The time moves once a minute, and once every ten after the first hour.
 The line stops when the card closes: the next step's card, or the one the run stops with,
-says the rest. A step's command no longer posts a message of its own every 45 seconds;
-a transition pressed by hand, which has no run card, still does.
+says the rest. A step's command no longer posts a message of its own every 45 seconds.
+A transition pressed by hand has no run card, so each of its commands keeps one message
+of its own, sent without a sound and rewritten every 45 seconds, so a long suite does not
+ring the phone once a minute. What comes after the command still rings. See
+`TELEGRAM_QUIET_STATUS` in [commands.md](commands.md).
 
 **A step on its way can be called back.** **⏹ Stop the workflow** clears the run, as it
 always has. Steering it sends the run to another step instead: **🧭 Pick a step** on the

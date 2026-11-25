@@ -30,6 +30,11 @@ settings:
   # doctor and help, with status, pause, resume, options, model, effort and your
   # prompts a card away. Every command still answers when typed either way.
   # TELEGRAM_MENU: simple
+  # Messages that only say how something is getting on — a command's progress,
+  # a command, inspection or transition starting — arrive without a sound. What
+  # needs you, and what comes of the work, rings either way. Set this to hear
+  # them too.
+  # TELEGRAM_QUIET_STATUS: false
 
   # The credential the turns Halyard starts run on.
   #
